@@ -50,12 +50,23 @@ let unlistenResized: (() => void) | null = null
 let unlistenTrayToggle: (() => void) | null = null
 let unlistenTrayReset: (() => void) | null = null
 let unlistenTrayAddTodo: (() => void) | null = null
+let unlistenFocus: (() => void) | null = null
 
 // 防抖保存定时器
 const saveDebounceTimer = ref<number | null>(null)
 
 // 是否有弹窗打开（模态状态）
 const isModalOpen = ref(false)
+let activeModalWindow: WebviewWindow | null = null
+
+async function bringModalToFront() {
+  if (!isModalOpen.value || !activeModalWindow) return
+  try {
+    await activeModalWindow.setFocus()
+  } catch (e) {
+    console.warn('Failed to focus modal window:', e)
+  }
+}
 
 // 防抖保存窗口状态（500ms 后保存）
 function debouncedSaveState() {
@@ -106,6 +117,12 @@ onMounted(async () => {
   unlistenTrayAddTodo = await listen('tray-add-todo', () => {
     openEditor(undefined)
   })
+
+  unlistenFocus = await appWindow.onFocusChanged(async ({ payload: focused }) => {
+    if (focused && isModalOpen.value) {
+      await bringModalToFront()
+    }
+  })
 })
 
 // 清理
@@ -116,6 +133,7 @@ onUnmounted(() => {
   if (unlistenTrayToggle) unlistenTrayToggle()
   if (unlistenTrayReset) unlistenTrayReset()
   if (unlistenTrayAddTodo) unlistenTrayAddTodo()
+  if (unlistenFocus) unlistenFocus()
   if (saveDebounceTimer.value) {
     clearTimeout(saveDebounceTimer.value)
   }
@@ -151,21 +169,26 @@ async function openEditor(todo?: Todo) {
       y,
       resizable: true,
       decorations: false,
-      transparent: false
+      transparent: false,
+      parent: appWindow
     })
+    activeModalWindow = webview
 
     // 监听窗口关闭，刷新待办列表并清除模态状态
     webview.once('tauri://destroyed', async () => {
       isModalOpen.value = false
+      activeModalWindow = null
       await todoStore.fetchTodos()
     })
     
     // 监听创建失败，清除模态状态
     webview.once('tauri://error', () => {
       isModalOpen.value = false
+      activeModalWindow = null
     })
   } catch (e) {
     isModalOpen.value = false
+    activeModalWindow = null
     console.error('Failed to open editor window:', e)
   }
 }
@@ -199,20 +222,25 @@ async function openSettings() {
       y,
       resizable: false,
       decorations: false,
-      transparent: false
+      transparent: false,
+      parent: appWindow
     })
+    activeModalWindow = webview
     
     // 监听窗口关闭，清除模态状态
     webview.once('tauri://destroyed', () => {
       isModalOpen.value = false
+      activeModalWindow = null
     })
     
     // 监听创建失败，清除模态状态
     webview.once('tauri://error', () => {
       isModalOpen.value = false
+      activeModalWindow = null
     })
   } catch (e) {
     isModalOpen.value = false
+    activeModalWindow = null
     console.error('Failed to open settings window:', e)
   }
 }
@@ -221,7 +249,7 @@ async function openSettings() {
 <template>
   <div :class="containerClass">
     <!-- 模态遮罩层 -->
-    <div v-if="isModalOpen" class="modal-overlay"></div>
+    <div v-if="isModalOpen" class="modal-overlay" @mousedown="bringModalToFront"></div>
     
     <!-- 标题栏 -->
     <TitleBar 
