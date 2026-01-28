@@ -3,9 +3,10 @@ import { onMounted, onUnmounted, computed, ref } from 'vue'
 import { useTodoStore, useAppStore } from '@/stores'
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import { listen } from '@tauri-apps/api/event'
 import TitleBar from '@/components/TitleBar.vue'
 import TodoList from '@/components/TodoList.vue'
-import type { Todo } from '@/types'
+import type { Todo, TextTheme } from '@/types'
 
 const todoStore = useTodoStore()
 const appStore = useAppStore()
@@ -21,6 +22,10 @@ const containerClass = computed(() => ({
 let unlistenClose: (() => void) | null = null
 let unlistenMoved: (() => void) | null = null
 let unlistenResized: (() => void) | null = null
+let unlistenSettings: (() => void) | null = null
+let unlistenTrayToggle: (() => void) | null = null
+let unlistenTrayReset: (() => void) | null = null
+let unlistenTrayAddTodo: (() => void) | null = null
 
 // 防抖保存定时器
 const saveDebounceTimer = ref<number | null>(null)
@@ -57,6 +62,33 @@ onMounted(async () => {
   unlistenResized = await appWindow.onResized(() => {
     debouncedSaveState()
   })
+  
+  // 监听设置变更事件（从设置窗口发送）
+  unlistenSettings = await listen<{ textTheme: TextTheme }>('settings-changed', (event) => {
+    if (event.payload.textTheme) {
+      // 应用文本主题
+      document.body.classList.remove('text-light', 'text-dark')
+      document.body.classList.add(`text-${event.payload.textTheme}`)
+      appStore.textTheme = event.payload.textTheme
+    }
+  })
+  
+  // 监听托盘菜单事件
+  unlistenTrayToggle = await listen('tray-toggle-fixed', async () => {
+    await appStore.toggleFixedMode()
+  })
+  
+  unlistenTrayReset = await listen('tray-reset-window', async () => {
+    // 重置后需要更新 appStore 状态并取消固定模式
+    if (appStore.isFixed) {
+      await appStore.toggleFixedMode()
+    }
+    await appStore.initSettings()
+  })
+  
+  unlistenTrayAddTodo = await listen('tray-add-todo', () => {
+    openEditor(undefined)
+  })
 })
 
 // 清理
@@ -64,6 +96,10 @@ onUnmounted(() => {
   if (unlistenClose) unlistenClose()
   if (unlistenMoved) unlistenMoved()
   if (unlistenResized) unlistenResized()
+  if (unlistenSettings) unlistenSettings()
+  if (unlistenTrayToggle) unlistenTrayToggle()
+  if (unlistenTrayReset) unlistenTrayReset()
+  if (unlistenTrayAddTodo) unlistenTrayAddTodo()
   if (saveDebounceTimer.value) {
     clearTimeout(saveDebounceTimer.value)
   }

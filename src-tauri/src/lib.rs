@@ -4,11 +4,13 @@ mod services;
 
 use db::Database;
 use services::NotificationService;
-use tauri::Manager;
+use tauri::{Manager, Emitter};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use commands::{
     get_todos, create_todo, update_todo, delete_todo, reorder_todos,
     create_subtask, update_subtask, delete_subtask,
-    get_settings, save_settings, set_window_fixed_mode,
+    get_settings, save_settings, set_window_fixed_mode, reset_window,
     export_data, import_data,
 };
 
@@ -53,6 +55,65 @@ pub fn run() {
                 }
             }
             
+            // 创建系统托盘菜单
+            let toggle_fixed = MenuItem::with_id(app, "toggle_fixed", "固定/取消固定", true, None::<&str>)?;
+            let reset = MenuItem::with_id(app, "reset", "重置位置/大小", true, None::<&str>)?;
+            let add_todo = MenuItem::with_id(app, "add_todo", "添加待办项", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+            
+            let menu = Menu::with_items(app, &[&toggle_fixed, &reset, &add_todo, &quit])?;
+            
+            let _tray = TrayIconBuilder::new()
+                .icon(app.default_window_icon().unwrap().clone())
+                .menu(&menu)
+                .show_menu_on_left_click(true)
+                .on_menu_event(move |app: &tauri::AppHandle, event| {
+                    match event.id().as_ref() {
+                        "toggle_fixed" => {
+                            // 发送事件给前端处理
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.emit::<()>("tray-toggle-fixed", ());
+                            }
+                        }
+                        "reset" => {
+                            // 重置窗口位置和大小
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = commands::reset_webview_window(window);
+                            }
+                            // 发送事件通知前端更新状态
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.emit::<()>("tray-reset-window", ());
+                            }
+                        }
+                        "add_todo" => {
+                            // 发送事件给前端打开添加待办窗口
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.emit::<()>("tray-add-todo", ());
+                            }
+                        }
+                        "quit" => {
+                            app.exit(0);
+                        }
+                        _ => {}
+                    }
+                })
+                .on_tray_icon_event(|tray: &tauri::tray::TrayIcon, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        let app = tray.app_handle();
+                        if let Some(webview_window) = app.get_webview_window("main") {
+                            let _ = webview_window.unminimize();
+                            let _ = webview_window.show();
+                            let _ = webview_window.set_focus();
+                        }
+                    }
+                })
+                .build(app)?;
+            
             // 启动通知调度器
             NotificationService::start_scheduler(app.handle().clone());
             
@@ -73,6 +134,7 @@ pub fn run() {
             get_settings,
             save_settings,
             set_window_fixed_mode,
+            reset_window,
             // 数据导入导出命令
             export_data,
             import_data,

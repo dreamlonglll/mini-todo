@@ -61,6 +61,21 @@
   --transition-slow: 300ms;
 }
 
+// 浅色文字主题（适配深色背景）- 只在固定模式下生效
+body.fixed-mode.text-light {
+  --text-primary: #FFFFFF;
+  --text-secondary: rgba(255, 255, 255, 0.85);
+  --text-tertiary: rgba(255, 255, 255, 0.65);
+}
+
+// 深色文字主题（适配浅色背景）- 默认
+body.text-dark,
+body.text-light:not(.fixed-mode) {
+  --text-primary: #1E293B;
+  --text-secondary: #64748B;
+  --text-tertiary: #94A3B8;
+}
+
 // 全局样式重置
 * {
   margin: 0;

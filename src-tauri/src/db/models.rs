@@ -90,6 +90,13 @@ pub struct AppSettings {
     pub is_fixed: bool,
     pub window_position: Option<WindowPosition>,
     pub window_size: Option<WindowSize>,
+    /// 文本主题：light（浅色文字，适配深色背景）或 dark（深色文字，适配浅色背景）
+    #[serde(default = "default_text_theme")]
+    pub text_theme: String,
+}
+
+fn default_text_theme() -> String {
+    "dark".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

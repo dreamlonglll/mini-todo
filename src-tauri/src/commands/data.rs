@@ -87,11 +87,19 @@ pub fn export_data(db: State<Database>) -> Result<String, String> {
             )
             .unwrap_or(None);
 
-        Ok((todos, is_fixed, window_position, window_size))
+        let text_theme: String = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'text_theme'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or_else(|_| "dark".to_string());
+
+        Ok((todos, is_fixed, window_position, window_size, text_theme))
     });
 
     match result {
-        Ok((todos, is_fixed, window_position, window_size)) => {
+        Ok((todos, is_fixed, window_position, window_size, text_theme)) => {
             let export_data = ExportData {
                 version: "1.0".to_string(),
                 exported_at: Local::now().format("%Y-%m-%dT%H:%M:%S%:z").to_string(),
@@ -100,6 +108,7 @@ pub fn export_data(db: State<Database>) -> Result<String, String> {
                     is_fixed,
                     window_position,
                     window_size,
+                    text_theme,
                 },
             };
             serde_json::to_string_pretty(&export_data).map_err(|e| e.to_string())
@@ -178,6 +187,12 @@ pub fn import_data(db: State<Database>, json_data: String) -> Result<(), String>
                 [&size_json],
             )?;
         }
+
+        // 导入文本主题
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('text_theme', ?, datetime('now', 'localtime'))",
+            [&import_data.settings.text_theme],
+        )?;
 
         Ok(())
     })
