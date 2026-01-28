@@ -1,13 +1,15 @@
 <script setup lang="ts">
-import { onMounted, computed } from 'vue'
+import { onMounted, onUnmounted, computed, ref } from 'vue'
 import { useTodoStore, useAppStore } from '@/stores'
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import TitleBar from '@/components/TitleBar.vue'
 import TodoList from '@/components/TodoList.vue'
 import type { Todo } from '@/types'
 
 const todoStore = useTodoStore()
 const appStore = useAppStore()
+const appWindow = getCurrentWindow()
 
 // 容器类名
 const containerClass = computed(() => ({
@@ -15,10 +17,53 @@ const containerClass = computed(() => ({
   'fixed-mode': appStore.isFixed
 }))
 
+// 事件监听清理函数
+let unlistenClose: (() => void) | null = null
+let unlistenMoved: (() => void) | null = null
+let unlistenResized: (() => void) | null = null
+
+// 防抖保存定时器
+const saveDebounceTimer = ref<number | null>(null)
+
+// 防抖保存窗口状态（500ms 后保存）
+function debouncedSaveState() {
+  if (saveDebounceTimer.value) {
+    clearTimeout(saveDebounceTimer.value)
+  }
+  saveDebounceTimer.value = window.setTimeout(async () => {
+    await appStore.saveWindowState()
+  }, 500)
+}
+
 // 初始化
 onMounted(async () => {
   await appStore.initSettings()
   await todoStore.fetchTodos()
+  
+  // 监听窗口关闭请求，保存状态
+  unlistenClose = await appWindow.onCloseRequested(async () => {
+    await appStore.saveWindowState()
+  })
+  
+  // 监听窗口移动事件，自动保存状态（防抖）
+  unlistenMoved = await appWindow.onMoved(() => {
+    debouncedSaveState()
+  })
+  
+  // 监听窗口调整尺寸事件，自动保存状态（防抖）
+  unlistenResized = await appWindow.onResized(() => {
+    debouncedSaveState()
+  })
+})
+
+// 清理
+onUnmounted(() => {
+  if (unlistenClose) unlistenClose()
+  if (unlistenMoved) unlistenMoved()
+  if (unlistenResized) unlistenResized()
+  if (saveDebounceTimer.value) {
+    clearTimeout(saveDebounceTimer.value)
+  }
 })
 
 // 打开编辑器窗口

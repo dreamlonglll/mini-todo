@@ -4,9 +4,16 @@ export interface WindowPosition {
   y: number
 }
 
+// 窗口尺寸接口
+export interface WindowSize {
+  width: number
+  height: number
+}
+
 // 应用设置接口
 export interface AppSettings {
   windowPosition: WindowPosition | null
+  windowSize: WindowSize | null
   isFixed: boolean
 }
 

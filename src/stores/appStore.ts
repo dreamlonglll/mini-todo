@@ -2,12 +2,13 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import type { WindowPosition, WindowMode } from '@/types'
+import type { WindowPosition, WindowSize, WindowMode } from '@/types'
 
 export const useAppStore = defineStore('app', () => {
   // 状态
   const isFixed = ref(false)
   const windowPosition = ref<WindowPosition | null>(null)
+  const windowSize = ref<WindowSize | null>(null)
   const windowMode = ref<WindowMode>('normal')
 
   // 获取当前窗口
@@ -16,10 +17,42 @@ export const useAppStore = defineStore('app', () => {
   // 初始化应用设置
   async function initSettings() {
     try {
-      const settings = await invoke<{ isFixed: boolean; windowPosition: WindowPosition | null }>('get_settings')
+      const settings = await invoke<{ 
+        isFixed: boolean
+        windowPosition: WindowPosition | null
+        windowSize: WindowSize | null
+      }>('get_settings')
+      
       isFixed.value = settings.isFixed
       windowPosition.value = settings.windowPosition
+      windowSize.value = settings.windowSize
       windowMode.value = settings.isFixed ? 'fixed' : 'normal'
+      
+      // 恢复窗口位置
+      if (settings.windowPosition) {
+        try {
+          await appWindow.setPosition({
+            type: 'Physical',
+            x: settings.windowPosition.x,
+            y: settings.windowPosition.y
+          })
+        } catch (e) {
+          console.error('Failed to restore window position:', e)
+        }
+      }
+      
+      // 恢复窗口尺寸
+      if (settings.windowSize) {
+        try {
+          await appWindow.setSize({
+            type: 'Physical',
+            width: settings.windowSize.width,
+            height: settings.windowSize.height
+          })
+        } catch (e) {
+          console.error('Failed to restore window size:', e)
+        }
+      }
       
       // 如果是固定模式，应用固定模式设置
       if (isFixed.value) {
@@ -33,11 +66,11 @@ export const useAppStore = defineStore('app', () => {
   // 切换固定模式
   async function toggleFixedMode() {
     try {
-      // 如果要切换到固定模式，先保存当前位置
-      if (!isFixed.value) {
-        const position = await appWindow.outerPosition()
-        windowPosition.value = { x: position.x, y: position.y }
-      }
+      // 保存当前位置和尺寸
+      const position = await appWindow.outerPosition()
+      const size = await appWindow.outerSize()
+      windowPosition.value = { x: position.x, y: position.y }
+      windowSize.value = { width: size.width, height: size.height }
 
       isFixed.value = !isFixed.value
       windowMode.value = isFixed.value ? 'fixed' : 'normal'
@@ -46,7 +79,8 @@ export const useAppStore = defineStore('app', () => {
       await invoke('save_settings', {
         settings: {
           isFixed: isFixed.value,
-          windowPosition: windowPosition.value
+          windowPosition: windowPosition.value,
+          windowSize: windowSize.value
         }
       })
 
@@ -92,20 +126,23 @@ export const useAppStore = defineStore('app', () => {
     }
   }
 
-  // 保存窗口位置
-  async function saveWindowPosition() {
+  // 保存窗口状态（位置和尺寸）
+  async function saveWindowState() {
     try {
       const position = await appWindow.outerPosition()
+      const size = await appWindow.outerSize()
       windowPosition.value = { x: position.x, y: position.y }
+      windowSize.value = { width: size.width, height: size.height }
       
       await invoke('save_settings', {
         settings: {
           isFixed: isFixed.value,
-          windowPosition: windowPosition.value
+          windowPosition: windowPosition.value,
+          windowSize: windowSize.value
         }
       })
     } catch (e) {
-      console.error('Failed to save window position:', e)
+      console.error('Failed to save window state:', e)
     }
   }
 
@@ -134,11 +171,12 @@ export const useAppStore = defineStore('app', () => {
     // 状态
     isFixed,
     windowPosition,
+    windowSize,
     windowMode,
     // 方法
     initSettings,
     toggleFixedMode,
-    saveWindowPosition,
+    saveWindowState,
     exportData,
     importData
   }

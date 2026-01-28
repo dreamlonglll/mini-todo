@@ -1,5 +1,5 @@
 use tauri::{State, Window};
-use crate::db::{Database, AppSettings, WindowPosition};
+use crate::db::{Database, AppSettings, WindowPosition, WindowSize};
 
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -33,9 +33,21 @@ pub fn get_settings(db: State<Database>) -> Result<AppSettings, String> {
             )
             .unwrap_or(None);
 
+        let window_size: Option<WindowSize> = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'window_size'",
+                [],
+                |row| {
+                    let val: String = row.get(0)?;
+                    Ok(serde_json::from_str(&val).ok())
+                },
+            )
+            .unwrap_or(None);
+
         Ok(AppSettings {
             is_fixed,
             window_position,
+            window_size,
         })
     })
     .map_err(|e| e.to_string())
@@ -56,6 +68,15 @@ pub fn save_settings(db: State<Database>, settings: AppSettings) -> Result<(), S
             conn.execute(
                 "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('window_position', ?, datetime('now', 'localtime'))",
                 [&pos_json],
+            )?;
+        }
+
+        // 保存窗口尺寸
+        if let Some(size) = &settings.window_size {
+            let size_json = serde_json::to_string(size).unwrap_or_default();
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('window_size', ?, datetime('now', 'localtime'))",
+                [&size_json],
             )?;
         }
 

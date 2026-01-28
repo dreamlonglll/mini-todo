@@ -1,6 +1,6 @@
 use tauri::State;
 use chrono::Local;
-use crate::db::{Database, Todo, SubTask, ExportData, AppSettings, WindowPosition};
+use crate::db::{Database, Todo, SubTask, ExportData, AppSettings, WindowPosition, WindowSize};
 
 #[tauri::command]
 pub fn export_data(db: State<Database>) -> Result<String, String> {
@@ -76,11 +76,22 @@ pub fn export_data(db: State<Database>) -> Result<String, String> {
             )
             .unwrap_or(None);
 
-        Ok((todos, is_fixed, window_position))
+        let window_size: Option<WindowSize> = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'window_size'",
+                [],
+                |row| {
+                    let val: String = row.get(0)?;
+                    Ok(serde_json::from_str(&val).ok())
+                },
+            )
+            .unwrap_or(None);
+
+        Ok((todos, is_fixed, window_position, window_size))
     });
 
     match result {
-        Ok((todos, is_fixed, window_position)) => {
+        Ok((todos, is_fixed, window_position, window_size)) => {
             let export_data = ExportData {
                 version: "1.0".to_string(),
                 exported_at: Local::now().format("%Y-%m-%dT%H:%M:%S%:z").to_string(),
@@ -88,6 +99,7 @@ pub fn export_data(db: State<Database>) -> Result<String, String> {
                 settings: AppSettings {
                     is_fixed,
                     window_position,
+                    window_size,
                 },
             };
             serde_json::to_string_pretty(&export_data).map_err(|e| e.to_string())
@@ -156,6 +168,14 @@ pub fn import_data(db: State<Database>, json_data: String) -> Result<(), String>
             conn.execute(
                 "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('window_position', ?, datetime('now', 'localtime'))",
                 [&pos_json],
+            )?;
+        }
+
+        if let Some(size) = &import_data.settings.window_size {
+            let size_json = serde_json::to_string(size).unwrap_or_default();
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('window_size', ?, datetime('now', 'localtime'))",
+                [&size_json],
             )?;
         }
 

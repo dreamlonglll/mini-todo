@@ -76,9 +76,17 @@ pub struct WindowPosition {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct WindowSize {
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AppSettings {
     pub is_fixed: bool,
     pub window_position: Option<WindowPosition>,
+    pub window_size: Option<WindowSize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
