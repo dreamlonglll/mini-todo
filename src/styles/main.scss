@@ -282,7 +282,7 @@ body {
     background: rgba(0, 0, 0, 0.03);
 
     .todo-actions {
-      opacity: 1;
+      display: flex;
     }
   }
 
@@ -360,11 +360,10 @@ body {
   }
 
   .todo-actions {
-    display: flex;
+    display: none;
     align-items: center;
     gap: var(--space-1);
-    opacity: 0;
-    transition: opacity var(--transition-fast);
+    flex-shrink: 0;
 
     .action-btn {
       display: flex;
