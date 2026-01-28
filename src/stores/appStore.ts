@@ -5,7 +5,7 @@ import { getCurrentWindow, PhysicalPosition, PhysicalSize } from '@tauri-apps/ap
 import type { WindowPosition, WindowSize, WindowMode } from '@/types'
 
 // 当前应用版本
-export const APP_VERSION = '1.0.0'
+export const APP_VERSION = '1.0.1'
 // GitHub 仓库信息
 const GITHUB_OWNER = 'dreamlonglll'
 const GITHUB_REPO = 'mini-todo'
