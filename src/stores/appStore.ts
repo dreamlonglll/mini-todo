@@ -64,8 +64,7 @@ export const useAppStore = defineStore('app', () => {
   // 应用固定模式
   async function applyFixedMode() {
     try {
-      // 设置窗口属性
-      await appWindow.setAlwaysOnTop(true)
+      // 设置窗口属性（不再置顶，支持正常窗体堆叠）
       await appWindow.setResizable(false)
       
       // 设置 body 的 class 以启用透明背景
@@ -81,7 +80,6 @@ export const useAppStore = defineStore('app', () => {
   // 应用普通模式
   async function applyNormalMode() {
     try {
-      await appWindow.setAlwaysOnTop(false)
       await appWindow.setResizable(true)
       
       // 移除 body 的固定模式 class

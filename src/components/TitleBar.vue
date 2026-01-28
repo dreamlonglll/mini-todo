@@ -35,7 +35,7 @@ function openSettings() {
 </script>
 
 <template>
-  <div class="title-bar">
+  <div class="title-bar" :class="{ 'no-drag': isFixed }">
     <div class="title-left">
       <span class="app-title">待办清单</span>
       <span class="archive-btn">归档</span>
@@ -94,5 +94,8 @@ function openSettings() {
 </template>
 
 <style scoped>
-/* 使用 main.scss 中的样式 */
+/* 固定模式下禁用拖拽 */
+.title-bar.no-drag {
+  -webkit-app-region: no-drag !important;
+}
 </style>
