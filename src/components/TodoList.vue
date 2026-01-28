@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { computed } from 'vue'
 import draggable from 'vuedraggable'
 import { useTodoStore } from '@/stores'
 import TodoItem from './TodoItem.vue'
@@ -11,17 +11,11 @@ const emit = defineEmits<{
 
 const todoStore = useTodoStore()
 
-// 已完成区域展开状态
-const showCompleted = ref(false)
-
 // 待办列表 (用于拖拽)
 const pendingList = computed({
   get: () => todoStore.pendingTodos,
   set: () => {}
 })
-
-// 已完成列表
-const completedList = computed(() => todoStore.completedTodos)
 
 // 已完成数量
 const completedCount = computed(() => todoStore.todoCount.completed)
@@ -46,11 +40,6 @@ async function handleToggleComplete(todo: Todo) {
 async function handleDelete(todo: Todo) {
   await todoStore.deleteTodo(todo.id)
 }
-
-// 切换已完成区域
-function toggleCompleted() {
-  showCompleted.value = !showCompleted.value
-}
 </script>
 
 <template>
@@ -72,27 +61,6 @@ function toggleCompleted() {
         />
       </template>
     </draggable>
-
-    <!-- 已完成区域 -->
-    <div v-if="completedCount > 0" class="completed-section">
-      <div class="section-header" @click="toggleCompleted">
-        <span>已完成 ({{ completedCount }})</span>
-        <el-icon class="collapse-icon" :class="{ expanded: showCompleted }" :size="14">
-          <ArrowDown />
-        </el-icon>
-      </div>
-
-      <div v-show="showCompleted" class="completed-list">
-        <TodoItem
-          v-for="todo in completedList"
-          :key="todo.id"
-          :todo="todo"
-          @click="handleEdit(todo)"
-          @toggle-complete="handleToggleComplete(todo)"
-          @delete="handleDelete(todo)"
-        />
-      </div>
-    </div>
 
     <!-- 空状态 -->
     <div v-if="pendingList.length === 0 && completedCount === 0" class="empty-state">

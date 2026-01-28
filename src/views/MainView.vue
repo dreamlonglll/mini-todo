@@ -6,11 +6,36 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { listen } from '@tauri-apps/api/event'
 import TitleBar from '@/components/TitleBar.vue'
 import TodoList from '@/components/TodoList.vue'
+import TodoItem from '@/components/TodoItem.vue'
 import type { Todo } from '@/types'
 
 const todoStore = useTodoStore()
 const appStore = useAppStore()
 const appWindow = getCurrentWindow()
+
+// 已完成区域展开状态
+const showCompleted = ref(false)
+
+// 已完成列表
+const completedList = computed(() => todoStore.completedTodos)
+
+// 已完成数量
+const completedCount = computed(() => todoStore.todoCount.completed)
+
+// 切换已完成区域
+function toggleCompleted() {
+  showCompleted.value = !showCompleted.value
+}
+
+// 切换完成状态
+async function handleToggleComplete(todo: Todo) {
+  await todoStore.toggleComplete(todo.id)
+}
+
+// 删除待办
+async function handleDelete(todo: Todo) {
+  await todoStore.deleteTodo(todo.id)
+}
 
 // 容器类名
 const containerClass = computed(() => ({
@@ -206,6 +231,27 @@ async function openSettings() {
       <TodoList
         @edit="openEditor"
       />
+    </div>
+
+    <!-- 已完成区域（放在 main-content 外面，固定在底部） -->
+    <div v-if="completedCount > 0" class="completed-section">
+      <div class="section-header" @click="toggleCompleted">
+        <span>已完成 ({{ completedCount }})</span>
+        <el-icon class="collapse-icon" :class="{ expanded: showCompleted }" :size="14">
+          <ArrowDown />
+        </el-icon>
+      </div>
+
+      <div v-show="showCompleted" class="completed-list">
+        <TodoItem
+          v-for="todo in completedList"
+          :key="todo.id"
+          :todo="todo"
+          @click="openEditor(todo)"
+          @toggle-complete="handleToggleComplete(todo)"
+          @delete="handleDelete(todo)"
+        />
+      </div>
     </div>
 
     <!-- 悬浮添加按钮（固定模式下隐藏） -->

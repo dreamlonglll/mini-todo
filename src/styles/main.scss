@@ -160,10 +160,10 @@ body {
     }
 
     .completed-section {
-      background: rgba(0, 0, 0, 0.1);
+      background: transparent;
 
       .section-header {
-        background: rgba(0, 0, 0, 0.1);
+        background: transparent;
       }
     }
 
@@ -412,7 +412,6 @@ body {
 
 // 已完成区域
 .completed-section {
-  margin-top: var(--space-4);
 
   .section-header {
     display: flex;
@@ -439,6 +438,25 @@ body {
 
   .completed-list {
     margin-top: var(--space-1);
+    max-height: 200px;
+    overflow-y: auto;
+
+    &::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    &::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    &::-webkit-scrollbar-thumb {
+      background: var(--border);
+      border-radius: 3px;
+
+      &:hover {
+        background: var(--text-tertiary);
+      }
+    }
   }
 }
 
