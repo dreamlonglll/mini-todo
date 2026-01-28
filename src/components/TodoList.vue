@@ -75,7 +75,7 @@ async function handleDelete(todo: Todo) {
 
 <style scoped>
 .todo-list {
-  min-height: 200px;
+  /* min-height: 200px; */
 }
 
 .empty-state {

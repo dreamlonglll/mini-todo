@@ -10,6 +10,7 @@
     "core:window:allow-set-resizable",
     "core:window:allow-minimize",
     "core:window:allow-close",
+    "core:window:allow-destroy",
     "core:window:allow-outer-position",
     "core:window:allow-set-position",
     "core:window:allow-set-size",

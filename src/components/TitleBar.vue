@@ -18,11 +18,6 @@ async function toggleFixed() {
   await appStore.toggleFixedMode()
 }
 
-// 最小化窗口
-async function minimizeWindow() {
-  await appWindow.minimize()
-}
-
 // 关闭窗口
 async function closeWindow() {
   await appWindow.close()
@@ -38,7 +33,7 @@ function openSettings() {
   <div class="title-bar" :class="{ 'no-drag': isFixed }">
     <div class="title-left">
       <span class="app-title">待办清单</span>
-      <span class="archive-btn">归档</span>
+      <!-- <span class="archive-btn">归档</span> -->
     </div>
     
     <div class="title-right">
@@ -63,18 +58,6 @@ function openSettings() {
       >
         <el-icon :size="16">
           <Setting />
-        </el-icon>
-      </button>
-
-      <!-- 最小化按钮 (非固定模式) -->
-      <button 
-        v-if="!isFixed"
-        class="title-btn btn-minimize"
-        title="最小化"
-        @click="minimizeWindow"
-      >
-        <el-icon :size="16">
-          <Minus />
         </el-icon>
       </button>
 
