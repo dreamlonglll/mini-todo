@@ -25,6 +25,9 @@ let unlistenResized: (() => void) | null = null
 // 防抖保存定时器
 const saveDebounceTimer = ref<number | null>(null)
 
+// 是否有弹窗打开（模态状态）
+const isModalOpen = ref(false)
+
 // 防抖保存窗口状态（500ms 后保存）
 function debouncedSaveState() {
   if (saveDebounceTimer.value) {
@@ -66,48 +69,98 @@ onUnmounted(() => {
   }
 })
 
-// 打开编辑器窗口
+// 打开编辑器窗口（模态）
 async function openEditor(todo?: Todo) {
+  // 如果已有弹窗打开，直接返回
+  if (isModalOpen.value) return
+  
   const url = todo ? `#/editor?id=${todo.id}` : '#/editor'
   const label = `editor-${Date.now()}`
   
   try {
+    isModalOpen.value = true
+    
+    // 获取主窗口位置，计算弹窗位置
+    const mainPos = await appWindow.outerPosition()
+    const mainSize = await appWindow.outerSize()
+    const editorWidth = 400
+    const editorHeight = 500
+    
+    // 计算弹窗位置：在主窗口中心偏移
+    const x = mainPos.x + Math.round((mainSize.width - editorWidth) / 2)
+    const y = mainPos.y + Math.round((mainSize.height - editorHeight) / 2)
+    
     const webview = new WebviewWindow(label, {
       url,
       title: todo ? '编辑待办' : '新建待办',
-      width: 400,
-      height: 500,
+      width: editorWidth,
+      height: editorHeight,
+      x,
+      y,
       resizable: true,
-      center: true,
       decorations: false,
       transparent: false
     })
 
-    // 监听窗口关闭，刷新待办列表
+    // 监听窗口关闭，刷新待办列表并清除模态状态
     webview.once('tauri://destroyed', async () => {
+      isModalOpen.value = false
       await todoStore.fetchTodos()
     })
+    
+    // 监听创建失败，清除模态状态
+    webview.once('tauri://error', () => {
+      isModalOpen.value = false
+    })
   } catch (e) {
+    isModalOpen.value = false
     console.error('Failed to open editor window:', e)
   }
 }
 
-// 打开设置窗口
+// 打开设置窗口（模态）
 async function openSettings() {
+  // 如果已有弹窗打开，直接返回
+  if (isModalOpen.value) return
+  
   const label = `settings-${Date.now()}`
   
   try {
-    new WebviewWindow(label, {
+    isModalOpen.value = true
+    
+    // 获取主窗口位置，计算弹窗位置
+    const mainPos = await appWindow.outerPosition()
+    const mainSize = await appWindow.outerSize()
+    const settingsWidth = 350
+    const settingsHeight = 400
+    
+    // 计算弹窗位置：在主窗口中心偏移
+    const x = mainPos.x + Math.round((mainSize.width - settingsWidth) / 2)
+    const y = mainPos.y + Math.round((mainSize.height - settingsHeight) / 2)
+    
+    const webview = new WebviewWindow(label, {
       url: '#/settings',
       title: '设置',
-      width: 350,
-      height: 400,
+      width: settingsWidth,
+      height: settingsHeight,
+      x,
+      y,
       resizable: false,
-      center: true,
       decorations: false,
       transparent: false
     })
+    
+    // 监听窗口关闭，清除模态状态
+    webview.once('tauri://destroyed', () => {
+      isModalOpen.value = false
+    })
+    
+    // 监听创建失败，清除模态状态
+    webview.once('tauri://error', () => {
+      isModalOpen.value = false
+    })
   } catch (e) {
+    isModalOpen.value = false
     console.error('Failed to open settings window:', e)
   }
 }
@@ -115,6 +168,9 @@ async function openSettings() {
 
 <template>
   <div :class="containerClass">
+    <!-- 模态遮罩层 -->
+    <div v-if="isModalOpen" class="modal-overlay"></div>
+    
     <!-- 标题栏 -->
     <TitleBar 
       @open-settings="openSettings"
@@ -128,13 +184,27 @@ async function openSettings() {
       />
     </div>
 
-    <!-- 悬浮添加按钮 -->
-    <button class="fab-add" title="新建待办" @click="openEditor()">
+    <!-- 悬浮添加按钮（固定模式下隐藏） -->
+    <button 
+      v-if="!appStore.isFixed" 
+      class="fab-add" 
+      title="新建待办" 
+      @click="openEditor()"
+    >
       <el-icon :size="24"><Plus /></el-icon>
     </button>
   </div>
 </template>
 
 <style scoped>
-/* 组件特定样式由 main.scss 提供 */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.3);
+  z-index: 999;
+  cursor: not-allowed;
+}
 </style>
