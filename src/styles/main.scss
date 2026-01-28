@@ -1,0 +1,492 @@
+// Mini-Todo 主样式文件
+
+// 变量定义
+:root {
+  // 主色调
+  --primary: #3B82F6;
+  --primary-light: #60A5FA;
+  --primary-dark: #2563EB;
+
+  // 背景色
+  --bg-primary: transparent;
+  --bg-secondary: #F8FAFC;
+  --bg-tertiary: #F1F5F9;
+
+  // 文字色
+  --text-primary: #1E293B;
+  --text-secondary: #64748B;
+  --text-tertiary: #94A3B8;
+
+  // 边框色
+  --border: #E2E8F0;
+  --border-light: #F1F5F9;
+
+  // 优先级颜色
+  --priority-high: #EF4444;
+  --priority-high-bg: #FEF2F2;
+  --priority-medium: #F59E0B;
+  --priority-medium-bg: #FFFBEB;
+  --priority-low: #10B981;
+  --priority-low-bg: #ECFDF5;
+
+  // 状态颜色
+  --success: #10B981;
+  --warning: #F59E0B;
+  --error: #EF4444;
+
+  // 阴影
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow-base: 0 1px 3px rgba(0, 0, 0, 0.1), 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+
+  // 圆角
+  --radius-sm: 4px;
+  --radius-base: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+
+  // 间距
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+
+  // 过渡
+  --transition-fast: 150ms;
+  --transition-base: 200ms;
+  --transition-slow: 300ms;
+}
+
+// 全局样式重置
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body, #app {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  background: var(--bg-primary);
+}
+
+// 固定模式下覆盖 CSS 变量
+body.fixed-mode {
+  // 覆盖背景色变量为透明
+  --bg-primary: transparent;
+  --bg-secondary: transparent;
+  --bg-tertiary: rgba(255, 255, 255, 0.1);
+  --shadow-sm: none;
+  --shadow-base: none;
+  --shadow-md: none;
+  --shadow-lg: none;
+  background: transparent !important;
+}
+
+body.fixed-mode #app,
+body.fixed-mode #app .app-container,
+body.fixed-mode #app .app-container .title-bar,
+body.fixed-mode #app .app-container .main-content,
+body.fixed-mode #app .app-container .quick-add,
+body.fixed-mode #app .app-container .todo-list,
+body.fixed-mode #app .app-container .todo-item {
+  background: transparent !important;
+  background-color: transparent !important;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+// 主容器样式
+.app-container {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: #FFFFFF;
+  overflow: hidden;
+  border-radius: 0;
+
+  &.fixed-mode {
+    background: transparent;
+    border-radius: 0;
+    margin: 0;
+    height: 100%;
+    box-shadow: none;
+
+    // 固定模式下所有背景都透明
+    .title-bar {
+      background: transparent;
+    }
+
+    .main-content {
+      background: transparent;
+    }
+
+    .quick-add {
+      background: transparent;
+      border: none;
+    }
+
+    .todo-item {
+      background: transparent;
+      
+      &:hover {
+        background: rgba(255, 255, 255, 0.2);
+      }
+    }
+
+    .completed-section {
+      background: transparent;
+
+      .section-header {
+        background: transparent;
+      }
+    }
+
+    .empty-state {
+      background: transparent;
+    }
+  }
+}
+
+// 标题栏样式
+.title-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-3) var(--space-4);
+  background: transparent;
+  user-select: none;
+  -webkit-app-region: drag;
+
+  .title-left {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+
+    .app-title {
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .archive-btn {
+      font-size: 13px;
+      color: var(--text-secondary);
+      cursor: pointer;
+      -webkit-app-region: no-drag;
+
+      &:hover {
+        color: var(--primary);
+      }
+    }
+  }
+
+  .title-right {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    -webkit-app-region: no-drag;
+
+    .title-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      border-radius: var(--radius-base);
+      cursor: pointer;
+      color: var(--text-secondary);
+      transition: all var(--transition-fast);
+      background: transparent;
+      border: none;
+
+      &:hover {
+        background: var(--bg-tertiary);
+        color: var(--text-primary);
+      }
+
+      &.active {
+        color: var(--primary);
+      }
+
+      &.btn-close:hover {
+        background: var(--error);
+        color: white;
+      }
+    }
+  }
+}
+
+// 内容区域
+.main-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 var(--space-4) var(--space-4);
+
+  &::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  &::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  &::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 3px;
+
+    &:hover {
+      background: var(--text-tertiary);
+    }
+  }
+}
+
+// 待办列表项
+.todo-item {
+  display: flex;
+  align-items: flex-start;
+  padding: var(--space-2) var(--space-3);
+  margin-bottom: var(--space-1);
+  border-radius: var(--radius-base);
+  background: transparent;
+  cursor: pointer;
+  transition: background var(--transition-fast);
+
+  &:hover {
+    background: rgba(0, 0, 0, 0.03);
+
+    .todo-actions {
+      opacity: 1;
+    }
+  }
+
+  &.dragging {
+    background: rgba(59, 130, 246, 0.1);
+    box-shadow: var(--shadow-md);
+  }
+
+  &.completed {
+    .todo-title {
+      text-decoration: line-through;
+      color: var(--text-tertiary);
+    }
+  }
+
+  .priority-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-top: 6px;
+    margin-right: var(--space-3);
+    flex-shrink: 0;
+
+    &.high { background: var(--priority-high); }
+    &.medium { background: var(--priority-medium); }
+    &.low { background: var(--priority-low); }
+  }
+
+  .todo-content {
+    flex: 1;
+    min-width: 0;
+
+    .todo-title {
+      font-size: 14px;
+      color: var(--text-primary);
+      word-break: break-word;
+    }
+
+    .todo-meta {
+      display: flex;
+      align-items: center;
+      gap: var(--space-2);
+      margin-top: var(--space-1);
+      font-size: 12px;
+      color: var(--text-tertiary);
+
+      .subtask-count {
+        display: flex;
+        align-items: center;
+        gap: 2px;
+      }
+
+      .notify-time {
+        display: flex;
+        align-items: center;
+        gap: 2px;
+      }
+    }
+  }
+
+  .todo-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    opacity: 0;
+    transition: opacity var(--transition-fast);
+
+    .action-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 24px;
+      height: 24px;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      color: var(--text-secondary);
+      background: transparent;
+      border: none;
+      transition: all var(--transition-fast);
+
+      &:hover {
+        background: var(--bg-tertiary);
+      }
+
+      &.complete-btn:hover {
+        color: var(--success);
+      }
+
+      &.top-btn:hover {
+        color: var(--warning);
+      }
+
+      &.delete-btn:hover {
+        color: var(--error);
+      }
+    }
+  }
+}
+
+// 快速添加输入框
+.quick-add {
+  display: flex;
+  align-items: center;
+  padding: var(--space-3);
+  margin-bottom: var(--space-2);
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+  cursor: text;
+
+  .add-icon {
+    color: var(--text-tertiary);
+    margin-right: var(--space-2);
+  }
+
+  .add-input {
+    flex: 1;
+    border: none;
+    background: transparent;
+    outline: none;
+    font-size: 14px;
+    color: var(--text-primary);
+
+    &::placeholder {
+      color: var(--text-tertiary);
+    }
+  }
+}
+
+// 已完成区域
+.completed-section {
+  margin-top: var(--space-4);
+
+  .section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-2) var(--space-3);
+    font-size: 13px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    user-select: none;
+
+    &:hover {
+      color: var(--text-primary);
+    }
+
+    .collapse-icon {
+      transition: transform var(--transition-base);
+
+      &.expanded {
+        transform: rotate(180deg);
+      }
+    }
+  }
+
+  .completed-list {
+    margin-top: var(--space-1);
+  }
+}
+
+// 子任务列表
+.subtask-list {
+  margin-top: var(--space-2);
+  margin-left: calc(8px + var(--space-3));
+  padding-left: var(--space-3);
+  border-left: 1px solid var(--border);
+
+  .subtask-item {
+    display: flex;
+    align-items: center;
+    padding: var(--space-1) 0;
+    font-size: 13px;
+    color: var(--text-secondary);
+
+    &.completed {
+      text-decoration: line-through;
+      color: var(--text-tertiary);
+    }
+
+    .subtask-checkbox {
+      margin-right: var(--space-2);
+    }
+  }
+}
+
+// 固定模式下的样式调整
+.fixed-mode {
+  .title-bar {
+    .btn-minimize,
+    .btn-close {
+      display: none;
+    }
+  }
+
+  .todo-item:hover {
+    background: rgba(255, 255, 255, 0.3);
+  }
+
+  .quick-add {
+    background: rgba(255, 255, 255, 0.5);
+  }
+}
+
+// Element Plus 样式覆盖
+.el-dialog {
+  border-radius: var(--radius-lg) !important;
+}
+
+.el-button {
+  border-radius: var(--radius-base) !important;
+}
+
+.el-input__wrapper {
+  border-radius: var(--radius-base) !important;
+}
