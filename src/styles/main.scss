@@ -478,6 +478,42 @@ body {
   }
 }
 
+// 悬浮添加按钮
+.fab-add {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: var(--primary);
+  color: white;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4);
+  transition: all var(--transition-base);
+  z-index: 100;
+
+  &:hover {
+    background: var(--primary-dark);
+    transform: scale(1.05);
+    box-shadow: 0 6px 16px rgba(59, 130, 246, 0.5);
+  }
+
+  &:active {
+    transform: scale(0.95);
+  }
+}
+
+// 固定模式下的悬浮按钮
+.fixed-mode .fab-add {
+  background: rgba(59, 130, 246, 0.9);
+  box-shadow: none;
+}
+
 // Element Plus 样式覆盖
 .el-dialog {
   border-radius: var(--radius-lg) !important;
