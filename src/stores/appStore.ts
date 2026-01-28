@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import type { WindowPosition, WindowSize, WindowMode, TextTheme } from '@/types'
+import type { WindowPosition, WindowSize, WindowMode } from '@/types'
 
 export const useAppStore = defineStore('app', () => {
   // 状态
@@ -10,7 +10,6 @@ export const useAppStore = defineStore('app', () => {
   const windowPosition = ref<WindowPosition | null>(null)
   const windowSize = ref<WindowSize | null>(null)
   const windowMode = ref<WindowMode>('normal')
-  const textTheme = ref<TextTheme>('dark')
 
   // 获取当前窗口
   const appWindow = getCurrentWindow()
@@ -22,17 +21,12 @@ export const useAppStore = defineStore('app', () => {
         isFixed: boolean
         windowPosition: WindowPosition | null
         windowSize: WindowSize | null
-        textTheme: TextTheme
       }>('get_settings')
       
       isFixed.value = settings.isFixed
       windowPosition.value = settings.windowPosition
       windowSize.value = settings.windowSize
       windowMode.value = settings.isFixed ? 'fixed' : 'normal'
-      textTheme.value = settings.textTheme || 'dark'
-      
-      // 应用文本主题
-      applyTextTheme(textTheme.value)
       
       // 恢复窗口位置
       if (settings.windowPosition) {
@@ -87,7 +81,7 @@ export const useAppStore = defineStore('app', () => {
           isFixed: isFixed.value,
           windowPosition: windowPosition.value,
           windowSize: windowSize.value,
-          textTheme: textTheme.value
+          textTheme: 'light'
         }
       })
 
@@ -146,39 +140,11 @@ export const useAppStore = defineStore('app', () => {
           isFixed: isFixed.value,
           windowPosition: windowPosition.value,
           windowSize: windowSize.value,
-          textTheme: textTheme.value
+          textTheme: 'light'
         }
       })
     } catch (e) {
       console.error('Failed to save window state:', e)
-    }
-  }
-
-  // 应用文本主题到 CSS
-  function applyTextTheme(theme: TextTheme) {
-    document.body.classList.remove('text-light', 'text-dark')
-    document.body.classList.add(`text-${theme}`)
-  }
-
-  // 设置文本主题
-  async function setTextTheme(theme: TextTheme) {
-    textTheme.value = theme
-    applyTextTheme(theme)
-    
-    try {
-      const position = await appWindow.outerPosition()
-      const size = await appWindow.outerSize()
-      
-      await invoke('save_settings', {
-        settings: {
-          isFixed: isFixed.value,
-          windowPosition: { x: position.x, y: position.y },
-          windowSize: { width: size.width, height: size.height },
-          textTheme: theme
-        }
-      })
-    } catch (e) {
-      console.error('Failed to save text theme:', e)
     }
   }
 
@@ -209,12 +175,10 @@ export const useAppStore = defineStore('app', () => {
     windowPosition,
     windowSize,
     windowMode,
-    textTheme,
     // 方法
     initSettings,
     toggleFixedMode,
     saveWindowState,
-    setTextTheme,
     exportData,
     importData
   }

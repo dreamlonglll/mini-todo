@@ -61,19 +61,11 @@
   --transition-slow: 300ms;
 }
 
-// 浅色文字主题（适配深色背景）- 只在固定模式下生效
-body.fixed-mode.text-light {
+// 固定模式下使用浅色文字
+body.fixed-mode {
   --text-primary: #FFFFFF;
   --text-secondary: rgba(255, 255, 255, 0.85);
   --text-tertiary: rgba(255, 255, 255, 0.65);
-}
-
-// 深色文字主题（适配浅色背景）- 默认
-body.text-dark,
-body.text-light:not(.fixed-mode) {
-  --text-primary: #1E293B;
-  --text-secondary: #64748B;
-  --text-tertiary: #94A3B8;
 }
 
 // 全局样式重置
@@ -97,15 +89,15 @@ html, body {
 
 // 固定模式下覆盖 CSS 变量
 body.fixed-mode {
-  // 覆盖背景色变量为透明
-  --bg-primary: transparent;
-  --bg-secondary: transparent;
+  // 覆盖背景色变量为半透明黑色
+  --bg-primary: rgba(0, 0, 0, 0.1);
+  --bg-secondary: rgba(0, 0, 0, 0.1);
   --bg-tertiary: rgba(255, 255, 255, 0.1);
   --shadow-sm: none;
   --shadow-base: none;
   --shadow-md: none;
   --shadow-lg: none;
-  background: transparent !important;
+  background: rgba(0, 0, 0, 0.1) !important;
 }
 
 body.fixed-mode #app,
@@ -115,8 +107,8 @@ body.fixed-mode #app .app-container .main-content,
 body.fixed-mode #app .app-container .quick-add,
 body.fixed-mode #app .app-container .todo-list,
 body.fixed-mode #app .app-container .todo-item {
-  background: transparent !important;
-  background-color: transparent !important;
+  background: rgba(0, 0, 0, 0.1) !important;
+  background-color: rgba(0, 0, 0, 0.1) !important;
 }
 
 body {
@@ -139,44 +131,44 @@ body {
   border-radius: 0;
 
   &.fixed-mode {
-    background: transparent;
+    background: rgba(0, 0, 0, 0.1);
     border-radius: 0;
     margin: 0;
     height: 100%;
     box-shadow: none;
 
-    // 固定模式下所有背景都透明
+    // 固定模式下所有背景都为半透明黑色
     .title-bar {
-      background: transparent;
+      background: rgba(0, 0, 0, 0.1);
     }
 
     .main-content {
-      background: transparent;
+      background: rgba(0, 0, 0, 0.1);
     }
 
     .quick-add {
-      background: transparent;
+      background: rgba(255, 255, 255, 0.1);
       border: none;
     }
 
     .todo-item {
-      background: transparent;
+      background: rgba(0, 0, 0, 0.1);
       
       &:hover {
-        background: rgba(255, 255, 255, 0.2);
+        background: rgba(255, 255, 255, 0.15);
       }
     }
 
     .completed-section {
-      background: transparent;
+      background: rgba(0, 0, 0, 0.1);
 
       .section-header {
-        background: transparent;
+        background: rgba(0, 0, 0, 0.1);
       }
     }
 
     .empty-state {
-      background: transparent;
+      background: rgba(0, 0, 0, 0.1);
     }
   }
 }
@@ -485,11 +477,11 @@ body {
   }
 
   .todo-item:hover {
-    background: rgba(255, 255, 255, 0.3);
+    background: rgba(255, 255, 255, 0.15);
   }
 
   .quick-add {
-    background: rgba(255, 255, 255, 0.5);
+    background: rgba(255, 255, 255, 0.1);
   }
 }
 
@@ -525,8 +517,8 @@ body {
 
 // 固定模式下的悬浮按钮
 .fixed-mode .fab-add {
-  background: rgba(59, 130, 246, 0.9);
-  box-shadow: none;
+  background: var(--primary);
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4);
 }
 
 // Element Plus 样式覆盖

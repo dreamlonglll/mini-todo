@@ -1,59 +1,15 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
-import { getCurrentWindow, Window } from '@tauri-apps/api/window'
-import { emit } from '@tauri-apps/api/event'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { save, open } from '@tauri-apps/plugin-dialog'
 import { writeTextFile, readTextFile } from '@tauri-apps/plugin-fs'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import type { TextTheme } from '@/types'
 
 const appWindow = getCurrentWindow()
 
 const exporting = ref(false)
 const importing = ref(false)
-const textTheme = ref<TextTheme>('dark')
-
-// 初始化获取当前设置
-onMounted(async () => {
-  try {
-    const settings = await invoke<{ textTheme: TextTheme }>('get_settings')
-    textTheme.value = settings.textTheme || 'dark'
-  } catch (e) {
-    console.error('Failed to load settings:', e)
-  }
-})
-
-// 切换文本主题
-async function handleTextThemeChange(theme: TextTheme) {
-  textTheme.value = theme
-  
-  try {
-    // 获取当前设置
-    const settings = await invoke<{ 
-      isFixed: boolean
-      windowPosition: { x: number; y: number } | null
-      windowSize: { width: number; height: number } | null
-    }>('get_settings')
-    
-    // 保存设置
-    await invoke('save_settings', {
-      settings: {
-        isFixed: settings.isFixed,
-        windowPosition: settings.windowPosition,
-        windowSize: settings.windowSize,
-        textTheme: theme
-      }
-    })
-    
-    // 发送事件通知主窗口更新
-    await emit('settings-changed', { textTheme: theme })
-    
-    ElMessage.success('已应用文本颜色设置')
-  } catch (e) {
-    console.error('Failed to save text theme:', e)
-  }
-}
 
 // 导出数据
 async function handleExport() {
@@ -143,33 +99,6 @@ function handleClose() {
     </div>
 
     <div class="settings-content">
-      <!-- 外观设置 -->
-      <div class="settings-section">
-        <h3 class="section-title">外观设置</h3>
-        
-        <div class="settings-item">
-          <div class="settings-label">文本颜色</div>
-          <el-radio-group v-model="textTheme" @change="handleTextThemeChange">
-            <el-radio value="dark">
-              <span class="theme-option">
-                <span class="theme-preview dark"></span>
-                深色文字
-              </span>
-            </el-radio>
-            <el-radio value="light">
-              <span class="theme-option">
-                <span class="theme-preview light"></span>
-                浅色文字
-              </span>
-            </el-radio>
-          </el-radio-group>
-        </div>
-
-        <p class="settings-hint">
-          固定模式下，根据桌面背景选择合适的文本颜色
-        </p>
-      </div>
-      
       <!-- 数据管理 -->
       <div class="settings-section">
         <h3 class="section-title">数据管理</h3>
@@ -263,34 +192,6 @@ function handleClose() {
 
 .settings-item {
   margin-bottom: 12px;
-}
-
-.settings-label {
-  font-size: 13px;
-  color: var(--text-secondary);
-  margin-bottom: 8px;
-}
-
-.theme-option {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.theme-preview {
-  width: 16px;
-  height: 16px;
-  border-radius: 4px;
-  border: 1px solid var(--border);
-  
-  &.dark {
-    background: #1E293B;
-  }
-  
-  &.light {
-    background: #FFFFFF;
-    border-color: #94A3B8;
-  }
 }
 
 .settings-hint {
