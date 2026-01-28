@@ -1,15 +1,23 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { save, open } from '@tauri-apps/plugin-dialog'
 import { writeTextFile, readTextFile } from '@tauri-apps/plugin-fs'
+import { openUrl } from '@tauri-apps/plugin-opener'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { useAppStore, APP_VERSION } from '@/stores'
 
 const appWindow = getCurrentWindow()
+const appStore = useAppStore()
 
 const exporting = ref(false)
 const importing = ref(false)
+const checking = ref(false)
+
+// 是否有更新
+const hasUpdate = computed(() => appStore.hasUpdate)
+const latestVersion = computed(() => appStore.latestVersion)
 
 // 导出数据
 async function handleExport() {
@@ -87,6 +95,35 @@ async function handleImport() {
 function handleClose() {
   appWindow.close()
 }
+
+// 检查更新
+async function handleCheckUpdate() {
+  try {
+    checking.value = true
+    await appStore.checkForUpdates()
+    
+    if (hasUpdate.value) {
+      await ElMessageBox.confirm(
+        `发现新版本 ${latestVersion.value}，是否前往下载？`,
+        '版本更新',
+        {
+          confirmButtonText: '前往下载',
+          cancelButtonText: '稍后再说',
+          type: 'info'
+        }
+      )
+      await openUrl(appStore.getReleasesUrl())
+    } else {
+      ElMessage.success('当前已是最新版本')
+    }
+  } catch (e) {
+    if (String(e) !== 'cancel') {
+      ElMessage.info('检查更新失败，请稍后重试')
+    }
+  } finally {
+    checking.value = false
+  }
+}
 </script>
 
 <template>
@@ -136,8 +173,24 @@ function handleClose() {
         <h3 class="section-title">关于</h3>
         <div class="about-info">
           <p><strong>Mini Todo</strong></p>
-          <p>版本: 0.1.0</p>
+          <p>
+            版本: {{ APP_VERSION }}
+            <span v-if="hasUpdate" class="update-available">
+              (有新版本 {{ latestVersion }})
+            </span>
+          </p>
           <p>一个简洁高效的桌面待办应用</p>
+        </div>
+        
+        <div class="settings-item" style="margin-top: 12px;">
+          <el-button 
+            :loading="checking"
+            style="width: 100%"
+            @click="handleCheckUpdate"
+          >
+            <el-icon><Refresh /></el-icon>
+            <span>检查更新</span>
+          </el-button>
         </div>
       </div>
     </div>
@@ -208,5 +261,10 @@ function handleClose() {
   strong {
     color: var(--text-primary);
   }
+}
+
+.update-available {
+  color: #EF4444;
+  font-size: 12px;
 }
 </style>

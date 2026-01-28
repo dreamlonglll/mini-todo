@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useTodoStore } from '@/stores'
+import { ElMessageBox } from 'element-plus'
 import dayjs from 'dayjs'
 import type { Todo } from '@/types'
 
@@ -42,9 +43,22 @@ function toggleComplete(e: Event) {
 }
 
 // 删除待办
-function deleteTodo(e: Event) {
+async function deleteTodo(e: Event) {
   e.stopPropagation()
-  emit('delete')
+  try {
+    await ElMessageBox.confirm(
+      `确定要删除待办"${props.todo.title}"吗？`,
+      '删除确认',
+      {
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+        type: 'warning'
+      }
+    )
+    emit('delete')
+  } catch {
+    // 用户取消，不做任何操作
+  }
 }
 
 // 置顶待办
