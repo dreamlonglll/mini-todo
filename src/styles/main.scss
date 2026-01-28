@@ -276,6 +276,7 @@ body {
   background: transparent;
   cursor: pointer;
   transition: background var(--transition-fast);
+  user-select: none;
 
   &:hover {
     background: rgba(0, 0, 0, 0.03);
@@ -298,12 +299,28 @@ body {
   }
 
   .priority-dot {
+    position: relative;
     width: 8px;
     height: 8px;
     border-radius: 50%;
     margin-top: 6px;
     margin-right: var(--space-3);
     flex-shrink: 0;
+    cursor: grab;
+
+    // 增大点击区域
+    &::before {
+      content: '';
+      position: absolute;
+      top: -8px;
+      left: -8px;
+      right: -8px;
+      bottom: -8px;
+    }
+
+    &:active {
+      cursor: grabbing;
+    }
 
     &.high { background: var(--priority-high); }
     &.medium { background: var(--priority-medium); }

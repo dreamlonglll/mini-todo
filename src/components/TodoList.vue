@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { ref, watch } from 'vue'
 import draggable from 'vuedraggable'
 import { useTodoStore } from '@/stores'
 import TodoItem from './TodoItem.vue'
@@ -11,18 +11,29 @@ const emit = defineEmits<{
 
 const todoStore = useTodoStore()
 
-// 待办列表 (用于拖拽)
-const pendingList = computed({
-  get: () => todoStore.pendingTodos,
-  set: () => {}
-})
+// 本地待办列表 (用于拖拽)
+const localPendingList = ref<Todo[]>([])
+
+// 同步 store 中的数据到本地列表
+watch(
+  () => todoStore.pendingTodos,
+  (newList) => {
+    localPendingList.value = [...newList]
+  },
+  { immediate: true, deep: true }
+)
 
 // 已完成数量
-const completedCount = computed(() => todoStore.todoCount.completed)
+const completedCount = ref(0)
+watch(
+  () => todoStore.todoCount.completed,
+  (val) => { completedCount.value = val },
+  { immediate: true }
+)
 
 // 拖拽结束处理
 async function onDragEnd() {
-  const ids = pendingList.value.map(t => t.id)
+  const ids = localPendingList.value.map(t => t.id)
   await todoStore.reorderTodos(ids)
 }
 
@@ -46,10 +57,12 @@ async function handleDelete(todo: Todo) {
   <div class="todo-list">
     <!-- 未完成待办列表 (可拖拽) -->
     <draggable
-      v-model="pendingList"
+      v-model="localPendingList"
       item-key="id"
-      handle=".drag-handle"
+      handle=".priority-dot"
       ghost-class="dragging"
+      :animation="200"
+      :force-fallback="true"
       @end="onDragEnd"
     >
       <template #item="{ element }">
@@ -63,7 +76,7 @@ async function handleDelete(todo: Todo) {
     </draggable>
 
     <!-- 空状态 -->
-    <div v-if="pendingList.length === 0 && completedCount === 0" class="empty-state">
+    <div v-if="localPendingList.length === 0 && completedCount === 0" class="empty-state">
       <el-icon :size="48" color="var(--text-tertiary)">
         <Document />
       </el-icon>
