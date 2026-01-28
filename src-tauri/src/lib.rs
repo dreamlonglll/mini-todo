@@ -1,7 +1,9 @@
 mod db;
 mod commands;
+mod services;
 
 use db::Database;
+use services::NotificationService;
 use tauri::Manager;
 use commands::{
     get_todos, create_todo, update_todo, delete_todo, reorder_todos,
@@ -50,6 +52,10 @@ pub fn run() {
                     setup_window_rounded_corners(&window);
                 }
             }
+            
+            // 启动通知调度器
+            NotificationService::start_scheduler(app.handle().clone());
+            
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
