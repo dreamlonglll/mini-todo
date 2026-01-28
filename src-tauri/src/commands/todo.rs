@@ -135,9 +135,15 @@ pub fn update_todo(db: State<Database>, id: i64, data: UpdateTodoRequest) -> Res
             updates.push("priority = ?");
             params.push(Box::new(priority.clone()));
         }
-        if let Some(ref notify_at) = data.notify_at {
+        // 明确清除通知时间
+        if data.clear_notify_at {
+            updates.push("notify_at = NULL");
+            updates.push("notified = 0");
+        } else if let Some(ref notify_at) = data.notify_at {
             updates.push("notify_at = ?");
             params.push(Box::new(notify_at.clone()));
+            // 设置新通知时间时，重置已通知状态
+            updates.push("notified = 0");
         }
         if let Some(notify_before) = data.notify_before {
             updates.push("notify_before = ?");

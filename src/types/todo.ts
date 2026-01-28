@@ -46,6 +46,8 @@ export interface UpdateTodoRequest {
   notifyBefore?: number
   completed?: boolean
   sortOrder?: number
+  /** 是否明确清除通知时间 */
+  clearNotifyAt?: boolean
 }
 
 // 创建子任务请求

@@ -50,6 +50,9 @@ pub struct UpdateTodoRequest {
     pub notify_before: Option<i32>,
     pub completed: Option<bool>,
     pub sort_order: Option<i32>,
+    /// 是否明确清除通知时间
+    #[serde(default)]
+    pub clear_notify_at: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

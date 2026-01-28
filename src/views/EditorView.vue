@@ -44,6 +44,9 @@ const notifyBeforeOptions = [
 const customNotifyBefore = ref(15)
 const isCustomNotifyBefore = ref(false)
 
+// 原始的通知时间（用于判断是否需要清除）
+const originalNotifyAt = ref<string | null>(null)
+
 // 初始化
 onMounted(async () => {
   if (todoId.value) {
@@ -67,6 +70,9 @@ async function loadTodo() {
         notifyAt: todo.value.notifyAt,
         notifyBefore: todo.value.notifyBefore
       }
+      
+      // 保存原始的通知时间
+      originalNotifyAt.value = todo.value.notifyAt
       
       // 检查是否是自定义时间
       const presetValues = [0, 5, 15, 30, 60]
@@ -101,12 +107,16 @@ async function handleSave() {
 
   try {
     if (isEdit.value && todoId.value) {
+      // 判断是否需要清除通知时间（原来有值，现在为空）
+      const shouldClearNotifyAt = originalNotifyAt.value !== null && !form.value.notifyAt
+      
       const data: UpdateTodoRequest = {
         title: form.value.title,
         description: form.value.description || null,
         priority: form.value.priority,
-        notifyAt: form.value.notifyAt,
-        notifyBefore: form.value.notifyBefore
+        notifyAt: form.value.notifyAt || undefined,
+        notifyBefore: form.value.notifyBefore,
+        clearNotifyAt: shouldClearNotifyAt
       }
       await invoke('update_todo', { id: todoId.value, data })
     } else {
@@ -230,6 +240,7 @@ function handleClose() {
             format="YYYY-MM-DD HH:mm"
             value-format="YYYY-MM-DDTHH:mm:ss"
             style="width: 100%"
+            :popper-options="{ placement: 'top-start' }"
           />
         </el-form-item>
 
