@@ -72,6 +72,9 @@ onMounted(async () => {
   await appStore.initSettings()
   await todoStore.fetchTodos()
   
+  // 异步检查版本更新（不阻塞主流程）
+  appStore.checkForUpdates()
+  
   // 监听窗口关闭请求，保存状态
   unlistenClose = await appWindow.onCloseRequested(async () => {
     await appStore.saveWindowState()

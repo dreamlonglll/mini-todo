@@ -1,2 +1,2 @@
 export { useTodoStore } from './todoStore'
-export { useAppStore } from './appStore'
+export { useAppStore, APP_VERSION } from './appStore'

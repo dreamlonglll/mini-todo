@@ -1,8 +1,14 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
-import { getCurrentWindow } from '@tauri-apps/api/window'
+import { getCurrentWindow, PhysicalPosition, PhysicalSize } from '@tauri-apps/api/window'
 import type { WindowPosition, WindowSize, WindowMode } from '@/types'
+
+// 当前应用版本
+export const APP_VERSION = '1.0.0'
+// GitHub 仓库信息
+const GITHUB_OWNER = 'dreamlonglll'
+const GITHUB_REPO = 'mini-todo'
 
 export const useAppStore = defineStore('app', () => {
   // 状态
@@ -10,6 +16,11 @@ export const useAppStore = defineStore('app', () => {
   const windowPosition = ref<WindowPosition | null>(null)
   const windowSize = ref<WindowSize | null>(null)
   const windowMode = ref<WindowMode>('normal')
+  
+  // 版本更新相关状态
+  const hasUpdate = ref(false)
+  const latestVersion = ref<string | null>(null)
+  const releaseUrl = ref<string | null>(null)
 
   // 获取当前窗口
   const appWindow = getCurrentWindow()
@@ -31,11 +42,9 @@ export const useAppStore = defineStore('app', () => {
       // 恢复窗口位置
       if (settings.windowPosition) {
         try {
-          await appWindow.setPosition({
-            type: 'Physical',
-            x: settings.windowPosition.x,
-            y: settings.windowPosition.y
-          })
+          await appWindow.setPosition(
+            new PhysicalPosition(settings.windowPosition.x, settings.windowPosition.y)
+          )
         } catch (e) {
           console.error('Failed to restore window position:', e)
         }
@@ -44,11 +53,9 @@ export const useAppStore = defineStore('app', () => {
       // 恢复窗口尺寸
       if (settings.windowSize) {
         try {
-          await appWindow.setSize({
-            type: 'Physical',
-            width: settings.windowSize.width,
-            height: settings.windowSize.height
-          })
+          await appWindow.setSize(
+            new PhysicalSize(settings.windowSize.width, settings.windowSize.height)
+          )
         } catch (e) {
           console.error('Failed to restore window size:', e)
         }
@@ -169,17 +176,71 @@ export const useAppStore = defineStore('app', () => {
     }
   }
 
+  // 比较版本号 (返回: 1 表示 v1 > v2, -1 表示 v1 < v2, 0 表示相等)
+  function compareVersions(v1: string, v2: string): number {
+    const parts1 = v1.replace(/^v/, '').split('.').map(Number)
+    const parts2 = v2.replace(/^v/, '').split('.').map(Number)
+    
+    for (let i = 0; i < Math.max(parts1.length, parts2.length); i++) {
+      const p1 = parts1[i] || 0
+      const p2 = parts2[i] || 0
+      if (p1 > p2) return 1
+      if (p1 < p2) return -1
+    }
+    return 0
+  }
+
+  // 检查版本更新
+  async function checkForUpdates(): Promise<void> {
+    try {
+      const response = await fetch(
+        `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`,
+        {
+          headers: {
+            'Accept': 'application/vnd.github.v3+json'
+          }
+        }
+      )
+      
+      if (!response.ok) {
+        console.log('No releases found or API error')
+        return
+      }
+      
+      const release = await response.json()
+      const tagName = release.tag_name as string
+      
+      // 比较版本号
+      if (compareVersions(tagName, APP_VERSION) > 0) {
+        hasUpdate.value = true
+        latestVersion.value = tagName
+        releaseUrl.value = release.html_url
+      }
+    } catch (e) {
+      console.error('Failed to check for updates:', e)
+    }
+  }
+
+  // 获取 GitHub Release 页面 URL
+  function getReleasesUrl(): string {
+    return releaseUrl.value || `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/releases`
+  }
+
   return {
     // 状态
     isFixed,
     windowPosition,
     windowSize,
     windowMode,
+    hasUpdate,
+    latestVersion,
     // 方法
     initSettings,
     toggleFixedMode,
     saveWindowState,
     exportData,
-    importData
+    importData,
+    checkForUpdates,
+    getReleasesUrl
   }
 })
