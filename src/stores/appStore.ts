@@ -1,16 +1,26 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
+import { getVersion } from '@tauri-apps/api/app'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow, PhysicalPosition, PhysicalSize } from '@tauri-apps/api/window'
 import type { WindowPosition, WindowSize, WindowMode } from '@/types'
 
-// 当前应用版本
-export const APP_VERSION = '1.2.0'
+// 当前应用版本（从系统读取）
+export const APP_VERSION = ref<string>('')
 // GitHub 仓库信息
 const GITHUB_OWNER = 'dreamlonglll'
 const GITHUB_REPO = 'mini-todo'
 
 export const useAppStore = defineStore('app', () => {
+  async function loadAppVersion() {
+    if (APP_VERSION.value) return
+    try {
+      APP_VERSION.value = await getVersion()
+    } catch (e) {
+      console.error('Failed to load app version:', e)
+    }
+  }
+
   // 状态
   const isFixed = ref(false)
   const windowPosition = ref<WindowPosition | null>(null)
@@ -28,6 +38,7 @@ export const useAppStore = defineStore('app', () => {
   // 初始化应用设置
   async function initSettings() {
     try {
+      await loadAppVersion()
       const settings = await invoke<{ 
         isFixed: boolean
         windowPosition: WindowPosition | null
@@ -193,6 +204,11 @@ export const useAppStore = defineStore('app', () => {
   // 检查版本更新
   async function checkForUpdates(): Promise<void> {
     try {
+      await loadAppVersion()
+      if (!APP_VERSION.value) {
+        console.log('App version unavailable; skip update check')
+        return
+      }
       const response = await fetch(
         `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`,
         {
@@ -211,7 +227,7 @@ export const useAppStore = defineStore('app', () => {
       const tagName = release.tag_name as string
       
       // 比较版本号
-      if (compareVersions(tagName, APP_VERSION) > 0) {
+      if (compareVersions(tagName, APP_VERSION.value) > 0) {
         hasUpdate.value = true
         latestVersion.value = tagName
         releaseUrl.value = release.html_url
