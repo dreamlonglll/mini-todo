@@ -81,7 +81,7 @@ async function handleDelete(todo: Todo) {
         <Document />
       </el-icon>
       <p>暂无待办事项</p>
-      <p class="hint">点击上方输入框添加新待办</p>
+      <p class="hint">请在非锁定模式下，点击悬浮按钮添加待办项</p>
     </div>
   </div>
 </template>
