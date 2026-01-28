@@ -1,5 +1,6 @@
 use tauri::{State, Window, WebviewWindow};
 use crate::db::{Database, AppSettings, WindowPosition, WindowSize};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -7,6 +8,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 #[cfg(target_os = "windows")]
 use windows::Win32::Foundation::HWND;
+
+/// 全局固定模式状态
+pub static IS_FIXED_MODE: AtomicBool = AtomicBool::new(false);
+
+/// 检查当前是否处于固定模式
+pub fn is_fixed_mode() -> bool {
+    IS_FIXED_MODE.load(Ordering::SeqCst)
+}
 
 #[tauri::command]
 pub fn get_settings(db: State<Database>) -> Result<AppSettings, String> {
@@ -102,6 +111,9 @@ pub fn save_settings(db: State<Database>, settings: AppSettings) -> Result<(), S
 
 #[tauri::command]
 pub fn set_window_fixed_mode(window: Window, fixed: bool) -> Result<(), String> {
+    // 更新全局固定模式状态
+    IS_FIXED_MODE.store(fixed, Ordering::SeqCst);
+    
     #[cfg(target_os = "windows")]
     {
         use raw_window_handle::HasWindowHandle;
@@ -114,7 +126,7 @@ pub fn set_window_fixed_mode(window: Window, fixed: bool) -> Result<(), String> 
                     let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE);
                     
                     if fixed {
-                        // 设置为工具窗口样式，不显示在任务栏，忽略 Win+D
+                        // 设置为工具窗口样式，不显示在任务栏
                         let new_style = (ex_style as u32 | WS_EX_TOOLWINDOW.0) & !WS_EX_APPWINDOW.0;
                         SetWindowLongW(hwnd, GWL_EXSTYLE, new_style as i32);
                     } else {

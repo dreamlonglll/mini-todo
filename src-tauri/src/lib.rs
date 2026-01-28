@@ -12,6 +12,7 @@ use commands::{
     create_subtask, update_subtask, delete_subtask,
     get_settings, save_settings, set_window_fixed_mode, reset_window,
     export_data, import_data,
+    is_fixed_mode,
 };
 
 #[cfg(target_os = "windows")]
@@ -117,6 +118,25 @@ pub fn run() {
             // 启动通知调度器
             NotificationService::start_scheduler(app.handle().clone());
             
+            // 启动固定模式监听器（定时检测窗口最小化状态）
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                loop {
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    
+                    // 只在固定模式下检测
+                    if is_fixed_mode() {
+                        if let Some(window) = handle.get_webview_window("main") {
+                            // 检查窗口是否被最小化
+                            if window.is_minimized().unwrap_or(false) {
+                                let _ = window.unminimize();
+                                let _ = window.show();
+                            }
+                        }
+                    }
+                }
+            });
+            
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -139,6 +159,9 @@ pub fn run() {
             export_data,
             import_data,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app_handle, _event| {
+            // 事件监听（保留空实现）
+        });
 }
