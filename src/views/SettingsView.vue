@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { save, open } from '@tauri-apps/plugin-dialog'
 import { writeTextFile, readTextFile } from '@tauri-apps/plugin-fs'
 import { openUrl } from '@tauri-apps/plugin-opener'
+import { enable, disable, isEnabled } from '@tauri-apps/plugin-autostart'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAppStore, APP_VERSION } from '@/stores'
 
@@ -14,10 +15,43 @@ const appStore = useAppStore()
 const exporting = ref(false)
 const importing = ref(false)
 const checking = ref(false)
+const autoStart = ref(false)
+const autoStartLoading = ref(false)
 
 // 是否有更新
 const hasUpdate = computed(() => appStore.hasUpdate)
 const latestVersion = computed(() => appStore.latestVersion)
+
+// 初始化时获取开机自启状态
+onMounted(async () => {
+  try {
+    autoStart.value = await isEnabled()
+  } catch (e) {
+    console.error('Failed to get autostart status:', e)
+  }
+})
+
+// 切换开机自启
+async function handleAutoStartChange(value: boolean) {
+  try {
+    autoStartLoading.value = true
+    if (value) {
+      await enable()
+      ElMessage.success('已开启开机自启')
+    } else {
+      await disable()
+      ElMessage.success('已关闭开机自启')
+    }
+    autoStart.value = value
+  } catch (e) {
+    console.error('Failed to toggle autostart:', e)
+    ElMessage.error('设置开机自启失败')
+    // 恢复原状态
+    autoStart.value = !value
+  } finally {
+    autoStartLoading.value = false
+  }
+}
 
 // 导出数据
 async function handleExport() {
@@ -136,6 +170,20 @@ async function handleCheckUpdate() {
     </div>
 
     <div class="settings-content">
+      <!-- 通用设置 -->
+      <div class="settings-section">
+        <h3 class="section-title">通用设置</h3>
+        
+        <div class="settings-row">
+          <span class="settings-label">开机自启</span>
+          <el-switch 
+            v-model="autoStart"
+            :loading="autoStartLoading"
+            @change="handleAutoStartChange"
+          />
+        </div>
+      </div>
+
       <!-- 数据管理 -->
       <div class="settings-section">
         <h3 class="section-title">数据管理</h3>
@@ -245,6 +293,18 @@ async function handleCheckUpdate() {
 
 .settings-item {
   margin-bottom: 12px;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 0;
+}
+
+.settings-label {
+  font-size: 14px;
+  color: var(--text-primary);
 }
 
 .settings-hint {

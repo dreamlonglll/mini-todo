@@ -66,7 +66,6 @@ async function handleVersionClick() {
         <span 
           class="version-tag" 
           :class="{ 'has-update': hasUpdate }"
-          :title="hasUpdate ? `有新版本 ${latestVersion}` : `当前版本 v${APP_VERSION}`"
           @click="handleVersionClick"
         >
           v{{ APP_VERSION }}
