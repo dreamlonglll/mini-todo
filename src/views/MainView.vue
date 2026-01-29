@@ -153,26 +153,37 @@ async function openEditor(todo?: Todo, centerOnScreen = false) {
     const editorWidth = 400
     const editorHeight = 500
     let x: number, y: number
+    const scaleFactor = await appWindow.scaleFactor()
     
     if (centerOnScreen) {
       // 在主屏幕正中间打开
       const monitor = await primaryMonitor()
       if (monitor) {
-        x = Math.round(monitor.position.x + (monitor.size.width - editorWidth) / 2)
-        y = Math.round(monitor.position.y + (monitor.size.height - editorHeight) / 2)
+        // 使用 monitor 自带的 scaleFactor 进行转换
+        const monitorScale = monitor.scaleFactor
+        const monitorX = monitor.position.x / monitorScale
+        const monitorY = monitor.position.y / monitorScale
+        const monitorW = monitor.size.width / monitorScale
+        const monitorH = monitor.size.height / monitorScale
+        x = Math.round(monitorX + (monitorW - editorWidth) / 2)
+        y = Math.round(monitorY + (monitorH - editorHeight) / 2)
       } else {
         // fallback: 使用主窗口中心
         const mainPos = await appWindow.outerPosition()
         const mainSize = await appWindow.outerSize()
-        x = mainPos.x + Math.round((mainSize.width - editorWidth) / 2)
-        y = mainPos.y + Math.round((mainSize.height - editorHeight) / 2)
+        const mainX = mainPos.x / scaleFactor
+        const mainY = mainPos.y / scaleFactor
+        const mainW = mainSize.width / scaleFactor
+        const mainH = mainSize.height / scaleFactor
+        x = Math.round(mainX + (mainW - editorWidth) / 2)
+        y = Math.round(mainY + (mainH - editorHeight) / 2)
       }
     } else {
-      // 在主窗口中心打开
+      // 在主窗口中心打开（考虑 DPI 缩放）
       const mainPos = await appWindow.outerPosition()
       const mainSize = await appWindow.outerSize()
-      x = mainPos.x + Math.round((mainSize.width - editorWidth) / 2)
-      y = mainPos.y + Math.round((mainSize.height - editorHeight) / 2)
+      x = Math.round(mainPos.x / scaleFactor + (mainSize.width / scaleFactor - editorWidth) / 2)
+      y = Math.round(mainPos.y / scaleFactor + (mainSize.height / scaleFactor - editorHeight) / 2)
     }
     
     const webview = new WebviewWindow(label, {
@@ -218,15 +229,20 @@ async function openSettings() {
   try {
     isModalOpen.value = true
     
-    // 获取主窗口位置，计算弹窗位置
+    // 获取主窗口位置、大小和缩放因子
     const mainPos = await appWindow.outerPosition()
     const mainSize = await appWindow.outerSize()
+    const scaleFactor = await appWindow.scaleFactor()
     const settingsWidth = 350
     const settingsHeight = 400
     
-    // 计算弹窗位置：在主窗口中心偏移
-    const x = mainPos.x + Math.round((mainSize.width - settingsWidth) / 2)
-    const y = mainPos.y + Math.round((mainSize.height - settingsHeight) / 2)
+    // 计算弹窗位置：主窗口正中间（考虑 DPI 缩放）
+    const mainX = mainPos.x / scaleFactor
+    const mainY = mainPos.y / scaleFactor
+    const mainW = mainSize.width / scaleFactor
+    const mainH = mainSize.height / scaleFactor
+    const x = Math.round(mainX + (mainW - settingsWidth) / 2)
+    const y = Math.round(mainY + (mainH - settingsHeight) / 2)
     
     const webview = new WebviewWindow(label, {
       url: '#/settings',
