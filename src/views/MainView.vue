@@ -2,7 +2,7 @@
 import { onMounted, onUnmounted, computed, ref } from 'vue'
 import { useTodoStore, useAppStore } from '@/stores'
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
-import { getCurrentWindow } from '@tauri-apps/api/window'
+import { getCurrentWindow, primaryMonitor } from '@tauri-apps/api/window'
 import { listen } from '@tauri-apps/api/event'
 import TitleBar from '@/components/TitleBar.vue'
 import TodoList from '@/components/TodoList.vue'
@@ -115,7 +115,7 @@ onMounted(async () => {
   })
   
   unlistenTrayAddTodo = await listen('tray-add-todo', () => {
-    openEditor(undefined)
+    openEditor(undefined, true) // 从托盘打开时居中于屏幕
   })
 
   unlistenFocus = await appWindow.onFocusChanged(async ({ payload: focused }) => {
@@ -140,7 +140,7 @@ onUnmounted(() => {
 })
 
 // 打开编辑器窗口（模态）
-async function openEditor(todo?: Todo) {
+async function openEditor(todo?: Todo, centerOnScreen = false) {
   // 如果已有弹窗打开，直接返回
   if (isModalOpen.value) return
   
@@ -150,15 +150,30 @@ async function openEditor(todo?: Todo) {
   try {
     isModalOpen.value = true
     
-    // 获取主窗口位置，计算弹窗位置
-    const mainPos = await appWindow.outerPosition()
-    const mainSize = await appWindow.outerSize()
     const editorWidth = 400
     const editorHeight = 500
+    let x: number, y: number
     
-    // 计算弹窗位置：在主窗口中心偏移
-    const x = mainPos.x + Math.round((mainSize.width - editorWidth) / 2)
-    const y = mainPos.y + Math.round((mainSize.height - editorHeight) / 2)
+    if (centerOnScreen) {
+      // 在主屏幕正中间打开
+      const monitor = await primaryMonitor()
+      if (monitor) {
+        x = Math.round(monitor.position.x + (monitor.size.width - editorWidth) / 2)
+        y = Math.round(monitor.position.y + (monitor.size.height - editorHeight) / 2)
+      } else {
+        // fallback: 使用主窗口中心
+        const mainPos = await appWindow.outerPosition()
+        const mainSize = await appWindow.outerSize()
+        x = mainPos.x + Math.round((mainSize.width - editorWidth) / 2)
+        y = mainPos.y + Math.round((mainSize.height - editorHeight) / 2)
+      }
+    } else {
+      // 在主窗口中心打开
+      const mainPos = await appWindow.outerPosition()
+      const mainSize = await appWindow.outerSize()
+      x = mainPos.x + Math.round((mainSize.width - editorWidth) / 2)
+      y = mainPos.y + Math.round((mainSize.height - editorHeight) / 2)
+    }
     
     const webview = new WebviewWindow(label, {
       url,
@@ -170,7 +185,7 @@ async function openEditor(todo?: Todo) {
       resizable: true,
       decorations: false,
       transparent: false,
-      parent: appWindow
+      parent: centerOnScreen ? undefined : appWindow
     })
     activeModalWindow = webview
 

@@ -5,8 +5,14 @@ mod services;
 use db::Database;
 use services::NotificationService;
 use tauri::{Manager, Emitter};
-use tauri::menu::{Menu, MenuItem};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+// 记录上次点击时间（用于双击检测）
+static LAST_CLICK_TIME: AtomicU64 = AtomicU64::new(0);
+const DOUBLE_CLICK_THRESHOLD_MS: u64 = 500;
 use commands::{
     get_todos, create_todo, update_todo, delete_todo, reorder_todos,
     create_subtask, update_subtask, delete_subtask,
@@ -60,18 +66,20 @@ pub fn run() {
                 }
             }
             
-            // 创建系统托盘菜单
-            let toggle_fixed = MenuItem::with_id(app, "toggle_fixed", "固定/取消固定", true, None::<&str>)?;
-            let reset = MenuItem::with_id(app, "reset", "重置位置/大小", true, None::<&str>)?;
+            // 创建系统托盘菜单项
+            let toggle_fixed_text = if is_fixed_mode() { "取消固定" } else { "固定窗口" };
+            let toggle_fixed = MenuItem::with_id(app, "toggle_fixed", toggle_fixed_text, true, None::<&str>)?;
+            let reset = MenuItem::with_id(app, "reset", "重置位置", true, None::<&str>)?;
             let add_todo = MenuItem::with_id(app, "add_todo", "添加待办项", true, None::<&str>)?;
+            let separator = PredefinedMenuItem::separator(app)?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
             
-            let menu = Menu::with_items(app, &[&toggle_fixed, &reset, &add_todo, &quit])?;
+            let menu = Menu::with_items(app, &[&toggle_fixed, &reset, &add_todo, &separator, &quit])?;
             
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
-                .show_menu_on_left_click(true)
+                .show_menu_on_left_click(false)
                 .on_menu_event(move |app: &tauri::AppHandle, event| {
                     match event.id().as_ref() {
                         "toggle_fixed" => {
@@ -79,9 +87,12 @@ pub fn run() {
                             if let Some(window) = app.get_webview_window("main") {
                                 let _ = window.emit::<()>("tray-toggle-fixed", ());
                             }
+                            // 更新菜单项文本
+                            let new_text = if is_fixed_mode() { "固定窗口" } else { "取消固定" };
+                            let _ = toggle_fixed.set_text(new_text);
                         }
                         "reset" => {
-                            // 重置窗口位置和大小
+                            // 重置窗口位置
                             if let Some(window) = app.get_webview_window("main") {
                                 let _ = commands::reset_webview_window(window);
                             }
@@ -109,11 +120,29 @@ pub fn run() {
                         ..
                     } = event
                     {
+                        let now = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis() as u64;
+                        let last_click = LAST_CLICK_TIME.swap(now, Ordering::SeqCst);
+                        
                         let app = tray.app_handle();
-                        if let Some(webview_window) = app.get_webview_window("main") {
-                            let _ = webview_window.unminimize();
-                            let _ = webview_window.show();
-                            let _ = webview_window.set_focus();
+                        
+                        // 检测双击
+                        if now - last_click < DOUBLE_CLICK_THRESHOLD_MS {
+                            // 双击：打开添加待办窗口
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.emit::<()>("tray-add-todo", ());
+                            }
+                            // 重置时间避免连续触发
+                            LAST_CLICK_TIME.store(0, Ordering::SeqCst);
+                        } else {
+                            // 单击：显示/聚焦主窗口
+                            if let Some(webview_window) = app.get_webview_window("main") {
+                                let _ = webview_window.unminimize();
+                                let _ = webview_window.show();
+                                let _ = webview_window.set_focus();
+                            }
                         }
                     }
                 })
