@@ -557,6 +557,14 @@ body {
 // Element Plus 样式覆盖
 .el-dialog {
   border-radius: var(--radius-lg) !important;
+  margin-top: 5vh !important; // 让 Dialog 更靠近窗口顶部
+}
+
+// 修复 Dialog 中日期选择器弹出面板被遮挡的问题
+.el-dialog__body {
+  overflow: visible !important;
+  max-height: 70vh;
+  overflow-y: auto;
 }
 
 .el-button {
@@ -565,4 +573,11 @@ body {
 
 .el-input__wrapper {
   border-radius: var(--radius-base) !important;
+}
+
+// 确保日期选择器弹出面板有足够高的 z-index 且始终向下弹出
+.el-picker__popper,
+.el-popper.is-pure,
+.date-picker-popper-bottom {
+  z-index: 3000 !important;
 }

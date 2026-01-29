@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -16,6 +16,38 @@ const form = ref({
   priority: 'medium' as Priority,
   notifyAt: null as string | null,
   notifyBefore: 15
+})
+
+// 拆分的日期和时间
+const notifyDate = ref<string | null>(null)
+const notifyTime = ref<string | null>(null)
+
+// 组合日期和时间生成 notifyAt
+function updateNotifyAt() {
+  if (notifyDate.value && notifyTime.value) {
+    form.value.notifyAt = `${notifyDate.value}T${notifyTime.value}:00`
+  } else if (notifyDate.value) {
+    form.value.notifyAt = `${notifyDate.value}T09:00:00`
+  } else {
+    form.value.notifyAt = null
+  }
+}
+
+// 解析 notifyAt 为日期和时间
+function parseNotifyAt(notifyAtValue: string | null) {
+  if (notifyAtValue) {
+    const [datePart, timePart] = notifyAtValue.split('T')
+    notifyDate.value = datePart
+    notifyTime.value = timePart ? timePart.substring(0, 5) : '09:00'
+  } else {
+    notifyDate.value = null
+    notifyTime.value = null
+  }
+}
+
+// 监听日期和时间变化
+watch([notifyDate, notifyTime], () => {
+  updateNotifyAt()
 })
 
 // 待办数据
@@ -73,6 +105,9 @@ async function loadTodo() {
       
       // 保存原始的通知时间
       originalNotifyAt.value = todo.value.notifyAt
+      
+      // 解析日期和时间
+      parseNotifyAt(todo.value.notifyAt)
       
       // 检查是否是自定义时间
       const presetValues = [0, 5, 15, 30, 60]
@@ -231,17 +266,36 @@ function handleClose() {
           </el-radio-group>
         </el-form-item>
 
-        <!-- 通知时间 -->
+        <!-- 提醒时间 - 拆分为日期和时间 -->
         <el-form-item label="提醒时间">
-          <el-date-picker
-            v-model="form.notifyAt"
-            type="datetime"
-            placeholder="选择提醒时间"
-            format="YYYY-MM-DD HH:mm"
-            value-format="YYYY-MM-DDTHH:mm:ss"
-            style="width: 100%"
-            :popper-options="{ placement: 'top-start' }"
-          />
+          <div class="notify-datetime-picker">
+            <el-date-picker
+              v-model="notifyDate"
+              type="date"
+              placeholder="选择日期"
+              format="YYYY-MM-DD"
+              value-format="YYYY-MM-DD"
+              :teleported="true"
+              :popper-options="{
+                placement: 'top-start',
+                modifiers: [{ name: 'flip', enabled: false }]
+              }"
+              class="date-picker"
+            />
+            <el-time-picker
+              v-model="notifyTime"
+              placeholder="时间"
+              format="HH:mm"
+              value-format="HH:mm"
+              :teleported="true"
+              :popper-options="{
+                placement: 'top-start',
+                modifiers: [{ name: 'flip', enabled: false }]
+              }"
+              class="time-picker"
+              :disabled="!notifyDate"
+            />
+          </div>
         </el-form-item>
 
         <!-- 提前通知 -->
@@ -421,6 +475,21 @@ function handleClose() {
       text-decoration: line-through;
       color: var(--text-tertiary);
     }
+  }
+}
+
+.notify-datetime-picker {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+
+  .date-picker {
+    flex: 1;
+  }
+
+  .time-picker {
+    width: 100px;
+    flex-shrink: 0;
   }
 }
 </style>
