@@ -10,7 +10,7 @@ pub fn get_todos(db: State<Database>) -> Result<Vec<Todo>, String> {
         // 获取所有待办
         let mut stmt = conn.prepare(
             "SELECT id, title, description, priority, notify_at, notify_before, 
-                    notified, completed, sort_order, created_at, updated_at 
+                    notified, completed, sort_order, start_time, end_time, created_at, updated_at 
              FROM todos 
              ORDER BY completed ASC, sort_order ASC, created_at DESC"
         )?;
@@ -26,8 +26,10 @@ pub fn get_todos(db: State<Database>) -> Result<Vec<Todo>, String> {
                 notified: row.get::<_, i32>(6)? != 0,
                 completed: row.get::<_, i32>(7)? != 0,
                 sort_order: row.get(8)?,
-                created_at: row.get(9)?,
-                updated_at: row.get(10)?,
+                start_time: row.get(9)?,
+                end_time: row.get(10)?,
+                created_at: row.get(11)?,
+                updated_at: row.get(12)?,
                 subtasks: Vec::new(),
             })
         })?;
@@ -76,14 +78,16 @@ pub fn create_todo(db: State<Database>, data: CreateTodoRequest) -> Result<Todo,
             .unwrap_or(-1);
 
         conn.execute(
-            "INSERT INTO todos (title, description, priority, notify_at, notify_before, sort_order) 
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO todos (title, description, priority, notify_at, notify_before, start_time, end_time, sort_order) 
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             (
                 &data.title,
                 &data.description,
                 &data.priority,
                 &data.notify_at,
                 data.notify_before.unwrap_or(0),
+                &data.start_time,
+                &data.end_time,
                 max_order + 1,
             ),
         )?;
@@ -93,7 +97,7 @@ pub fn create_todo(db: State<Database>, data: CreateTodoRequest) -> Result<Todo,
         // 返回新创建的待办
         conn.query_row(
             "SELECT id, title, description, priority, notify_at, notify_before, 
-                    notified, completed, sort_order, created_at, updated_at 
+                    notified, completed, sort_order, start_time, end_time, created_at, updated_at 
              FROM todos WHERE id = ?",
             [id],
             |row| {
@@ -107,8 +111,10 @@ pub fn create_todo(db: State<Database>, data: CreateTodoRequest) -> Result<Todo,
                     notified: row.get::<_, i32>(6)? != 0,
                     completed: row.get::<_, i32>(7)? != 0,
                     sort_order: row.get(8)?,
-                    created_at: row.get(9)?,
-                    updated_at: row.get(10)?,
+                    start_time: row.get(9)?,
+                    end_time: row.get(10)?,
+                    created_at: row.get(11)?,
+                    updated_at: row.get(12)?,
                     subtasks: Vec::new(),
                 })
             },
@@ -157,6 +163,20 @@ pub fn update_todo(db: State<Database>, id: i64, data: UpdateTodoRequest) -> Res
             updates.push("sort_order = ?");
             params.push(Box::new(sort_order));
         }
+        // 开始时间
+        if data.clear_start_time {
+            updates.push("start_time = NULL");
+        } else if let Some(ref start_time) = data.start_time {
+            updates.push("start_time = ?");
+            params.push(Box::new(start_time.clone()));
+        }
+        // 截止时间
+        if data.clear_end_time {
+            updates.push("end_time = NULL");
+        } else if let Some(ref end_time) = data.end_time {
+            updates.push("end_time = ?");
+            params.push(Box::new(end_time.clone()));
+        }
 
         if updates.is_empty() {
             return Err(rusqlite::Error::InvalidParameterName("No fields to update".to_string()));
@@ -173,7 +193,7 @@ pub fn update_todo(db: State<Database>, id: i64, data: UpdateTodoRequest) -> Res
         // 返回更新后的待办
         let mut todo = conn.query_row(
             "SELECT id, title, description, priority, notify_at, notify_before, 
-                    notified, completed, sort_order, created_at, updated_at 
+                    notified, completed, sort_order, start_time, end_time, created_at, updated_at 
              FROM todos WHERE id = ?",
             [id],
             |row| {
@@ -187,8 +207,10 @@ pub fn update_todo(db: State<Database>, id: i64, data: UpdateTodoRequest) -> Res
                     notified: row.get::<_, i32>(6)? != 0,
                     completed: row.get::<_, i32>(7)? != 0,
                     sort_order: row.get(8)?,
-                    created_at: row.get(9)?,
-                    updated_at: row.get(10)?,
+                    start_time: row.get(9)?,
+                    end_time: row.get(10)?,
+                    created_at: row.get(11)?,
+                    updated_at: row.get(12)?,
                     subtasks: Vec::new(),
                 })
             },

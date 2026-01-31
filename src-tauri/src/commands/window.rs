@@ -372,3 +372,37 @@ pub fn update_screen_config_name(db: State<Database>, config_id: String, display
     })
     .map_err(|e| e.to_string())
 }
+
+// ============ 日历设置相关命令 ============
+
+/// 获取是否显示日历
+#[tauri::command]
+pub fn get_show_calendar(db: State<Database>) -> Result<bool, String> {
+    db.with_connection(|conn| {
+        let show: bool = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'show_calendar'",
+                [],
+                |row| {
+                    let val: String = row.get(0)?;
+                    Ok(val == "true")
+                },
+            )
+            .unwrap_or(false);
+        Ok(show)
+    })
+    .map_err(|e| e.to_string())
+}
+
+/// 设置是否显示日历
+#[tauri::command]
+pub fn set_show_calendar(db: State<Database>, show: bool) -> Result<(), String> {
+    db.with_connection(|conn| {
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('show_calendar', ?, datetime('now', 'localtime'))",
+            [if show { "true" } else { "false" }],
+        )?;
+        Ok(())
+    })
+    .map_err(|e| e.to_string())
+}

@@ -15,8 +15,16 @@ const form = ref({
   description: '',
   priority: 'medium' as Priority,
   notifyAt: null as string | null,
-  notifyBefore: 15
+  notifyBefore: 15,
+  startTime: null as string | null,
+  endTime: null as string | null
 })
+
+// 开始和截止时间的日期时间组件值
+const startDate = ref<string | null>(null)
+const startTimeValue = ref<string | null>(null)
+const endDate = ref<string | null>(null)
+const endTimeValue = ref<string | null>(null)
 
 // 拆分的日期和时间
 const notifyDate = ref<string | null>(null)
@@ -50,6 +58,62 @@ watch([notifyDate, notifyTime], () => {
   updateNotifyAt()
 })
 
+// 组合开始日期和时间
+function updateStartTime() {
+  if (startDate.value && startTimeValue.value) {
+    form.value.startTime = `${startDate.value}T${startTimeValue.value}:00`
+  } else if (startDate.value) {
+    form.value.startTime = `${startDate.value}T00:00:00`
+  } else {
+    form.value.startTime = null
+  }
+}
+
+// 组合截止日期和时间
+function updateEndTime() {
+  if (endDate.value && endTimeValue.value) {
+    form.value.endTime = `${endDate.value}T${endTimeValue.value}:00`
+  } else if (endDate.value) {
+    form.value.endTime = `${endDate.value}T23:59:00`
+  } else {
+    form.value.endTime = null
+  }
+}
+
+// 解析开始时间
+function parseStartTime(startTimeStr: string | null) {
+  if (startTimeStr) {
+    const [datePart, timePart] = startTimeStr.split('T')
+    startDate.value = datePart
+    startTimeValue.value = timePart ? timePart.substring(0, 5) : '00:00'
+  } else {
+    startDate.value = null
+    startTimeValue.value = null
+  }
+}
+
+// 解析截止时间
+function parseEndTime(endTimeStr: string | null) {
+  if (endTimeStr) {
+    const [datePart, timePart] = endTimeStr.split('T')
+    endDate.value = datePart
+    endTimeValue.value = timePart ? timePart.substring(0, 5) : '23:59'
+  } else {
+    endDate.value = null
+    endTimeValue.value = null
+  }
+}
+
+// 监听开始时间变化
+watch([startDate, startTimeValue], () => {
+  updateStartTime()
+})
+
+// 监听截止时间变化
+watch([endDate, endTimeValue], () => {
+  updateEndTime()
+})
+
 // 待办数据
 const todo = ref<Todo | null>(null)
 
@@ -78,6 +142,9 @@ const isCustomNotifyBefore = ref(false)
 
 // 原始的通知时间（用于判断是否需要清除）
 const originalNotifyAt = ref<string | null>(null)
+// 原始的开始和截止时间（用于判断是否需要清除）
+const originalStartTime = ref<string | null>(null)
+const originalEndTime = ref<string | null>(null)
 
 // 初始化
 onMounted(async () => {
@@ -100,14 +167,22 @@ async function loadTodo() {
         description: todo.value.description || '',
         priority: todo.value.priority as Priority,
         notifyAt: todo.value.notifyAt,
-        notifyBefore: todo.value.notifyBefore
+        notifyBefore: todo.value.notifyBefore,
+        startTime: todo.value.startTime,
+        endTime: todo.value.endTime
       }
       
       // 保存原始的通知时间
       originalNotifyAt.value = todo.value.notifyAt
       
+      // 保存原始的开始和截止时间
+      originalStartTime.value = todo.value.startTime
+      originalEndTime.value = todo.value.endTime
+      
       // 解析日期和时间
       parseNotifyAt(todo.value.notifyAt)
+      parseStartTime(todo.value.startTime)
+      parseEndTime(todo.value.endTime)
       
       // 检查是否是自定义时间
       const presetValues = [0, 5, 15, 30, 60]
@@ -142,8 +217,10 @@ async function handleSave() {
 
   try {
     if (isEdit.value && todoId.value) {
-      // 判断是否需要清除通知时间（原来有值，现在为空）
+      // 判断是否需要清除时间字段
       const shouldClearNotifyAt = originalNotifyAt.value !== null && !form.value.notifyAt
+      const shouldClearStartTime = originalStartTime.value !== null && !form.value.startTime
+      const shouldClearEndTime = originalEndTime.value !== null && !form.value.endTime
       
       const data: UpdateTodoRequest = {
         title: form.value.title,
@@ -151,7 +228,11 @@ async function handleSave() {
         priority: form.value.priority,
         notifyAt: form.value.notifyAt || undefined,
         notifyBefore: form.value.notifyBefore,
-        clearNotifyAt: shouldClearNotifyAt
+        clearNotifyAt: shouldClearNotifyAt,
+        startTime: form.value.startTime || undefined,
+        endTime: form.value.endTime || undefined,
+        clearStartTime: shouldClearStartTime,
+        clearEndTime: shouldClearEndTime
       }
       await invoke('update_todo', { id: todoId.value, data })
     } else {
@@ -160,7 +241,9 @@ async function handleSave() {
         description: form.value.description || undefined,
         priority: form.value.priority,
         notifyAt: form.value.notifyAt || undefined,
-        notifyBefore: form.value.notifyBefore
+        notifyBefore: form.value.notifyBefore,
+        startTime: form.value.startTime || undefined,
+        endTime: form.value.endTime || undefined
       }
       await invoke('create_todo', { data })
     }
@@ -264,6 +347,54 @@ function handleClose() {
               <span class="priority-label low">低</span>
             </el-radio>
           </el-radio-group>
+        </el-form-item>
+
+        <!-- 时间范围 -->
+        <el-form-item label="时间范围">
+          <div class="time-range-picker">
+            <div class="time-range-row">
+              <span class="time-label">开始</span>
+              <el-date-picker
+                v-model="startDate"
+                type="date"
+                placeholder="开始日期"
+                format="YYYY-MM-DD"
+                value-format="YYYY-MM-DD"
+                :teleported="true"
+                class="date-picker-sm"
+              />
+              <el-time-picker
+                v-model="startTimeValue"
+                placeholder="时间"
+                format="HH:mm"
+                value-format="HH:mm"
+                :teleported="true"
+                class="time-picker-sm"
+                :disabled="!startDate"
+              />
+            </div>
+            <div class="time-range-row">
+              <span class="time-label">截止</span>
+              <el-date-picker
+                v-model="endDate"
+                type="date"
+                placeholder="截止日期"
+                format="YYYY-MM-DD"
+                value-format="YYYY-MM-DD"
+                :teleported="true"
+                class="date-picker-sm"
+              />
+              <el-time-picker
+                v-model="endTimeValue"
+                placeholder="时间"
+                format="HH:mm"
+                value-format="HH:mm"
+                :teleported="true"
+                class="time-picker-sm"
+                :disabled="!endDate"
+              />
+            </div>
+          </div>
         </el-form-item>
 
         <!-- 提醒时间 - 拆分为日期和时间 -->
@@ -489,6 +620,35 @@ function handleClose() {
 
   .time-picker {
     width: 100px;
+    flex-shrink: 0;
+  }
+}
+
+.time-range-picker {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.time-range-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+
+  .time-label {
+    width: 32px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    flex-shrink: 0;
+  }
+
+  .date-picker-sm {
+    flex: 1;
+  }
+
+  .time-picker-sm {
+    width: 90px;
     flex-shrink: 0;
   }
 }

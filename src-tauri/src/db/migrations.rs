@@ -28,6 +28,44 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute("INSERT INTO migrations (version) VALUES (2)", [])?;
     }
 
+    if current_version < 3 {
+        migration_v3(conn)?;
+        conn.execute("INSERT INTO migrations (version) VALUES (3)", [])?;
+    }
+
+    Ok(())
+}
+
+/// 迁移 v3：todos 表新增 start_time 和 end_time 字段，支持日历视图
+fn migration_v3(conn: &Connection) -> Result<()> {
+    // 新增 start_time 字段（开始时间，可为空）
+    conn.execute(
+        "ALTER TABLE todos ADD COLUMN start_time TEXT",
+        [],
+    )?;
+
+    // 新增 end_time 字段（截止时间，可为空）
+    conn.execute(
+        "ALTER TABLE todos ADD COLUMN end_time TEXT",
+        [],
+    )?;
+
+    // 创建索引以优化日历查询
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_todos_start_time ON todos(start_time)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_todos_end_time ON todos(end_time)",
+        [],
+    )?;
+
+    // 初始化日历显示设置（默认关闭）
+    conn.execute(
+        "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES ('show_calendar', 'false', datetime('now', 'localtime'))",
+        [],
+    )?;
+
     Ok(())
 }
 

@@ -1,0 +1,483 @@
+<script setup lang="ts">
+import { ref, computed } from 'vue'
+import type { Todo } from '@/types'
+
+const props = defineProps<{
+  todos: Todo[]
+  isFixed?: boolean
+}>()
+
+const emit = defineEmits<{
+  (e: 'select-todo', todo: Todo): void
+}>()
+
+// 当前显示的年月
+const currentYear = ref(new Date().getFullYear())
+const currentMonth = ref(new Date().getMonth()) // 0-11
+
+// 星期标题
+const weekDays = ['一', '二', '三', '四', '五', '六', '日']
+
+// 当前月份显示文本
+const currentMonthText = computed(() => {
+  return `${currentYear.value}年${currentMonth.value + 1}月`
+})
+
+// 获取某月的天数
+function getDaysInMonth(year: number, month: number): number {
+  return new Date(year, month + 1, 0).getDate()
+}
+
+// 获取某月第一天是星期几（0=日, 1=一, ..., 6=六）
+function getFirstDayOfMonth(year: number, month: number): number {
+  const day = new Date(year, month, 1).getDay()
+  // 转换为周一开始 (0=一, 1=二, ..., 6=日)
+  return day === 0 ? 6 : day - 1
+}
+
+// 日历格子数据
+interface CalendarCell {
+  date: Date
+  day: number
+  isCurrentMonth: boolean
+  isToday: boolean
+  dateStr: string // YYYY-MM-DD 格式
+  row: number
+  col: number
+}
+
+// 生成日历格子
+const calendarCells = computed<CalendarCell[]>(() => {
+  const cells: CalendarCell[] = []
+  const year = currentYear.value
+  const month = currentMonth.value
+  
+  const daysInMonth = getDaysInMonth(year, month)
+  const firstDay = getFirstDayOfMonth(year, month)
+  
+  // 上月补齐
+  const prevMonth = month === 0 ? 11 : month - 1
+  const prevYear = month === 0 ? year - 1 : year
+  const daysInPrevMonth = getDaysInMonth(prevYear, prevMonth)
+  
+  let cellIndex = 0
+  
+  for (let i = firstDay - 1; i >= 0; i--) {
+    const day = daysInPrevMonth - i
+    const date = new Date(prevYear, prevMonth, day)
+    cells.push({
+      date,
+      day,
+      isCurrentMonth: false,
+      isToday: false,
+      dateStr: formatDate(date),
+      row: Math.floor(cellIndex / 7),
+      col: cellIndex % 7
+    })
+    cellIndex++
+  }
+  
+  // 当月
+  const today = new Date()
+  const todayStr = formatDate(today)
+  
+  for (let day = 1; day <= daysInMonth; day++) {
+    const date = new Date(year, month, day)
+    const dateStr = formatDate(date)
+    cells.push({
+      date,
+      day,
+      isCurrentMonth: true,
+      isToday: dateStr === todayStr,
+      dateStr,
+      row: Math.floor(cellIndex / 7),
+      col: cellIndex % 7
+    })
+    cellIndex++
+  }
+  
+  // 下月补齐（补到6行 = 42格）
+  const nextMonth = month === 11 ? 0 : month + 1
+  const nextYear = month === 11 ? year + 1 : year
+  const remaining = 42 - cells.length
+  
+  for (let day = 1; day <= remaining; day++) {
+    const date = new Date(nextYear, nextMonth, day)
+    cells.push({
+      date,
+      day,
+      isCurrentMonth: false,
+      isToday: false,
+      dateStr: formatDate(date),
+      row: Math.floor(cellIndex / 7),
+      col: cellIndex % 7
+    })
+    cellIndex++
+  }
+  
+  return cells
+})
+
+// 格式化日期为 YYYY-MM-DD
+function formatDate(date: Date): string {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+// 获取 todo 的有效开始日期
+function getTodoStartDate(todo: Todo): string {
+  if (todo.startTime) {
+    return todo.startTime.split('T')[0]
+  }
+  return todo.createdAt.split('T')[0]
+}
+
+// 获取 todo 的有效截止日期
+function getTodoEndDate(todo: Todo): string | null {
+  if (todo.endTime) {
+    return todo.endTime.split('T')[0]
+  }
+  return null
+}
+
+// 跨天待办条信息
+interface TodoBar {
+  todo: Todo
+  startCol: number
+  endCol: number
+  row: number
+  isStart: boolean
+  isEnd: boolean
+}
+
+// 计算每行的跨天待办条
+const todoBarsByRow = computed(() => {
+  const result: Map<number, TodoBar[]> = new Map()
+  const firstDateStr = calendarCells.value[0]?.dateStr
+  const lastDateStr = calendarCells.value[41]?.dateStr
+  
+  if (!firstDateStr || !lastDateStr) return result
+
+  for (const todo of props.todos) {
+    const startDate = getTodoStartDate(todo)
+    const endDate = getTodoEndDate(todo) || startDate
+    
+    // 检查是否在当前日历范围内
+    if (endDate < firstDateStr || startDate > lastDateStr) continue
+    
+    // 找到起始和结束的格子
+    let startCellIndex = calendarCells.value.findIndex(c => c.dateStr === startDate)
+    let endCellIndex = calendarCells.value.findIndex(c => c.dateStr === endDate)
+    
+    // 如果开始日期在日历范围之前
+    if (startCellIndex === -1 && startDate < firstDateStr) {
+      startCellIndex = 0
+    }
+    // 如果结束日期在日历范围之后
+    if (endCellIndex === -1 && endDate > lastDateStr) {
+      endCellIndex = 41
+    }
+    
+    if (startCellIndex === -1 || endCellIndex === -1) continue
+    
+    const startCell = calendarCells.value[startCellIndex]
+    const endCell = calendarCells.value[endCellIndex]
+    
+    // 按行拆分待办条
+    for (let row = startCell.row; row <= endCell.row; row++) {
+      const rowStartCol = (row === startCell.row) ? startCell.col : 0
+      const rowEndCol = (row === endCell.row) ? endCell.col : 6
+      const isStart = row === startCell.row && startDate >= firstDateStr
+      const isEnd = row === endCell.row && endDate <= lastDateStr
+      
+      if (!result.has(row)) {
+        result.set(row, [])
+      }
+      result.get(row)!.push({
+        todo,
+        startCol: rowStartCol,
+        endCol: rowEndCol,
+        row,
+        isStart,
+        isEnd
+      })
+    }
+  }
+  
+  return result
+})
+
+// 上一月
+function prevMonth() {
+  if (currentMonth.value === 0) {
+    currentMonth.value = 11
+    currentYear.value--
+  } else {
+    currentMonth.value--
+  }
+}
+
+// 下一月
+function nextMonth() {
+  if (currentMonth.value === 11) {
+    currentMonth.value = 0
+    currentYear.value++
+  } else {
+    currentMonth.value++
+  }
+}
+
+// 回到今天
+function goToToday() {
+  const today = new Date()
+  currentYear.value = today.getFullYear()
+  currentMonth.value = today.getMonth()
+}
+
+// 点击待办项
+function handleTodoClick(todo: Todo) {
+  emit('select-todo', todo)
+}
+
+// 获取优先级颜色
+function getPriorityColor(priority: string): string {
+  switch (priority) {
+    case 'high': return 'var(--priority-high)'
+    case 'medium': return 'var(--priority-medium)'
+    case 'low': return 'var(--priority-low)'
+    default: return 'var(--primary)'
+  }
+}
+
+// 计算待办条样式
+function getBarStyle(bar: TodoBar): Record<string, string> {
+  const left = `calc(${bar.startCol} * (100% / 7) + 2px)`
+  const width = `calc(${bar.endCol - bar.startCol + 1} * (100% / 7) - 4px)`
+  
+  return {
+    left,
+    width,
+    backgroundColor: getPriorityColor(bar.todo.priority)
+  }
+}
+</script>
+
+<template>
+  <div class="calendar-view" :class="{ 'fixed-mode': isFixed }">
+    <!-- 日历头部 -->
+    <div class="calendar-header">
+      <div class="nav-buttons">
+        <el-button text size="small" @click="prevMonth">
+          <el-icon><ArrowLeft /></el-icon>
+        </el-button>
+        <span class="current-month">{{ currentMonthText }}</span>
+        <el-button text size="small" @click="nextMonth">
+          <el-icon><ArrowRight /></el-icon>
+        </el-button>
+      </div>
+      <el-button size="small" @click="goToToday">今天</el-button>
+    </div>
+
+    <!-- 星期标题 -->
+    <div class="weekday-header">
+      <div v-for="day in weekDays" :key="day" class="weekday-cell">
+        {{ day }}
+      </div>
+    </div>
+
+    <!-- 日历网格 -->
+    <div class="calendar-grid">
+      <!-- 日期格子 -->
+      <div 
+        v-for="(cell, index) in calendarCells" 
+        :key="index"
+        class="calendar-cell"
+        :class="{ 
+          'other-month': !cell.isCurrentMonth,
+          'is-today': cell.isToday
+        }"
+      >
+        <div class="cell-date">{{ cell.day }}</div>
+      </div>
+      
+      <!-- 跨天待办条（按行覆盖在格子上方） -->
+      <template v-for="row in 6" :key="'bars-' + row">
+        <div 
+          v-for="(bar, barIndex) in todoBarsByRow.get(row - 1) || []"
+          :key="'bar-' + row + '-' + barIndex"
+          class="todo-bar"
+          :class="{ 
+            'is-start': bar.isStart,
+            'is-end': bar.isEnd,
+            'is-completed': bar.todo.completed
+          }"
+          :style="getBarStyle(bar)"
+          :data-row="row - 1"
+          @click.stop="handleTodoClick(bar.todo)"
+        >
+          <span v-if="bar.isStart" class="bar-title">{{ bar.todo.title }}</span>
+        </div>
+      </template>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.calendar-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: transparent;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.calendar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+}
+
+.nav-buttons {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.current-month {
+  font-size: 16px;
+  font-weight: 600;
+  min-width: 100px;
+  text-align: center;
+  color: var(--text-primary);
+}
+
+.weekday-header {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+}
+
+.weekday-cell {
+  padding: 8px 4px;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.calendar-grid {
+  flex: 1;
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  grid-template-rows: repeat(6, 1fr);
+  position: relative;
+  overflow: hidden;
+}
+
+.calendar-cell {
+  padding: 4px 6px;
+  min-height: 60px;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid rgba(255, 255, 255, 0.6);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.6);
+
+  &:nth-child(7n) {
+    border-right: none;
+  }
+
+  &.other-month {
+    .cell-date {
+      color: var(--text-tertiary);
+      opacity: 0.5;
+    }
+  }
+
+  &.is-today {
+    .cell-date {
+      background: var(--primary);
+      color: white;
+      border-radius: 50%;
+      width: 24px;
+      height: 24px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+  }
+}
+
+.cell-date {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+  flex-shrink: 0;
+}
+
+/* 跨天待办条 */
+.todo-bar {
+  position: absolute;
+  height: 20px;
+  border-radius: 4px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  padding: 0 6px;
+  transition: opacity 0.2s, transform 0.1s;
+  z-index: 10;
+  overflow: hidden;
+
+  &:hover {
+    opacity: 0.85;
+    transform: scale(1.02);
+  }
+
+  &.is-completed {
+    opacity: 0.5;
+
+    .bar-title {
+      text-decoration: line-through;
+    }
+  }
+
+  /* 根据行号计算 top 位置 */
+  &[data-row="0"] { top: calc(0 * (100% / 6) + 28px); }
+  &[data-row="1"] { top: calc(1 * (100% / 6) + 28px); }
+  &[data-row="2"] { top: calc(2 * (100% / 6) + 28px); }
+  &[data-row="3"] { top: calc(3 * (100% / 6) + 28px); }
+  &[data-row="4"] { top: calc(4 * (100% / 6) + 28px); }
+  &[data-row="5"] { top: calc(5 * (100% / 6) + 28px); }
+}
+
+.bar-title {
+  font-size: 11px;
+  color: white;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
+/* 固定模式样式 */
+.calendar-view.fixed-mode {
+  .calendar-cell {
+    border-bottom-color: rgba(255, 255, 255, 0.6);
+  }
+
+  .cell-date {
+    color: var(--text-primary);
+  }
+
+  .weekday-cell {
+    color: var(--text-secondary);
+  }
+
+  .current-month {
+    color: var(--text-primary);
+  }
+}
+</style>

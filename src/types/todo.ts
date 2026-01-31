@@ -23,6 +23,10 @@ export interface Todo {
   notified: boolean
   completed: boolean
   sortOrder: number
+  /** 开始时间（可为空，空则使用 createdAt） */
+  startTime: string | null
+  /** 截止时间（可为空） */
+  endTime: string | null
   createdAt: string
   updatedAt: string
   subtasks: SubTask[]
@@ -35,6 +39,10 @@ export interface CreateTodoRequest {
   priority: Priority
   notifyAt?: string
   notifyBefore?: number
+  /** 开始时间 */
+  startTime?: string
+  /** 截止时间 */
+  endTime?: string
 }
 
 // 更新待办请求
@@ -48,6 +56,14 @@ export interface UpdateTodoRequest {
   sortOrder?: number
   /** 是否明确清除通知时间 */
   clearNotifyAt?: boolean
+  /** 开始时间 */
+  startTime?: string | null
+  /** 截止时间 */
+  endTime?: string | null
+  /** 是否明确清除开始时间 */
+  clearStartTime?: boolean
+  /** 是否明确清除截止时间 */
+  clearEndTime?: boolean
 }
 
 // 创建子任务请求

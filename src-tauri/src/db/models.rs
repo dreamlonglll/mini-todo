@@ -12,6 +12,10 @@ pub struct Todo {
     pub notified: bool,
     pub completed: bool,
     pub sort_order: i32,
+    /// 开始时间（可为空，空则使用 created_at）
+    pub start_time: Option<String>,
+    /// 截止时间（可为空）
+    pub end_time: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     #[serde(default)]
@@ -38,6 +42,10 @@ pub struct CreateTodoRequest {
     pub priority: String,
     pub notify_at: Option<String>,
     pub notify_before: Option<i32>,
+    /// 开始时间（可为空）
+    pub start_time: Option<String>,
+    /// 截止时间（可为空）
+    pub end_time: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,6 +61,16 @@ pub struct UpdateTodoRequest {
     /// 是否明确清除通知时间
     #[serde(default)]
     pub clear_notify_at: bool,
+    /// 开始时间
+    pub start_time: Option<String>,
+    /// 截止时间
+    pub end_time: Option<String>,
+    /// 是否明确清除开始时间
+    #[serde(default)]
+    pub clear_start_time: bool,
+    /// 是否明确清除截止时间
+    #[serde(default)]
+    pub clear_end_time: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

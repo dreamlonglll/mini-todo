@@ -8,7 +8,7 @@ pub fn export_data(db: State<Database>) -> Result<String, String> {
         // 获取所有待办和子任务
         let mut stmt = conn.prepare(
             "SELECT id, title, description, priority, notify_at, notify_before, 
-                    notified, completed, sort_order, created_at, updated_at 
+                    notified, completed, sort_order, start_time, end_time, created_at, updated_at 
              FROM todos ORDER BY sort_order ASC"
         )?;
 
@@ -23,8 +23,10 @@ pub fn export_data(db: State<Database>) -> Result<String, String> {
                 notified: row.get::<_, i32>(6)? != 0,
                 completed: row.get::<_, i32>(7)? != 0,
                 sort_order: row.get(8)?,
-                created_at: row.get(9)?,
-                updated_at: row.get(10)?,
+                start_time: row.get(9)?,
+                end_time: row.get(10)?,
+                created_at: row.get(11)?,
+                updated_at: row.get(12)?,
                 subtasks: Vec::new(),
             })
         })?;
@@ -131,8 +133,8 @@ pub fn import_data(db: State<Database>, json_data: String) -> Result<(), String>
         for todo in &import_data.todos {
             conn.execute(
                 "INSERT INTO todos (title, description, priority, notify_at, notify_before, 
-                                   notified, completed, sort_order, created_at, updated_at) 
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                                   notified, completed, sort_order, start_time, end_time, created_at, updated_at) 
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 (
                     &todo.title,
                     &todo.description,
@@ -142,6 +144,8 @@ pub fn import_data(db: State<Database>, json_data: String) -> Result<(), String>
                     if todo.notified { 1 } else { 0 },
                     if todo.completed { 1 } else { 0 },
                     todo.sort_order,
+                    &todo.start_time,
+                    &todo.end_time,
                     &todo.created_at,
                     &todo.updated_at,
                 ),

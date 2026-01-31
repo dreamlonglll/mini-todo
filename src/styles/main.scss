@@ -105,10 +105,15 @@ body.fixed-mode #app .app-container,
 body.fixed-mode #app .app-container .title-bar,
 body.fixed-mode #app .app-container .main-content,
 body.fixed-mode #app .app-container .quick-add,
-body.fixed-mode #app .app-container .todo-list,
+body.fixed-mode #app .app-container .right-panel {
+  background: rgba(0, 0, 0, 0.15) !important;
+  background-color: rgba(0, 0, 0, 0.15) !important;
+}
+
+/* 固定模式下 todo-item 保持透明背景 */
 body.fixed-mode #app .app-container .todo-item {
-  background: rgba(0, 0, 0, 0.1) !important;
-  background-color: rgba(0, 0, 0, 0.1) !important;
+  background: transparent !important;
+  background-color: transparent !important;
 }
 
 body {

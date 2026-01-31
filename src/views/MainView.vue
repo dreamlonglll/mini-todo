@@ -7,14 +7,21 @@ import { listen } from '@tauri-apps/api/event'
 import TitleBar from '@/components/TitleBar.vue'
 import TodoList from '@/components/TodoList.vue'
 import TodoItem from '@/components/TodoItem.vue'
+import CalendarView from '@/components/CalendarView.vue'
 import type { Todo } from '@/types'
 
 const todoStore = useTodoStore()
 const appStore = useAppStore()
 const appWindow = getCurrentWindow()
 
-// 已完成区域展开状态
-const showCompleted = ref(false)
+// 已完成弹窗显示状态
+const showCompletedDialog = ref(false)
+
+// 是否显示日历
+const showCalendar = computed(() => appStore.showCalendar)
+
+// 所有待办（用于日历显示）
+const allTodos = computed(() => todoStore.todos)
 
 // 已完成列表
 const completedList = computed(() => todoStore.completedTodos)
@@ -22,10 +29,6 @@ const completedList = computed(() => todoStore.completedTodos)
 // 已完成数量
 const completedCount = computed(() => todoStore.todoCount.completed)
 
-// 切换已完成区域
-function toggleCompleted() {
-  showCompleted.value = !showCompleted.value
-}
 
 // 切换完成状态
 async function handleToggleComplete(todo: Todo) {
@@ -258,10 +261,12 @@ async function openSettings() {
     })
     activeModalWindow = webview
     
-    // 监听窗口关闭，清除模态状态
-    webview.once('tauri://destroyed', () => {
+    // 监听窗口关闭，清除模态状态并重新加载设置
+    webview.once('tauri://destroyed', async () => {
       isModalOpen.value = false
       activeModalWindow = null
+      // 重新加载日历显示设置（因为设置窗口是独立的 store 实例）
+      await appStore.loadShowCalendar()
     })
     
     // 监听创建失败，清除模态状态
@@ -278,7 +283,7 @@ async function openSettings() {
 </script>
 
 <template>
-  <div :class="containerClass">
+  <div :class="[containerClass, { 'with-calendar': showCalendar }]">
     <!-- 模态遮罩层 -->
     <div v-if="isModalOpen" class="modal-overlay" @mousedown="bringModalToFront"></div>
     
@@ -287,31 +292,52 @@ async function openSettings() {
       @open-settings="openSettings"
     />
 
-    <!-- 主内容区 -->
-    <div class="main-content">
-      <!-- 待办列表 -->
-      <TodoList
-        @edit="openEditor"
-      />
-    </div>
+    <!-- 主内容区 - 分栏布局 -->
+    <div class="main-body" :class="{ 'split-layout': showCalendar }">
+      <!-- 左侧：待办列表 -->
+      <div class="left-panel">
+        <div class="main-content">
+          <!-- 待办列表 -->
+          <TodoList
+            @edit="openEditor"
+          />
+        </div>
 
-    <!-- 已完成区域（放在 main-content 外面，固定在底部） -->
-    <div v-if="completedCount > 0" class="completed-section">
-      <div class="section-header" @click="toggleCompleted">
-        <span>已完成 ({{ completedCount }})</span>
-        <el-icon class="collapse-icon" :class="{ expanded: showCompleted }" :size="14">
-          <ArrowDown />
-        </el-icon>
+        <!-- 已完成按钮 -->
+        <div v-if="completedCount > 0" class="completed-btn-wrapper">
+          <button class="completed-btn" @click="showCompletedDialog = true">
+            <span>已完成 ({{ completedCount }})</span>
+            <el-icon :size="14"><ArrowRight /></el-icon>
+          </button>
+        </div>
       </div>
 
-      <div v-show="showCompleted" class="completed-list">
-        <TodoItem
-          v-for="todo in completedList"
-          :key="todo.id"
-          :todo="todo"
-          @click="openEditor(todo)"
-          @toggle-complete="handleToggleComplete(todo)"
-          @delete="handleDelete(todo)"
+      <!-- 已完成弹窗 -->
+      <el-dialog
+        v-model="showCompletedDialog"
+        title="已完成"
+        width="450"
+        :modal="true"
+        append-to-body
+      >
+        <div class="completed-dialog-list">
+          <TodoItem
+            v-for="todo in completedList"
+            :key="todo.id"
+            :todo="todo"
+            @click="openEditor(todo)"
+            @toggle-complete="handleToggleComplete(todo)"
+            @delete="handleDelete(todo)"
+          />
+        </div>
+      </el-dialog>
+
+      <!-- 右侧：日历视图 -->
+      <div v-if="showCalendar" class="right-panel" :class="{ 'fixed-mode': appStore.isFixed }">
+        <CalendarView 
+          :todos="allTodos"
+          :is-fixed="appStore.isFixed"
+          @select-todo="openEditor"
         />
       </div>
     </div>
@@ -338,5 +364,72 @@ async function openSettings() {
   background: rgba(0, 0, 0, 0.3);
   z-index: 999;
   cursor: not-allowed;
+}
+
+/* 分栏布局 */
+.main-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+
+  &.split-layout {
+    flex-direction: row;
+  }
+}
+
+.left-panel {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+
+  .split-layout & {
+    width: 40%;
+    min-width: 280px;
+    /* 去掉分割线 */
+  }
+}
+
+.right-panel {
+  flex: 1;
+  overflow: hidden;
+  padding: 12px;
+  background: transparent;
+
+  &.fixed-mode {
+    background: transparent;
+    padding: 8px;
+  }
+}
+
+/* 已完成按钮 */
+.completed-btn-wrapper {
+  padding: 8px 16px;
+}
+
+.completed-btn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 8px 12px;
+  background: transparent;
+  border: 1px solid rgba(128, 128, 128, 0.2);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s;
+
+  &:hover {
+    background: rgba(128, 128, 128, 0.1);
+    color: var(--text-primary);
+  }
+}
+
+/* 已完成弹窗列表 */
+.completed-dialog-list {
+  max-height: 400px;
+  overflow-y: auto;
 }
 </style>

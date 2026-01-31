@@ -21,6 +21,8 @@ use commands::{
     is_fixed_mode,
     // 屏幕配置命令
     get_screen_config, save_screen_config, list_screen_configs, delete_screen_config, update_screen_config_name,
+    // 日历设置命令
+    get_show_calendar, set_show_calendar,
 };
 
 #[cfg(target_os = "windows")]
@@ -196,6 +198,9 @@ pub fn run() {
             list_screen_configs,
             delete_screen_config,
             update_screen_config_name,
+            // 日历设置命令
+            get_show_calendar,
+            set_show_calendar,
             // 数据导入导出命令
             export_data,
             import_data,

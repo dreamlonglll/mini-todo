@@ -31,6 +31,9 @@ export const useAppStore = defineStore('app', () => {
   const currentScreenConfigId = ref<string>('')
   const screenConfigs = ref<ScreenConfig[]>([])
   
+  // 日历显示状态
+  const showCalendar = ref(false)
+  
   // 版本更新相关状态
   const hasUpdate = ref(false)
   const latestVersion = ref<string | null>(null)
@@ -175,8 +178,42 @@ export const useAppStore = defineStore('app', () => {
       
       // 加载所有屏幕配置列表
       await loadScreenConfigs()
+      
+      // 加载日历显示状态
+      await loadShowCalendar()
     } catch (e) {
       console.error('Failed to load settings:', e)
+    }
+  }
+
+  // 加载日历显示状态
+  async function loadShowCalendar() {
+    try {
+      showCalendar.value = await invoke<boolean>('get_show_calendar')
+    } catch (e) {
+      console.error('Failed to load show calendar setting:', e)
+      showCalendar.value = false
+    }
+  }
+
+  // 切换日历显示
+  async function toggleShowCalendar() {
+    try {
+      showCalendar.value = !showCalendar.value
+      await invoke('set_show_calendar', { show: showCalendar.value })
+    } catch (e) {
+      console.error('Failed to toggle show calendar:', e)
+      showCalendar.value = !showCalendar.value // 回滚
+    }
+  }
+
+  // 设置日历显示
+  async function setShowCalendar(show: boolean) {
+    try {
+      showCalendar.value = show
+      await invoke('set_show_calendar', { show })
+    } catch (e) {
+      console.error('Failed to set show calendar:', e)
     }
   }
 
@@ -392,6 +429,8 @@ export const useAppStore = defineStore('app', () => {
     // 屏幕配置状态
     currentScreenConfigId,
     screenConfigs,
+    // 日历状态
+    showCalendar,
     // 方法
     initSettings,
     toggleFixedMode,
@@ -405,6 +444,10 @@ export const useAppStore = defineStore('app', () => {
     generateScreenConfigDisplayName,
     loadScreenConfigs,
     deleteScreenConfig,
-    updateScreenConfigName
+    updateScreenConfigName,
+    // 日历方法
+    loadShowCalendar,
+    toggleShowCalendar,
+    setShowCalendar
   }
 })

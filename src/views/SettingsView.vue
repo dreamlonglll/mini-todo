@@ -23,6 +23,9 @@ const autoStartLoading = ref(false)
 const screenConfigs = computed(() => appStore.screenConfigs)
 const currentConfigId = computed(() => appStore.currentScreenConfigId)
 
+// 日历显示
+const showCalendar = computed(() => appStore.showCalendar)
+
 // 是否有更新
 const hasUpdate = computed(() => appStore.hasUpdate)
 const latestVersion = computed(() => appStore.latestVersion)
@@ -237,6 +240,17 @@ async function handleCheckUpdate() {
             @change="handleAutoStartChange"
           />
         </div>
+        
+        <div class="settings-row">
+          <span class="settings-label">展示日历</span>
+          <el-switch 
+            :model-value="showCalendar"
+            @change="(val: boolean) => appStore.setShowCalendar(val)"
+          />
+        </div>
+        <p class="settings-hint" style="margin-top: 4px;">
+          开启后主界面将显示日历视图
+        </p>
       </div>
 
       <!-- 数据管理 -->
