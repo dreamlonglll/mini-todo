@@ -153,8 +153,8 @@ async function openEditor(todo?: Todo, centerOnScreen = false) {
   try {
     isModalOpen.value = true
     
-    const editorWidth = 400
-    const editorHeight = 500
+    const editorWidth = 800
+    const editorHeight = 1200
     let x: number, y: number
     const scaleFactor = await appWindow.scaleFactor()
     

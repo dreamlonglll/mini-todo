@@ -361,6 +361,10 @@ function handleClose() {
                 format="YYYY-MM-DD"
                 value-format="YYYY-MM-DD"
                 :teleported="true"
+                :popper-options="{
+                  placement: 'top-start',
+                  modifiers: [{ name: 'flip', enabled: false }]
+                }"
                 class="date-picker-sm"
               />
               <el-time-picker
@@ -369,6 +373,10 @@ function handleClose() {
                 format="HH:mm"
                 value-format="HH:mm"
                 :teleported="true"
+                :popper-options="{
+                  placement: 'top-start',
+                  modifiers: [{ name: 'flip', enabled: false }]
+                }"
                 class="time-picker-sm"
                 :disabled="!startDate"
               />
@@ -382,6 +390,10 @@ function handleClose() {
                 format="YYYY-MM-DD"
                 value-format="YYYY-MM-DD"
                 :teleported="true"
+                :popper-options="{
+                  placement: 'top-start',
+                  modifiers: [{ name: 'flip', enabled: false }]
+                }"
                 class="date-picker-sm"
               />
               <el-time-picker
@@ -390,6 +402,10 @@ function handleClose() {
                 format="HH:mm"
                 value-format="HH:mm"
                 :teleported="true"
+                :popper-options="{
+                  placement: 'top-start',
+                  modifiers: [{ name: 'flip', enabled: false }]
+                }"
                 class="time-picker-sm"
                 :disabled="!endDate"
               />
