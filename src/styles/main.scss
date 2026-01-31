@@ -172,6 +172,18 @@ body {
       }
     }
 
+    .completed-btn {
+      background: transparent;
+      border-color: rgba(255, 255, 255, 0.3);
+      color: rgba(255, 255, 255, 0.9);
+
+      &:hover {
+        background: rgba(255, 255, 255, 0.1);
+        border-color: rgba(255, 255, 255, 0.5);
+        color: rgba(255, 255, 255, 1);
+      }
+    }
+
     .empty-state {
       background: rgba(0, 0, 0, 0.1);
     }

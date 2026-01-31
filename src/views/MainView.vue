@@ -328,7 +328,7 @@ async function openSettings() {
         </div>
 
         <!-- 已完成按钮 -->
-        <div v-if="completedCount > 0" class="completed-btn-wrapper">
+        <div v-if="completedCount > 0" class="completed-btn-wrapper" :class="{ 'fixed-mode': appStore.isFixed }">
           <button class="completed-btn" @click="showCompletedDialog = true">
             <span>已完成 ({{ completedCount }})</span>
             <el-icon :size="14"><ArrowRight /></el-icon>
@@ -430,6 +430,11 @@ async function openSettings() {
 /* 已完成按钮 */
 .completed-btn-wrapper {
   padding: 8px 16px;
+
+  /* 固定模式下的样式 */
+  &.fixed-mode {
+    background-color: rgba(0, 0, 0, 0.15);
+  }
 }
 
 .completed-btn {
