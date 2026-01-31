@@ -499,6 +499,8 @@ defineExpose({
   grid-template-rows: repeat(6, 1fr);
   position: relative;
   overflow: hidden;
+  /* 添加上边框 - 默认使用深色边框（非固定模式） */
+  border-top: 1px solid var(--border);
 }
 
 .calendar-cell {
@@ -506,17 +508,19 @@ defineExpose({
   min-height: 60px;
   display: flex;
   flex-direction: column;
-  border-right: 1px solid rgba(255, 255, 255, 0.6);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.6);
+  /* 默认使用深色边框（非固定模式） */
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
   position: relative;
 
-  /* 第一行添加上边线 */
-  &:nth-child(-n+7) {
-    border-top: 1px solid rgba(255, 255, 255, 0.6);
-  }
-
+  /* 每行最后一个单元格不需要右边框 */
   &:nth-child(7n) {
     border-right: none;
+  }
+
+  /* 最后一行单元格不需要下边框 */
+  &:nth-child(n+36) {
+    border-bottom: none;
   }
 
   &.other-month {
@@ -655,7 +659,13 @@ defineExpose({
 
 /* 固定模式样式 */
 .calendar-view.fixed-mode {
+  /* 固定模式使用浅色边框 */
+  .calendar-grid {
+    border-top-color: rgba(255, 255, 255, 0.6);
+  }
+
   .calendar-cell {
+    border-right-color: rgba(255, 255, 255, 0.6);
     border-bottom-color: rgba(255, 255, 255, 0.6);
   }
 
