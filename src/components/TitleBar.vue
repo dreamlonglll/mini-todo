@@ -5,8 +5,16 @@ import { useAppStore, APP_VERSION } from '@/stores'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import { ElMessageBox } from 'element-plus'
 
+const props = defineProps<{
+  showCalendarControls?: boolean
+  currentMonthText?: string
+}>()
+
 const emit = defineEmits<{
   (e: 'open-settings'): void
+  (e: 'calendar-prev'): void
+  (e: 'calendar-next'): void
+  (e: 'calendar-today'): void
 }>()
 
 const appStore = useAppStore()
@@ -73,6 +81,20 @@ async function handleVersionClick() {
         </span>
       </span>
     </div>
+
+    <!-- 日历控制区域（居中显示） -->
+    <div v-if="showCalendarControls" class="title-center">
+      <div class="calendar-nav">
+        <el-button text size="small" class="nav-btn" @click="emit('calendar-prev')">
+          <el-icon><ArrowLeft /></el-icon>
+        </el-button>
+        <span class="current-month">{{ currentMonthText }}</span>
+        <el-button text size="small" class="nav-btn" @click="emit('calendar-next')">
+          <el-icon><ArrowRight /></el-icon>
+        </el-button>
+      </div>
+      <el-button size="small" class="today-btn" @click="emit('calendar-today')">今天</el-button>
+    </div>
     
     <div class="title-right">
       <!-- 固定按钮 -->
@@ -124,6 +146,88 @@ async function handleVersionClick() {
 .app-title-wrapper {
   display: flex;
   align-items: baseline;
+}
+
+/* 当有日历控制时，标题左侧固定 40% 宽度（与左侧面板对应） */
+.title-bar:has(.title-center) {
+  .title-left {
+    width: 40%;
+    min-width: 280px;
+    flex-shrink: 0;
+  }
+}
+
+/* 日历控制区域 - 左对齐（紧跟标题区域） */
+.title-center {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  -webkit-app-region: no-drag;
+}
+
+.calendar-nav {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.current-month {
+  font-size: 15px;
+  font-weight: 600;
+  min-width: 90px;
+  text-align: center;
+  color: var(--text-primary);
+}
+
+/* 非固定模式下的按钮样式 */
+.nav-btn {
+  color: var(--text-secondary) !important;
+
+  &:hover {
+    color: var(--primary) !important;
+    background: var(--bg-tertiary) !important;
+  }
+
+  :deep(.el-icon) {
+    color: inherit !important;
+  }
+}
+
+.today-btn {
+  color: var(--text-secondary) !important;
+  background: var(--bg-secondary) !important;
+  border-color: var(--border) !important;
+
+  &:hover {
+    color: var(--primary) !important;
+    background: var(--bg-tertiary) !important;
+    border-color: var(--primary) !important;
+  }
+}
+
+/* 固定模式下的按钮样式 */
+.title-bar.no-drag {
+  .nav-btn {
+    color: var(--text-primary) !important;
+
+    &:hover {
+      color: var(--primary-light) !important;
+      background: rgba(255, 255, 255, 0.1) !important;
+    }
+  }
+
+  .today-btn {
+    color: var(--text-primary) !important;
+    background: transparent !important;
+    border-color: rgba(255, 255, 255, 0.4) !important;
+
+    &:hover {
+      color: white !important;
+      background: rgba(255, 255, 255, 0.15) !important;
+      border-color: rgba(255, 255, 255, 0.5) !important;
+    }
+  }
 }
 
 /* 版本号标签 */

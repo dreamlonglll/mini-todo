@@ -20,6 +20,25 @@ const showCompletedDialog = ref(false)
 // 是否显示日历
 const showCalendar = computed(() => appStore.showCalendar)
 
+// 日历组件引用
+const calendarRef = ref<InstanceType<typeof CalendarView> | null>(null)
+
+// 当前月份文本（从日历组件获取）
+const calendarMonthText = computed(() => calendarRef.value?.currentMonthText || '')
+
+// 日历控制方法
+function handleCalendarPrev() {
+  calendarRef.value?.prevMonth()
+}
+
+function handleCalendarNext() {
+  calendarRef.value?.nextMonth()
+}
+
+function handleCalendarToday() {
+  calendarRef.value?.goToToday()
+}
+
 // 所有待办（用于日历显示）
 const allTodos = computed(() => todoStore.todos)
 
@@ -289,7 +308,12 @@ async function openSettings() {
     
     <!-- 标题栏 -->
     <TitleBar 
+      :show-calendar-controls="showCalendar"
+      :current-month-text="calendarMonthText"
       @open-settings="openSettings"
+      @calendar-prev="handleCalendarPrev"
+      @calendar-next="handleCalendarNext"
+      @calendar-today="handleCalendarToday"
     />
 
     <!-- 主内容区 - 分栏布局 -->
@@ -335,6 +359,7 @@ async function openSettings() {
       <!-- 右侧：日历视图 -->
       <div v-if="showCalendar" class="right-panel" :class="{ 'fixed-mode': appStore.isFixed }">
         <CalendarView 
+          ref="calendarRef"
           :todos="allTodos"
           :is-fixed="appStore.isFixed"
           @select-todo="openEditor"

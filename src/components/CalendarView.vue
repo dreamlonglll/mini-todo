@@ -329,24 +329,18 @@ function getBarStyle(bar: TodoBar): Record<string, string> {
     backgroundColor: getPriorityColor(bar.todo.priority)
   }
 }
+
+// 暴露方法和状态给父组件
+defineExpose({
+  prevMonth,
+  nextMonth,
+  goToToday,
+  currentMonthText
+})
 </script>
 
 <template>
   <div class="calendar-view" :class="{ 'fixed-mode': isFixed }">
-    <!-- 日历头部 -->
-    <div class="calendar-header">
-      <div class="nav-buttons">
-        <el-button text size="small" @click="prevMonth">
-          <el-icon><ArrowLeft /></el-icon>
-        </el-button>
-        <span class="current-month">{{ currentMonthText }}</span>
-        <el-button text size="small" @click="nextMonth">
-          <el-icon><ArrowRight /></el-icon>
-        </el-button>
-      </div>
-      <el-button size="small" @click="goToToday">今天</el-button>
-    </div>
-
     <!-- 星期标题 -->
     <div class="weekday-header">
       <div v-for="day in weekDays" :key="day" class="weekday-cell">
@@ -401,27 +395,6 @@ function getBarStyle(bar: TodoBar): Record<string, string> {
   background: transparent;
   border-radius: 8px;
   overflow: hidden;
-}
-
-.calendar-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 16px;
-}
-
-.nav-buttons {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.current-month {
-  font-size: 16px;
-  font-weight: 600;
-  min-width: 100px;
-  text-align: center;
-  color: var(--text-primary);
 }
 
 .weekday-header {
@@ -541,43 +514,6 @@ function getBarStyle(bar: TodoBar): Record<string, string> {
 
   .weekday-cell {
     color: var(--text-secondary);
-  }
-
-  .current-month {
-    color: var(--text-primary);
-  }
-
-  /* 固定模式下导航按钮样式（左右箭头） */
-  .nav-buttons :deep(.el-button) {
-    color: white !important;
-    
-    .el-icon {
-      color: white !important;
-    }
-
-    &:hover,
-    &:focus {
-      color: var(--primary-light) !important;
-      background: rgba(255, 255, 255, 0.1) !important;
-
-      .el-icon {
-        color: var(--primary-light) !important;
-      }
-    }
-  }
-
-  /* 固定模式下今天按钮样式 */
-  .calendar-header > :deep(.el-button:not(.is-text)) {
-    color: white !important;
-    background: transparent !important;
-    border-color: rgba(255, 255, 255, 0.4) !important;
-
-    &:hover,
-    &:focus {
-      color: white !important;
-      background: rgba(255, 255, 255, 0.15) !important;
-      border-color: rgba(255, 255, 255, 0.5) !important;
-    }
   }
 }
 </style>
