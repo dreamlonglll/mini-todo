@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import type { Todo } from '@/types'
+import { getLunarDisplayText } from '@/utils/lunar'
+import { getYearHolidays, isWeekend, type HolidayInfo } from '@/utils/holiday'
 
 const props = defineProps<{
   todos: Todo[]
@@ -47,7 +49,13 @@ interface CalendarCell {
   dateStr: string // YYYY-MM-DD 格式
   row: number
   col: number
+  // 农历信息
+  lunarText: string
+  lunarType: 'festival' | 'solarTerm' | 'lunar'
 }
+
+// 节假日数据缓存
+const holidayData = ref<Map<string, HolidayInfo>>(new Map())
 
 // 生成日历格子
 const calendarCells = computed<CalendarCell[]>(() => {
@@ -68,14 +76,18 @@ const calendarCells = computed<CalendarCell[]>(() => {
   for (let i = firstDay - 1; i >= 0; i--) {
     const day = daysInPrevMonth - i
     const date = new Date(prevYear, prevMonth, day)
+    const dateStr = formatDate(date)
+    const lunarDisplay = getLunarDisplayText(dateStr)
     cells.push({
       date,
       day,
       isCurrentMonth: false,
       isToday: false,
-      dateStr: formatDate(date),
+      dateStr,
       row: Math.floor(cellIndex / 7),
-      col: cellIndex % 7
+      col: cellIndex % 7,
+      lunarText: lunarDisplay.text,
+      lunarType: lunarDisplay.type
     })
     cellIndex++
   }
@@ -87,6 +99,7 @@ const calendarCells = computed<CalendarCell[]>(() => {
   for (let day = 1; day <= daysInMonth; day++) {
     const date = new Date(year, month, day)
     const dateStr = formatDate(date)
+    const lunarDisplay = getLunarDisplayText(dateStr)
     cells.push({
       date,
       day,
@@ -94,7 +107,9 @@ const calendarCells = computed<CalendarCell[]>(() => {
       isToday: dateStr === todayStr,
       dateStr,
       row: Math.floor(cellIndex / 7),
-      col: cellIndex % 7
+      col: cellIndex % 7,
+      lunarText: lunarDisplay.text,
+      lunarType: lunarDisplay.type
     })
     cellIndex++
   }
@@ -106,19 +121,73 @@ const calendarCells = computed<CalendarCell[]>(() => {
   
   for (let day = 1; day <= remaining; day++) {
     const date = new Date(nextYear, nextMonth, day)
+    const dateStr = formatDate(date)
+    const lunarDisplay = getLunarDisplayText(dateStr)
     cells.push({
       date,
       day,
       isCurrentMonth: false,
       isToday: false,
-      dateStr: formatDate(date),
+      dateStr,
       row: Math.floor(cellIndex / 7),
-      col: cellIndex % 7
+      col: cellIndex % 7,
+      lunarText: lunarDisplay.text,
+      lunarType: lunarDisplay.type
     })
     cellIndex++
   }
   
   return cells
+})
+
+// 加载节假日数据
+async function loadHolidayData() {
+  const year = currentYear.value
+  const month = currentMonth.value
+  
+  // 可能跨年，加载相关年份的数据
+  const years = new Set<number>()
+  years.add(year)
+  if (month === 0) years.add(year - 1) // 一月可能显示上一年十二月
+  if (month === 11) years.add(year + 1) // 十二月可能显示下一年一月
+  
+  const allHolidays = new Map<string, HolidayInfo>()
+  
+  for (const y of years) {
+    const yearHolidays = await getYearHolidays(y)
+    for (const [date, info] of yearHolidays) {
+      allHolidays.set(date, info)
+    }
+  }
+  
+  holidayData.value = allHolidays
+}
+
+// 获取单元格的节假日信息
+function getCellHolidayInfo(dateStr: string): HolidayInfo | null {
+  return holidayData.value.get(dateStr) || null
+}
+
+// 判断单元格是否是休息日（法定节假日）
+function isCellHoliday(dateStr: string): boolean {
+  const info = holidayData.value.get(dateStr)
+  return info?.isHoliday ?? false
+}
+
+// 判断单元格是否是调休工作日
+function isCellAdjustWorkday(dateStr: string): boolean {
+  const info = holidayData.value.get(dateStr)
+  return info !== null && info !== undefined && !info.isHoliday
+}
+
+// 监听年月变化，重新加载节假日数据
+watch([currentYear, currentMonth], () => {
+  loadHolidayData()
+}, { immediate: false })
+
+// 初始化加载节假日数据
+onMounted(() => {
+  loadHolidayData()
 })
 
 // 格式化日期为 YYYY-MM-DD
@@ -357,10 +426,29 @@ defineExpose({
         class="calendar-cell"
         :class="{ 
           'other-month': !cell.isCurrentMonth,
-          'is-today': cell.isToday
+          'is-today': cell.isToday,
+          'is-holiday': isCellHoliday(cell.dateStr),
+          'is-adjust': isCellAdjustWorkday(cell.dateStr),
+          'is-weekend': isWeekend(cell.dateStr) && !getCellHolidayInfo(cell.dateStr)
         }"
       >
-        <div class="cell-date">{{ cell.day }}</div>
+        <div class="cell-header">
+          <div class="cell-date">{{ cell.day }}</div>
+          <div 
+            class="cell-lunar"
+            :class="{
+              'is-festival': cell.lunarType === 'festival',
+              'is-solar-term': cell.lunarType === 'solarTerm'
+            }"
+          >
+            {{ cell.lunarText }}
+          </div>
+        </div>
+        <!-- 节假日标记 -->
+        <div v-if="getCellHolidayInfo(cell.dateStr)" class="holiday-badge">
+          <span v-if="isCellHoliday(cell.dateStr)" class="badge-rest">休</span>
+          <span v-else class="badge-work">班</span>
+        </div>
       </div>
       
       <!-- 跨天待办条（按行覆盖在格子上方） -->
@@ -426,13 +514,15 @@ defineExpose({
   flex-direction: column;
   border-right: 1px solid rgba(255, 255, 255, 0.6);
   border-bottom: 1px solid rgba(255, 255, 255, 0.6);
+  position: relative;
 
   &:nth-child(7n) {
     border-right: none;
   }
 
   &.other-month {
-    .cell-date {
+    .cell-date,
+    .cell-lunar {
       color: var(--text-tertiary);
       opacity: 0.5;
     }
@@ -450,14 +540,82 @@ defineExpose({
       justify-content: center;
     }
   }
+
+  /* 法定节假日休息日 */
+  &.is-holiday {
+    background: rgba(239, 68, 68, 0.08);
+    
+    .cell-date {
+      color: #EF4444;
+    }
+  }
+
+  /* 调休工作日 */
+  &.is-adjust {
+    background: rgba(245, 158, 11, 0.08);
+  }
+
+  /* 普通周末 */
+  &.is-weekend:not(.is-holiday):not(.is-adjust) {
+    .cell-date {
+      color: var(--text-secondary);
+    }
+  }
+}
+
+/* 单元格头部（日期+农历） */
+.cell-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
 }
 
 .cell-date {
   font-size: 13px;
   font-weight: 500;
   color: var(--text-primary);
-  margin-bottom: 4px;
   flex-shrink: 0;
+}
+
+/* 农历日期 */
+.cell-lunar {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+
+  /* 传统节日 */
+  &.is-festival {
+    color: #EF4444;
+    font-weight: 500;
+  }
+
+  /* 节气 */
+  &.is-solar-term {
+    color: #10B981;
+    font-weight: 500;
+  }
+}
+
+/* 节假日标记 */
+.holiday-badge {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  font-size: 9px;
+  line-height: 1;
+
+  .badge-rest {
+    color: #EF4444;
+    font-weight: 600;
+  }
+
+  .badge-work {
+    color: #F59E0B;
+    font-weight: 600;
+  }
 }
 
 /* 跨天待办条 */
@@ -510,6 +668,18 @@ defineExpose({
 
   .cell-date {
     color: var(--text-primary);
+  }
+
+  .cell-lunar {
+    color: var(--text-tertiary);
+    
+    &.is-festival {
+      color: #EF4444;
+    }
+    
+    &.is-solar-term {
+      color: #10B981;
+    }
   }
 
   .weekday-cell {
