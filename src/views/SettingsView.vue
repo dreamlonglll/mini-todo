@@ -40,6 +40,9 @@ onMounted(async () => {
   
   // 加载屏幕配置列表
   await appStore.loadScreenConfigs()
+  
+  // 加载日历显示状态
+  await appStore.loadShowCalendar()
 })
 
 // 删除屏幕配置
