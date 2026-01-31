@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// 节假日信息
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -10,34 +9,39 @@ pub struct HolidayInfo {
     pub is_off_day: bool,
 }
 
-/// API 响应格式
-/// 接口: https://holiday.ailcc.com/api/holiday/year/{year}
+/// NateScarlet/holiday-cn 数据格式
+/// 数据源: https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/{year}.json
 #[derive(Debug, Deserialize)]
-struct ApiResponse {
-    code: i32,
-    holiday: Option<HashMap<String, ApiHolidayData>>,
+struct HolidayCnResponse {
+    #[serde(rename = "$schema")]
+    #[allow(dead_code)]
+    schema: Option<String>,
+    #[serde(rename = "$id")]
+    #[allow(dead_code)]
+    id: Option<String>,
+    #[allow(dead_code)]
+    year: i32,
+    #[allow(dead_code)]
+    papers: Option<Vec<serde_json::Value>>,
+    days: Vec<HolidayCnDay>,
 }
 
 #[derive(Debug, Deserialize)]
-struct ApiHolidayData {
-    holiday: bool,
+#[serde(rename_all = "camelCase")]
+struct HolidayCnDay {
     name: String,
     date: String,
-    #[allow(dead_code)]
-    wage: Option<i32>,
-    #[serde(rename = "cnLunar")]
-    #[allow(dead_code)]
-    cn_lunar: Option<String>,
-    #[allow(dead_code)]
-    extra_info: Option<String>,
-    #[allow(dead_code)]
-    rest: Option<i32>,
+    is_off_day: bool,
 }
 
 /// 获取指定年份的节假日数据
+/// 使用 NateScarlet/holiday-cn 开源数据，包含休息日和调休上班日
 #[tauri::command]
 pub async fn fetch_holidays(year: i32) -> Result<Vec<HolidayInfo>, String> {
-    let url = format!("https://holiday.ailcc.com/api/holiday/year/{}", year);
+    let url = format!(
+        "https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/{}.json",
+        year
+    );
     
     let response = reqwest::get(&url)
         .await
@@ -47,24 +51,19 @@ pub async fn fetch_holidays(year: i32) -> Result<Vec<HolidayInfo>, String> {
         return Err(format!("API returned status: {}", response.status()));
     }
     
-    let api_response: ApiResponse = response
+    let api_response: HolidayCnResponse = response
         .json()
         .await
         .map_err(|e| format!("Failed to parse response: {}", e))?;
     
-    if api_response.code != 0 {
-        return Err(format!("API returned error code: {}", api_response.code));
-    }
-    
     let holidays: Vec<HolidayInfo> = api_response
-        .holiday
-        .unwrap_or_default()
+        .days
         .into_iter()
-        .map(|(_, data)| {
+        .map(|day| {
             HolidayInfo {
-                date: data.date,
-                name: data.name,
-                is_off_day: data.holiday,
+                date: day.date,
+                name: day.name,
+                is_off_day: day.is_off_day,
             }
         })
         .collect();
