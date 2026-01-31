@@ -1,6 +1,6 @@
 /**
  * 节假日服务模块
- * 通过 Tauri 后端调用 holiday.ailcc.com API 获取中国法定节假日数据
+ * 通过 Tauri 后端调用 NateScarlet/holiday-cn 开源数据获取中国法定节假日
  */
 import { invoke } from '@tauri-apps/api/core'
 
@@ -77,57 +77,3 @@ export async function getYearHolidays(year: number): Promise<Map<string, Holiday
   return holidays
 }
 
-/**
- * 获取指定日期的节假日信息
- * @param date 日期 YYYY-MM-DD 格式
- */
-export async function getHolidayInfo(date: string): Promise<HolidayInfo | null> {
-  const year = parseInt(date.split('-')[0])
-  const holidays = await getYearHolidays(year)
-  return holidays.get(date) || null
-}
-
-/**
- * 判断指定日期是否是休息日（法定节假日）
- * @param date 日期 YYYY-MM-DD 格式
- */
-export async function isHoliday(date: string): Promise<boolean> {
-  const info = await getHolidayInfo(date)
-  return info?.isHoliday ?? false
-}
-
-/**
- * 判断指定日期是否是调休上班日
- * @param date 日期 YYYY-MM-DD 格式
- */
-export async function isAdjustWorkday(date: string): Promise<boolean> {
-  const info = await getHolidayInfo(date)
-  // 如果在节假日数据中且不是休息日，说明是调休上班
-  return info !== null && !info.isHoliday
-}
-
-/**
- * 批量获取多个年份的节假日数据（用于日历视图，可能跨年）
- * @param years 年份数组
- */
-export async function preloadYearHolidays(years: number[]): Promise<void> {
-  const uniqueYears = [...new Set(years)]
-  await Promise.all(uniqueYears.map(year => getYearHolidays(year)))
-}
-
-/**
- * 清除缓存（用于强制刷新数据）
- */
-export function clearHolidayCache(): void {
-  holidayCache.clear()
-}
-
-/**
- * 判断指定日期是否是普通周末（非节假日也非调休）
- * @param date 日期对象或 YYYY-MM-DD 格式字符串
- */
-export function isWeekend(date: Date | string): boolean {
-  const d = typeof date === 'string' ? new Date(date) : date
-  const day = d.getDay()
-  return day === 0 || day === 6
-}

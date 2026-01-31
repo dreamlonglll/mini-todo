@@ -89,22 +89,3 @@ export function getLunarDisplayText(date: Date | string): { text: string; type: 
   return { text: lunarText, type: 'lunar' }
 }
 
-/**
- * 批量获取一个月的农历信息（用于日历视图优化）
- * @param year 年份
- * @param month 月份（0-11）
- */
-export function getMonthLunarInfo(year: number, month: number): Map<string, LunarInfo> {
-  const result = new Map<string, LunarInfo>()
-  
-  // 获取当月天数
-  const daysInMonth = new Date(year, month + 1, 0).getDate()
-  
-  // 为每一天计算农历信息
-  for (let day = 1; day <= daysInMonth; day++) {
-    const dateStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`
-    result.set(dateStr, getLunarInfo(dateStr))
-  }
-  
-  return result
-}
