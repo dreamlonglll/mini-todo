@@ -105,7 +105,7 @@ body.fixed-mode #app .app-container,
 body.fixed-mode #app .app-container .title-bar,
 body.fixed-mode #app .app-container .main-content,
 body.fixed-mode #app .app-container .quick-add,
-body.fixed-mode #app .app-container .right-panel {
+body.fixed-mode #app .app-container .right-panel  {
   background: rgba(0, 0, 0, 0.15) !important;
   background-color: rgba(0, 0, 0, 0.15) !important;
 }
@@ -303,7 +303,7 @@ body {
     }
   }
 
-  .priority-dot {
+  .color-dot {
     position: relative;
     width: 8px;
     height: 8px;
@@ -326,10 +326,6 @@ body {
     &:active {
       cursor: grabbing;
     }
-
-    &.high { background: var(--priority-high); }
-    &.medium { background: var(--priority-medium); }
-    &.low { background: var(--priority-low); }
   }
 
   .todo-content {

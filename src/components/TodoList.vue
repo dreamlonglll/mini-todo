@@ -59,7 +59,7 @@ async function handleDelete(todo: Todo) {
     <draggable
       v-model="localPendingList"
       item-key="id"
-      handle=".priority-dot"
+      handle=".color-dot"
       ghost-class="dragging"
       :animation="200"
       :force-fallback="true"

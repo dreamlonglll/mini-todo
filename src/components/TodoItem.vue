@@ -20,8 +20,10 @@ const todoStore = useTodoStore()
 // 是否已完成
 const isCompleted = computed(() => props.todo.completed)
 
-// 优先级类
-const priorityClass = computed(() => props.todo.priority)
+// 颜色样式
+const colorStyle = computed(() => ({
+  backgroundColor: props.todo.color
+}))
 
 // 子任务统计
 const subtaskStats = computed(() => {
@@ -82,8 +84,8 @@ function handleClick() {
     :class="{ completed: isCompleted }"
     @click="handleClick"
   >
-    <!-- 拖拽手柄 + 优先级圆点 -->
-    <div class="drag-handle priority-dot" :class="priorityClass"></div>
+    <!-- 拖拽手柄 + 颜色圆点 -->
+    <div class="drag-handle color-dot" :style="colorStyle"></div>
 
     <!-- 内容区域 -->
     <div class="todo-content">

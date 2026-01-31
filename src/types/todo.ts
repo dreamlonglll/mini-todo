@@ -1,5 +1,17 @@
-// 优先级枚举
-export type Priority = 'high' | 'medium' | 'low'
+// 预设颜色列表
+export const PRESET_COLORS = [
+  { name: '红色', value: '#EF4444' },
+  { name: '橙色', value: '#F59E0B' },
+  { name: '黄色', value: '#EAB308' },
+  { name: '绿色', value: '#10B981' },
+  { name: '青色', value: '#06B6D4' },
+  { name: '蓝色', value: '#3B82F6' },
+  { name: '紫色', value: '#8B5CF6' },
+  { name: '粉色', value: '#EC4899' },
+] as const
+
+// 默认颜色
+export const DEFAULT_COLOR = '#F59E0B'
 
 // 子任务接口
 export interface SubTask {
@@ -17,7 +29,8 @@ export interface Todo {
   id: number
   title: string
   description: string | null
-  priority: Priority
+  /** 颜色（HEX 格式，如 #EF4444） */
+  color: string
   notifyAt: string | null
   notifyBefore: number
   notified: boolean
@@ -36,7 +49,8 @@ export interface Todo {
 export interface CreateTodoRequest {
   title: string
   description?: string
-  priority: Priority
+  /** 颜色（HEX 格式） */
+  color: string
   notifyAt?: string
   notifyBefore?: number
   /** 开始时间 */
@@ -49,7 +63,8 @@ export interface CreateTodoRequest {
 export interface UpdateTodoRequest {
   title?: string
   description?: string | null
-  priority?: Priority
+  /** 颜色（HEX 格式） */
+  color?: string
   notifyAt?: string | null
   notifyBefore?: number
   completed?: boolean

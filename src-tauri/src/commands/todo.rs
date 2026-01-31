@@ -9,7 +9,7 @@ pub fn get_todos(db: State<Database>) -> Result<Vec<Todo>, String> {
     db.with_connection(|conn| {
         // 获取所有待办
         let mut stmt = conn.prepare(
-            "SELECT id, title, description, priority, notify_at, notify_before, 
+            "SELECT id, title, description, color, notify_at, notify_before, 
                     notified, completed, sort_order, start_time, end_time, created_at, updated_at 
              FROM todos 
              ORDER BY completed ASC, sort_order ASC, created_at DESC"
@@ -20,7 +20,7 @@ pub fn get_todos(db: State<Database>) -> Result<Vec<Todo>, String> {
                 id: row.get(0)?,
                 title: row.get(1)?,
                 description: row.get(2)?,
-                priority: row.get(3)?,
+                color: row.get(3)?,
                 notify_at: row.get(4)?,
                 notify_before: row.get(5)?,
                 notified: row.get::<_, i32>(6)? != 0,
@@ -78,12 +78,12 @@ pub fn create_todo(db: State<Database>, data: CreateTodoRequest) -> Result<Todo,
             .unwrap_or(-1);
 
         conn.execute(
-            "INSERT INTO todos (title, description, priority, notify_at, notify_before, start_time, end_time, sort_order) 
+            "INSERT INTO todos (title, description, color, notify_at, notify_before, start_time, end_time, sort_order) 
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             (
                 &data.title,
                 &data.description,
-                &data.priority,
+                &data.color,
                 &data.notify_at,
                 data.notify_before.unwrap_or(0),
                 &data.start_time,
@@ -96,7 +96,7 @@ pub fn create_todo(db: State<Database>, data: CreateTodoRequest) -> Result<Todo,
 
         // 返回新创建的待办
         conn.query_row(
-            "SELECT id, title, description, priority, notify_at, notify_before, 
+            "SELECT id, title, description, color, notify_at, notify_before, 
                     notified, completed, sort_order, start_time, end_time, created_at, updated_at 
              FROM todos WHERE id = ?",
             [id],
@@ -105,7 +105,7 @@ pub fn create_todo(db: State<Database>, data: CreateTodoRequest) -> Result<Todo,
                     id: row.get(0)?,
                     title: row.get(1)?,
                     description: row.get(2)?,
-                    priority: row.get(3)?,
+                    color: row.get(3)?,
                     notify_at: row.get(4)?,
                     notify_before: row.get(5)?,
                     notified: row.get::<_, i32>(6)? != 0,
@@ -137,9 +137,9 @@ pub fn update_todo(db: State<Database>, id: i64, data: UpdateTodoRequest) -> Res
             updates.push("description = ?");
             params.push(Box::new(desc.clone()));
         }
-        if let Some(ref priority) = data.priority {
-            updates.push("priority = ?");
-            params.push(Box::new(priority.clone()));
+        if let Some(ref color) = data.color {
+            updates.push("color = ?");
+            params.push(Box::new(color.clone()));
         }
         // 明确清除通知时间
         if data.clear_notify_at {
@@ -192,7 +192,7 @@ pub fn update_todo(db: State<Database>, id: i64, data: UpdateTodoRequest) -> Res
 
         // 返回更新后的待办
         let mut todo = conn.query_row(
-            "SELECT id, title, description, priority, notify_at, notify_before, 
+            "SELECT id, title, description, color, notify_at, notify_before, 
                     notified, completed, sort_order, start_time, end_time, created_at, updated_at 
              FROM todos WHERE id = ?",
             [id],
@@ -201,7 +201,7 @@ pub fn update_todo(db: State<Database>, id: i64, data: UpdateTodoRequest) -> Res
                     id: row.get(0)?,
                     title: row.get(1)?,
                     description: row.get(2)?,
-                    priority: row.get(3)?,
+                    color: row.get(3)?,
                     notify_at: row.get(4)?,
                     notify_before: row.get(5)?,
                     notified: row.get::<_, i32>(6)? != 0,

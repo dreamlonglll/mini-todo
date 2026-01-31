@@ -362,16 +362,6 @@ function handleTodoClick(todo: Todo) {
   emit('select-todo', todo)
 }
 
-// 获取优先级颜色
-function getPriorityColor(priority: string): string {
-  switch (priority) {
-    case 'high': return 'var(--priority-high)'
-    case 'medium': return 'var(--priority-medium)'
-    case 'low': return 'var(--priority-low)'
-    default: return 'var(--primary)'
-  }
-}
-
 // 每个待办条的高度和间距
 const BAR_HEIGHT = 20
 const BAR_GAP = 2
@@ -390,7 +380,7 @@ function getBarStyle(bar: TodoBar): Record<string, string> {
     left,
     width,
     top,
-    backgroundColor: getPriorityColor(bar.todo.priority)
+    backgroundColor: bar.todo.color
   }
 }
 

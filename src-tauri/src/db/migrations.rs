@@ -33,6 +33,39 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute("INSERT INTO migrations (version) VALUES (3)", [])?;
     }
 
+    if current_version < 4 {
+        migration_v4(conn)?;
+        conn.execute("INSERT INTO migrations (version) VALUES (4)", [])?;
+    }
+
+    Ok(())
+}
+
+/// 迁移 v4：将 priority 字段改为 color 字段，支持自定义颜色
+fn migration_v4(conn: &Connection) -> Result<()> {
+    // 添加 color 列，默认橙色
+    conn.execute(
+        "ALTER TABLE todos ADD COLUMN color TEXT NOT NULL DEFAULT '#F59E0B'",
+        [],
+    )?;
+
+    // 根据 priority 迁移颜色数据
+    // high -> 红色 #EF4444
+    conn.execute(
+        "UPDATE todos SET color = '#EF4444' WHERE priority = 'high'",
+        [],
+    )?;
+    // medium -> 橙色 #F59E0B (已是默认值)
+    conn.execute(
+        "UPDATE todos SET color = '#F59E0B' WHERE priority = 'medium'",
+        [],
+    )?;
+    // low -> 绿色 #10B981
+    conn.execute(
+        "UPDATE todos SET color = '#10B981' WHERE priority = 'low'",
+        [],
+    )?;
+
     Ok(())
 }
 

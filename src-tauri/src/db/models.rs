@@ -6,7 +6,8 @@ pub struct Todo {
     pub id: i64,
     pub title: String,
     pub description: Option<String>,
-    pub priority: String,
+    /// 颜色（HEX 格式，如 #EF4444）
+    pub color: String,
     pub notify_at: Option<String>,
     pub notify_before: i32,
     pub notified: bool,
@@ -39,7 +40,8 @@ pub struct SubTask {
 pub struct CreateTodoRequest {
     pub title: String,
     pub description: Option<String>,
-    pub priority: String,
+    /// 颜色（HEX 格式，如 #EF4444）
+    pub color: String,
     pub notify_at: Option<String>,
     pub notify_before: Option<i32>,
     /// 开始时间（可为空）
@@ -53,7 +55,8 @@ pub struct CreateTodoRequest {
 pub struct UpdateTodoRequest {
     pub title: Option<String>,
     pub description: Option<String>,
-    pub priority: Option<String>,
+    /// 颜色（HEX 格式，如 #EF4444）
+    pub color: Option<String>,
     pub notify_at: Option<String>,
     pub notify_before: Option<i32>,
     pub completed: Option<bool>,

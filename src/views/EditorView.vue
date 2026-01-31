@@ -4,7 +4,8 @@ import { useRoute } from 'vue-router'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { ElMessageBox } from 'element-plus'
-import type { Todo, Priority, CreateTodoRequest, UpdateTodoRequest, CreateSubTaskRequest } from '@/types'
+import type { Todo, CreateTodoRequest, UpdateTodoRequest, CreateSubTaskRequest } from '@/types'
+import { DEFAULT_COLOR, PRESET_COLORS } from '@/types'
 
 const route = useRoute()
 const todoId = computed(() => route.query.id ? parseInt(route.query.id as string) : null)
@@ -14,12 +15,13 @@ const appWindow = getCurrentWindow()
 const form = ref({
   title: '',
   description: '',
-  priority: 'medium' as Priority,
+  color: DEFAULT_COLOR,
   notifyAt: null as string | null,
   notifyBefore: 15,
   startTime: null as string | null,
   endTime: null as string | null
 })
+
 
 // 开始和截止时间的日期时间组件值
 const startDate = ref<string | null>(null)
@@ -170,7 +172,7 @@ async function loadTodo() {
       form.value = {
         title: todo.value.title,
         description: todo.value.description || '',
-        priority: todo.value.priority as Priority,
+        color: todo.value.color,
         notifyAt: todo.value.notifyAt,
         notifyBefore: todo.value.notifyBefore,
         startTime: todo.value.startTime,
@@ -230,7 +232,7 @@ async function handleSave() {
       const data: UpdateTodoRequest = {
         title: form.value.title,
         description: form.value.description || null,
-        priority: form.value.priority,
+        color: form.value.color,
         notifyAt: form.value.notifyAt || undefined,
         notifyBefore: form.value.notifyBefore,
         clearNotifyAt: shouldClearNotifyAt,
@@ -244,7 +246,7 @@ async function handleSave() {
       const data: CreateTodoRequest = {
         title: form.value.title,
         description: form.value.description || undefined,
-        priority: form.value.priority,
+        color: form.value.color,
         notifyAt: form.value.notifyAt || undefined,
         notifyBefore: form.value.notifyBefore,
         startTime: form.value.startTime || undefined,
@@ -404,19 +406,25 @@ function handleClose() {
           />
         </el-form-item>
 
-        <!-- 优先级 -->
-        <el-form-item label="优先级">
-          <el-radio-group v-model="form.priority">
-            <el-radio value="high">
-              <span class="priority-label high">高</span>
-            </el-radio>
-            <el-radio value="medium">
-              <span class="priority-label medium">中</span>
-            </el-radio>
-            <el-radio value="low">
-              <span class="priority-label low">低</span>
-            </el-radio>
-          </el-radio-group>
+        <!-- 颜色 -->
+        <el-form-item label="颜色">
+          <div class="color-picker-row">
+            <button
+              v-for="color in PRESET_COLORS"
+              :key="color.value"
+              class="color-preset-btn"
+              :class="{ active: form.color === color.value }"
+              :style="{ backgroundColor: color.value }"
+              :title="color.name"
+              type="button"
+              @click="form.color = color.value"
+            ></button>
+            <el-color-picker
+              v-model="form.color"
+              :predefine="PRESET_COLORS.map(c => c.value)"
+              size="small"
+            />
+          </div>
         </el-form-item>
 
         <!-- 时间范围 -->
@@ -668,24 +676,28 @@ function handleClose() {
   border-top: 1px solid var(--border);
 }
 
-.priority-label {
-  padding: 2px 8px;
+.color-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.color-preset-btn {
+  width: 24px;
+  height: 24px;
   border-radius: 4px;
-  font-size: 12px;
+  border: 2px solid transparent;
+  cursor: pointer;
+  transition: all 0.15s;
+  padding: 0;
 
-  &.high {
-    background: var(--priority-high-bg);
-    color: var(--priority-high);
+  &:hover {
+    transform: scale(1.1);
   }
 
-  &.medium {
-    background: var(--priority-medium-bg);
-    color: var(--priority-medium);
-  }
-
-  &.low {
-    background: var(--priority-low-bg);
-    color: var(--priority-low);
+  &.active {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.3);
   }
 }
 

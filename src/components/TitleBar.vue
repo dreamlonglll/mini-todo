@@ -5,7 +5,7 @@ import { useAppStore, APP_VERSION } from '@/stores'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import { ElMessageBox } from 'element-plus'
 
-const props = defineProps<{
+defineProps<{
   showCalendarControls?: boolean
   currentMonthText?: string
 }>()

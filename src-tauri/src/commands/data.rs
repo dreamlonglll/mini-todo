@@ -7,7 +7,7 @@ pub fn export_data(db: State<Database>) -> Result<String, String> {
     let result = db.with_connection(|conn| {
         // 获取所有待办和子任务
         let mut stmt = conn.prepare(
-            "SELECT id, title, description, priority, notify_at, notify_before, 
+            "SELECT id, title, description, color, notify_at, notify_before, 
                     notified, completed, sort_order, start_time, end_time, created_at, updated_at 
              FROM todos ORDER BY sort_order ASC"
         )?;
@@ -17,7 +17,7 @@ pub fn export_data(db: State<Database>) -> Result<String, String> {
                 id: row.get(0)?,
                 title: row.get(1)?,
                 description: row.get(2)?,
-                priority: row.get(3)?,
+                color: row.get(3)?,
                 notify_at: row.get(4)?,
                 notify_before: row.get(5)?,
                 notified: row.get::<_, i32>(6)? != 0,
@@ -132,13 +132,13 @@ pub fn import_data(db: State<Database>, json_data: String) -> Result<(), String>
         // 导入待办
         for todo in &import_data.todos {
             conn.execute(
-                "INSERT INTO todos (title, description, priority, notify_at, notify_before, 
+                "INSERT INTO todos (title, description, color, notify_at, notify_before, 
                                    notified, completed, sort_order, start_time, end_time, created_at, updated_at) 
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 (
                     &todo.title,
                     &todo.description,
-                    &todo.priority,
+                    &todo.color,
                     &todo.notify_at,
                     todo.notify_before,
                     if todo.notified { 1 } else { 0 },
