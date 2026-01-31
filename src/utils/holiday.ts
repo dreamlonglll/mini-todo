@@ -1,7 +1,8 @@
 /**
  * 节假日服务模块
- * 使用 holiday.ailcc.com API 获取中国法定节假日数据
+ * 通过 Tauri 后端调用 holiday.ailcc.com API 获取中国法定节假日数据
  */
+import { invoke } from '@tauri-apps/api/core'
 
 export interface HolidayInfo {
   /** 日期 YYYY-MM-DD */
@@ -18,52 +19,34 @@ export interface HolidayInfo {
   type: number
 }
 
-interface ApiHolidayData {
+// 后端返回的节假日数据格式
+interface BackendHolidayInfo {
   date: string
   name: string
   isOffDay: boolean
-}
-
-interface ApiResponse {
-  code: number
-  holiday: Record<string, ApiHolidayData>
 }
 
 // 年度节假日缓存
 const holidayCache = new Map<number, Map<string, HolidayInfo>>()
 
 /**
- * 从 API 获取指定年份的节假日数据
+ * 从 Tauri 后端获取指定年份的节假日数据
  * @param year 年份
  */
 async function fetchYearHolidays(year: number): Promise<Map<string, HolidayInfo>> {
-  const url = `https://holiday.ailcc.com/json/${year}.json`
-  
   try {
-    const response = await fetch(url)
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`)
-    }
-    
-    const data: ApiResponse = await response.json()
+    const holidays = await invoke<BackendHolidayInfo[]>('fetch_holidays', { year })
     const result = new Map<string, HolidayInfo>()
     
-    if (data.code === 0 && data.holiday) {
-      for (const [dateKey, info] of Object.entries(data.holiday)) {
-        // dateKey 格式可能是 "01-01" 或 "2024-01-01"
-        const date = dateKey.includes('-') && dateKey.length > 5 
-          ? dateKey 
-          : `${year}-${dateKey}`
-        
-        result.set(date, {
-          date,
-          isHoliday: info.isOffDay,
-          isWorkday: !info.isOffDay,
-          isAdjust: !info.isOffDay, // 如果不是休息日但在节假日数据中，说明是调休上班
-          name: info.name,
-          type: info.isOffDay ? 1 : 2
-        })
-      }
+    for (const info of holidays) {
+      result.set(info.date, {
+        date: info.date,
+        isHoliday: info.isOffDay,
+        isWorkday: !info.isOffDay,
+        isAdjust: !info.isOffDay, // 如果不是休息日但在节假日数据中，说明是调休上班
+        name: info.name,
+        type: info.isOffDay ? 1 : 2
+      })
     }
     
     return result

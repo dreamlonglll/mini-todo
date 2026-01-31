@@ -23,6 +23,8 @@ use commands::{
     get_screen_config, save_screen_config, list_screen_configs, delete_screen_config, update_screen_config_name,
     // 日历设置命令
     get_show_calendar, set_show_calendar,
+    // 节假日命令
+    fetch_holidays,
 };
 
 #[cfg(target_os = "windows")]
@@ -204,6 +206,8 @@ pub fn run() {
             // 数据导入导出命令
             export_data,
             import_data,
+            // 节假日命令
+            fetch_holidays,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
