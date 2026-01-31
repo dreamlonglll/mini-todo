@@ -123,8 +123,12 @@ const newSubtaskTitle = ref('')
 // 是否编辑模式
 const isEdit = computed(() => todoId.value !== null)
 
-// 当前待办的子任务列表
+// 当前待办的子任务列表（编辑模式从服务器加载）
 const subtasks = computed(() => todo.value?.subtasks || [])
+
+// 新建模式下待创建的子任务列表
+const pendingSubtasks = ref<Array<{ id: number; title: string; completed: boolean }>>([])
+let pendingSubtaskIdCounter = 0
 
 // 提前通知选项
 const notifyBeforeOptions = [
@@ -245,7 +249,18 @@ async function handleSave() {
         startTime: form.value.startTime || undefined,
         endTime: form.value.endTime || undefined
       }
-      await invoke('create_todo', { data })
+      const newTodo = await invoke<Todo>('create_todo', { data })
+      
+      // 如果有待创建的子任务，批量创建
+      if (pendingSubtasks.value.length > 0) {
+        for (const subtask of pendingSubtasks.value) {
+          const subtaskData: CreateSubTaskRequest = {
+            parentId: newTodo.id,
+            title: subtask.title
+          }
+          await invoke('create_subtask', { data: subtaskData })
+        }
+      }
     }
 
     handleClose()
@@ -256,18 +271,29 @@ async function handleSave() {
 
 // 添加子任务
 async function addSubtask() {
-  if (!newSubtaskTitle.value.trim() || !todoId.value) return
+  if (!newSubtaskTitle.value.trim()) return
   
-  try {
-    const data: CreateSubTaskRequest = {
-      parentId: todoId.value,
-      title: newSubtaskTitle.value.trim()
+  if (isEdit.value && todoId.value) {
+    // 编辑模式：调用 API 创建子任务
+    try {
+      const data: CreateSubTaskRequest = {
+        parentId: todoId.value,
+        title: newSubtaskTitle.value.trim()
+      }
+      await invoke('create_subtask', { data })
+      await loadTodo()
+      newSubtaskTitle.value = ''
+    } catch (e) {
+      console.error('Failed to add subtask:', e)
     }
-    await invoke('create_subtask', { data })
-    await loadTodo()
+  } else {
+    // 新建模式：添加到本地列表
+    pendingSubtasks.value.push({
+      id: --pendingSubtaskIdCounter, // 使用负数作为临时 ID
+      title: newSubtaskTitle.value.trim(),
+      completed: false
+    })
     newSubtaskTitle.value = ''
-  } catch (e) {
-    console.error('Failed to add subtask:', e)
   }
 }
 
@@ -289,11 +315,28 @@ async function toggleSubtask(subtaskId: number) {
 
 // 删除子任务
 async function deleteSubtask(subtaskId: number) {
-  try {
-    await invoke('delete_subtask', { id: subtaskId })
-    await loadTodo()
-  } catch (e) {
-    console.error('Failed to delete subtask:', e)
+  if (isEdit.value) {
+    // 编辑模式：调用 API 删除子任务
+    try {
+      await invoke('delete_subtask', { id: subtaskId })
+      await loadTodo()
+    } catch (e) {
+      console.error('Failed to delete subtask:', e)
+    }
+  } else {
+    // 新建模式：从本地列表删除
+    const index = pendingSubtasks.value.findIndex(s => s.id === subtaskId)
+    if (index !== -1) {
+      pendingSubtasks.value.splice(index, 1)
+    }
+  }
+}
+
+// 切换本地子任务完成状态（新建模式）
+function togglePendingSubtask(subtaskId: number) {
+  const subtask = pendingSubtasks.value.find(s => s.id === subtaskId)
+  if (subtask) {
+    subtask.completed = !subtask.completed
   }
 }
 
@@ -471,8 +514,8 @@ function handleClose() {
           </el-input-number>
         </el-form-item>
 
-        <!-- 子任务 (仅编辑模式) -->
-        <el-form-item v-if="isEdit" label="子任务">
+        <!-- 子任务 -->
+        <el-form-item label="子任务">
           <div class="subtask-editor">
             <div class="add-subtask">
               <el-input
@@ -488,7 +531,8 @@ function handleClose() {
               </el-input>
             </div>
 
-            <div class="subtask-list-editor">
+            <!-- 编辑模式：显示已保存的子任务 -->
+            <div v-if="isEdit" class="subtask-list-editor">
               <div 
                 v-for="subtask in subtasks" 
                 :key="subtask.id" 
@@ -497,6 +541,34 @@ function handleClose() {
                 <el-checkbox 
                   :model-value="subtask.completed"
                   @change="toggleSubtask(subtask.id)"
+                />
+                <span 
+                  class="subtask-title"
+                  :class="{ completed: subtask.completed }"
+                >
+                  {{ subtask.title }}
+                </span>
+                <el-button 
+                  type="danger" 
+                  text 
+                  size="small"
+                  @click="deleteSubtask(subtask.id)"
+                >
+                  <el-icon><Delete /></el-icon>
+                </el-button>
+              </div>
+            </div>
+
+            <!-- 新建模式：显示待创建的子任务 -->
+            <div v-else class="subtask-list-editor">
+              <div 
+                v-for="subtask in pendingSubtasks" 
+                :key="subtask.id" 
+                class="subtask-item-editor"
+              >
+                <el-checkbox 
+                  :model-value="subtask.completed"
+                  @change="togglePendingSubtask(subtask.id)"
                 />
                 <span 
                   class="subtask-title"
