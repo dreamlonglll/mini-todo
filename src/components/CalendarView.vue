@@ -2,7 +2,7 @@
 import { ref, computed, watch, onMounted } from 'vue'
 import type { Todo } from '@/types'
 import { getLunarDisplayText } from '@/utils/lunar'
-import { getYearHolidays, isWeekend, type HolidayInfo } from '@/utils/holiday'
+import { getYearHolidays, type HolidayInfo } from '@/utils/holiday'
 
 const props = defineProps<{
   todos: Todo[]
@@ -161,11 +161,6 @@ async function loadHolidayData() {
   }
   
   holidayData.value = allHolidays
-}
-
-// 获取单元格的节假日信息
-function getCellHolidayInfo(dateStr: string): HolidayInfo | null {
-  return holidayData.value.get(dateStr) || null
 }
 
 // 判断单元格是否是休息日（法定节假日）
@@ -426,14 +421,18 @@ defineExpose({
         class="calendar-cell"
         :class="{ 
           'other-month': !cell.isCurrentMonth,
-          'is-today': cell.isToday,
-          'is-holiday': isCellHoliday(cell.dateStr),
-          'is-adjust': isCellAdjustWorkday(cell.dateStr),
-          'is-weekend': isWeekend(cell.dateStr) && !getCellHolidayInfo(cell.dateStr)
+          'is-today': cell.isToday
         }"
       >
-        <div class="cell-header">
-          <div class="cell-date">{{ cell.day }}</div>
+        <!-- 日期行：阳历 + 农历 -->
+        <div class="cell-date-row">
+          <!-- 左侧：阳历日期 + 班/休角标 -->
+          <div class="cell-date-area">
+            <span class="cell-date">{{ cell.day }}</span>
+            <span v-if="isCellHoliday(cell.dateStr)" class="badge-rest">休</span>
+            <span v-else-if="isCellAdjustWorkday(cell.dateStr)" class="badge-work">班</span>
+          </div>
+          <!-- 右侧：农历/节气/节日 -->
           <div 
             class="cell-lunar"
             :class="{
@@ -443,11 +442,6 @@ defineExpose({
           >
             {{ cell.lunarText }}
           </div>
-        </div>
-        <!-- 节假日标记 -->
-        <div v-if="getCellHolidayInfo(cell.dateStr)" class="holiday-badge">
-          <span v-if="isCellHoliday(cell.dateStr)" class="badge-rest">休</span>
-          <span v-else class="badge-work">班</span>
         </div>
       </div>
       
@@ -508,7 +502,7 @@ defineExpose({
 }
 
 .calendar-cell {
-  padding: 4px 6px;
+  padding: 3px 4px;
   min-height: 60px;
   display: flex;
   flex-direction: column;
@@ -516,58 +510,52 @@ defineExpose({
   border-bottom: 1px solid rgba(255, 255, 255, 0.6);
   position: relative;
 
+  /* 第一行添加上边线 */
+  &:nth-child(-n+7) {
+    border-top: 1px solid rgba(255, 255, 255, 0.6);
+  }
+
   &:nth-child(7n) {
     border-right: none;
   }
 
   &.other-month {
     .cell-date,
-    .cell-lunar {
-      color: var(--text-tertiary);
-      opacity: 0.5;
+    .cell-lunar,
+    .badge-rest,
+    .badge-work {
+      opacity: 0.4;
     }
   }
 
   &.is-today {
     .cell-date {
       background: var(--primary);
-      color: white;
+      color: white !important;
       border-radius: 50%;
-      width: 24px;
-      height: 24px;
-      display: flex;
+      width: 20px;
+      height: 20px;
+      display: inline-flex;
       align-items: center;
       justify-content: center;
     }
   }
-
-  /* 法定节假日休息日 */
-  &.is-holiday {
-    background: rgba(239, 68, 68, 0.08);
-    
-    .cell-date {
-      color: #EF4444;
-    }
-  }
-
-  /* 调休工作日 */
-  &.is-adjust {
-    background: rgba(245, 158, 11, 0.08);
-  }
-
-  /* 普通周末 */
-  &.is-weekend:not(.is-holiday):not(.is-adjust) {
-    .cell-date {
-      color: var(--text-secondary);
-    }
-  }
 }
 
-/* 单元格头部（日期+农历） */
-.cell-header {
+/* 日期行：阳历 + 农历 同行显示 */
+.cell-date-row {
   display: flex;
   align-items: center;
-  gap: 4px;
+  justify-content: space-between;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+/* 日期区域：阳历日期 + 班/休角标 */
+.cell-date-area {
+  display: flex;
+  align-items: center;
+  gap: 2px;
   flex-shrink: 0;
 }
 
@@ -576,15 +564,39 @@ defineExpose({
   font-weight: 500;
   color: var(--text-primary);
   flex-shrink: 0;
+  line-height: 1.4;
 }
 
-/* 农历日期 */
+/* 班/休角标 */
+.badge-rest,
+.badge-work {
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 1px 2px;
+  border-radius: 2px;
+}
+
+.badge-rest {
+  color: white;
+  background: #EF4444;
+}
+
+.badge-work {
+  color: white;
+  background: #F59E0B;
+}
+
+/* 农历日期 - 靠右显示 */
 .cell-lunar {
   font-size: 10px;
   color: var(--text-tertiary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  line-height: 1.4;
+  flex-shrink: 1;
+  text-align: right;
 
   /* 传统节日 */
   &.is-festival {
@@ -596,25 +608,6 @@ defineExpose({
   &.is-solar-term {
     color: #10B981;
     font-weight: 500;
-  }
-}
-
-/* 节假日标记 */
-.holiday-badge {
-  position: absolute;
-  top: 2px;
-  right: 2px;
-  font-size: 9px;
-  line-height: 1;
-
-  .badge-rest {
-    color: #EF4444;
-    font-weight: 600;
-  }
-
-  .badge-work {
-    color: #F59E0B;
-    font-weight: 600;
   }
 }
 
@@ -684,6 +677,17 @@ defineExpose({
 
   .weekday-cell {
     color: var(--text-secondary);
+  }
+
+  /* 固定模式下角标样式保持 */
+  .badge-rest {
+    color: white;
+    background: #EF4444;
+  }
+
+  .badge-work {
+    color: white;
+    background: #F59E0B;
   }
 }
 </style>
