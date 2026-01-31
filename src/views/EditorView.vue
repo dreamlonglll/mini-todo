@@ -3,6 +3,7 @@ import { ref, onMounted, computed, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import { ElMessageBox } from 'element-plus'
 import type { Todo, Priority, CreateTodoRequest, UpdateTodoRequest, CreateSubTaskRequest } from '@/types'
 
 const route = useRoute()
@@ -315,6 +316,32 @@ async function toggleSubtask(subtaskId: number) {
 
 // 删除子任务
 async function deleteSubtask(subtaskId: number) {
+  // 获取子任务标题用于确认
+  let subtaskTitle = ''
+  if (isEdit.value) {
+    const subtask = subtasks.value.find(s => s.id === subtaskId)
+    subtaskTitle = subtask?.title || ''
+  } else {
+    const subtask = pendingSubtasks.value.find(s => s.id === subtaskId)
+    subtaskTitle = subtask?.title || ''
+  }
+  
+  // 二次确认
+  try {
+    await ElMessageBox.confirm(
+      `确定删除子任务"${subtaskTitle}"吗？`,
+      '删除确认',
+      {
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+        type: 'warning'
+      }
+    )
+  } catch {
+    // 用户取消
+    return
+  }
+  
   if (isEdit.value) {
     // 编辑模式：调用 API 删除子任务
     try {
