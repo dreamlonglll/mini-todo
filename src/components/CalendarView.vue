@@ -15,6 +15,9 @@ const emit = defineEmits<{
 const currentYear = ref(new Date().getFullYear())
 const currentMonth = ref(new Date().getMonth()) // 0-11
 
+// 当前悬停的 todo ID（用于跨行联动 hover）
+const hoveredTodoId = ref<number | null>(null)
+
 // 星期标题
 const weekDays = ['一', '二', '三', '四', '五', '六', '日']
 
@@ -150,6 +153,54 @@ interface TodoBar {
   row: number
   isStart: boolean
   isEnd: boolean
+  lane: number // 在同一行内的层级，用于处理重叠
+}
+
+// 检查两个待办条是否在同一行内重叠
+function isBarsOverlapping(bar1: { startCol: number, endCol: number }, bar2: { startCol: number, endCol: number }): boolean {
+  return !(bar1.endCol < bar2.startCol || bar2.endCol < bar1.startCol)
+}
+
+// 为一组待办条分配层级（lane），避免重叠
+// 开始时间早的任务显示在上面（分配更小的 lane）
+function assignLanes(bars: TodoBar[]): void {
+  // 先将所有 lane 重置为 -1，表示未分配
+  for (const bar of bars) {
+    bar.lane = -1
+  }
+  
+  // 按原始开始日期排序，开始时间早的排在前面
+  bars.sort((a, b) => {
+    const startA = getTodoStartDate(a.todo)
+    const startB = getTodoStartDate(b.todo)
+    if (startA !== startB) {
+      return startA.localeCompare(startB)
+    }
+    // 如果开始日期相同，按结束日期排序
+    const endA = getTodoEndDate(a.todo) || startA
+    const endB = getTodoEndDate(b.todo) || startB
+    return endA.localeCompare(endB)
+  })
+  
+  for (const bar of bars) {
+    // 找到不与已分配 lane 的 bar 重叠的最小 lane
+    let lane = 0
+    const usedLanes: Set<number> = new Set()
+    
+    for (const otherBar of bars) {
+      if (otherBar === bar) continue
+      // 只检查已经分配了 lane 的 bar（lane >= 0）
+      if (otherBar.lane >= 0 && isBarsOverlapping(bar, otherBar)) {
+        usedLanes.add(otherBar.lane)
+      }
+    }
+    
+    while (usedLanes.has(lane)) {
+      lane++
+    }
+    
+    bar.lane = lane
+  }
 }
 
 // 计算每行的跨天待办条
@@ -201,9 +252,15 @@ const todoBarsByRow = computed(() => {
         endCol: rowEndCol,
         row,
         isStart,
-        isEnd
+        isEnd,
+        lane: 0 // 初始化为0，后面会重新计算
       })
     }
+  }
+  
+  // 为每一行的待办条分配层级
+  for (const [, bars] of result) {
+    assignLanes(bars)
   }
   
   return result
@@ -251,14 +308,24 @@ function getPriorityColor(priority: string): string {
   }
 }
 
+// 每个待办条的高度和间距
+const BAR_HEIGHT = 20
+const BAR_GAP = 2
+const BAR_TOP_OFFSET = 28 // 从日期数字下方开始
+
 // 计算待办条样式
 function getBarStyle(bar: TodoBar): Record<string, string> {
   const left = `calc(${bar.startCol} * (100% / 7) + 2px)`
   const width = `calc(${bar.endCol - bar.startCol + 1} * (100% / 7) - 4px)`
   
+  // 根据行和层级计算 top 位置
+  const laneOffset = bar.lane * (BAR_HEIGHT + BAR_GAP)
+  const top = `calc(${bar.row} * (100% / 6) + ${BAR_TOP_OFFSET + laneOffset}px)`
+  
   return {
     left,
     width,
+    top,
     backgroundColor: getPriorityColor(bar.todo.priority)
   }
 }
@@ -306,16 +373,18 @@ function getBarStyle(bar: TodoBar): Record<string, string> {
       <template v-for="row in 6" :key="'bars-' + row">
         <div 
           v-for="(bar, barIndex) in todoBarsByRow.get(row - 1) || []"
-          :key="'bar-' + row + '-' + barIndex"
+          :key="'bar-' + row + '-' + barIndex + '-' + bar.todo.id"
           class="todo-bar"
           :class="{ 
             'is-start': bar.isStart,
             'is-end': bar.isEnd,
-            'is-completed': bar.todo.completed
+            'is-completed': bar.todo.completed,
+            'is-hovered': hoveredTodoId === bar.todo.id
           }"
           :style="getBarStyle(bar)"
-          :data-row="row - 1"
           @click.stop="handleTodoClick(bar.todo)"
+          @mouseenter="hoveredTodoId = bar.todo.id"
+          @mouseleave="hoveredTodoId = null"
         >
           <span v-if="bar.isStart" class="bar-title">{{ bar.todo.title }}</span>
         </div>
@@ -431,9 +500,11 @@ function getBarStyle(bar: TodoBar): Record<string, string> {
   z-index: 10;
   overflow: hidden;
 
-  &:hover {
+  /* 联动 hover 效果 */
+  &.is-hovered {
     opacity: 0.85;
     transform: scale(1.02);
+    z-index: 15;
   }
 
   &.is-completed {
@@ -442,15 +513,11 @@ function getBarStyle(bar: TodoBar): Record<string, string> {
     .bar-title {
       text-decoration: line-through;
     }
-  }
 
-  /* 根据行号计算 top 位置 */
-  &[data-row="0"] { top: calc(0 * (100% / 6) + 28px); }
-  &[data-row="1"] { top: calc(1 * (100% / 6) + 28px); }
-  &[data-row="2"] { top: calc(2 * (100% / 6) + 28px); }
-  &[data-row="3"] { top: calc(3 * (100% / 6) + 28px); }
-  &[data-row="4"] { top: calc(4 * (100% / 6) + 28px); }
-  &[data-row="5"] { top: calc(5 * (100% / 6) + 28px); }
+    &.is-hovered {
+      opacity: 0.65;
+    }
+  }
 }
 
 .bar-title {
@@ -478,6 +545,39 @@ function getBarStyle(bar: TodoBar): Record<string, string> {
 
   .current-month {
     color: var(--text-primary);
+  }
+
+  /* 固定模式下导航按钮样式（左右箭头） */
+  .nav-buttons :deep(.el-button) {
+    color: white !important;
+    
+    .el-icon {
+      color: white !important;
+    }
+
+    &:hover,
+    &:focus {
+      color: var(--primary-light) !important;
+      background: rgba(255, 255, 255, 0.1) !important;
+
+      .el-icon {
+        color: var(--primary-light) !important;
+      }
+    }
+  }
+
+  /* 固定模式下今天按钮样式 */
+  .calendar-header > :deep(.el-button:not(.is-text)) {
+    color: white !important;
+    background: transparent !important;
+    border-color: rgba(255, 255, 255, 0.4) !important;
+
+    &:hover,
+    &:focus {
+      color: white !important;
+      background: rgba(255, 255, 255, 0.15) !important;
+      border-color: rgba(255, 255, 255, 0.5) !important;
+    }
   }
 }
 </style>
