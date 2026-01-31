@@ -563,6 +563,23 @@ body {
 .el-dialog {
   border-radius: var(--radius-lg) !important;
   margin-top: 5vh !important; // 让 Dialog 更靠近窗口顶部
+
+  // 确保弹窗内的内容使用正常模式颜色（不受固定模式影响）
+  .todo-item {
+    .todo-title {
+      color: #1E293B !important; // 使用固定的深色
+    }
+
+    .todo-meta {
+      color: #94A3B8 !important;
+    }
+
+    &.completed {
+      .todo-title {
+        color: #94A3B8 !important;
+      }
+    }
+  }
 }
 
 // 修复 Dialog 中日期选择器弹出面板被遮挡的问题
