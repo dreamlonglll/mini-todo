@@ -107,3 +107,41 @@ pub struct ExportData {
     pub todos: Vec<Todo>,
     pub settings: AppSettings,
 }
+
+/// 屏幕配置记录，用于存储不同屏幕组合下的窗口状态
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenConfig {
+    pub id: i64,
+    /// 屏幕配置唯一标识（如 "2_2560x1440@125_1920x1080@100"）
+    pub config_id: String,
+    /// 显示名称（用户可编辑）
+    pub display_name: Option<String>,
+    /// 窗口 X 坐标
+    pub window_x: i32,
+    /// 窗口 Y 坐标
+    pub window_y: i32,
+    /// 窗口宽度
+    pub window_width: i32,
+    /// 窗口高度
+    pub window_height: i32,
+    /// 是否固定模式
+    pub is_fixed: bool,
+    /// 创建时间
+    pub created_at: String,
+    /// 更新时间
+    pub updated_at: String,
+}
+
+/// 保存/更新屏幕配置的请求
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveScreenConfigRequest {
+    pub config_id: String,
+    pub display_name: Option<String>,
+    pub window_x: i32,
+    pub window_y: i32,
+    pub window_width: i32,
+    pub window_height: i32,
+    pub is_fixed: bool,
+}

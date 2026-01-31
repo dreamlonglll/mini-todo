@@ -1,5 +1,5 @@
 use tauri::{State, Window, WebviewWindow};
-use crate::db::{Database, AppSettings, WindowPosition, WindowSize};
+use crate::db::{Database, AppSettings, WindowPosition, WindowSize, ScreenConfig, SaveScreenConfigRequest};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(target_os = "windows")]
@@ -229,4 +229,146 @@ impl<R: tauri::Runtime> WindowExt<R> for WebviewWindow<R> {
     fn set_resizable(&self, resizable: bool) -> tauri::Result<()> {
         WebviewWindow::set_resizable(self, resizable)
     }
+}
+
+// ============ 屏幕配置相关命令 ============
+
+/// 根据屏幕配置标识获取保存的窗口配置
+#[tauri::command]
+pub fn get_screen_config(db: State<Database>, config_id: String) -> Result<Option<ScreenConfig>, String> {
+    db.with_connection(|conn| {
+        let result = conn.query_row(
+            "SELECT id, config_id, display_name, window_x, window_y, window_width, window_height, 
+                    is_fixed, created_at, updated_at 
+             FROM screen_configs WHERE config_id = ?",
+            [&config_id],
+            |row| {
+                Ok(ScreenConfig {
+                    id: row.get(0)?,
+                    config_id: row.get(1)?,
+                    display_name: row.get(2)?,
+                    window_x: row.get(3)?,
+                    window_y: row.get(4)?,
+                    window_width: row.get(5)?,
+                    window_height: row.get(6)?,
+                    is_fixed: row.get::<_, i32>(7)? != 0,
+                    created_at: row.get(8)?,
+                    updated_at: row.get(9)?,
+                })
+            },
+        );
+
+        match result {
+            Ok(config) => Ok(Some(config)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    })
+    .map_err(|e| e.to_string())
+}
+
+/// 保存或更新屏幕配置
+#[tauri::command]
+pub fn save_screen_config(db: State<Database>, config: SaveScreenConfigRequest) -> Result<ScreenConfig, String> {
+    db.with_connection(|conn| {
+        // 使用 INSERT OR REPLACE 来保存或更新
+        conn.execute(
+            "INSERT INTO screen_configs 
+             (config_id, display_name, window_x, window_y, window_width, window_height, is_fixed, updated_at) 
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now', 'localtime'))
+             ON CONFLICT(config_id) DO UPDATE SET
+                display_name = COALESCE(?2, display_name),
+                window_x = ?3,
+                window_y = ?4,
+                window_width = ?5,
+                window_height = ?6,
+                is_fixed = ?7,
+                updated_at = datetime('now', 'localtime')",
+            (
+                &config.config_id,
+                &config.display_name,
+                config.window_x,
+                config.window_y,
+                config.window_width,
+                config.window_height,
+                if config.is_fixed { 1 } else { 0 },
+            ),
+        )?;
+
+        // 返回保存后的配置
+        conn.query_row(
+            "SELECT id, config_id, display_name, window_x, window_y, window_width, window_height, 
+                    is_fixed, created_at, updated_at 
+             FROM screen_configs WHERE config_id = ?",
+            [&config.config_id],
+            |row| {
+                Ok(ScreenConfig {
+                    id: row.get(0)?,
+                    config_id: row.get(1)?,
+                    display_name: row.get(2)?,
+                    window_x: row.get(3)?,
+                    window_y: row.get(4)?,
+                    window_width: row.get(5)?,
+                    window_height: row.get(6)?,
+                    is_fixed: row.get::<_, i32>(7)? != 0,
+                    created_at: row.get(8)?,
+                    updated_at: row.get(9)?,
+                })
+            },
+        )
+    })
+    .map_err(|e| e.to_string())
+}
+
+/// 获取所有屏幕配置列表
+#[tauri::command]
+pub fn list_screen_configs(db: State<Database>) -> Result<Vec<ScreenConfig>, String> {
+    db.with_connection(|conn| {
+        let mut stmt = conn.prepare(
+            "SELECT id, config_id, display_name, window_x, window_y, window_width, window_height, 
+                    is_fixed, created_at, updated_at 
+             FROM screen_configs ORDER BY updated_at DESC"
+        )?;
+
+        let configs = stmt.query_map([], |row| {
+            Ok(ScreenConfig {
+                id: row.get(0)?,
+                config_id: row.get(1)?,
+                display_name: row.get(2)?,
+                window_x: row.get(3)?,
+                window_y: row.get(4)?,
+                window_width: row.get(5)?,
+                window_height: row.get(6)?,
+                is_fixed: row.get::<_, i32>(7)? != 0,
+                created_at: row.get(8)?,
+                updated_at: row.get(9)?,
+            })
+        })?;
+
+        configs.collect::<Result<Vec<_>, _>>()
+    })
+    .map_err(|e| e.to_string())
+}
+
+/// 删除屏幕配置
+#[tauri::command]
+pub fn delete_screen_config(db: State<Database>, config_id: String) -> Result<(), String> {
+    db.with_connection(|conn| {
+        conn.execute("DELETE FROM screen_configs WHERE config_id = ?", [&config_id])?;
+        Ok(())
+    })
+    .map_err(|e| e.to_string())
+}
+
+/// 更新屏幕配置的显示名称
+#[tauri::command]
+pub fn update_screen_config_name(db: State<Database>, config_id: String, display_name: String) -> Result<(), String> {
+    db.with_connection(|conn| {
+        conn.execute(
+            "UPDATE screen_configs SET display_name = ?, updated_at = datetime('now', 'localtime') WHERE config_id = ?",
+            [&display_name, &config_id],
+        )?;
+        Ok(())
+    })
+    .map_err(|e| e.to_string())
 }

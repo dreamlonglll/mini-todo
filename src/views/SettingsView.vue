@@ -8,6 +8,7 @@ import { openUrl } from '@tauri-apps/plugin-opener'
 import { enable, disable, isEnabled } from '@tauri-apps/plugin-autostart'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAppStore, APP_VERSION } from '@/stores'
+import type { ScreenConfig } from '@/types'
 
 const appWindow = getCurrentWindow()
 const appStore = useAppStore()
@@ -18,18 +19,72 @@ const checking = ref(false)
 const autoStart = ref(false)
 const autoStartLoading = ref(false)
 
+// 屏幕配置相关
+const screenConfigs = computed(() => appStore.screenConfigs)
+const currentConfigId = computed(() => appStore.currentScreenConfigId)
+
 // 是否有更新
 const hasUpdate = computed(() => appStore.hasUpdate)
 const latestVersion = computed(() => appStore.latestVersion)
 
-// 初始化时获取开机自启状态
+// 初始化时获取开机自启状态和屏幕配置
 onMounted(async () => {
   try {
     autoStart.value = await isEnabled()
   } catch (e) {
     console.error('Failed to get autostart status:', e)
   }
+  
+  // 加载屏幕配置列表
+  await appStore.loadScreenConfigs()
 })
+
+// 删除屏幕配置
+async function handleDeleteConfig(config: ScreenConfig) {
+  // 不允许删除当前正在使用的配置
+  if (config.configId === currentConfigId.value) {
+    ElMessage.warning('不能删除当前正在使用的屏幕配置')
+    return
+  }
+  
+  try {
+    await ElMessageBox.confirm(
+      `确定删除屏幕配置 "${config.displayName || config.configId}" 吗？`,
+      '删除确认',
+      {
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+        type: 'warning'
+      }
+    )
+    
+    const success = await appStore.deleteScreenConfig(config.configId)
+    if (success) {
+      ElMessage.success('删除成功')
+    } else {
+      ElMessage.error('删除失败')
+    }
+  } catch (e) {
+    // 用户取消
+  }
+}
+
+// 格式化屏幕配置信息
+function formatConfigInfo(configId: string): string {
+  if (configId === 'legacy') return '旧版本迁移的配置'
+  if (configId === 'unknown') return '未知屏幕配置'
+  
+  const parts = configId.split('_')
+  if (parts.length < 2) return configId
+  
+  const count = parts[0]
+  const monitors = parts.slice(1).map(p => {
+    const [res, scale] = p.split('@')
+    return `${res} ${scale}%`
+  })
+  
+  return `${count} 个显示器: ${monitors.join(', ')}`
+}
 
 // 切换开机自启
 async function handleAutoStartChange(value: boolean) {
@@ -216,6 +271,55 @@ async function handleCheckUpdate() {
         </p>
       </div>
 
+      <!-- 屏幕配置管理 -->
+      <div class="settings-section">
+        <h3 class="section-title">屏幕配置</h3>
+        
+        <p class="settings-hint" style="margin-bottom: 12px;">
+          应用会根据不同的屏幕组合自动保存和恢复窗口位置
+        </p>
+        
+        <div v-if="screenConfigs.length === 0" class="empty-configs">
+          暂无保存的屏幕配置
+        </div>
+        
+        <div v-else class="config-list">
+          <div 
+            v-for="config in screenConfigs" 
+            :key="config.id"
+            class="config-item"
+            :class="{ active: config.configId === currentConfigId }"
+          >
+            <div class="config-info">
+              <div class="config-name">
+                {{ config.displayName || '未命名配置' }}
+                <span v-if="config.configId === currentConfigId" class="current-badge">
+                  当前
+                </span>
+              </div>
+              <div class="config-detail">
+                {{ formatConfigInfo(config.configId) }}
+              </div>
+              <div class="config-meta">
+                {{ config.isFixed ? '固定模式' : '普通模式' }} | 
+                位置: ({{ config.windowX }}, {{ config.windowY }})
+              </div>
+            </div>
+            <div class="config-actions">
+              <el-button 
+                type="danger" 
+                text 
+                size="small"
+                :disabled="config.configId === currentConfigId"
+                @click="handleDeleteConfig(config)"
+              >
+                <el-icon><Delete /></el-icon>
+              </el-button>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- 关于 -->
       <div class="settings-section">
         <h3 class="section-title">关于</h3>
@@ -326,5 +430,78 @@ async function handleCheckUpdate() {
 .update-available {
   color: #EF4444;
   font-size: 12px;
+}
+
+/* 屏幕配置样式 */
+.empty-configs {
+  text-align: center;
+  color: var(--text-tertiary);
+  font-size: 13px;
+  padding: 16px;
+}
+
+.config-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.config-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  background: var(--bg-secondary);
+  border-radius: 6px;
+  border: 1px solid transparent;
+  transition: border-color 0.2s;
+
+  &.active {
+    border-color: var(--primary);
+    background: rgba(64, 158, 255, 0.05);
+  }
+}
+
+.config-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.config-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.current-badge {
+  font-size: 11px;
+  padding: 1px 6px;
+  background: var(--primary);
+  color: white;
+  border-radius: 4px;
+  font-weight: normal;
+}
+
+.config-detail {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.config-meta {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-top: 2px;
+}
+
+.config-actions {
+  flex-shrink: 0;
+  margin-left: 8px;
 }
 </style>

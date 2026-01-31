@@ -19,6 +19,8 @@ use commands::{
     get_settings, save_settings, set_window_fixed_mode, reset_window,
     export_data, import_data,
     is_fixed_mode,
+    // 屏幕配置命令
+    get_screen_config, save_screen_config, list_screen_configs, delete_screen_config, update_screen_config_name,
 };
 
 #[cfg(target_os = "windows")]
@@ -188,6 +190,12 @@ pub fn run() {
             save_settings,
             set_window_fixed_mode,
             reset_window,
+            // 屏幕配置命令
+            get_screen_config,
+            save_screen_config,
+            list_screen_configs,
+            delete_screen_config,
+            update_screen_config_name,
             // 数据导入导出命令
             export_data,
             import_data,

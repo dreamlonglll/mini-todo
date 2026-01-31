@@ -2,8 +2,8 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { getVersion } from '@tauri-apps/api/app'
 import { invoke } from '@tauri-apps/api/core'
-import { getCurrentWindow, PhysicalPosition, PhysicalSize } from '@tauri-apps/api/window'
-import type { WindowPosition, WindowSize, WindowMode } from '@/types'
+import { getCurrentWindow, PhysicalPosition, PhysicalSize, availableMonitors, primaryMonitor } from '@tauri-apps/api/window'
+import type { WindowPosition, WindowSize, WindowMode, ScreenConfig, SaveScreenConfigRequest, MonitorInfo } from '@/types'
 
 // 当前应用版本（从系统读取）
 export const APP_VERSION = ref<string>('')
@@ -27,6 +27,10 @@ export const useAppStore = defineStore('app', () => {
   const windowSize = ref<WindowSize | null>(null)
   const windowMode = ref<WindowMode>('normal')
   
+  // 屏幕配置相关状态
+  const currentScreenConfigId = ref<string>('')
+  const screenConfigs = ref<ScreenConfig[]>([])
+  
   // 版本更新相关状态
   const hasUpdate = ref(false)
   const latestVersion = ref<string | null>(null)
@@ -35,47 +39,142 @@ export const useAppStore = defineStore('app', () => {
   // 获取当前窗口
   const appWindow = getCurrentWindow()
 
+  /**
+   * 生成当前屏幕配置的唯一标识
+   * 格式：{显示器数量}_{分辨率1}@{缩放1}_{分辨率2}@{缩放2}...
+   * 按分辨率排序确保一致性
+   */
+  async function generateScreenConfigId(): Promise<string> {
+    try {
+      const monitors = await availableMonitors()
+      if (monitors.length === 0) {
+        return 'unknown'
+      }
+
+      // 收集所有显示器信息
+      const monitorInfos: MonitorInfo[] = monitors.map(m => ({
+        width: m.size.width,
+        height: m.size.height,
+        scaleFactor: Math.round(m.scaleFactor * 100) // 转换为百分比整数
+      }))
+
+      // 按分辨率排序（降序，大屏在前）
+      monitorInfos.sort((a, b) => {
+        const aPixels = a.width * a.height
+        const bPixels = b.width * b.height
+        return bPixels - aPixels
+      })
+
+      // 生成标识字符串
+      const parts = monitorInfos.map(m => `${m.width}x${m.height}@${m.scaleFactor}`)
+      return `${monitors.length}_${parts.join('_')}`
+    } catch (e) {
+      console.error('Failed to generate screen config id:', e)
+      return 'unknown'
+    }
+  }
+
+  /**
+   * 生成人类可读的屏幕配置描述
+   */
+  function generateScreenConfigDisplayName(configId: string): string {
+    if (configId === 'unknown' || configId === 'legacy') {
+      return configId === 'legacy' ? '旧版配置' : '未知配置'
+    }
+    
+    const parts = configId.split('_')
+    const count = parts[0]
+    const monitors = parts.slice(1).map(p => {
+      const [res, scale] = p.split('@')
+      return `${res} (${scale}%)`
+    })
+    
+    return `${count}屏: ${monitors.join(' + ')}`
+  }
+
   // 初始化应用设置
   async function initSettings() {
     try {
       await loadAppVersion()
-      const settings = await invoke<{ 
-        isFixed: boolean
-        windowPosition: WindowPosition | null
-        windowSize: WindowSize | null
-      }>('get_settings')
       
-      isFixed.value = settings.isFixed
-      windowPosition.value = settings.windowPosition
-      windowSize.value = settings.windowSize
-      windowMode.value = settings.isFixed ? 'fixed' : 'normal'
+      // 生成当前屏幕配置标识
+      currentScreenConfigId.value = await generateScreenConfigId()
+      console.log('Current screen config ID:', currentScreenConfigId.value)
       
-      // 恢复窗口位置
-      if (settings.windowPosition) {
+      // 尝试获取当前屏幕配置的保存记录
+      const savedConfig = await invoke<ScreenConfig | null>('get_screen_config', {
+        configId: currentScreenConfigId.value
+      })
+      
+      if (savedConfig) {
+        // 有保存的配置，恢复窗口状态
+        console.log('Restoring saved screen config:', savedConfig)
+        
+        isFixed.value = savedConfig.isFixed
+        windowPosition.value = { x: savedConfig.windowX, y: savedConfig.windowY }
+        windowSize.value = { width: savedConfig.windowWidth, height: savedConfig.windowHeight }
+        windowMode.value = savedConfig.isFixed ? 'fixed' : 'normal'
+        
+        // 恢复窗口位置
         try {
           await appWindow.setPosition(
-            new PhysicalPosition(settings.windowPosition.x, settings.windowPosition.y)
+            new PhysicalPosition(savedConfig.windowX, savedConfig.windowY)
           )
         } catch (e) {
           console.error('Failed to restore window position:', e)
         }
-      }
-      
-      // 恢复窗口尺寸
-      if (settings.windowSize) {
+        
+        // 恢复窗口尺寸
         try {
           await appWindow.setSize(
-            new PhysicalSize(settings.windowSize.width, settings.windowSize.height)
+            new PhysicalSize(savedConfig.windowWidth, savedConfig.windowHeight)
           )
         } catch (e) {
           console.error('Failed to restore window size:', e)
         }
+        
+        // 如果是固定模式，应用固定模式设置
+        if (savedConfig.isFixed) {
+          await applyFixedMode()
+        }
+      } else {
+        // 没有保存的配置，使用主屏幕中心位置
+        console.log('No saved config found, using primary monitor center')
+        
+        isFixed.value = false
+        windowMode.value = 'normal'
+        
+        try {
+          const monitor = await primaryMonitor()
+          if (monitor) {
+            const defaultWidth = 380
+            const defaultHeight = 600
+            const scale = monitor.scaleFactor
+            
+            // 计算主屏幕中心位置（逻辑坐标转物理坐标）
+            const centerX = Math.round(
+              monitor.position.x + (monitor.size.width - defaultWidth * scale) / 2
+            )
+            const centerY = Math.round(
+              monitor.position.y + (monitor.size.height - defaultHeight * scale) / 2
+            )
+            
+            await appWindow.setPosition(new PhysicalPosition(centerX, centerY))
+            await appWindow.setSize(new PhysicalSize(defaultWidth * scale, defaultHeight * scale))
+            
+            windowPosition.value = { x: centerX, y: centerY }
+            windowSize.value = { width: Math.round(defaultWidth * scale), height: Math.round(defaultHeight * scale) }
+          }
+        } catch (e) {
+          console.error('Failed to center window:', e)
+        }
+        
+        // 为当前配置创建初始记录
+        await saveWindowState()
       }
       
-      // 如果是固定模式，应用固定模式设置
-      if (isFixed.value) {
-        await applyFixedMode()
-      }
+      // 加载所有屏幕配置列表
+      await loadScreenConfigs()
     } catch (e) {
       console.error('Failed to load settings:', e)
     }
@@ -84,24 +183,8 @@ export const useAppStore = defineStore('app', () => {
   // 切换固定模式
   async function toggleFixedMode() {
     try {
-      // 保存当前位置和尺寸
-      const position = await appWindow.outerPosition()
-      const size = await appWindow.outerSize()
-      windowPosition.value = { x: position.x, y: position.y }
-      windowSize.value = { width: size.width, height: size.height }
-
       isFixed.value = !isFixed.value
       windowMode.value = isFixed.value ? 'fixed' : 'normal'
-
-      // 保存设置到数据库
-      await invoke('save_settings', {
-        settings: {
-          isFixed: isFixed.value,
-          windowPosition: windowPosition.value,
-          windowSize: windowSize.value,
-          textTheme: 'light'
-        }
-      })
 
       // 应用窗口模式
       if (isFixed.value) {
@@ -109,6 +192,9 @@ export const useAppStore = defineStore('app', () => {
       } else {
         await applyNormalMode()
       }
+
+      // 保存窗口状态到屏幕配置表和 settings 表
+      await saveWindowState()
     } catch (e) {
       console.error('Failed to toggle fixed mode:', e)
     }
@@ -145,7 +231,7 @@ export const useAppStore = defineStore('app', () => {
     }
   }
 
-  // 保存窗口状态（位置和尺寸）
+  // 保存窗口状态（位置和尺寸）到当前屏幕配置
   async function saveWindowState() {
     try {
       const position = await appWindow.outerPosition()
@@ -153,6 +239,25 @@ export const useAppStore = defineStore('app', () => {
       windowPosition.value = { x: position.x, y: position.y }
       windowSize.value = { width: size.width, height: size.height }
       
+      // 确保有当前屏幕配置 ID
+      if (!currentScreenConfigId.value) {
+        currentScreenConfigId.value = await generateScreenConfigId()
+      }
+      
+      // 保存到屏幕配置表
+      const configRequest: SaveScreenConfigRequest = {
+        configId: currentScreenConfigId.value,
+        displayName: generateScreenConfigDisplayName(currentScreenConfigId.value),
+        windowX: position.x,
+        windowY: position.y,
+        windowWidth: size.width,
+        windowHeight: size.height,
+        isFixed: isFixed.value
+      }
+      
+      await invoke('save_screen_config', { config: configRequest })
+      
+      // 同时保存到旧的 settings 表（保持向后兼容）
       await invoke('save_settings', {
         settings: {
           isFixed: isFixed.value,
@@ -163,6 +268,40 @@ export const useAppStore = defineStore('app', () => {
       })
     } catch (e) {
       console.error('Failed to save window state:', e)
+    }
+  }
+
+  // 加载所有屏幕配置列表
+  async function loadScreenConfigs() {
+    try {
+      screenConfigs.value = await invoke<ScreenConfig[]>('list_screen_configs')
+    } catch (e) {
+      console.error('Failed to load screen configs:', e)
+      screenConfigs.value = []
+    }
+  }
+
+  // 删除屏幕配置
+  async function deleteScreenConfig(configId: string): Promise<boolean> {
+    try {
+      await invoke('delete_screen_config', { configId })
+      await loadScreenConfigs()
+      return true
+    } catch (e) {
+      console.error('Failed to delete screen config:', e)
+      return false
+    }
+  }
+
+  // 更新屏幕配置名称
+  async function updateScreenConfigName(configId: string, displayName: string): Promise<boolean> {
+    try {
+      await invoke('update_screen_config_name', { configId, displayName })
+      await loadScreenConfigs()
+      return true
+    } catch (e) {
+      console.error('Failed to update screen config name:', e)
+      return false
     }
   }
 
@@ -250,6 +389,9 @@ export const useAppStore = defineStore('app', () => {
     windowMode,
     hasUpdate,
     latestVersion,
+    // 屏幕配置状态
+    currentScreenConfigId,
+    screenConfigs,
     // 方法
     initSettings,
     toggleFixedMode,
@@ -257,6 +399,12 @@ export const useAppStore = defineStore('app', () => {
     exportData,
     importData,
     checkForUpdates,
-    getReleasesUrl
+    getReleasesUrl,
+    // 屏幕配置方法
+    generateScreenConfigId,
+    generateScreenConfigDisplayName,
+    loadScreenConfigs,
+    deleteScreenConfig,
+    updateScreenConfigName
   }
 })
