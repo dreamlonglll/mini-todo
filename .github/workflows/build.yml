@@ -95,6 +95,38 @@ jobs:
           releaseDraft: false
           prerelease: false
 
+      - name: Create portable zip (Windows only)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $exe = Get-ChildItem "src-tauri/target" -Recurse -Filter "mini-todo.exe" | Where-Object { $_.FullName -match "\\release\\" } | Select-Object -First 1
+          if (-not $exe) { throw "mini-todo.exe not found in release output." }
+          $outDir = $exe.DirectoryName
+          $portableDir = Join-Path $outDir "portable"
+          if (Test-Path $portableDir) { Remove-Item $portableDir -Recurse -Force }
+          New-Item -ItemType Directory $portableDir | Out-Null
+          Copy-Item $exe.FullName $portableDir
+          Get-ChildItem $outDir -Filter "*.dll" | ForEach-Object { Copy-Item $_.FullName $portableDir }
+          $resourcesDir = Join-Path $outDir "resources"
+          if (Test-Path $resourcesDir) { Copy-Item $resourcesDir $portableDir -Recurse }
+          $bundleDir = Join-Path $outDir "bundle\\portable"
+          New-Item -ItemType Directory $bundleDir -Force | Out-Null
+          $zipPath = Join-Path $bundleDir "mini-todo-portable-windows.zip"
+          if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+          Compress-Archive -Path (Join-Path $portableDir "*") -DestinationPath $zipPath
+
+      - name: Upload portable zip to release (Windows only)
+        if: matrix.platform == 'windows-latest' && startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            src-tauri/target/release/bundle/portable/*.zip
+            src-tauri/target/*/release/bundle/portable/*.zip
+          tag_name: ${{ github.ref_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Upload artifacts (non-release builds)
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         uses: actions/upload-artifact@v4
@@ -106,8 +138,10 @@ jobs:
             src-tauri/target/release/bundle/dmg/*.dmg
             src-tauri/target/release/bundle/deb/*.deb
             src-tauri/target/release/bundle/appimage/*.AppImage
+            src-tauri/target/release/bundle/portable/*.zip
             src-tauri/target/*/release/bundle/msi/*.msi
             src-tauri/target/*/release/bundle/nsis/*.exe
             src-tauri/target/*/release/bundle/dmg/*.dmg
+            src-tauri/target/*/release/bundle/portable/*.zip
           if-no-files-found: ignore
           retention-days: 7
