@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, computed, ref } from 'vue'
+import dayjs from 'dayjs'
 import { useTodoStore, useAppStore } from '@/stores'
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { getCurrentWindow, primaryMonitor, currentMonitor } from '@tauri-apps/api/window'
@@ -47,6 +48,11 @@ const completedList = computed(() => todoStore.completedTodos)
 
 // 已完成数量
 const completedCount = computed(() => todoStore.todoCount.completed)
+
+// 格式化已完成时间
+function formatCompletedTime(time: string) {
+  return dayjs(time).format('MM-DD HH:mm')
+}
 
 
 // 切换完成状态
@@ -331,19 +337,50 @@ async function openSettings() {
       <el-dialog
         v-model="showCompletedDialog"
         title="已完成"
-        width="450"
+        width="500"
         :modal="true"
         append-to-body
+        class="completed-dialog"
       >
         <div class="completed-dialog-list">
-          <TodoItem
-            v-for="todo in completedList"
-            :key="todo.id"
-            :todo="todo"
+          <div 
+            v-for="todo in completedList" 
+            :key="todo.id" 
+            class="completed-item"
             @click="openEditor(todo)"
-            @toggle-complete="handleToggleComplete(todo)"
-            @delete="handleDelete(todo)"
-          />
+          >
+            <!-- 颜色标记 -->
+            <div class="completed-color" :style="{ backgroundColor: todo.color }"></div>
+            
+            <!-- 内容区域 -->
+            <div class="completed-content">
+              <div class="completed-title">{{ todo.title }}</div>
+              <div v-if="todo.notifyAt" class="completed-time">
+                <el-icon :size="12"><Clock /></el-icon>
+                {{ formatCompletedTime(todo.notifyAt) }}
+              </div>
+            </div>
+            
+            <!-- 操作按钮 -->
+            <div class="completed-actions">
+              <el-tooltip content="恢复为未完成" placement="top">
+                <button class="restore-btn" @click.stop="handleToggleComplete(todo)">
+                  <el-icon :size="16"><RefreshLeft /></el-icon>
+                </button>
+              </el-tooltip>
+              <el-tooltip content="删除" placement="top">
+                <button class="delete-btn" @click.stop="handleDelete(todo)">
+                  <el-icon :size="16"><Delete /></el-icon>
+                </button>
+              </el-tooltip>
+            </div>
+          </div>
+          
+          <!-- 空状态 -->
+          <div v-if="completedList.length === 0" class="completed-empty">
+            <el-icon :size="40"><Check /></el-icon>
+            <span>暂无已完成的待办</span>
+          </div>
         </div>
       </el-dialog>
 
@@ -450,7 +487,127 @@ async function openSettings() {
 
 /* 已完成弹窗列表 */
 .completed-dialog-list {
-  max-height: 400px;
+  max-height: 450px;
   overflow-y: auto;
+  padding: 4px 0;
+}
+
+/* 已完成列表项 */
+.completed-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  margin-bottom: 8px;
+  background: #f8fafc;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+
+  &:last-child {
+    margin-bottom: 0;
+  }
+
+  &:hover {
+    background: #f1f5f9;
+    
+    .completed-actions {
+      opacity: 1;
+    }
+  }
+
+  .completed-color {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .completed-content {
+    flex: 1;
+    min-width: 0;
+
+    .completed-title {
+      font-size: 14px;
+      color: #64748b;
+      text-decoration: line-through;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .completed-time {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      margin-top: 4px;
+      font-size: 12px;
+      color: #94a3b8;
+
+      .el-icon {
+        font-size: 12px;
+      }
+    }
+  }
+
+  .completed-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+
+    button {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 32px;
+      height: 32px;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+
+    .restore-btn {
+      background: #dbeafe;
+      color: #3b82f6;
+
+      &:hover {
+        background: #bfdbfe;
+        color: #2563eb;
+      }
+    }
+
+    .delete-btn {
+      background: #fee2e2;
+      color: #ef4444;
+
+      &:hover {
+        background: #fecaca;
+        color: #dc2626;
+      }
+    }
+  }
+}
+
+/* 已完成空状态 */
+.completed-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 20px;
+  color: #94a3b8;
+  text-align: center;
+
+  .el-icon {
+    margin-bottom: 12px;
+    opacity: 0.5;
+  }
+
+  span {
+    font-size: 14px;
+  }
 }
 </style>
