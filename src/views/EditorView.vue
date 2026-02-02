@@ -129,6 +129,27 @@ const isEdit = computed(() => todoId.value !== null)
 // 当前待办的子任务列表（编辑模式从服务器加载）
 const subtasks = computed(() => todo.value?.subtasks || [])
 
+// 当前显示的子任务列表（根据编辑模式决定，未完成的置顶）
+const currentSubtaskList = computed(() => {
+  const list = isEdit.value ? subtasks.value : pendingSubtasks.value
+  // 未完成的排在前面，已完成的排在后面
+  return [...list].sort((a, b) => {
+    if (a.completed === b.completed) return 0
+    return a.completed ? 1 : -1
+  })
+})
+
+// 已完成的子任务数量
+const completedSubtaskCount = computed(() => {
+  return currentSubtaskList.value.filter(s => s.completed).length
+})
+
+// 子任务完成进度百分比
+const subtaskProgressPercent = computed(() => {
+  if (currentSubtaskList.value.length === 0) return 0
+  return Math.round((completedSubtaskCount.value / currentSubtaskList.value.length) * 100)
+})
+
 // 新建模式下待创建的子任务列表
 const pendingSubtasks = ref<Array<{ id: number; title: string; completed: boolean }>>([])
 let pendingSubtaskIdCounter = 0
@@ -552,74 +573,76 @@ function handleClose() {
         <!-- 子任务 -->
         <el-form-item label="子任务">
           <div class="subtask-editor">
+            <!-- 进度条 -->
+            <div v-if="currentSubtaskList.length > 0" class="subtask-progress">
+              <div class="progress-info">
+                <span class="progress-text">{{ completedSubtaskCount }} / {{ currentSubtaskList.length }}</span>
+                <span class="progress-label">已完成</span>
+              </div>
+              <div class="progress-bar">
+                <div 
+                  class="progress-fill" 
+                  :style="{ width: subtaskProgressPercent + '%' }"
+                ></div>
+              </div>
+            </div>
+
+            <!-- 添加子任务 -->
             <div class="add-subtask">
-              <el-input
-                v-model="newSubtaskTitle"
-                placeholder="添加子任务..."
-                @keyup.enter="addSubtask"
-              >
-                <template #append>
-                  <el-button @click="addSubtask">
-                    <el-icon><Plus /></el-icon>
-                  </el-button>
-                </template>
-              </el-input>
-            </div>
-
-            <!-- 编辑模式：显示已保存的子任务 -->
-            <div v-if="isEdit" class="subtask-list-editor">
-              <div 
-                v-for="subtask in subtasks" 
-                :key="subtask.id" 
-                class="subtask-item-editor"
-              >
-                <el-checkbox 
-                  :model-value="subtask.completed"
-                  @change="toggleSubtask(subtask.id)"
+              <div class="add-subtask-input">
+                <el-icon class="input-icon"><Plus /></el-icon>
+                <input
+                  v-model="newSubtaskTitle"
+                  type="text"
+                  placeholder="添加子任务..."
+                  @keyup.enter="addSubtask"
                 />
-                <span 
-                  class="subtask-title"
-                  :class="{ completed: subtask.completed }"
-                >
-                  {{ subtask.title }}
-                </span>
-                <el-button 
-                  type="danger" 
-                  text 
-                  size="small"
-                  @click="deleteSubtask(subtask.id)"
-                >
-                  <el-icon><Delete /></el-icon>
-                </el-button>
+                <transition name="fade">
+                  <button 
+                    v-if="newSubtaskTitle.trim()"
+                    class="add-btn"
+                    @click="addSubtask"
+                  >
+                    添加
+                  </button>
+                </transition>
               </div>
             </div>
 
-            <!-- 新建模式：显示待创建的子任务 -->
-            <div v-else class="subtask-list-editor">
-              <div 
-                v-for="subtask in pendingSubtasks" 
-                :key="subtask.id" 
-                class="subtask-item-editor"
-              >
-                <el-checkbox 
-                  :model-value="subtask.completed"
-                  @change="togglePendingSubtask(subtask.id)"
-                />
-                <span 
-                  class="subtask-title"
+            <!-- 子任务列表 -->
+            <div v-if="currentSubtaskList.length > 0" class="subtask-list-editor">
+              <transition-group name="subtask-list" tag="div">
+                <div 
+                  v-for="subtask in currentSubtaskList" 
+                  :key="subtask.id" 
+                  class="subtask-item-editor"
                   :class="{ completed: subtask.completed }"
                 >
-                  {{ subtask.title }}
-                </span>
-                <el-button 
-                  type="danger" 
-                  text 
-                  size="small"
-                  @click="deleteSubtask(subtask.id)"
-                >
-                  <el-icon><Delete /></el-icon>
-                </el-button>
-              </div>
+                  <div 
+                    class="custom-checkbox"
+                    :class="{ checked: subtask.completed }"
+                    @click="isEdit ? toggleSubtask(subtask.id) : togglePendingSubtask(subtask.id)"
+                  >
+                    <el-icon v-if="subtask.completed" class="check-icon"><Check /></el-icon>
+                  </div>
+                  <span class="subtask-title">
+                    {{ subtask.title }}
+                  </span>
+                  <button 
+                    class="delete-btn"
+                    @click="deleteSubtask(subtask.id)"
+                    title="删除子任务"
+                  >
+                    <el-icon><Delete /></el-icon>
+                  </button>
+                </div>
+              </transition-group>
+            </div>
+
+            <!-- 空状态 -->
+            <div v-else class="subtask-empty">
+              <el-icon class="empty-icon"><List /></el-icon>
+              <span>暂无子任务</span>
             </div>
           </div>
         </el-form-item>
@@ -705,35 +728,276 @@ function handleClose() {
   width: 100%;
 }
 
+/* 进度条样式 */
+.subtask-progress {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
+  border-radius: 10px;
+
+  .progress-info {
+    display: flex;
+    flex-direction: column;
+    min-width: 50px;
+
+    .progress-text {
+      font-size: 16px;
+      font-weight: 600;
+      color: #0369a1;
+    }
+
+    .progress-label {
+      font-size: 11px;
+      color: #64748b;
+    }
+  }
+
+  .progress-bar {
+    flex: 1;
+    height: 6px;
+    background: #e2e8f0;
+    border-radius: 3px;
+    overflow: hidden;
+
+    .progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #3b82f6 0%, #06b6d4 100%);
+      border-radius: 3px;
+      transition: width 0.3s ease;
+    }
+  }
+}
+
+/* 添加子任务输入框 */
 .add-subtask {
   margin-bottom: 12px;
+
+  .add-subtask-input {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: #f8fafc;
+    border: 1px dashed #cbd5e1;
+    border-radius: 8px;
+    transition: all 0.2s ease;
+
+    &:hover {
+      border-color: #94a3b8;
+      background: #f1f5f9;
+    }
+
+    &:focus-within {
+      border-color: #3b82f6;
+      border-style: solid;
+      background: #ffffff;
+      box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+    }
+
+    .input-icon {
+      color: #94a3b8;
+      font-size: 16px;
+      flex-shrink: 0;
+    }
+
+    input {
+      flex: 1;
+      border: none;
+      outline: none;
+      background: transparent;
+      font-size: 13px;
+      color: #334155;
+
+      &::placeholder {
+        color: #94a3b8;
+      }
+    }
+
+    .add-btn {
+      padding: 4px 12px;
+      font-size: 12px;
+      font-weight: 500;
+      color: #ffffff;
+      background: #3b82f6;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+
+      &:hover {
+        background: #2563eb;
+      }
+
+      &:active {
+        transform: scale(0.96);
+      }
+    }
+  }
 }
 
+/* 子任务列表 */
 .subtask-list-editor {
-  max-height: 200px;
+  max-height: 220px;
   overflow-y: auto;
+  padding-right: 4px;
+
+  &::-webkit-scrollbar {
+    width: 4px;
+  }
+
+  &::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  &::-webkit-scrollbar-thumb {
+    background: #cbd5e1;
+    border-radius: 2px;
+  }
 }
 
+/* 子任务列表项 */
 .subtask-item-editor {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 0;
-  border-bottom: 1px solid var(--border-light);
+  gap: 10px;
+  padding: 10px 12px;
+  margin-bottom: 6px;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  transition: all 0.2s ease;
 
   &:last-child {
-    border-bottom: none;
+    margin-bottom: 0;
+  }
+
+  &:hover {
+    border-color: #cbd5e1;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.04);
+
+    .delete-btn {
+      opacity: 1;
+    }
+  }
+
+  &.completed {
+    background: #f8fafc;
+    border-color: #e2e8f0;
+
+    .subtask-title {
+      text-decoration: line-through;
+      color: #94a3b8;
+    }
+  }
+
+  /* 自定义复选框 */
+  .custom-checkbox {
+    width: 20px;
+    height: 20px;
+    border: 2px solid #cbd5e1;
+    border-radius: 50%;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s ease;
+    flex-shrink: 0;
+
+    &:hover {
+      border-color: #3b82f6;
+    }
+
+    &.checked {
+      background: linear-gradient(135deg, #3b82f6 0%, #06b6d4 100%);
+      border-color: transparent;
+
+      .check-icon {
+        color: #ffffff;
+        font-size: 12px;
+      }
+    }
   }
 
   .subtask-title {
     flex: 1;
     font-size: 13px;
+    color: #334155;
+    line-height: 1.4;
+    word-break: break-word;
+  }
 
-    &.completed {
-      text-decoration: line-through;
-      color: var(--text-tertiary);
+  .delete-btn {
+    padding: 4px;
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    opacity: 0;
+    transition: all 0.15s ease;
+    color: #94a3b8;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+    &:hover {
+      background: #fee2e2;
+      color: #ef4444;
     }
   }
+}
+
+/* 空状态 */
+.subtask-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 16px;
+  color: #94a3b8;
+  text-align: center;
+
+  .empty-icon {
+    font-size: 32px;
+    margin-bottom: 8px;
+    opacity: 0.5;
+  }
+
+  span {
+    font-size: 13px;
+  }
+}
+
+/* 动画 */
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.15s ease;
+}
+
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+
+.subtask-list-enter-active,
+.subtask-list-leave-active {
+  transition: all 0.25s ease;
+}
+
+.subtask-list-enter-from {
+  opacity: 0;
+  transform: translateX(-10px);
+}
+
+.subtask-list-leave-to {
+  opacity: 0;
+  transform: translateX(10px);
+}
+
+.subtask-list-move {
+  transition: transform 0.25s ease;
 }
 
 .notify-datetime-picker {
