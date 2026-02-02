@@ -252,8 +252,8 @@ async function openSettings() {
     const mainPos = await appWindow.outerPosition()
     const mainSize = await appWindow.outerSize()
     const scaleFactor = await appWindow.scaleFactor()
-    const settingsWidth = 350
-    const settingsHeight = 400
+    const settingsWidth = 480
+    const settingsHeight = 560
     
     // 计算弹窗位置：主窗口正中间（考虑 DPI 缩放）
     const mainX = mainPos.x / scaleFactor

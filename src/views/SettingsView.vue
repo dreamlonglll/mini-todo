@@ -232,135 +232,158 @@ async function handleCheckUpdate() {
 
     <div class="settings-content">
       <!-- 通用设置 -->
-      <div class="settings-section">
-        <h3 class="section-title">通用设置</h3>
-        
-        <div class="settings-row">
-          <span class="settings-label">开机自启</span>
-          <el-switch 
-            v-model="autoStart"
-            :loading="autoStartLoading"
-            @change="handleAutoStartChange"
-          />
+      <div class="settings-card">
+        <div class="card-header">
+          <el-icon class="card-icon"><Setting /></el-icon>
+          <h3 class="card-title">通用设置</h3>
         </div>
         
-        <div class="settings-row">
-          <span class="settings-label">展示日历</span>
-          <el-switch 
-            :model-value="showCalendar"
-            @change="(val: boolean) => appStore.setShowCalendar(val)"
-          />
+        <div class="card-body">
+          <div class="settings-row">
+            <div class="row-left">
+              <el-icon class="row-icon"><Monitor /></el-icon>
+              <span class="settings-label">开机自启</span>
+            </div>
+            <el-switch 
+              v-model="autoStart"
+              :loading="autoStartLoading"
+              @change="handleAutoStartChange"
+            />
+          </div>
+          
+          <div class="settings-row">
+            <div class="row-left">
+              <el-icon class="row-icon"><Calendar /></el-icon>
+              <div class="row-content">
+                <span class="settings-label">展示日历</span>
+                <span class="settings-desc">开启后主界面将显示日历视图</span>
+              </div>
+            </div>
+            <el-switch 
+              :model-value="showCalendar"
+              @change="(val: boolean) => appStore.setShowCalendar(val)"
+            />
+          </div>
         </div>
-        <p class="settings-hint" style="margin-top: 4px;">
-          开启后主界面将显示日历视图
-        </p>
       </div>
 
       <!-- 数据管理 -->
-      <div class="settings-section">
-        <h3 class="section-title">数据管理</h3>
+      <div class="settings-card">
+        <div class="card-header">
+          <el-icon class="card-icon"><Folder /></el-icon>
+          <h3 class="card-title">数据管理</h3>
+        </div>
         
-        <div class="settings-item">
-          <el-button 
-            type="primary" 
-            :loading="exporting"
-            style="width: 100%"
-            @click="handleExport"
-          >
-            <el-icon><Download /></el-icon>
-            <span>导出数据</span>
-          </el-button>
-        </div>
+        <div class="card-body">
+          <div class="data-actions">
+            <button 
+              class="data-btn primary"
+              :disabled="exporting"
+              @click="handleExport"
+            >
+              <el-icon><Download /></el-icon>
+              <span>{{ exporting ? '导出中...' : '导出数据' }}</span>
+            </button>
 
-        <div class="settings-item">
-          <el-button 
-            :loading="importing"
-            style="width: 100%"
-            @click="handleImport"
-          >
-            <el-icon><Upload /></el-icon>
-            <span>导入数据</span>
-          </el-button>
-        </div>
+            <button 
+              class="data-btn"
+              :disabled="importing"
+              @click="handleImport"
+            >
+              <el-icon><Upload /></el-icon>
+              <span>{{ importing ? '导入中...' : '导入数据' }}</span>
+            </button>
+          </div>
 
-        <p class="settings-hint">
-          导出数据可用于备份或迁移到其他设备
-        </p>
+          <p class="card-hint">
+            <el-icon :size="14"><InfoFilled /></el-icon>
+            导出数据可用于备份或迁移到其他设备
+          </p>
+        </div>
       </div>
 
       <!-- 屏幕配置管理 -->
-      <div class="settings-section">
-        <h3 class="section-title">屏幕配置</h3>
-        
-        <p class="settings-hint" style="margin-bottom: 12px;">
-          应用会根据不同的屏幕组合自动保存和恢复窗口位置
-        </p>
-        
-        <div v-if="screenConfigs.length === 0" class="empty-configs">
-          暂无保存的屏幕配置
+      <div class="settings-card">
+        <div class="card-header">
+          <el-icon class="card-icon"><Monitor /></el-icon>
+          <h3 class="card-title">屏幕配置</h3>
         </div>
         
-        <div v-else class="config-list">
-          <div 
-            v-for="config in screenConfigs" 
-            :key="config.id"
-            class="config-item"
-            :class="{ active: config.configId === currentConfigId }"
-          >
-            <div class="config-info">
-              <div class="config-name">
-                {{ config.displayName || '未命名配置' }}
-                <span v-if="config.configId === currentConfigId" class="current-badge">
-                  当前
-                </span>
+        <div class="card-body">
+          <p class="card-hint" style="margin-bottom: 12px;">
+            <el-icon :size="14"><InfoFilled /></el-icon>
+            应用会根据不同的屏幕组合自动保存和恢复窗口位置
+          </p>
+          
+          <div v-if="screenConfigs.length === 0" class="empty-configs">
+            <el-icon :size="28"><Monitor /></el-icon>
+            <span>暂无保存的屏幕配置</span>
+          </div>
+          
+          <div v-else class="config-list">
+            <div 
+              v-for="config in screenConfigs" 
+              :key="config.id"
+              class="config-item"
+              :class="{ active: config.configId === currentConfigId }"
+            >
+              <div class="config-info">
+                <div class="config-name">
+                  {{ config.displayName || '未命名配置' }}
+                  <span v-if="config.configId === currentConfigId" class="current-badge">
+                    当前
+                  </span>
+                </div>
+                <div class="config-detail">
+                  {{ formatConfigInfo(config.configId) }}
+                </div>
+                <div class="config-meta">
+                  {{ config.isFixed ? '固定模式' : '普通模式' }} | 
+                  位置: ({{ config.windowX }}, {{ config.windowY }})
+                </div>
               </div>
-              <div class="config-detail">
-                {{ formatConfigInfo(config.configId) }}
+              <div class="config-actions">
+                <el-button 
+                  type="danger" 
+                  text 
+                  size="small"
+                  :disabled="config.configId === currentConfigId"
+                  @click="handleDeleteConfig(config)"
+                >
+                  <el-icon><Delete /></el-icon>
+                </el-button>
               </div>
-              <div class="config-meta">
-                {{ config.isFixed ? '固定模式' : '普通模式' }} | 
-                位置: ({{ config.windowX }}, {{ config.windowY }})
-              </div>
-            </div>
-            <div class="config-actions">
-              <el-button 
-                type="danger" 
-                text 
-                size="small"
-                :disabled="config.configId === currentConfigId"
-                @click="handleDeleteConfig(config)"
-              >
-                <el-icon><Delete /></el-icon>
-              </el-button>
             </div>
           </div>
         </div>
       </div>
 
       <!-- 关于 -->
-      <div class="settings-section">
-        <h3 class="section-title">关于</h3>
-        <div class="about-info">
-          <p><strong>Mini Todo</strong></p>
-          <p>
-            版本: {{ APP_VERSION }}
-            <span v-if="hasUpdate" class="update-available">
-              (有新版本 {{ latestVersion }})
-            </span>
-          </p>
-          <p>一个简洁高效的桌面待办应用</p>
+      <div class="settings-card about-card">
+        <div class="about-content">
+          <div class="app-logo">
+            <el-icon :size="36"><Promotion /></el-icon>
+          </div>
+          <div class="app-info">
+            <h3 class="app-name">Mini Todo</h3>
+            <p class="app-version">
+              版本 {{ APP_VERSION }}
+              <span v-if="hasUpdate" class="update-badge">
+                新版本 {{ latestVersion }}
+              </span>
+            </p>
+            <p class="app-desc">一个简洁高效的桌面待办应用</p>
+          </div>
         </div>
         
-        <div class="settings-item" style="margin-top: 12px;">
-          <el-button 
-            :loading="checking"
-            style="width: 100%"
-            @click="handleCheckUpdate"
-          >
-            <el-icon><Refresh /></el-icon>
-            <span>检查更新</span>
-          </el-button>
-        </div>
+        <button 
+          class="check-update-btn"
+          :disabled="checking"
+          @click="handleCheckUpdate"
+        >
+          <el-icon><Refresh /></el-icon>
+          <span>{{ checking ? '检查中...' : '检查更新' }}</span>
+        </button>
       </div>
     </div>
   </div>
@@ -371,21 +394,23 @@ async function handleCheckUpdate() {
   display: flex;
   flex-direction: column;
   height: 100vh;
-  background: #FFFFFF;
+  background: #f8fafc;
 }
 
 .window-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--border);
+  padding: 14px 20px;
+  background: #ffffff;
+  border-bottom: 1px solid #e2e8f0;
   -webkit-app-region: drag;
 
   h2 {
     margin: 0;
-    font-size: 16px;
+    font-size: 17px;
     font-weight: 600;
+    color: #1e293b;
   }
 
   .el-button {
@@ -395,66 +420,164 @@ async function handleCheckUpdate() {
 
 .settings-content {
   flex: 1;
-  padding: 16px;
+  padding: 20px;
   overflow-y: auto;
 }
 
-.settings-section {
-  margin-bottom: 24px;
+/* 卡片样式 */
+.settings-card {
+  background: #ffffff;
+  border-radius: 12px;
+  margin-bottom: 16px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
 }
 
-.section-title {
-  font-size: 14px;
+.card-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 20px 0;
+}
+
+.card-icon {
+  font-size: 20px;
+  color: #3b82f6;
+}
+
+.card-title {
+  margin: 0;
+  font-size: 15px;
   font-weight: 600;
-  color: var(--text-primary);
-  margin-bottom: 12px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--border);
+  color: #1e293b;
 }
 
-.settings-item {
-  margin-bottom: 12px;
+.card-body {
+  padding: 16px 20px 20px;
 }
 
+.card-hint {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 12px;
+  color: #64748b;
+  margin: 0;
+
+  .el-icon {
+    margin-top: 1px;
+    color: #94a3b8;
+  }
+}
+
+/* 设置行 */
 .settings-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 8px 0;
+  padding: 12px 0;
+  border-bottom: 1px solid #f1f5f9;
+
+  &:last-child {
+    border-bottom: none;
+    padding-bottom: 0;
+  }
+}
+
+.row-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.row-icon {
+  font-size: 18px;
+  color: #64748b;
+}
+
+.row-content {
+  display: flex;
+  flex-direction: column;
 }
 
 .settings-label {
   font-size: 14px;
-  color: var(--text-primary);
+  color: #334155;
+  font-weight: 500;
 }
 
-.settings-hint {
+.settings-desc {
   font-size: 12px;
-  color: var(--text-tertiary);
-  margin-top: 8px;
+  color: #94a3b8;
+  margin-top: 2px;
 }
 
-.about-info {
-  font-size: 13px;
-  color: var(--text-secondary);
-  line-height: 1.8;
+/* 数据操作按钮 */
+.data-actions {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 16px;
+}
 
-  strong {
-    color: var(--text-primary);
+.data-btn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px 16px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #ffffff;
+  font-size: 14px;
+  font-weight: 500;
+  color: #334155;
+  cursor: pointer;
+  transition: all 0.2s ease;
+
+  &:hover:not(:disabled) {
+    background: #f8fafc;
+    border-color: #cbd5e1;
   }
-}
 
-.update-available {
-  color: #EF4444;
-  font-size: 12px;
+  &:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  &.primary {
+    background: #3b82f6;
+    border-color: #3b82f6;
+    color: #ffffff;
+
+    &:hover:not(:disabled) {
+      background: #2563eb;
+      border-color: #2563eb;
+    }
+  }
+
+  .el-icon {
+    font-size: 18px;
+  }
 }
 
 /* 屏幕配置样式 */
 .empty-configs {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  color: #94a3b8;
   text-align: center;
-  color: var(--text-tertiary);
-  font-size: 13px;
-  padding: 16px;
+
+  .el-icon {
+    margin-bottom: 8px;
+    opacity: 0.5;
+  }
+
+  span {
+    font-size: 13px;
+  }
 }
 
 .config-list {
@@ -467,15 +590,19 @@ async function handleCheckUpdate() {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 12px;
-  background: var(--bg-secondary);
-  border-radius: 6px;
+  padding: 12px 14px;
+  background: #f8fafc;
+  border-radius: 8px;
   border: 1px solid transparent;
-  transition: border-color 0.2s;
+  transition: all 0.2s ease;
+
+  &:hover {
+    background: #f1f5f9;
+  }
 
   &.active {
-    border-color: var(--primary);
-    background: rgba(64, 158, 255, 0.05);
+    border-color: #3b82f6;
+    background: #eff6ff;
   }
 }
 
@@ -487,25 +614,25 @@ async function handleCheckUpdate() {
 .config-name {
   font-size: 13px;
   font-weight: 500;
-  color: var(--text-primary);
+  color: #334155;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
 }
 
 .current-badge {
-  font-size: 11px;
-  padding: 1px 6px;
-  background: var(--primary);
+  font-size: 10px;
+  padding: 2px 8px;
+  background: linear-gradient(135deg, #3b82f6 0%, #06b6d4 100%);
   color: white;
-  border-radius: 4px;
-  font-weight: normal;
+  border-radius: 10px;
+  font-weight: 500;
 }
 
 .config-detail {
   font-size: 11px;
-  color: var(--text-secondary);
-  margin-top: 2px;
+  color: #64748b;
+  margin-top: 4px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -513,12 +640,101 @@ async function handleCheckUpdate() {
 
 .config-meta {
   font-size: 11px;
-  color: var(--text-tertiary);
+  color: #94a3b8;
   margin-top: 2px;
 }
 
 .config-actions {
   flex-shrink: 0;
   margin-left: 8px;
+}
+
+/* 关于卡片 */
+.about-card {
+  padding: 20px;
+}
+
+.about-content {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.app-logo {
+  width: 60px;
+  height: 60px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #3b82f6 0%, #06b6d4 100%);
+  border-radius: 14px;
+  color: #ffffff;
+}
+
+.app-info {
+  flex: 1;
+}
+
+.app-name {
+  margin: 0 0 4px;
+  font-size: 18px;
+  font-weight: 600;
+  color: #1e293b;
+}
+
+.app-version {
+  margin: 0 0 4px;
+  font-size: 13px;
+  color: #64748b;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.update-badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  background: #fee2e2;
+  color: #ef4444;
+  border-radius: 10px;
+  font-weight: 500;
+}
+
+.app-desc {
+  margin: 0;
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+.check-update-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px 16px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #ffffff;
+  font-size: 14px;
+  font-weight: 500;
+  color: #334155;
+  cursor: pointer;
+  transition: all 0.2s ease;
+
+  &:hover:not(:disabled) {
+    background: #f8fafc;
+    border-color: #cbd5e1;
+  }
+
+  &:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .el-icon {
+    font-size: 16px;
+  }
 }
 </style>
