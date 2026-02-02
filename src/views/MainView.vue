@@ -7,7 +7,6 @@ import { getCurrentWindow, primaryMonitor, currentMonitor } from '@tauri-apps/ap
 import { listen } from '@tauri-apps/api/event'
 import TitleBar from '@/components/TitleBar.vue'
 import TodoList from '@/components/TodoList.vue'
-import TodoItem from '@/components/TodoItem.vue'
 import CalendarView from '@/components/CalendarView.vue'
 import type { Todo } from '@/types'
 
