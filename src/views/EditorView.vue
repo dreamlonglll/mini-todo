@@ -398,262 +398,270 @@ function handleClose() {
 
 <template>
   <div class="editor-window">
-    <div class="window-header">
-      <h2>{{ isEdit ? '编辑待办' : '新建待办' }}</h2>
-      <el-button text @click="handleClose">
-        <el-icon><Close /></el-icon>
-      </el-button>
-    </div>
+    <!-- 主内容区域 -->
+    <div class="main-area">
+      <div class="window-header">
+        <h2>{{ isEdit ? '编辑待办' : '新建待办' }}</h2>
+        <el-button text @click="handleClose">
+          <el-icon><Close /></el-icon>
+        </el-button>
+      </div>
 
-    <div class="editor-content">
-      <el-form label-position="top" :model="form">
-        <!-- 标题 -->
-        <el-form-item label="标题" required>
-          <el-input 
-            v-model="form.title" 
-            placeholder="请输入待办标题"
-            maxlength="100"
-          />
-        </el-form-item>
-
-        <!-- 描述 -->
-        <el-form-item label="描述">
-          <el-input 
-            v-model="form.description" 
-            type="textarea"
-            :rows="3"
-            placeholder="添加详细描述..."
-            maxlength="500"
-          />
-        </el-form-item>
-
-        <!-- 颜色 -->
-        <el-form-item label="颜色">
-          <div class="color-picker-row">
-            <button
-              v-for="color in PRESET_COLORS"
-              :key="color.value"
-              class="color-preset-btn"
-              :class="{ active: form.color === color.value }"
-              :style="{ backgroundColor: color.value }"
-              :title="color.name"
-              type="button"
-              @click="form.color = color.value"
-            ></button>
-            <el-color-picker
-              v-model="form.color"
-              :predefine="PRESET_COLORS.map(c => c.value)"
-              size="small"
+      <div class="editor-content">
+        <el-form label-position="top" :model="form">
+          <!-- 标题 -->
+          <el-form-item label="标题" required>
+            <el-input 
+              v-model="form.title" 
+              placeholder="请输入待办标题"
+              maxlength="100"
             />
-          </div>
-        </el-form-item>
+          </el-form-item>
 
-        <!-- 时间范围 -->
-        <el-form-item label="时间范围">
-          <div class="time-range-picker">
-            <div class="time-range-row">
-              <span class="time-label">开始</span>
-              <el-date-picker
-                v-model="startDate"
-                type="date"
-                placeholder="开始日期"
-                format="YYYY-MM-DD"
-                value-format="YYYY-MM-DD"
-                :teleported="true"
-                :popper-options="{
-                  placement: 'top-start',
-                  modifiers: [{ name: 'flip', enabled: false }]
-                }"
-                class="date-picker-sm"
-              />
-              <el-time-picker
-                v-model="startTimeValue"
-                placeholder="时间"
-                format="HH:mm"
-                value-format="HH:mm"
-                :teleported="true"
-                :popper-options="{
-                  placement: 'top-start',
-                  modifiers: [{ name: 'flip', enabled: false }]
-                }"
-                class="time-picker-sm"
-                :disabled="!startDate"
+          <!-- 描述 -->
+          <el-form-item label="描述">
+            <el-input 
+              v-model="form.description" 
+              type="textarea"
+              :rows="3"
+              placeholder="添加详细描述..."
+              maxlength="500"
+            />
+          </el-form-item>
+
+          <!-- 颜色 -->
+          <el-form-item label="颜色">
+            <div class="color-picker-row">
+              <button
+                v-for="color in PRESET_COLORS"
+                :key="color.value"
+                class="color-preset-btn"
+                :class="{ active: form.color === color.value }"
+                :style="{ backgroundColor: color.value }"
+                :title="color.name"
+                type="button"
+                @click="form.color = color.value"
+              ></button>
+              <el-color-picker
+                v-model="form.color"
+                :predefine="PRESET_COLORS.map(c => c.value)"
+                size="small"
               />
             </div>
-            <div class="time-range-row">
-              <span class="time-label">截止</span>
-              <el-date-picker
-                v-model="endDate"
-                type="date"
-                placeholder="截止日期"
-                format="YYYY-MM-DD"
-                value-format="YYYY-MM-DD"
-                :teleported="true"
-                :popper-options="{
-                  placement: 'top-start',
-                  modifiers: [{ name: 'flip', enabled: false }]
-                }"
-                class="date-picker-sm"
-              />
-              <el-time-picker
-                v-model="endTimeValue"
-                placeholder="时间"
-                format="HH:mm"
-                value-format="HH:mm"
-                :teleported="true"
-                :popper-options="{
-                  placement: 'top-start',
-                  modifiers: [{ name: 'flip', enabled: false }]
-                }"
-                class="time-picker-sm"
-                :disabled="!endDate"
-              />
-            </div>
-          </div>
-        </el-form-item>
+          </el-form-item>
 
-        <!-- 提醒时间 - 拆分为日期和时间 -->
-        <el-form-item label="提醒时间">
-          <div class="notify-datetime-picker">
-            <el-date-picker
-              v-model="notifyDate"
-              type="date"
-              placeholder="选择日期"
-              format="YYYY-MM-DD"
-              value-format="YYYY-MM-DD"
-              :teleported="true"
-              :popper-options="{
-                placement: 'top-start',
-                modifiers: [{ name: 'flip', enabled: false }]
-              }"
-              class="date-picker"
-            />
-            <el-time-picker
-              v-model="notifyTime"
-              placeholder="时间"
-              format="HH:mm"
-              value-format="HH:mm"
-              :teleported="true"
-              :popper-options="{
-                placement: 'top-start',
-                modifiers: [{ name: 'flip', enabled: false }]
-              }"
-              class="time-picker"
-              :disabled="!notifyDate"
-            />
-          </div>
-        </el-form-item>
-
-        <!-- 提前通知 -->
-        <el-form-item v-if="form.notifyAt" label="提前提醒">
-          <el-select 
-            :model-value="isCustomNotifyBefore ? -1 : form.notifyBefore"
-            @change="handleNotifyBeforeChange"
-            style="width: 100%"
-          >
-            <el-option 
-              v-for="opt in notifyBeforeOptions"
-              :key="opt.value"
-              :label="opt.label"
-              :value="opt.value"
-            />
-          </el-select>
-          
-          <el-input-number
-            v-if="isCustomNotifyBefore"
-            v-model="customNotifyBefore"
-            :min="1"
-            :max="1440"
-            style="width: 100%; margin-top: 8px"
-          >
-            <template #suffix>分钟前</template>
-          </el-input-number>
-        </el-form-item>
-
-        <!-- 子任务 -->
-        <el-form-item label="子任务">
-          <div class="subtask-editor">
-            <!-- 进度条 -->
-            <div v-if="currentSubtaskList.length > 0" class="subtask-progress">
-              <div class="progress-info">
-                <span class="progress-text">{{ completedSubtaskCount }} / {{ currentSubtaskList.length }}</span>
-                <span class="progress-label">已完成</span>
-              </div>
-              <div class="progress-bar">
-                <div 
-                  class="progress-fill" 
-                  :style="{ width: subtaskProgressPercent + '%' }"
-                ></div>
-              </div>
-            </div>
-
-            <!-- 添加子任务 -->
-            <div class="add-subtask">
-              <div class="add-subtask-input">
-                <el-icon class="input-icon"><Plus /></el-icon>
-                <input
-                  v-model="newSubtaskTitle"
-                  type="text"
-                  placeholder="添加子任务..."
-                  @keyup.enter="addSubtask"
+          <!-- 时间范围 -->
+          <el-form-item label="时间范围">
+            <div class="time-range-picker">
+              <div class="time-range-row">
+                <span class="time-label">开始</span>
+                <el-date-picker
+                  v-model="startDate"
+                  type="date"
+                  placeholder="开始日期"
+                  format="YYYY-MM-DD"
+                  value-format="YYYY-MM-DD"
+                  :teleported="true"
+                  :popper-options="{
+                    placement: 'top-start',
+                    modifiers: [{ name: 'flip', enabled: false }]
+                  }"
+                  class="date-picker-sm"
                 />
-                <transition name="fade">
-                  <button 
-                    v-if="newSubtaskTitle.trim()"
-                    class="add-btn"
-                    @click="addSubtask"
-                  >
-                    添加
-                  </button>
-                </transition>
+                <el-time-picker
+                  v-model="startTimeValue"
+                  placeholder="时间"
+                  format="HH:mm"
+                  value-format="HH:mm"
+                  :teleported="true"
+                  :popper-options="{
+                    placement: 'top-start',
+                    modifiers: [{ name: 'flip', enabled: false }]
+                  }"
+                  class="time-picker-sm"
+                  :disabled="!startDate"
+                />
+              </div>
+              <div class="time-range-row">
+                <span class="time-label">截止</span>
+                <el-date-picker
+                  v-model="endDate"
+                  type="date"
+                  placeholder="截止日期"
+                  format="YYYY-MM-DD"
+                  value-format="YYYY-MM-DD"
+                  :teleported="true"
+                  :popper-options="{
+                    placement: 'top-start',
+                    modifiers: [{ name: 'flip', enabled: false }]
+                  }"
+                  class="date-picker-sm"
+                />
+                <el-time-picker
+                  v-model="endTimeValue"
+                  placeholder="时间"
+                  format="HH:mm"
+                  value-format="HH:mm"
+                  :teleported="true"
+                  :popper-options="{
+                    placement: 'top-start',
+                    modifiers: [{ name: 'flip', enabled: false }]
+                  }"
+                  class="time-picker-sm"
+                  :disabled="!endDate"
+                />
               </div>
             </div>
+          </el-form-item>
 
-            <!-- 子任务列表 -->
-            <div v-if="currentSubtaskList.length > 0" class="subtask-list-editor">
-              <transition-group name="subtask-list" tag="div">
-                <div 
-                  v-for="subtask in currentSubtaskList" 
-                  :key="subtask.id" 
-                  class="subtask-item-editor"
-                  :class="{ completed: subtask.completed }"
-                >
-                  <div 
-                    class="custom-checkbox"
-                    :class="{ checked: subtask.completed }"
-                    @click="isEdit ? toggleSubtask(subtask.id) : togglePendingSubtask(subtask.id)"
-                  >
-                    <el-icon v-if="subtask.completed" class="check-icon"><Check /></el-icon>
-                  </div>
-                  <span class="subtask-title">
-                    {{ subtask.title }}
-                  </span>
-                  <button 
-                    class="delete-btn"
-                    @click="deleteSubtask(subtask.id)"
-                    title="删除子任务"
-                  >
-                    <el-icon><Delete /></el-icon>
-                  </button>
-                </div>
-              </transition-group>
+          <!-- 提醒时间 - 拆分为日期和时间 -->
+          <el-form-item label="提醒时间">
+            <div class="notify-datetime-picker">
+              <el-date-picker
+                v-model="notifyDate"
+                type="date"
+                placeholder="选择日期"
+                format="YYYY-MM-DD"
+                value-format="YYYY-MM-DD"
+                :teleported="true"
+                :popper-options="{
+                  placement: 'top-start',
+                  modifiers: [{ name: 'flip', enabled: false }]
+                }"
+                class="date-picker"
+              />
+              <el-time-picker
+                v-model="notifyTime"
+                placeholder="时间"
+                format="HH:mm"
+                value-format="HH:mm"
+                :teleported="true"
+                :popper-options="{
+                  placement: 'top-start',
+                  modifiers: [{ name: 'flip', enabled: false }]
+                }"
+                class="time-picker"
+                :disabled="!notifyDate"
+              />
             </div>
+          </el-form-item>
 
-            <!-- 空状态 -->
-            <div v-else class="subtask-empty">
-              <el-icon class="empty-icon"><List /></el-icon>
-              <span>暂无子任务</span>
-            </div>
-          </div>
-        </el-form-item>
-      </el-form>
+          <!-- 提前通知 -->
+          <el-form-item v-if="form.notifyAt" label="提前提醒">
+            <el-select 
+              :model-value="isCustomNotifyBefore ? -1 : form.notifyBefore"
+              @change="handleNotifyBeforeChange"
+              style="width: 100%"
+            >
+              <el-option 
+                v-for="opt in notifyBeforeOptions"
+                :key="opt.value"
+                :label="opt.label"
+                :value="opt.value"
+              />
+            </el-select>
+            
+            <el-input-number
+              v-if="isCustomNotifyBefore"
+              v-model="customNotifyBefore"
+              :min="1"
+              :max="1440"
+              style="width: 100%; margin-top: 8px"
+            >
+              <template #suffix>分钟前</template>
+            </el-input-number>
+          </el-form-item>
+
+        </el-form>
+      </div>
+
+      <div class="window-footer">
+        <el-button @click="handleClose">取消</el-button>
+        <el-button type="primary" @click="handleSave">
+          {{ isEdit ? '保存' : '创建' }}
+        </el-button>
+      </div>
     </div>
 
-    <div class="window-footer">
-      <el-button @click="handleClose">取消</el-button>
-      <el-button type="primary" @click="handleSave">
-        {{ isEdit ? '保存' : '创建' }}
-      </el-button>
+    <!-- 子任务面板（始终显示） -->
+    <div class="subtask-panel">
+      <div class="panel-header">
+        <h3>子任务</h3>
+      </div>
+
+        <div class="panel-content">
+          <!-- 进度条 -->
+          <div v-if="currentSubtaskList.length > 0" class="subtask-progress">
+            <div class="progress-info">
+              <span class="progress-text">{{ completedSubtaskCount }} / {{ currentSubtaskList.length }}</span>
+              <span class="progress-label">已完成</span>
+            </div>
+            <div class="progress-bar">
+              <div 
+                class="progress-fill" 
+                :style="{ width: subtaskProgressPercent + '%' }"
+              ></div>
+            </div>
+          </div>
+
+          <!-- 添加子任务 -->
+          <div class="add-subtask">
+            <div class="add-subtask-input">
+              <el-icon class="input-icon"><Plus /></el-icon>
+              <input
+                v-model="newSubtaskTitle"
+                type="text"
+                placeholder="添加子任务..."
+                @keyup.enter="addSubtask"
+              />
+              <transition name="fade">
+                <button 
+                  v-if="newSubtaskTitle.trim()"
+                  class="add-btn"
+                  @click="addSubtask"
+                >
+                  添加
+                </button>
+              </transition>
+            </div>
+          </div>
+
+          <!-- 子任务列表 -->
+          <div v-if="currentSubtaskList.length > 0" class="subtask-list-editor">
+            <transition-group name="subtask-list" tag="div">
+              <div 
+                v-for="subtask in currentSubtaskList" 
+                :key="subtask.id" 
+                class="subtask-item-editor"
+                :class="{ completed: subtask.completed }"
+              >
+                <div 
+                  class="custom-checkbox"
+                  :class="{ checked: subtask.completed }"
+                  @click="isEdit ? toggleSubtask(subtask.id) : togglePendingSubtask(subtask.id)"
+                >
+                  <el-icon v-if="subtask.completed" class="check-icon"><Check /></el-icon>
+                </div>
+                <span class="subtask-title">
+                  {{ subtask.title }}
+                </span>
+                <button 
+                  class="delete-btn"
+                  @click="deleteSubtask(subtask.id)"
+                  title="删除子任务"
+                >
+                  <el-icon><Delete /></el-icon>
+                </button>
+              </div>
+            </transition-group>
+          </div>
+
+          <!-- 空状态 -->
+          <div v-else class="subtask-empty">
+            <el-icon class="empty-icon"><List /></el-icon>
+            <span>暂无子任务</span>
+          </div>
+        </div>
     </div>
   </div>
 </template>
@@ -661,9 +669,15 @@ function handleClose() {
 <style scoped>
 .editor-window {
   display: flex;
-  flex-direction: column;
   height: 100vh;
   background: #FFFFFF;
+}
+
+.main-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
 }
 
 .window-header {
@@ -671,6 +685,8 @@ function handleClose() {
   align-items: center;
   justify-content: space-between;
   padding: 12px 16px;
+  min-height: 44px;
+  box-sizing: border-box;
   border-bottom: 1px solid var(--border);
   -webkit-app-region: drag;
 
@@ -678,6 +694,7 @@ function handleClose() {
     margin: 0;
     font-size: 16px;
     font-weight: 600;
+    line-height: 1.2;
   }
 
   .el-button {
@@ -697,6 +714,44 @@ function handleClose() {
   gap: 8px;
   padding: 12px 16px;
   border-top: 1px solid var(--border);
+}
+
+/* 子任务面板 */
+.subtask-panel {
+  width: 380px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: #fafbfc;
+  border-left: 1px solid #e2e8f0;
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  min-height: 57px;
+  box-sizing: border-box;
+  border-bottom: 1px solid var(--border);
+  background: #ffffff;
+  -webkit-app-region: drag;
+
+  h3 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 600;
+    line-height: 1.2;
+    color: #334155;
+  }
+}
+
+.panel-content {
+  flex: 1;
+  padding: 16px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
 }
 
 .color-picker-row {
@@ -722,10 +777,6 @@ function handleClose() {
     border-color: var(--primary);
     box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.3);
   }
-}
-
-.subtask-editor {
-  width: 100%;
 }
 
 /* 进度条样式 */
@@ -840,7 +891,8 @@ function handleClose() {
 
 /* 子任务列表 */
 .subtask-list-editor {
-  max-height: 220px;
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding-right: 4px;
 
@@ -951,6 +1003,7 @@ function handleClose() {
 
 /* 空状态 */
 .subtask-empty {
+  flex: 1;
   display: flex;
   flex-direction: column;
   align-items: center;
