@@ -1,6 +1,6 @@
 use crate::db::Database;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::async_runtime;
 use tauri::{Manager, Emitter, Listener};
 use tauri::WebviewUrl;
@@ -26,15 +26,37 @@ impl NotificationService {
         async_runtime::spawn(async move {
             // 等待应用初始化完成
             tokio::time::sleep(Duration::from_secs(5)).await;
-            
-            let mut interval = tokio::time::interval(Duration::from_secs(60));
+
             loop {
-                interval.tick().await;
+                Self::sleep_until_next_minute().await;
                 if let Err(e) = Self::check_and_send_notifications(&app_handle) {
                     eprintln!("通知检查失败: {}", e);
                 }
             }
         });
+    }
+
+    /// 等待到下一个整分（本地时间）
+    async fn sleep_until_next_minute() {
+        let since_epoch = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_else(|_| Duration::from_secs(0));
+        let secs = since_epoch.as_secs();
+        let nanos = since_epoch.subsec_nanos();
+        let remainder = secs % 60;
+
+        if remainder == 0 && nanos == 0 {
+            return;
+        }
+
+        let mut wait_secs = 59 - remainder;
+        let mut wait_nanos = 1_000_000_000 - nanos;
+        if wait_nanos == 1_000_000_000 {
+            wait_secs += 1;
+            wait_nanos = 0;
+        }
+
+        tokio::time::sleep(Duration::new(wait_secs, wait_nanos)).await;
     }
 
     /// 检查并发送到期的通知
