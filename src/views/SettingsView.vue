@@ -19,6 +19,10 @@ const checking = ref(false)
 const autoStart = ref(false)
 const autoStartLoading = ref(false)
 
+// 通知类型设置
+const notificationType = ref<'system' | 'app'>('system')
+const notificationTypeLoading = ref(false)
+
 // 屏幕配置相关
 const screenConfigs = computed(() => appStore.screenConfigs)
 const currentConfigId = computed(() => appStore.currentScreenConfigId)
@@ -36,6 +40,14 @@ onMounted(async () => {
     autoStart.value = await isEnabled()
   } catch (e) {
     console.error('Failed to get autostart status:', e)
+  }
+  
+  // 加载通知类型设置
+  try {
+    const type = await invoke<string>('get_notification_type')
+    notificationType.value = type === 'app' ? 'app' : 'system'
+  } catch (e) {
+    console.error('Failed to get notification type:', e)
   }
   
   // 加载屏幕配置列表
@@ -111,6 +123,24 @@ async function handleAutoStartChange(value: boolean) {
     autoStart.value = !value
   } finally {
     autoStartLoading.value = false
+  }
+}
+
+// 切换通知类型
+async function handleNotificationTypeChange(value: 'system' | 'app') {
+  const oldValue = notificationType.value
+  try {
+    notificationTypeLoading.value = true
+    notificationType.value = value
+    await invoke('set_notification_type', { notificationType: value })
+    ElMessage.success(value === 'system' ? '已切换为系统通知' : '已切换为软件通知')
+  } catch (e) {
+    console.error('Failed to set notification type:', e)
+    ElMessage.error('设置通知类型失败')
+    // 恢复原状态
+    notificationType.value = oldValue
+  } finally {
+    notificationTypeLoading.value = false
   }
 }
 
@@ -263,6 +293,25 @@ async function handleCheckUpdate() {
               :model-value="showCalendar"
               @change="(val: boolean) => appStore.setShowCalendar(val)"
             />
+          </div>
+          
+          <div class="settings-row notification-type-row">
+            <div class="row-left">
+              <el-icon class="row-icon"><Bell /></el-icon>
+              <div class="row-content">
+                <span class="settings-label">通知方式</span>
+                <span class="settings-desc">选择待办提醒的通知展示方式</span>
+              </div>
+            </div>
+            <el-radio-group 
+              :model-value="notificationType"
+              :disabled="notificationTypeLoading"
+              size="small"
+              @change="handleNotificationTypeChange"
+            >
+              <el-radio-button value="system">系统通知</el-radio-button>
+              <el-radio-button value="app">软件通知</el-radio-button>
+            </el-radio-group>
           </div>
         </div>
       </div>
@@ -509,6 +558,26 @@ async function handleCheckUpdate() {
   font-size: 12px;
   color: #94a3b8;
   margin-top: 2px;
+}
+
+/* 通知类型设置行 */
+.notification-type-row {
+  flex-wrap: wrap;
+  gap: 8px;
+  
+  .row-left {
+    flex: 1;
+    min-width: 150px;
+  }
+  
+  :deep(.el-radio-group) {
+    flex-shrink: 0;
+  }
+  
+  :deep(.el-radio-button__inner) {
+    padding: 6px 12px;
+    font-size: 12px;
+  }
 }
 
 /* 数据操作按钮 */

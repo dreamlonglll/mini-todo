@@ -43,6 +43,22 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute("INSERT INTO migrations (version) VALUES (5)", [])?;
     }
 
+    if current_version < 6 {
+        migration_v6(conn)?;
+        conn.execute("INSERT INTO migrations (version) VALUES (6)", [])?;
+    }
+
+    Ok(())
+}
+
+/// 迁移 v6：添加通知类型设置，支持系统通知和软件通知切换
+fn migration_v6(conn: &Connection) -> Result<()> {
+    // 初始化通知类型设置（默认系统通知）
+    conn.execute(
+        "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES ('notification_type', 'system', datetime('now', 'localtime'))",
+        [],
+    )?;
+
     Ok(())
 }
 

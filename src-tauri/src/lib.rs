@@ -25,6 +25,10 @@ use commands::{
     get_show_calendar, set_show_calendar,
     // 节假日命令
     fetch_holidays,
+    // 通知设置命令
+    get_notification_type, set_notification_type,
+    // 通知窗口命令
+    close_notification_window, close_all_notification_windows,
 };
 
 #[cfg(target_os = "windows")]
@@ -208,6 +212,12 @@ pub fn run() {
             import_data,
             // 节假日命令
             fetch_holidays,
+            // 通知设置命令
+            get_notification_type,
+            set_notification_type,
+            // 通知窗口命令
+            close_notification_window,
+            close_all_notification_windows,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
