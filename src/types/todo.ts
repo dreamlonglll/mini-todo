@@ -10,8 +10,8 @@ export const PRESET_COLORS = [
   { name: '粉色', value: '#EC4899' },
 ] as const
 
-// 默认颜色
-export const DEFAULT_COLOR = '#F59E0B'
+// 默认颜色（绿色）
+export const DEFAULT_COLOR = '#10B981'
 
 // 四象限定义
 export const QUADRANTS = {
@@ -31,8 +31,8 @@ export const QUADRANT_INFO = [
   { id: QUADRANTS.NOT_URGENT_NOT_IMPORTANT, name: '不紧急不重要', color: '#10B981', bgColor: 'rgba(16, 185, 129, 0.1)' },
 ] as const
 
-// 默认象限
-export const DEFAULT_QUADRANT = QUADRANTS.IMPORTANT_URGENT
+// 默认象限（不紧急不重要）
+export const DEFAULT_QUADRANT = QUADRANTS.NOT_URGENT_NOT_IMPORTANT
 
 // 视图模式
 export type ViewMode = 'list' | 'quadrant'

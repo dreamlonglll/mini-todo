@@ -56,7 +56,7 @@ pub struct CreateTodoRequest {
 }
 
 fn default_quadrant() -> i32 {
-    1
+    4
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

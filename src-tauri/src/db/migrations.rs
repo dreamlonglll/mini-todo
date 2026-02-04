@@ -49,9 +49,9 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
 /// 迁移 v5：添加 quadrant 字段，支持四象限视图
 /// quadrant 值：1=重要紧急, 2=重要不紧急, 3=紧急不重要, 4=不紧急不重要
 fn migration_v5(conn: &Connection) -> Result<()> {
-    // 添加 quadrant 列，默认为 1（重要紧急）
+    // 添加 quadrant 列，默认为 4（不紧急不重要）
     conn.execute(
-        "ALTER TABLE todos ADD COLUMN quadrant INTEGER NOT NULL DEFAULT 1",
+        "ALTER TABLE todos ADD COLUMN quadrant INTEGER NOT NULL DEFAULT 4",
         [],
     )?;
 
