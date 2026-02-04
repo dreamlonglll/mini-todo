@@ -38,6 +38,35 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute("INSERT INTO migrations (version) VALUES (4)", [])?;
     }
 
+    if current_version < 5 {
+        migration_v5(conn)?;
+        conn.execute("INSERT INTO migrations (version) VALUES (5)", [])?;
+    }
+
+    Ok(())
+}
+
+/// 迁移 v5：添加 quadrant 字段，支持四象限视图
+/// quadrant 值：1=重要紧急, 2=重要不紧急, 3=紧急不重要, 4=不紧急不重要
+fn migration_v5(conn: &Connection) -> Result<()> {
+    // 添加 quadrant 列，默认为 1（重要紧急）
+    conn.execute(
+        "ALTER TABLE todos ADD COLUMN quadrant INTEGER NOT NULL DEFAULT 1",
+        [],
+    )?;
+
+    // 创建索引以优化四象限查询
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_todos_quadrant ON todos(quadrant)",
+        [],
+    )?;
+
+    // 初始化视图模式设置（默认列表模式）
+    conn.execute(
+        "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES ('view_mode', 'list', datetime('now', 'localtime'))",
+        [],
+    )?;
+
     Ok(())
 }
 

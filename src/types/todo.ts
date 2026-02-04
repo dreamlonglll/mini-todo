@@ -13,6 +13,30 @@ export const PRESET_COLORS = [
 // 默认颜色
 export const DEFAULT_COLOR = '#F59E0B'
 
+// 四象限定义
+export const QUADRANTS = {
+  IMPORTANT_URGENT: 1,      // 重要且紧急
+  IMPORTANT_NOT_URGENT: 2,  // 重要不紧急
+  URGENT_NOT_IMPORTANT: 3,  // 紧急不重要
+  NOT_URGENT_NOT_IMPORTANT: 4, // 不紧急不重要
+} as const
+
+export type QuadrantType = typeof QUADRANTS[keyof typeof QUADRANTS]
+
+// 四象限信息
+export const QUADRANT_INFO = [
+  { id: QUADRANTS.IMPORTANT_URGENT, name: '重要且紧急', color: '#EF4444', bgColor: 'rgba(239, 68, 68, 0.1)' },
+  { id: QUADRANTS.IMPORTANT_NOT_URGENT, name: '重要不紧急', color: '#F59E0B', bgColor: 'rgba(245, 158, 11, 0.1)' },
+  { id: QUADRANTS.URGENT_NOT_IMPORTANT, name: '紧急不重要', color: '#3B82F6', bgColor: 'rgba(59, 130, 246, 0.1)' },
+  { id: QUADRANTS.NOT_URGENT_NOT_IMPORTANT, name: '不紧急不重要', color: '#10B981', bgColor: 'rgba(16, 185, 129, 0.1)' },
+] as const
+
+// 默认象限
+export const DEFAULT_QUADRANT = QUADRANTS.IMPORTANT_URGENT
+
+// 视图模式
+export type ViewMode = 'list' | 'quadrant'
+
 // 子任务接口
 export interface SubTask {
   id: number
@@ -31,6 +55,8 @@ export interface Todo {
   description: string | null
   /** 颜色（HEX 格式，如 #EF4444） */
   color: string
+  /** 四象限：1=重要紧急, 2=重要不紧急, 3=紧急不重要, 4=不紧急不重要 */
+  quadrant: QuadrantType
   notifyAt: string | null
   notifyBefore: number
   notified: boolean
@@ -51,6 +77,8 @@ export interface CreateTodoRequest {
   description?: string
   /** 颜色（HEX 格式） */
   color: string
+  /** 四象限：1=重要紧急, 2=重要不紧急, 3=紧急不重要, 4=不紧急不重要 */
+  quadrant?: QuadrantType
   notifyAt?: string
   notifyBefore?: number
   /** 开始时间 */
@@ -65,6 +93,8 @@ export interface UpdateTodoRequest {
   description?: string | null
   /** 颜色（HEX 格式） */
   color?: string
+  /** 四象限：1=重要紧急, 2=重要不紧急, 3=紧急不重要, 4=不紧急不重要 */
+  quadrant?: QuadrantType
   notifyAt?: string | null
   notifyBefore?: number
   completed?: boolean

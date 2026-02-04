@@ -1,13 +1,15 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
-import type { Todo, CreateTodoRequest, UpdateTodoRequest, SubTask, CreateSubTaskRequest, UpdateSubTaskRequest } from '@/types'
+import type { Todo, CreateTodoRequest, UpdateTodoRequest, SubTask, CreateSubTaskRequest, UpdateSubTaskRequest, ViewMode, QuadrantType } from '@/types'
+import { QUADRANTS } from '@/types'
 
 export const useTodoStore = defineStore('todo', () => {
   // 状态
   const todos = ref<Todo[]>([])
   const loading = ref(false)
   const error = ref<string | null>(null)
+  const viewMode = ref<ViewMode>('list')
 
   // 计算属性
   const pendingTodos = computed(() => 
@@ -27,6 +29,28 @@ export const useTodoStore = defineStore('todo', () => {
     pending: pendingTodos.value.length,
     completed: completedTodos.value.length
   }))
+
+  // 按象限分组的待办（仅未完成）
+  const todosByQuadrant = computed(() => {
+    const result: Record<QuadrantType, Todo[]> = {
+      [QUADRANTS.IMPORTANT_URGENT]: [],
+      [QUADRANTS.IMPORTANT_NOT_URGENT]: [],
+      [QUADRANTS.URGENT_NOT_IMPORTANT]: [],
+      [QUADRANTS.NOT_URGENT_NOT_IMPORTANT]: [],
+    }
+    
+    pendingTodos.value.forEach(todo => {
+      const quadrant = todo.quadrant as QuadrantType
+      if (result[quadrant]) {
+        result[quadrant].push(todo)
+      } else {
+        // 默认放入第一象限
+        result[QUADRANTS.IMPORTANT_URGENT].push(todo)
+      }
+    })
+    
+    return result
+  })
 
   // 操作方法
   async function fetchTodos() {
@@ -105,6 +129,37 @@ export const useTodoStore = defineStore('todo', () => {
     }
   }
 
+  // 更新待办的象限
+  async function updateTodoQuadrant(id: number, quadrant: QuadrantType): Promise<boolean> {
+    return updateTodo(id, { quadrant })
+  }
+
+  // 设置视图模式
+  function setViewMode(mode: ViewMode) {
+    viewMode.value = mode
+  }
+
+  // 加载视图模式设置
+  async function loadViewMode() {
+    try {
+      const savedMode = await invoke<string | null>('get_setting', { key: 'view_mode' })
+      if (savedMode === 'list' || savedMode === 'quadrant') {
+        viewMode.value = savedMode
+      }
+    } catch (e) {
+      console.error('Failed to load view mode:', e)
+    }
+  }
+
+  // 保存视图模式设置
+  async function saveViewMode() {
+    try {
+      await invoke('set_setting', { key: 'view_mode', value: viewMode.value })
+    } catch (e) {
+      console.error('Failed to save view mode:', e)
+    }
+  }
+
   // 子任务操作
   async function addSubTask(data: CreateSubTaskRequest): Promise<SubTask | null> {
     try {
@@ -172,10 +227,12 @@ export const useTodoStore = defineStore('todo', () => {
     todos,
     loading,
     error,
+    viewMode,
     // 计算属性
     pendingTodos,
     completedTodos,
     todoCount,
+    todosByQuadrant,
     // 方法
     fetchTodos,
     addTodo,
@@ -183,6 +240,10 @@ export const useTodoStore = defineStore('todo', () => {
     deleteTodo,
     toggleComplete,
     reorderTodos,
+    updateTodoQuadrant,
+    setViewMode,
+    loadViewMode,
+    saveViewMode,
     addSubTask,
     updateSubTask,
     deleteSubTask,

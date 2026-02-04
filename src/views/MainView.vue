@@ -7,6 +7,7 @@ import { getCurrentWindow, primaryMonitor, currentMonitor } from '@tauri-apps/ap
 import { listen } from '@tauri-apps/api/event'
 import TitleBar from '@/components/TitleBar.vue'
 import TodoList from '@/components/TodoList.vue'
+import QuadrantView from '@/components/QuadrantView.vue'
 import CalendarView from '@/components/CalendarView.vue'
 import type { Todo } from '@/types'
 
@@ -19,6 +20,9 @@ const showCompletedDialog = ref(false)
 
 // 是否显示日历
 const showCalendar = computed(() => appStore.showCalendar)
+
+// 当前视图模式
+const viewMode = computed(() => todoStore.viewMode)
 
 // 日历组件引用
 const calendarRef = ref<InstanceType<typeof CalendarView> | null>(null)
@@ -109,6 +113,7 @@ function debouncedSaveState() {
 onMounted(async () => {
   await appStore.initSettings()
   await todoStore.fetchTodos()
+  await todoStore.loadViewMode()
   
   // 异步检查版本更新（不阻塞主流程）
   appStore.checkForUpdates()
@@ -314,17 +319,23 @@ async function openSettings() {
 
     <!-- 主内容区 - 分栏布局 -->
     <div class="main-body" :class="{ 'split-layout': showCalendar }">
-      <!-- 左侧：待办列表 -->
+      <!-- 左侧：待办列表/四象限视图 -->
       <div class="left-panel">
         <div class="main-content">
-          <!-- 待办列表 -->
+          <!-- 列表视图 -->
           <TodoList
+            v-if="viewMode === 'list'"
+            @edit="openEditor"
+          />
+          <!-- 四象限视图 -->
+          <QuadrantView
+            v-else
             @edit="openEditor"
           />
         </div>
 
-        <!-- 已完成按钮 -->
-        <div v-if="completedCount > 0" class="completed-btn-wrapper" :class="{ 'fixed-mode': appStore.isFixed }">
+        <!-- 已完成按钮（仅在列表模式显示） -->
+        <div v-if="viewMode === 'list' && completedCount > 0" class="completed-btn-wrapper" :class="{ 'fixed-mode': appStore.isFixed }">
           <button class="completed-btn" @click="showCompletedDialog = true">
             <span>已完成 ({{ completedCount }})</span>
             <el-icon :size="14"><ArrowRight /></el-icon>

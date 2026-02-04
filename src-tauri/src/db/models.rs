@@ -8,6 +8,8 @@ pub struct Todo {
     pub description: Option<String>,
     /// 颜色（HEX 格式，如 #EF4444）
     pub color: String,
+    /// 四象限：1=重要紧急, 2=重要不紧急, 3=紧急不重要, 4=不紧急不重要
+    pub quadrant: i32,
     pub notify_at: Option<String>,
     pub notify_before: i32,
     pub notified: bool,
@@ -42,12 +44,19 @@ pub struct CreateTodoRequest {
     pub description: Option<String>,
     /// 颜色（HEX 格式，如 #EF4444）
     pub color: String,
+    /// 四象限：1=重要紧急, 2=重要不紧急, 3=紧急不重要, 4=不紧急不重要
+    #[serde(default = "default_quadrant")]
+    pub quadrant: i32,
     pub notify_at: Option<String>,
     pub notify_before: Option<i32>,
     /// 开始时间（可为空）
     pub start_time: Option<String>,
     /// 截止时间（可为空）
     pub end_time: Option<String>,
+}
+
+fn default_quadrant() -> i32 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,6 +66,8 @@ pub struct UpdateTodoRequest {
     pub description: Option<String>,
     /// 颜色（HEX 格式，如 #EF4444）
     pub color: Option<String>,
+    /// 四象限：1=重要紧急, 2=重要不紧急, 3=紧急不重要, 4=不紧急不重要
+    pub quadrant: Option<i32>,
     pub notify_at: Option<String>,
     pub notify_before: Option<i32>,
     pub completed: Option<bool>,

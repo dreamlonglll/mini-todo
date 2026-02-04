@@ -4,8 +4,8 @@ import { useRoute } from 'vue-router'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { ElMessageBox } from 'element-plus'
-import type { Todo, CreateTodoRequest, UpdateTodoRequest, CreateSubTaskRequest } from '@/types'
-import { DEFAULT_COLOR, PRESET_COLORS } from '@/types'
+import type { Todo, CreateTodoRequest, UpdateTodoRequest, CreateSubTaskRequest, QuadrantType } from '@/types'
+import { DEFAULT_COLOR, PRESET_COLORS, QUADRANT_INFO, DEFAULT_QUADRANT } from '@/types'
 
 const route = useRoute()
 const todoId = computed(() => route.query.id ? parseInt(route.query.id as string) : null)
@@ -16,6 +16,7 @@ const form = ref({
   title: '',
   description: '',
   color: DEFAULT_COLOR,
+  quadrant: DEFAULT_QUADRANT as QuadrantType,
   notifyAt: null as string | null,
   notifyBefore: 15,
   startTime: null as string | null,
@@ -194,6 +195,7 @@ async function loadTodo() {
         title: todo.value.title,
         description: todo.value.description || '',
         color: todo.value.color,
+        quadrant: todo.value.quadrant,
         notifyAt: todo.value.notifyAt,
         notifyBefore: todo.value.notifyBefore,
         startTime: todo.value.startTime,
@@ -254,6 +256,7 @@ async function handleSave() {
         title: form.value.title,
         description: form.value.description || null,
         color: form.value.color,
+        quadrant: form.value.quadrant,
         notifyAt: form.value.notifyAt || undefined,
         notifyBefore: form.value.notifyBefore,
         clearNotifyAt: shouldClearNotifyAt,
@@ -268,6 +271,7 @@ async function handleSave() {
         title: form.value.title,
         description: form.value.description || undefined,
         color: form.value.color,
+        quadrant: form.value.quadrant,
         notifyAt: form.value.notifyAt || undefined,
         notifyBefore: form.value.notifyBefore,
         startTime: form.value.startTime || undefined,
@@ -447,6 +451,27 @@ function handleClose() {
                 :predefine="PRESET_COLORS.map(c => c.value)"
                 size="small"
               />
+            </div>
+          </el-form-item>
+
+          <!-- 四象限 -->
+          <el-form-item label="四象限">
+            <div class="quadrant-picker">
+              <button
+                v-for="quadrant in QUADRANT_INFO"
+                :key="quadrant.id"
+                class="quadrant-btn"
+                :class="{ active: form.quadrant === quadrant.id }"
+                :style="{ 
+                  '--quadrant-color': quadrant.color,
+                  '--quadrant-bg': quadrant.bgColor 
+                }"
+                type="button"
+                @click="form.quadrant = quadrant.id"
+              >
+                <span class="quadrant-indicator" :style="{ backgroundColor: quadrant.color }"></span>
+                <span class="quadrant-name">{{ quadrant.name }}</span>
+              </button>
             </div>
           </el-form-item>
 
@@ -776,6 +801,48 @@ function handleClose() {
   &.active {
     border-color: var(--primary);
     box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.3);
+  }
+}
+
+/* 四象限选择器 */
+.quadrant-picker {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  width: 100%;
+}
+
+.quadrant-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--quadrant-bg);
+  border: 2px solid transparent;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+
+  &:hover {
+    border-color: var(--quadrant-color);
+  }
+
+  &.active {
+    border-color: var(--quadrant-color);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--quadrant-color) 30%, transparent);
+  }
+
+  .quadrant-indicator {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .quadrant-name {
+    font-size: 12px;
+    color: #334155;
+    font-weight: 500;
   }
 }
 

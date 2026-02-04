@@ -7,7 +7,7 @@ pub fn export_data(db: State<Database>) -> Result<String, String> {
     let result = db.with_connection(|conn| {
         // 获取所有待办和子任务
         let mut stmt = conn.prepare(
-            "SELECT id, title, description, color, notify_at, notify_before, 
+            "SELECT id, title, description, color, quadrant, notify_at, notify_before, 
                     notified, completed, sort_order, start_time, end_time, created_at, updated_at 
              FROM todos ORDER BY sort_order ASC"
         )?;
@@ -18,15 +18,16 @@ pub fn export_data(db: State<Database>) -> Result<String, String> {
                 title: row.get(1)?,
                 description: row.get(2)?,
                 color: row.get(3)?,
-                notify_at: row.get(4)?,
-                notify_before: row.get(5)?,
-                notified: row.get::<_, i32>(6)? != 0,
-                completed: row.get::<_, i32>(7)? != 0,
-                sort_order: row.get(8)?,
-                start_time: row.get(9)?,
-                end_time: row.get(10)?,
-                created_at: row.get(11)?,
-                updated_at: row.get(12)?,
+                quadrant: row.get(4)?,
+                notify_at: row.get(5)?,
+                notify_before: row.get(6)?,
+                notified: row.get::<_, i32>(7)? != 0,
+                completed: row.get::<_, i32>(8)? != 0,
+                sort_order: row.get(9)?,
+                start_time: row.get(10)?,
+                end_time: row.get(11)?,
+                created_at: row.get(12)?,
+                updated_at: row.get(13)?,
                 subtasks: Vec::new(),
             })
         })?;
@@ -132,13 +133,14 @@ pub fn import_data(db: State<Database>, json_data: String) -> Result<(), String>
         // 导入待办
         for todo in &import_data.todos {
             conn.execute(
-                "INSERT INTO todos (title, description, color, notify_at, notify_before, 
+                "INSERT INTO todos (title, description, color, quadrant, notify_at, notify_before, 
                                    notified, completed, sort_order, start_time, end_time, created_at, updated_at) 
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 (
                     &todo.title,
                     &todo.description,
                     &todo.color,
+                    todo.quadrant,
                     &todo.notify_at,
                     todo.notify_before,
                     if todo.notified { 1 } else { 0 },

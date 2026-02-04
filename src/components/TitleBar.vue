@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { useAppStore, APP_VERSION } from '@/stores'
+import { useAppStore, useTodoStore, APP_VERSION } from '@/stores'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import { ElMessageBox } from 'element-plus'
+import type { ViewMode } from '@/types'
 
 defineProps<{
   showCalendarControls?: boolean
@@ -18,10 +19,21 @@ const emit = defineEmits<{
 }>()
 
 const appStore = useAppStore()
+const todoStore = useTodoStore()
 const appWindow = getCurrentWindow()
 
 // 是否固定模式
 const isFixed = computed(() => appStore.isFixed)
+
+// 当前视图模式
+const viewMode = computed(() => todoStore.viewMode)
+
+// 切换视图模式
+async function toggleViewMode() {
+  const newMode: ViewMode = viewMode.value === 'list' ? 'quadrant' : 'list'
+  todoStore.setViewMode(newMode)
+  await todoStore.saveViewMode()
+}
 
 // 是否有更新
 const hasUpdate = computed(() => appStore.hasUpdate)
@@ -97,6 +109,19 @@ async function handleVersionClick() {
     </div>
     
     <div class="title-right">
+      <!-- 视图切换按钮 -->
+      <button 
+        class="title-btn view-toggle-btn" 
+        :class="{ active: viewMode === 'quadrant' }"
+        :title="viewMode === 'list' ? '切换到四象限视图' : '切换到列表视图'"
+        @click="toggleViewMode"
+      >
+        <el-icon :size="16">
+          <Grid v-if="viewMode === 'list'" />
+          <List v-else />
+        </el-icon>
+      </button>
+
       <!-- 固定按钮 -->
       <button 
         class="title-btn" 

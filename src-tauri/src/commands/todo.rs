@@ -9,7 +9,7 @@ pub fn get_todos(db: State<Database>) -> Result<Vec<Todo>, String> {
     db.with_connection(|conn| {
         // 获取所有待办
         let mut stmt = conn.prepare(
-            "SELECT id, title, description, color, notify_at, notify_before, 
+            "SELECT id, title, description, color, quadrant, notify_at, notify_before, 
                     notified, completed, sort_order, start_time, end_time, created_at, updated_at 
              FROM todos 
              ORDER BY completed ASC, sort_order ASC, created_at DESC"
@@ -21,15 +21,16 @@ pub fn get_todos(db: State<Database>) -> Result<Vec<Todo>, String> {
                 title: row.get(1)?,
                 description: row.get(2)?,
                 color: row.get(3)?,
-                notify_at: row.get(4)?,
-                notify_before: row.get(5)?,
-                notified: row.get::<_, i32>(6)? != 0,
-                completed: row.get::<_, i32>(7)? != 0,
-                sort_order: row.get(8)?,
-                start_time: row.get(9)?,
-                end_time: row.get(10)?,
-                created_at: row.get(11)?,
-                updated_at: row.get(12)?,
+                quadrant: row.get(4)?,
+                notify_at: row.get(5)?,
+                notify_before: row.get(6)?,
+                notified: row.get::<_, i32>(7)? != 0,
+                completed: row.get::<_, i32>(8)? != 0,
+                sort_order: row.get(9)?,
+                start_time: row.get(10)?,
+                end_time: row.get(11)?,
+                created_at: row.get(12)?,
+                updated_at: row.get(13)?,
                 subtasks: Vec::new(),
             })
         })?;
@@ -78,12 +79,13 @@ pub fn create_todo(db: State<Database>, data: CreateTodoRequest) -> Result<Todo,
             .unwrap_or(-1);
 
         conn.execute(
-            "INSERT INTO todos (title, description, color, notify_at, notify_before, start_time, end_time, sort_order) 
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO todos (title, description, color, quadrant, notify_at, notify_before, start_time, end_time, sort_order) 
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             (
                 &data.title,
                 &data.description,
                 &data.color,
+                data.quadrant,
                 &data.notify_at,
                 data.notify_before.unwrap_or(0),
                 &data.start_time,
@@ -96,7 +98,7 @@ pub fn create_todo(db: State<Database>, data: CreateTodoRequest) -> Result<Todo,
 
         // 返回新创建的待办
         conn.query_row(
-            "SELECT id, title, description, color, notify_at, notify_before, 
+            "SELECT id, title, description, color, quadrant, notify_at, notify_before, 
                     notified, completed, sort_order, start_time, end_time, created_at, updated_at 
              FROM todos WHERE id = ?",
             [id],
@@ -106,15 +108,16 @@ pub fn create_todo(db: State<Database>, data: CreateTodoRequest) -> Result<Todo,
                     title: row.get(1)?,
                     description: row.get(2)?,
                     color: row.get(3)?,
-                    notify_at: row.get(4)?,
-                    notify_before: row.get(5)?,
-                    notified: row.get::<_, i32>(6)? != 0,
-                    completed: row.get::<_, i32>(7)? != 0,
-                    sort_order: row.get(8)?,
-                    start_time: row.get(9)?,
-                    end_time: row.get(10)?,
-                    created_at: row.get(11)?,
-                    updated_at: row.get(12)?,
+                    quadrant: row.get(4)?,
+                    notify_at: row.get(5)?,
+                    notify_before: row.get(6)?,
+                    notified: row.get::<_, i32>(7)? != 0,
+                    completed: row.get::<_, i32>(8)? != 0,
+                    sort_order: row.get(9)?,
+                    start_time: row.get(10)?,
+                    end_time: row.get(11)?,
+                    created_at: row.get(12)?,
+                    updated_at: row.get(13)?,
                     subtasks: Vec::new(),
                 })
             },
@@ -140,6 +143,10 @@ pub fn update_todo(db: State<Database>, id: i64, data: UpdateTodoRequest) -> Res
         if let Some(ref color) = data.color {
             updates.push("color = ?");
             params.push(Box::new(color.clone()));
+        }
+        if let Some(quadrant) = data.quadrant {
+            updates.push("quadrant = ?");
+            params.push(Box::new(quadrant));
         }
         // 明确清除通知时间
         if data.clear_notify_at {
@@ -192,7 +199,7 @@ pub fn update_todo(db: State<Database>, id: i64, data: UpdateTodoRequest) -> Res
 
         // 返回更新后的待办
         let mut todo = conn.query_row(
-            "SELECT id, title, description, color, notify_at, notify_before, 
+            "SELECT id, title, description, color, quadrant, notify_at, notify_before, 
                     notified, completed, sort_order, start_time, end_time, created_at, updated_at 
              FROM todos WHERE id = ?",
             [id],
@@ -202,15 +209,16 @@ pub fn update_todo(db: State<Database>, id: i64, data: UpdateTodoRequest) -> Res
                     title: row.get(1)?,
                     description: row.get(2)?,
                     color: row.get(3)?,
-                    notify_at: row.get(4)?,
-                    notify_before: row.get(5)?,
-                    notified: row.get::<_, i32>(6)? != 0,
-                    completed: row.get::<_, i32>(7)? != 0,
-                    sort_order: row.get(8)?,
-                    start_time: row.get(9)?,
-                    end_time: row.get(10)?,
-                    created_at: row.get(11)?,
-                    updated_at: row.get(12)?,
+                    quadrant: row.get(4)?,
+                    notify_at: row.get(5)?,
+                    notify_before: row.get(6)?,
+                    notified: row.get::<_, i32>(7)? != 0,
+                    completed: row.get::<_, i32>(8)? != 0,
+                    sort_order: row.get(9)?,
+                    start_time: row.get(10)?,
+                    end_time: row.get(11)?,
+                    created_at: row.get(12)?,
+                    updated_at: row.get(13)?,
                     subtasks: Vec::new(),
                 })
             },
