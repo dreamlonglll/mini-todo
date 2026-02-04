@@ -1,18 +1,19 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useAppStore, useTodoStore, APP_VERSION } from '@/stores'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import { ElMessageBox } from 'element-plus'
 import type { ViewMode } from '@/types'
 
-defineProps<{
+const props = defineProps<{
   showCalendarControls?: boolean
   currentMonthText?: string
+  completedCount?: number
 }>()
 
 const emit = defineEmits<{
   (e: 'open-settings'): void
+  (e: 'open-completed'): void
   (e: 'calendar-prev'): void
   (e: 'calendar-next'): void
   (e: 'calendar-today'): void
@@ -20,7 +21,6 @@ const emit = defineEmits<{
 
 const appStore = useAppStore()
 const todoStore = useTodoStore()
-const appWindow = getCurrentWindow()
 
 // 是否固定模式
 const isFixed = computed(() => appStore.isFixed)
@@ -44,11 +44,6 @@ const latestVersion = computed(() => appStore.latestVersion)
 // 切换固定模式
 async function toggleFixed() {
   await appStore.toggleFixedMode()
-}
-
-// 关闭窗口
-async function closeWindow() {
-  await appWindow.close()
 }
 
 // 打开设置
@@ -109,6 +104,16 @@ async function handleVersionClick() {
     </div>
     
     <div class="title-right">
+      <!-- 已完成按钮 -->
+      <button 
+        v-if="props.completedCount && props.completedCount > 0"
+        class="title-btn"
+        title="已完成"
+        @click="emit('open-completed')"
+      >
+        <el-icon :size="16"><Finished /></el-icon>
+      </button>
+
       <!-- 视图切换按钮 -->
       <button 
         class="title-btn view-toggle-btn" 
@@ -116,10 +121,15 @@ async function handleVersionClick() {
         :title="viewMode === 'list' ? '切换到四象限视图' : '切换到列表视图'"
         @click="toggleViewMode"
       >
-        <el-icon :size="16">
-          <Grid v-if="viewMode === 'list'" />
-          <List v-else />
-        </el-icon>
+        <!-- 四象限图标（4格子） -->
+        <svg v-if="viewMode === 'list'" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+          <rect x="3" y="3" width="8" height="8" rx="1" />
+          <rect x="13" y="3" width="8" height="8" rx="1" />
+          <rect x="3" y="13" width="8" height="8" rx="1" />
+          <rect x="13" y="13" width="8" height="8" rx="1" />
+        </svg>
+        <!-- 列表图标 -->
+        <el-icon v-else :size="16"><List /></el-icon>
       </button>
 
       <!-- 固定按钮 -->
@@ -143,18 +153,6 @@ async function handleVersionClick() {
       >
         <el-icon :size="16">
           <Setting />
-        </el-icon>
-      </button>
-
-      <!-- 关闭按钮 (非固定模式) -->
-      <button 
-        v-if="!isFixed"
-        class="title-btn btn-close"
-        title="关闭"
-        @click="closeWindow"
-      >
-        <el-icon :size="16">
-          <Close />
         </el-icon>
       </button>
     </div>
@@ -297,4 +295,5 @@ async function handleVersionClick() {
     box-shadow: 0 0 0 0 rgba(239, 68, 68, 0);
   }
 }
+
 </style>

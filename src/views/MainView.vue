@@ -311,7 +311,9 @@ async function openSettings() {
     <TitleBar 
       :show-calendar-controls="showCalendar"
       :current-month-text="calendarMonthText"
+      :completed-count="completedCount"
       @open-settings="openSettings"
+      @open-completed="showCompletedDialog = true"
       @calendar-prev="handleCalendarPrev"
       @calendar-next="handleCalendarNext"
       @calendar-today="handleCalendarToday"
@@ -332,14 +334,6 @@ async function openSettings() {
             v-else
             @edit="openEditor"
           />
-        </div>
-
-        <!-- 已完成按钮（仅在列表模式显示） -->
-        <div v-if="viewMode === 'list' && completedCount > 0" class="completed-btn-wrapper" :class="{ 'fixed-mode': appStore.isFixed }">
-          <button class="completed-btn" @click="showCompletedDialog = true">
-            <span>已完成 ({{ completedCount }})</span>
-            <el-icon :size="14"><ArrowRight /></el-icon>
-          </button>
         </div>
       </div>
 
