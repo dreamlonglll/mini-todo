@@ -2,18 +2,19 @@
 
 一款简洁高效的 Windows 桌面待办事项管理应用，基于 Tauri 2 + Vue 3 + TypeScript 开发。
 
-![非固定模式](docs/images/screenshot1.png)
-![固定模式](docs/images/screenshot2.png)
+![列表模式](docs/images/list.png)
+![四象限模式](docs/images/grid.png)
+
+![添加/编辑模式](docs/images/add.png)
+
+
 
 ## 功能特性
 
 ### 待办管理
-- 创建、编辑、删除待办事项
-- 支持添加子任务
-- 优先级自定义颜色
-- 完成状态标记
-- 拖拽排序
-- 置顶功能
+- 以列表模式/四象限模式展示待办项（支持子任务）
+- 支持日历展示，以及自定义颜色
+- 列表/四象限模式都拖拽排序
 - 系统提醒
 
 ### 日历模式
