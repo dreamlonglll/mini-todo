@@ -140,6 +140,9 @@ const calendarCells = computed<CalendarCell[]>(() => {
   return cells
 })
 
+// 加载失败后的重试延迟（毫秒）
+const RELOAD_RETRY_DELAY = 5000
+
 // 加载节假日数据
 async function loadHolidayData() {
   const year = currentYear.value
@@ -161,6 +164,14 @@ async function loadHolidayData() {
   }
   
   holidayData.value = allHolidays
+  
+  // 如果加载结果为空，延迟后自动重试一次
+  if (allHolidays.size === 0) {
+    console.warn('[CalendarView] Holiday data is empty, will retry after delay...')
+    setTimeout(() => {
+      loadHolidayData()
+    }, RELOAD_RETRY_DELAY)
+  }
 }
 
 // 判断单元格是否是休息日（法定节假日）
