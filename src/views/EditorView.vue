@@ -175,6 +175,20 @@ const originalNotifyAt = ref<string | null>(null)
 const originalStartTime = ref<string | null>(null)
 const originalEndTime = ref<string | null>(null)
 
+// 根据象限ID获取对应颜色
+function getQuadrantColor(quadrantId: QuadrantType): string {
+  const quadrant = QUADRANT_INFO.find(q => q.id === quadrantId)
+  return quadrant ? quadrant.color : DEFAULT_COLOR
+}
+
+// 选择象限时自动同步颜色（仅新建模式）
+function handleQuadrantSelect(quadrantId: QuadrantType) {
+  form.value.quadrant = quadrantId
+  if (!isEdit.value) {
+    form.value.color = getQuadrantColor(quadrantId)
+  }
+}
+
 // 初始化
 onMounted(async () => {
   if (todoId.value) {
@@ -467,7 +481,7 @@ function handleClose() {
                   '--quadrant-bg': quadrant.bgColor 
                 }"
                 type="button"
-                @click="form.quadrant = quadrant.id"
+                @click="handleQuadrantSelect(quadrant.id)"
               >
                 <span class="quadrant-indicator" :style="{ backgroundColor: quadrant.color }"></span>
                 <span class="quadrant-name">{{ quadrant.name }}</span>
