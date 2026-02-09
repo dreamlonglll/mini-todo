@@ -61,11 +61,41 @@ pub fn get_settings(db: State<Database>) -> Result<AppSettings, String> {
             )
             .unwrap_or_else(|_| "dark".to_string());
 
+        let show_calendar: bool = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'show_calendar'",
+                [],
+                |row| {
+                    let val: String = row.get(0)?;
+                    Ok(val == "true")
+                },
+            )
+            .unwrap_or(false);
+
+        let view_mode: String = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'view_mode'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or_else(|_| "list".to_string());
+
+        let notification_type: String = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'notification_type'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or_else(|_| "system".to_string());
+
         Ok(AppSettings {
             is_fixed,
             window_position,
             window_size,
             text_theme,
+            show_calendar,
+            view_mode,
+            notification_type,
         })
     })
     .map_err(|e| e.to_string())

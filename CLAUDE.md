@@ -93,9 +93,40 @@ mini-todo/
 ### 数据库设计
 - **数据库类型**：SQLite
 - **存储位置**：`%APPDATA%/mini-todo/data.db`
-- **主要表**：todos（待办表）、subtasks（子任务表）、settings（设置表）
+- **主要表**：todos（待办表）、subtasks（子任务表）、settings（设置表）、screen_configs（屏幕配置表）
+- **迁移版本**：当前 v1~v6，通过 `src-tauri/src/db/migrations.rs` 管理
 
 > 详细设计请参阅：[数据库设计](docs/开发文档/05-数据库设计.md)
+
+### 数据导入导出
+
+> **重要**：当数据库结构变更（新增表/字段/设置项）时，必须同步更新导入导出功能！
+
+- **导出版本号**：当前 `2.0`（位于 `src-tauri/src/commands/data.rs`）
+- **关键文件**：
+  - 模型定义：`src-tauri/src/db/models.rs` → `ExportData`、`AppSettings`
+  - 导入导出逻辑：`src-tauri/src/commands/data.rs` → `export_data`、`import_data`
+  - 前端类型：`src/types/todo.ts` → `ExportData`（前端只传递 JSON 字符串，无需严格同步）
+
+#### 导出覆盖的数据
+
+| 数据表/分类 | 导出内容 | 说明 |
+|------------|---------|------|
+| `todos` | 全部字段 | id, title, description, color, quadrant, notify_at, notify_before, notified, completed, sort_order, start_time, end_time, created_at, updated_at |
+| `subtasks` | 全部字段 | id, parent_id, title, completed, sort_order, created_at, updated_at |
+| `settings` | 7 个键值 | is_fixed, window_position, window_size, text_theme, show_calendar, view_mode, notification_type |
+| `screen_configs` | **不导出** | 与机器屏幕配置绑定，不适合跨机器迁移 |
+| `migrations` | **不导出** | 导入时通过迁移机制自动重建 |
+
+#### 维护检查清单
+
+当新增数据库迁移（如 v7）时，请检查：
+1. 新增的 **settings 键值** 是否已加入 `AppSettings` 结构体（含 `#[serde(default)]`）
+2. `export_data` 函数是否读取了新设置
+3. `import_data` 函数是否写入了新设置
+4. 新增的 **数据表** 是否需要纳入导出范围
+5. 旧版数据导入的兼容性（新字段必须有默认值）
+6. 导出版本号是否需要递增
 
 ## 开发命令
 

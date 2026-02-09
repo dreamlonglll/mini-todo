@@ -125,10 +125,27 @@ pub struct AppSettings {
     /// 文本主题：light（浅色文字，适配深色背景）或 dark（深色文字，适配浅色背景）
     #[serde(default = "default_text_theme")]
     pub text_theme: String,
+    /// 是否显示日历面板
+    #[serde(default)]
+    pub show_calendar: bool,
+    /// 视图模式：list 或 quadrant
+    #[serde(default = "default_view_mode")]
+    pub view_mode: String,
+    /// 通知类型：system 或 app
+    #[serde(default = "default_notification_type")]
+    pub notification_type: String,
 }
 
 fn default_text_theme() -> String {
     "dark".to_string()
+}
+
+fn default_view_mode() -> String {
+    "list".to_string()
+}
+
+fn default_notification_type() -> String {
+    "system".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

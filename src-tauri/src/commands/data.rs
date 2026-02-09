@@ -2,6 +2,29 @@ use tauri::State;
 use chrono::Local;
 use crate::db::{Database, Todo, SubTask, ExportData, AppSettings, WindowPosition, WindowSize};
 
+/// 从 settings 表读取字符串值的辅助函数
+fn get_setting_string(conn: &rusqlite::Connection, key: &str, default: &str) -> String {
+    conn.query_row(
+        "SELECT value FROM settings WHERE key = ?1",
+        [key],
+        |row| row.get(0),
+    )
+    .unwrap_or_else(|_| default.to_string())
+}
+
+/// 从 settings 表读取布尔值的辅助函数
+fn get_setting_bool(conn: &rusqlite::Connection, key: &str, default: bool) -> bool {
+    conn.query_row(
+        "SELECT value FROM settings WHERE key = ?1",
+        [key],
+        |row| {
+            let val: String = row.get(0)?;
+            Ok(val == "true")
+        },
+    )
+    .unwrap_or(default)
+}
+
 #[tauri::command]
 pub fn export_data(db: State<Database>) -> Result<String, String> {
     let result = db.with_connection(|conn| {
@@ -57,16 +80,7 @@ pub fn export_data(db: State<Database>) -> Result<String, String> {
         }
 
         // 获取设置
-        let is_fixed: bool = conn
-            .query_row(
-                "SELECT value FROM settings WHERE key = 'is_fixed'",
-                [],
-                |row| {
-                    let val: String = row.get(0)?;
-                    Ok(val == "true")
-                },
-            )
-            .unwrap_or(false);
+        let is_fixed = get_setting_bool(conn, "is_fixed", false);
 
         let window_position: Option<WindowPosition> = conn
             .query_row(
@@ -90,29 +104,31 @@ pub fn export_data(db: State<Database>) -> Result<String, String> {
             )
             .unwrap_or(None);
 
-        let text_theme: String = conn
-            .query_row(
-                "SELECT value FROM settings WHERE key = 'text_theme'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap_or_else(|_| "dark".to_string());
+        let text_theme = get_setting_string(conn, "text_theme", "dark");
+        let show_calendar = get_setting_bool(conn, "show_calendar", false);
+        let view_mode = get_setting_string(conn, "view_mode", "list");
+        let notification_type = get_setting_string(conn, "notification_type", "system");
 
-        Ok((todos, is_fixed, window_position, window_size, text_theme))
+        let settings = AppSettings {
+            is_fixed,
+            window_position,
+            window_size,
+            text_theme,
+            show_calendar,
+            view_mode,
+            notification_type,
+        };
+
+        Ok((todos, settings))
     });
 
     match result {
-        Ok((todos, is_fixed, window_position, window_size, text_theme)) => {
+        Ok((todos, settings)) => {
             let export_data = ExportData {
-                version: "1.0".to_string(),
+                version: "2.0".to_string(),
                 exported_at: Local::now().format("%Y-%m-%dT%H:%M:%S%:z").to_string(),
                 todos,
-                settings: AppSettings {
-                    is_fixed,
-                    window_position,
-                    window_size,
-                    text_theme,
-                },
+                settings,
             };
             serde_json::to_string_pretty(&export_data).map_err(|e| e.to_string())
         }
@@ -198,6 +214,24 @@ pub fn import_data(db: State<Database>, json_data: String) -> Result<(), String>
         conn.execute(
             "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('text_theme', ?, datetime('now', 'localtime'))",
             [&import_data.settings.text_theme],
+        )?;
+
+        // 导入日历显示设置
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('show_calendar', ?, datetime('now', 'localtime'))",
+            [if import_data.settings.show_calendar { "true" } else { "false" }],
+        )?;
+
+        // 导入视图模式
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('view_mode', ?, datetime('now', 'localtime'))",
+            [&import_data.settings.view_mode],
+        )?;
+
+        // 导入通知类型
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('notification_type', ?, datetime('now', 'localtime'))",
+            [&import_data.settings.notification_type],
         )?;
 
         Ok(())
