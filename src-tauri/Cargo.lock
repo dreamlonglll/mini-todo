@@ -2143,7 +2143,7 @@ checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
 name = "mini-todo"
-version = "1.4.4"
+version = "1.4.5"
 dependencies = [
  "chrono",
  "dirs 5.0.1",
