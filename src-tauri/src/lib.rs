@@ -5,8 +5,9 @@ mod services;
 use db::Database;
 use services::NotificationService;
 use tauri::{Manager, Emitter};
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri_plugin_autostart::ManagerExt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -81,10 +82,23 @@ pub fn run() {
             let toggle_fixed = MenuItem::with_id(app, "toggle_fixed", toggle_fixed_text, true, None::<&str>)?;
             let reset = MenuItem::with_id(app, "reset", "重置位置", true, None::<&str>)?;
             let add_todo = MenuItem::with_id(app, "add_todo", "添加待办项", true, None::<&str>)?;
-            let separator = PredefinedMenuItem::separator(app)?;
+            let open_settings = MenuItem::with_id(app, "open_settings", "打开设置", true, None::<&str>)?;
+            let auto_start_enabled = app.autolaunch().is_enabled().unwrap_or(false);
+            let auto_start = CheckMenuItem::with_id(app, "auto_start", "开机自启动", true, auto_start_enabled, None::<&str>)?;
+            let separator1 = PredefinedMenuItem::separator(app)?;
+            let separator2 = PredefinedMenuItem::separator(app)?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
             
-            let menu = Menu::with_items(app, &[&toggle_fixed, &reset, &add_todo, &separator, &quit])?;
+            let menu = Menu::with_items(app, &[
+                &add_todo,
+                &separator1,
+                &toggle_fixed,
+                &reset,
+                &open_settings,
+                &auto_start,
+                &separator2,
+                &quit,
+            ])?;
             
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
@@ -116,6 +130,25 @@ pub fn run() {
                             if let Some(window) = app.get_webview_window("main") {
                                 let _ = window.emit::<()>("tray-add-todo", ());
                             }
+                        }
+                        "open_settings" => {
+                            // 发送事件给前端打开设置窗口
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                                let _ = window.emit::<()>("tray-open-settings", ());
+                            }
+                        }
+                        "auto_start" => {
+                            // 切换开机自启动
+                            let autolaunch = app.autolaunch();
+                            let currently_enabled = autolaunch.is_enabled().unwrap_or(false);
+                            if currently_enabled {
+                                let _ = autolaunch.disable();
+                            } else {
+                                let _ = autolaunch.enable();
+                            }
+                            // CheckMenuItem 会自动切换勾选状态
                         }
                         "quit" => {
                             app.exit(0);

@@ -81,6 +81,7 @@ let unlistenResized: (() => void) | null = null
 let unlistenTrayToggle: (() => void) | null = null
 let unlistenTrayReset: (() => void) | null = null
 let unlistenTrayAddTodo: (() => void) | null = null
+let unlistenTrayOpenSettings: (() => void) | null = null
 let unlistenFocus: (() => void) | null = null
 
 // 防抖保存定时器
@@ -150,6 +151,10 @@ onMounted(async () => {
     openEditor(undefined, true) // 从托盘打开时居中于屏幕
   })
 
+  unlistenTrayOpenSettings = await listen('tray-open-settings', () => {
+    openSettings()
+  })
+
   unlistenFocus = await appWindow.onFocusChanged(async ({ payload: focused }) => {
     if (focused && isModalOpen.value) {
       await bringModalToFront()
@@ -165,6 +170,7 @@ onUnmounted(() => {
   if (unlistenTrayToggle) unlistenTrayToggle()
   if (unlistenTrayReset) unlistenTrayReset()
   if (unlistenTrayAddTodo) unlistenTrayAddTodo()
+  if (unlistenTrayOpenSettings) unlistenTrayOpenSettings()
   if (unlistenFocus) unlistenFocus()
   if (saveDebounceTimer.value) {
     clearTimeout(saveDebounceTimer.value)
