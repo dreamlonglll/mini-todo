@@ -557,7 +557,6 @@ function handleClose() {
           <el-form-item label="时间范围">
             <div class="time-range-picker">
               <div class="time-range-row">
-                <span class="time-label">开始</span>
                 <el-date-picker
                   v-model="startDate"
                   type="date"
@@ -586,7 +585,6 @@ function handleClose() {
                 />
               </div>
               <div class="time-range-row">
-                <span class="time-label">截止</span>
                 <el-date-picker
                   v-model="endDate"
                   type="date"
@@ -1290,13 +1288,6 @@ function handleClose() {
   display: flex;
   align-items: center;
   gap: 8px;
-
-  .time-label {
-    width: 32px;
-    font-size: 12px;
-    color: var(--text-secondary);
-    flex-shrink: 0;
-  }
 
   .date-picker-sm {
     flex: 1;
