@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
+import { emit } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { save, open } from '@tauri-apps/plugin-dialog'
 import { writeTextFile, readTextFile } from '@tauri-apps/plugin-fs'
@@ -204,7 +205,8 @@ async function handleImport() {
     const jsonData = await readTextFile(filePath as string)
     await invoke('import_data', { jsonData })
     
-    ElMessage.success('导入成功')
+    // 通知主窗口导入成功（在主窗口显示提示）
+    await emit('data-imported')
     handleClose()
   } catch (e) {
     if (String(e) !== 'cancel') {

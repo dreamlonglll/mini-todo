@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, computed, ref } from 'vue'
 import dayjs from 'dayjs'
+import { ElMessage } from 'element-plus'
 import { useTodoStore, useAppStore } from '@/stores'
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { getCurrentWindow, primaryMonitor, currentMonitor } from '@tauri-apps/api/window'
@@ -82,6 +83,7 @@ let unlistenTrayToggle: (() => void) | null = null
 let unlistenTrayReset: (() => void) | null = null
 let unlistenTrayAddTodo: (() => void) | null = null
 let unlistenTrayOpenSettings: (() => void) | null = null
+let unlistenDataImported: (() => void) | null = null
 let unlistenFocus: (() => void) | null = null
 
 // 防抖保存定时器
@@ -155,6 +157,10 @@ onMounted(async () => {
     openSettings()
   })
 
+  unlistenDataImported = await listen('data-imported', () => {
+    ElMessage.success('数据导入成功')
+  })
+
   unlistenFocus = await appWindow.onFocusChanged(async ({ payload: focused }) => {
     if (focused && isModalOpen.value) {
       await bringModalToFront()
@@ -171,6 +177,7 @@ onUnmounted(() => {
   if (unlistenTrayReset) unlistenTrayReset()
   if (unlistenTrayAddTodo) unlistenTrayAddTodo()
   if (unlistenTrayOpenSettings) unlistenTrayOpenSettings()
+  if (unlistenDataImported) unlistenDataImported()
   if (unlistenFocus) unlistenFocus()
   if (saveDebounceTimer.value) {
     clearTimeout(saveDebounceTimer.value)
@@ -287,11 +294,13 @@ async function openSettings() {
     })
     activeModalWindow = webview
     
-    // 监听窗口关闭，清除模态状态并重新加载设置
+    // 监听窗口关闭，清除模态状态并重新加载设置和数据
     webview.once('tauri://destroyed', async () => {
       isModalOpen.value = false
       activeModalWindow = null
-      // 重新加载日历显示设置（因为设置窗口是独立的 store 实例）
+      // 重新加载数据和设置（导入数据后需要刷新）
+      await todoStore.fetchTodos()
+      await todoStore.loadViewMode()
       await appStore.loadShowCalendar()
     })
     
