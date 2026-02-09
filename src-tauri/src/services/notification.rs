@@ -181,7 +181,7 @@ impl NotificationService {
         let app_handle_clone = app_handle.clone();
         
         // 在主线程创建窗口
-        let _ = WebviewWindowBuilder::new(
+        let mut window_builder = WebviewWindowBuilder::new(
             app_handle,
             &window_label,
             WebviewUrl::App(url.into()),
@@ -190,14 +190,18 @@ impl NotificationService {
         .inner_size(NOTIFICATION_WIDTH as f64, NOTIFICATION_HEIGHT as f64)
         .position(x as f64, y as f64)
         .decorations(false)
-        .transparent(true)
         .always_on_top(true)
         .resizable(false)
         .skip_taskbar(true)
         .focused(false)
-        .visible(true)
-        .build()
-        .map_err(|e| e.to_string())?;
+        .visible(true);
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            window_builder = window_builder.transparent(true);
+        }
+
+        let _ = window_builder.build().map_err(|e| e.to_string())?;
         
         // 监听窗口关闭事件，减少活动通知计数
         let _ = app_handle.listen(format!("notification-closed-{}", window_label_clone), move |_| {
