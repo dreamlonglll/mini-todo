@@ -162,6 +162,11 @@ body {
       &:hover {
         background: rgba(255, 255, 255, 0.15);
       }
+
+      .todo-actions {
+        background: rgba(30, 30, 30, 0.9);
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+      }
     }
 
     .completed-section {
@@ -287,6 +292,7 @@ body {
 .todo-item {
   display: flex;
   align-items: flex-start;
+  position: relative;
   padding: var(--space-2) var(--space-3);
   margin-bottom: var(--space-1);
   border-radius: var(--radius-base);
@@ -377,6 +383,14 @@ body {
     align-items: center;
     gap: var(--space-1);
     flex-shrink: 0;
+    position: absolute;
+    right: var(--space-2);
+    top: var(--space-2);
+    background: rgba(255, 255, 255, 0.95);
+    padding: 2px 4px;
+    border-radius: var(--radius-sm);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
+    z-index: 5;
 
     .action-btn {
       display: flex;
@@ -524,6 +538,11 @@ body {
 
   .todo-item:hover {
     background: rgba(255, 255, 255, 0.15);
+  }
+
+  .todo-item .todo-actions {
+    background: rgba(30, 30, 30, 0.9);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
   }
 
   .quick-add {
