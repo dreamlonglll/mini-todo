@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed, watch } from 'vue'
+import { ref, onMounted, computed, watch, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -408,6 +408,70 @@ function togglePendingSubtask(subtaskId: number) {
   }
 }
 
+// 编辑子任务相关状态
+const editingSubtaskId = ref<number | null>(null)
+const editingSubtaskTitle = ref('')
+const editInputRef = ref<HTMLInputElement | null>(null)
+
+// 开始编辑子任务
+async function startEditSubtask(subtask: { id: number; title: string }) {
+  editingSubtaskId.value = subtask.id
+  editingSubtaskTitle.value = subtask.title
+  await nextTick()
+  editInputRef.value?.focus()
+  editInputRef.value?.select()
+}
+
+// 保存编辑子任务
+async function saveEditSubtask() {
+  if (editingSubtaskId.value === null) return
+  
+  const newTitle = editingSubtaskTitle.value.trim()
+  if (!newTitle) {
+    cancelEditSubtask()
+    return
+  }
+
+  if (isEdit.value) {
+    // 编辑模式：调用 API 更新子任务标题
+    try {
+      await invoke('update_subtask', {
+        id: editingSubtaskId.value,
+        data: { title: newTitle }
+      })
+      await loadTodo()
+    } catch (e) {
+      console.error('Failed to update subtask:', e)
+    }
+  } else {
+    // 新建模式：更新本地列表
+    const subtask = pendingSubtasks.value.find(s => s.id === editingSubtaskId.value)
+    if (subtask) {
+      subtask.title = newTitle
+    }
+  }
+
+  editingSubtaskId.value = null
+  editingSubtaskTitle.value = ''
+}
+
+// 取消编辑子任务
+function cancelEditSubtask() {
+  editingSubtaskId.value = null
+  editingSubtaskTitle.value = ''
+}
+
+// 处理编辑输入框按键
+function handleEditKeydown(e: KeyboardEvent) {
+  if (e.key === 'Enter') {
+    e.preventDefault()
+    saveEditSubtask()
+  } else if (e.key === 'Escape') {
+    e.preventDefault()
+    cancelEditSubtask()
+  }
+}
+
 // 关闭窗口
 function handleClose() {
   appWindow.close()
@@ -681,10 +745,34 @@ function handleClose() {
                 >
                   <el-icon v-if="subtask.completed" class="check-icon"><Check /></el-icon>
                 </div>
-                <span class="subtask-title">
+                <!-- 编辑状态：显示输入框 -->
+                <input
+                  v-if="editingSubtaskId === subtask.id"
+                  ref="editInputRef"
+                  v-model="editingSubtaskTitle"
+                  class="subtask-edit-input"
+                  type="text"
+                  @keydown="handleEditKeydown"
+                  @blur="saveEditSubtask"
+                />
+                <!-- 非编辑状态：显示标题，双击进入编辑 -->
+                <span 
+                  v-else
+                  class="subtask-title"
+                  @dblclick="startEditSubtask(subtask)"
+                >
                   {{ subtask.title }}
                 </span>
                 <button 
+                  v-if="editingSubtaskId !== subtask.id"
+                  class="edit-btn"
+                  @click="startEditSubtask(subtask)"
+                  title="编辑子任务"
+                >
+                  <el-icon><Edit /></el-icon>
+                </button>
+                <button 
+                  v-if="editingSubtaskId !== subtask.id"
                   class="delete-btn"
                   @click="deleteSubtask(subtask.id)"
                   title="删除子任务"
@@ -1011,6 +1099,7 @@ function handleClose() {
     border-color: #cbd5e1;
     box-shadow: 0 2px 4px rgba(0, 0, 0, 0.04);
 
+    .edit-btn,
     .delete-btn {
       opacity: 1;
     }
@@ -1060,6 +1149,47 @@ function handleClose() {
     color: #334155;
     line-height: 1.4;
     word-break: break-word;
+    cursor: default;
+    padding: 2px 4px;
+    border-radius: 4px;
+    transition: background 0.15s ease;
+
+    &:hover {
+      background: #f1f5f9;
+    }
+  }
+
+  .subtask-edit-input {
+    flex: 1;
+    font-size: 13px;
+    color: #334155;
+    line-height: 1.4;
+    padding: 2px 6px;
+    border: 1px solid #3b82f6;
+    border-radius: 4px;
+    outline: none;
+    background: #ffffff;
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+    min-width: 0;
+  }
+
+  .edit-btn {
+    padding: 4px;
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    opacity: 0;
+    transition: all 0.15s ease;
+    color: #94a3b8;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+    &:hover {
+      background: #dbeafe;
+      color: #3b82f6;
+    }
   }
 
   .delete-btn {
