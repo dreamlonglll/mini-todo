@@ -168,6 +168,7 @@ const notifyBeforeOptions = [
 // 自定义提前时间
 const customNotifyBefore = ref(15)
 const isCustomNotifyBefore = ref(false)
+const isUpdatingCompleteState = ref(false)
 
 // 原始的通知时间（用于判断是否需要清除）
 const originalNotifyAt = ref<string | null>(null)
@@ -309,6 +310,34 @@ async function handleSave() {
   } catch (e) {
     console.error('Failed to save:', e)
   }
+}
+
+// 更新待办完成状态
+async function updateTodoCompleted(completed: boolean) {
+  if (!isEdit.value || !todoId.value || isUpdatingCompleteState.value) return
+  if (todo.value?.completed === completed) return
+
+  isUpdatingCompleteState.value = true
+  try {
+    const data: UpdateTodoRequest = { completed }
+    await invoke('update_todo', { id: todoId.value, data })
+    handleClose()
+  } catch (e) {
+    const action = completed ? 'complete' : 'reopen'
+    console.error(`Failed to ${action} todo:`, e)
+  } finally {
+    isUpdatingCompleteState.value = false
+  }
+}
+
+// 标记当前待办为已完成
+async function handleCompleteTodo() {
+  await updateTodoCompleted(true)
+}
+
+// 重新打开已完成待办
+async function handleReopenTodo() {
+  await updateTodoCompleted(false)
 }
 
 // 添加子任务
@@ -677,8 +706,35 @@ function handleClose() {
       </div>
 
       <div class="window-footer">
-        <el-button @click="handleClose">取消</el-button>
+        <el-button
+          v-if="isEdit && todo && !todo.completed"
+          type="success"
+          plain
+          :loading="isUpdatingCompleteState"
+          @click="handleCompleteTodo"
+        >
+          <el-icon><CircleCheck /></el-icon>
+          完成任务
+        </el-button>
+        <el-button
+          v-if="isEdit && todo && todo.completed"
+          type="warning"
+          plain
+          :loading="isUpdatingCompleteState"
+          @click="handleReopenTodo"
+        >
+          <el-icon><RefreshLeft /></el-icon>
+          重新打开
+        </el-button>
+        <el-button @click="handleClose">
+          <el-icon><Close /></el-icon>
+          取消
+        </el-button>
         <el-button type="primary" @click="handleSave">
+          <el-icon>
+            <Check v-if="isEdit" />
+            <Plus v-else />
+          </el-icon>
           {{ isEdit ? '保存' : '创建' }}
         </el-button>
       </div>
@@ -721,7 +777,8 @@ function handleClose() {
                   class="add-btn"
                   @click="addSubtask"
                 >
-                  添加
+                  <el-icon><Plus /></el-icon>
+                  <span>添加</span>
                 </button>
               </transition>
             </div>
@@ -1035,6 +1092,9 @@ function handleClose() {
     }
 
     .add-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
       padding: 4px 12px;
       font-size: 12px;
       font-weight: 500;
