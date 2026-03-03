@@ -1,8 +1,8 @@
-use tauri::State;
 use crate::db::{
-    Database, Todo, SubTask, CreateTodoRequest, UpdateTodoRequest,
-    CreateSubTaskRequest, UpdateSubTaskRequest,
+    CreateSubTaskRequest, CreateTodoRequest, Database, SubTask, Todo, UpdateSubTaskRequest,
+    UpdateTodoRequest,
 };
+use tauri::State;
 
 #[tauri::command]
 pub fn get_todos(db: State<Database>) -> Result<Vec<Todo>, String> {
@@ -12,7 +12,7 @@ pub fn get_todos(db: State<Database>) -> Result<Vec<Todo>, String> {
             "SELECT id, title, description, color, quadrant, notify_at, notify_before, 
                     notified, completed, sort_order, start_time, end_time, created_at, updated_at 
              FROM todos 
-             ORDER BY completed ASC, sort_order ASC, created_at DESC"
+             ORDER BY completed ASC, sort_order ASC, created_at DESC",
         )?;
 
         let todo_iter = stmt.query_map([], |row| {
@@ -43,7 +43,7 @@ pub fn get_todos(db: State<Database>) -> Result<Vec<Todo>, String> {
                 "SELECT id, parent_id, title, completed, sort_order, created_at, updated_at 
                  FROM subtasks 
                  WHERE parent_id = ? 
-                 ORDER BY sort_order ASC"
+                 ORDER BY sort_order ASC",
             )?;
 
             let subtask_iter = subtask_stmt.query_map([todo.id], |row| {
@@ -186,11 +186,13 @@ pub fn update_todo(db: State<Database>, id: i64, data: UpdateTodoRequest) -> Res
         }
 
         if updates.is_empty() {
-            return Err(rusqlite::Error::InvalidParameterName("No fields to update".to_string()));
+            return Err(rusqlite::Error::InvalidParameterName(
+                "No fields to update".to_string(),
+            ));
         }
 
         updates.push("updated_at = datetime('now', 'localtime')");
-        
+
         let sql = format!("UPDATE todos SET {} WHERE id = ?", updates.join(", "));
         params.push(Box::new(id));
 
@@ -227,7 +229,7 @@ pub fn update_todo(db: State<Database>, id: i64, data: UpdateTodoRequest) -> Res
         // 获取子任务
         let mut subtask_stmt = conn.prepare(
             "SELECT id, parent_id, title, completed, sort_order, created_at, updated_at 
-             FROM subtasks WHERE parent_id = ? ORDER BY sort_order ASC"
+             FROM subtasks WHERE parent_id = ? ORDER BY sort_order ASC",
         )?;
 
         let subtask_iter = subtask_stmt.query_map([id], |row| {
@@ -312,7 +314,11 @@ pub fn create_subtask(db: State<Database>, data: CreateSubTaskRequest) -> Result
 }
 
 #[tauri::command]
-pub fn update_subtask(db: State<Database>, id: i64, data: UpdateSubTaskRequest) -> Result<SubTask, String> {
+pub fn update_subtask(
+    db: State<Database>,
+    id: i64,
+    data: UpdateSubTaskRequest,
+) -> Result<SubTask, String> {
     db.with_connection(|conn| {
         let mut updates = Vec::new();
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -331,11 +337,13 @@ pub fn update_subtask(db: State<Database>, id: i64, data: UpdateSubTaskRequest) 
         }
 
         if updates.is_empty() {
-            return Err(rusqlite::Error::InvalidParameterName("No fields to update".to_string()));
+            return Err(rusqlite::Error::InvalidParameterName(
+                "No fields to update".to_string(),
+            ));
         }
 
         updates.push("updated_at = datetime('now', 'localtime')");
-        
+
         let sql = format!("UPDATE subtasks SET {} WHERE id = ?", updates.join(", "));
         params.push(Box::new(id));
 

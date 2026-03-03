@@ -117,16 +117,10 @@ fn migration_v4(conn: &Connection) -> Result<()> {
 /// 迁移 v3：todos 表新增 start_time 和 end_time 字段，支持日历视图
 fn migration_v3(conn: &Connection) -> Result<()> {
     // 新增 start_time 字段（开始时间，可为空）
-    conn.execute(
-        "ALTER TABLE todos ADD COLUMN start_time TEXT",
-        [],
-    )?;
+    conn.execute("ALTER TABLE todos ADD COLUMN start_time TEXT", [])?;
 
     // 新增 end_time 字段（截止时间，可为空）
-    conn.execute(
-        "ALTER TABLE todos ADD COLUMN end_time TEXT",
-        [],
-    )?;
+    conn.execute("ALTER TABLE todos ADD COLUMN end_time TEXT", [])?;
 
     // 创建索引以优化日历查询
     conn.execute(

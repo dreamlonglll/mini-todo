@@ -2,7 +2,10 @@ use tauri::Manager;
 
 /// 关闭指定的通知窗口
 #[tauri::command]
-pub fn close_notification_window(app_handle: tauri::AppHandle, window_label: String) -> Result<(), String> {
+pub fn close_notification_window(
+    app_handle: tauri::AppHandle,
+    window_label: String,
+) -> Result<(), String> {
     if let Some(window) = app_handle.get_webview_window(&window_label) {
         window.close().map_err(|e| e.to_string())?;
     }

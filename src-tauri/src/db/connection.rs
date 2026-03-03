@@ -11,17 +11,17 @@ pub struct Database {
 impl Database {
     pub fn new() -> Result<Self> {
         let db_path = Self::get_db_path();
-        
+
         // 确保目录存在
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
 
         let conn = Connection::open(&db_path)?;
-        
+
         // 启用外键约束
         conn.execute("PRAGMA foreign_keys = ON", [])?;
-        
+
         let db = Self {
             conn: Mutex::new(conn),
         };
