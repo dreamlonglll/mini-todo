@@ -22,9 +22,24 @@ use windows::Win32::UI::WindowsAndMessaging::{
 /// 全局固定模式状态
 pub static IS_FIXED_MODE: AtomicBool = AtomicBool::new(false);
 
+/// 托盘"固定模式"勾选菜单项引用，用于跨模块同步状态
+static TRAY_TOGGLE_FIXED: OnceLock<tauri::menu::CheckMenuItem<tauri::Wry>> = OnceLock::new();
+
 /// 检查当前是否处于固定模式
 pub fn is_fixed_mode() -> bool {
     IS_FIXED_MODE.load(Ordering::SeqCst)
+}
+
+/// 保存托盘"固定模式"勾选菜单项引用（在 setup 阶段调用一次）
+pub fn set_tray_toggle_fixed_item(item: tauri::menu::CheckMenuItem<tauri::Wry>) {
+    let _ = TRAY_TOGGLE_FIXED.set(item);
+}
+
+/// 同步更新托盘菜单项勾选状态
+fn sync_tray_fixed_checked(fixed: bool) {
+    if let Some(item) = TRAY_TOGGLE_FIXED.get() {
+        let _ = item.set_checked(fixed);
+    }
 }
 
 fn get_auto_hide_enabled_value(db: &State<Database>) -> bool {
@@ -684,6 +699,8 @@ pub fn set_window_fixed_mode(
     {
         let _ = (window, fixed);
     }
+
+    sync_tray_fixed_checked(fixed);
 
     Ok(())
 }

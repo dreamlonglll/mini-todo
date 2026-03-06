@@ -101,13 +101,14 @@ pub fn run() {
             }
 
             // 创建系统托盘菜单项
-            let toggle_fixed_text = if is_fixed_mode() {
-                "取消固定"
-            } else {
-                "固定窗口"
-            };
-            let toggle_fixed =
-                MenuItem::with_id(app, "toggle_fixed", toggle_fixed_text, true, None::<&str>)?;
+            let toggle_fixed = CheckMenuItem::with_id(
+                app,
+                "toggle_fixed",
+                "固定模式",
+                true,
+                is_fixed_mode(),
+                None::<&str>,
+            )?;
             let reset = MenuItem::with_id(app, "reset", "重置位置", true, None::<&str>)?;
             let add_todo = MenuItem::with_id(app, "add_todo", "添加待办项", true, None::<&str>)?;
             let open_settings =
@@ -139,6 +140,9 @@ pub fn run() {
                 ],
             )?;
 
+            // 保存托盘菜单项引用，供 set_window_fixed_mode 同步勾选状态
+            commands::set_tray_toggle_fixed_item(toggle_fixed.clone());
+
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
@@ -146,17 +150,9 @@ pub fn run() {
                 .on_menu_event(move |app: &tauri::AppHandle, event| {
                     match event.id().as_ref() {
                         "toggle_fixed" => {
-                            // 发送事件给前端处理
                             if let Some(window) = app.get_webview_window("main") {
                                 let _ = window.emit::<()>("tray-toggle-fixed", ());
                             }
-                            // 更新菜单项文本
-                            let new_text = if is_fixed_mode() {
-                                "固定窗口"
-                            } else {
-                                "取消固定"
-                            };
-                            let _ = toggle_fixed.set_text(new_text);
                         }
                         "reset" => {
                             // 重置窗口位置
