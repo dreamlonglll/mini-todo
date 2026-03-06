@@ -20,6 +20,11 @@ const routes: RouteRecordRaw[] = [
     path: '/notification',
     name: 'notification',
     component: () => import('@/views/NotificationView.vue')
+  },
+  {
+    path: '/subtask-editor',
+    name: 'subtask-editor',
+    component: () => import('@/views/SubtaskEditorView.vue')
   }
 ]
 

@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { ref, onMounted, computed, watch, nextTick } from 'vue'
+import { ref, onMounted, computed, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
+import { currentMonitor, primaryMonitor } from '@tauri-apps/api/window'
 import { ElMessageBox } from 'element-plus'
 import type { Todo, CreateTodoRequest, UpdateTodoRequest, CreateSubTaskRequest, QuadrantType } from '@/types'
 import { DEFAULT_COLOR, PRESET_COLORS, QUADRANT_INFO, DEFAULT_QUADRANT } from '@/types'
@@ -152,7 +154,7 @@ const subtaskProgressPercent = computed(() => {
 })
 
 // 新建模式下待创建的子任务列表
-const pendingSubtasks = ref<Array<{ id: number; title: string; completed: boolean }>>([])
+const pendingSubtasks = ref<Array<{ id: number; title: string; content: string | null; completed: boolean }>>([])
 let pendingSubtaskIdCounter = 0
 
 // 提前通知选项
@@ -299,7 +301,8 @@ async function handleSave() {
         for (const subtask of pendingSubtasks.value) {
           const subtaskData: CreateSubTaskRequest = {
             parentId: newTodo.id,
-            title: subtask.title
+            title: subtask.title,
+            content: subtask.content || undefined
           }
           await invoke('create_subtask', { data: subtaskData })
         }
@@ -360,8 +363,9 @@ async function addSubtask() {
   } else {
     // 新建模式：添加到本地列表
     pendingSubtasks.value.push({
-      id: --pendingSubtaskIdCounter, // 使用负数作为临时 ID
+      id: --pendingSubtaskIdCounter,
       title: newSubtaskTitle.value.trim(),
+      content: null,
       completed: false
     })
     newSubtaskTitle.value = ''
@@ -437,67 +441,64 @@ function togglePendingSubtask(subtaskId: number) {
   }
 }
 
-// 编辑子任务相关状态
-const editingSubtaskId = ref<number | null>(null)
-const editingSubtaskTitle = ref('')
-const editInputRef = ref<HTMLInputElement | null>(null)
+// 子任务编辑窗口是否已打开
+const isSubtaskEditorOpen = ref(false)
 
-// 开始编辑子任务
-async function startEditSubtask(subtask: { id: number; title: string }) {
-  editingSubtaskId.value = subtask.id
-  editingSubtaskTitle.value = subtask.title
-  await nextTick()
-  editInputRef.value?.focus()
-  editInputRef.value?.select()
-}
+// 打开子任务编辑独立窗口（仅编辑模式，子任务已持久化）
+async function openSubtaskEditorWindow(subtaskId: number) {
+  if (isSubtaskEditorOpen.value) return
 
-// 保存编辑子任务
-async function saveEditSubtask() {
-  if (editingSubtaskId.value === null) return
-  
-  const newTitle = editingSubtaskTitle.value.trim()
-  if (!newTitle) {
-    cancelEditSubtask()
-    return
-  }
+  const url = `#/subtask-editor?id=${subtaskId}`
+  const label = `subtask-editor-${Date.now()}`
 
-  if (isEdit.value) {
-    // 编辑模式：调用 API 更新子任务标题
-    try {
-      await invoke('update_subtask', {
-        id: editingSubtaskId.value,
-        data: { title: newTitle }
-      })
+  try {
+    isSubtaskEditorOpen.value = true
+
+    const windowWidth = 800
+    const windowHeight = 750
+    let x: number, y: number
+
+    const monitor = await currentMonitor() || await primaryMonitor()
+    if (monitor) {
+      const s = monitor.scaleFactor
+      const mx = monitor.position.x / s
+      const my = monitor.position.y / s
+      const mw = monitor.size.width / s
+      const mh = monitor.size.height / s
+      x = Math.round(mx + (mw - windowWidth) / 2)
+      y = Math.round(my + (mh - windowHeight) / 2)
+    } else {
+      const s = await appWindow.scaleFactor()
+      const pos = await appWindow.outerPosition()
+      const size = await appWindow.outerSize()
+      x = Math.round(pos.x / s + (size.width / s - windowWidth) / 2)
+      y = Math.round(pos.y / s + (size.height / s - windowHeight) / 2)
+    }
+
+    const webview = new WebviewWindow(label, {
+      url,
+      title: '编辑子任务',
+      width: windowWidth,
+      height: windowHeight,
+      x,
+      y,
+      resizable: true,
+      decorations: false,
+      transparent: false,
+      parent: appWindow,
+    })
+
+    webview.once('tauri://destroyed', async () => {
+      isSubtaskEditorOpen.value = false
       await loadTodo()
-    } catch (e) {
-      console.error('Failed to update subtask:', e)
-    }
-  } else {
-    // 新建模式：更新本地列表
-    const subtask = pendingSubtasks.value.find(s => s.id === editingSubtaskId.value)
-    if (subtask) {
-      subtask.title = newTitle
-    }
-  }
+    })
 
-  editingSubtaskId.value = null
-  editingSubtaskTitle.value = ''
-}
-
-// 取消编辑子任务
-function cancelEditSubtask() {
-  editingSubtaskId.value = null
-  editingSubtaskTitle.value = ''
-}
-
-// 处理编辑输入框按键
-function handleEditKeydown(e: KeyboardEvent) {
-  if (e.key === 'Enter') {
-    e.preventDefault()
-    saveEditSubtask()
-  } else if (e.key === 'Escape') {
-    e.preventDefault()
-    cancelEditSubtask()
+    webview.once('tauri://error', () => {
+      isSubtaskEditorOpen.value = false
+    })
+  } catch (e) {
+    isSubtaskEditorOpen.value = false
+    console.error('Failed to open subtask editor:', e)
   }
 }
 
@@ -800,28 +801,25 @@ function handleClose() {
                 >
                   <el-icon v-if="subtask.completed" class="check-icon"><Check /></el-icon>
                 </div>
-                <!-- 编辑状态：显示输入框 -->
-                <input
-                  v-if="editingSubtaskId === subtask.id"
-                  ref="editInputRef"
-                  v-model="editingSubtaskTitle"
-                  class="subtask-edit-input"
-                  type="text"
-                  @keydown="handleEditKeydown"
-                  @blur="saveEditSubtask"
-                />
-                <!-- 非编辑状态：显示标题，双击进入编辑 -->
                 <span 
-                  v-else
                   class="subtask-title"
-                  @dblclick="startEditSubtask(subtask)"
+                  @dblclick="isEdit && openSubtaskEditorWindow(subtask.id)"
                 >
                   {{ subtask.title }}
                 </span>
-                <div v-if="editingSubtaskId !== subtask.id" class="subtask-actions">
+                <el-icon
+                  v-if="subtask.content"
+                  class="content-indicator"
+                  :size="12"
+                  title="包含详细内容"
+                >
+                  <Document />
+                </el-icon>
+                <div class="subtask-actions">
                   <button 
+                    v-if="isEdit"
                     class="action-btn edit-btn"
-                    @click="startEditSubtask(subtask)"
+                    @click="openSubtaskEditorWindow(subtask.id)"
                     title="编辑子任务"
                   >
                     <el-icon><Edit /></el-icon>
@@ -845,6 +843,9 @@ function handleClose() {
           </div>
         </div>
     </div>
+
+    <!-- 模态遮罩：子任务编辑窗口打开时阻止操作 -->
+    <div v-if="isSubtaskEditorOpen" class="modal-overlay"></div>
   </div>
 </template>
 
@@ -1217,18 +1218,10 @@ function handleClose() {
     }
   }
 
-  .subtask-edit-input {
-    flex: 1;
-    font-size: 13px;
-    color: #334155;
-    line-height: 1.4;
-    padding: 2px 6px;
-    border: 1px solid #3b82f6;
-    border-radius: 4px;
-    outline: none;
-    background: #ffffff;
-    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
-    min-width: 0;
+  .content-indicator {
+    color: #3b82f6;
+    flex-shrink: 0;
+    opacity: 0.7;
   }
 
   .subtask-actions {
@@ -1359,5 +1352,16 @@ function handleClose() {
     width: 90px;
     flex-shrink: 0;
   }
+}
+
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.15);
+  z-index: 9999;
+  cursor: not-allowed;
 }
 </style>

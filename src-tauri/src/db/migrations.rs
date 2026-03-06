@@ -48,6 +48,17 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute("INSERT INTO migrations (version) VALUES (6)", [])?;
     }
 
+    if current_version < 7 {
+        migration_v7(conn)?;
+        conn.execute("INSERT INTO migrations (version) VALUES (7)", [])?;
+    }
+
+    Ok(())
+}
+
+/// 迁移 v7：subtasks 表新增 content 列，支持 Markdown 内容
+fn migration_v7(conn: &Connection) -> Result<()> {
+    conn.execute("ALTER TABLE subtasks ADD COLUMN content TEXT", [])?;
     Ok(())
 }
 

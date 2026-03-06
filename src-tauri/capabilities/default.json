@@ -9,6 +9,9 @@
     "core:window:allow-set-always-on-top",
     "core:window:allow-set-resizable",
     "core:window:allow-minimize",
+    "core:window:allow-maximize",
+    "core:window:allow-unmaximize",
+    "core:window:allow-is-maximized",
     "core:window:allow-close",
     "core:window:allow-destroy",
     "core:window:allow-outer-position",
@@ -27,6 +30,12 @@
     "fs:default",
     "fs:allow-read-text-file",
     "fs:allow-write-text-file",
+    {
+      "identifier": "fs:scope",
+      "allow": [
+        { "path": "$LOCALDATA/mini-todo/images/**" }
+      ]
+    },
     "autostart:default"
   ]
 }

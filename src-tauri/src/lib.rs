@@ -24,6 +24,8 @@ use commands::{
     delete_subtask,
     delete_todo,
     export_data,
+    get_images_dir,
+    get_subtask,
     // 节假日命令
     fetch_holidays,
     // 日历设置命令
@@ -43,6 +45,7 @@ use commands::{
     reset_window,
     save_screen_config,
     save_settings,
+    save_subtask_image,
     set_auto_hide_cursor_inside,
     set_auto_hide_enabled,
     set_notification_type,
@@ -268,6 +271,10 @@ pub fn run() {
             create_subtask,
             update_subtask,
             delete_subtask,
+            // 图片命令
+            get_images_dir,
+            get_subtask,
+            save_subtask_image,
             // 窗口设置命令
             get_settings,
             save_settings,

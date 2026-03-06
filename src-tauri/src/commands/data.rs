@@ -54,7 +54,7 @@ pub fn export_data(db: State<Database>) -> Result<String, String> {
         // 获取每个待办的子任务
         for todo in &mut todos {
             let mut subtask_stmt = conn.prepare(
-                "SELECT id, parent_id, title, completed, sort_order, created_at, updated_at 
+                "SELECT id, parent_id, title, content, completed, sort_order, created_at, updated_at 
                  FROM subtasks WHERE parent_id = ? ORDER BY sort_order ASC",
             )?;
 
@@ -63,10 +63,11 @@ pub fn export_data(db: State<Database>) -> Result<String, String> {
                     id: row.get(0)?,
                     parent_id: row.get(1)?,
                     title: row.get(2)?,
-                    completed: row.get::<_, i32>(3)? != 0,
-                    sort_order: row.get(4)?,
-                    created_at: row.get(5)?,
-                    updated_at: row.get(6)?,
+                    content: row.get(3)?,
+                    completed: row.get::<_, i32>(4)? != 0,
+                    sort_order: row.get(5)?,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
                 })
             })?;
 
@@ -170,11 +171,12 @@ pub fn import_data(db: State<Database>, json_data: String) -> Result<(), String>
             // 导入子任务
             for subtask in &todo.subtasks {
                 conn.execute(
-                    "INSERT INTO subtasks (parent_id, title, completed, sort_order, created_at, updated_at) 
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    "INSERT INTO subtasks (parent_id, title, content, completed, sort_order, created_at, updated_at) 
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                     (
                         new_todo_id,
                         &subtask.title,
+                        &subtask.content,
                         if subtask.completed { 1 } else { 0 },
                         subtask.sort_order,
                         &subtask.created_at,

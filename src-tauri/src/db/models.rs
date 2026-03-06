@@ -31,6 +31,7 @@ pub struct SubTask {
     pub id: i64,
     pub parent_id: i64,
     pub title: String,
+    pub content: Option<String>,
     pub completed: bool,
     pub sort_order: i32,
     pub created_at: String,
@@ -92,12 +93,14 @@ pub struct UpdateTodoRequest {
 pub struct CreateSubTaskRequest {
     pub parent_id: i64,
     pub title: String,
+    pub content: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateSubTaskRequest {
     pub title: Option<String>,
+    pub content: Option<String>,
     pub completed: Option<bool>,
     pub sort_order: Option<i32>,
 }

@@ -1,7 +1,9 @@
+use base64::{engine::general_purpose, Engine};
 use crate::db::{
     CreateSubTaskRequest, CreateTodoRequest, Database, SubTask, Todo, UpdateSubTaskRequest,
     UpdateTodoRequest,
 };
+use std::path::PathBuf;
 use tauri::State;
 
 #[tauri::command]
@@ -40,7 +42,7 @@ pub fn get_todos(db: State<Database>) -> Result<Vec<Todo>, String> {
         // 获取每个待办的子任务
         for todo in &mut todos {
             let mut subtask_stmt = conn.prepare(
-                "SELECT id, parent_id, title, completed, sort_order, created_at, updated_at 
+                "SELECT id, parent_id, title, content, completed, sort_order, created_at, updated_at 
                  FROM subtasks 
                  WHERE parent_id = ? 
                  ORDER BY sort_order ASC",
@@ -51,10 +53,11 @@ pub fn get_todos(db: State<Database>) -> Result<Vec<Todo>, String> {
                     id: row.get(0)?,
                     parent_id: row.get(1)?,
                     title: row.get(2)?,
-                    completed: row.get::<_, i32>(3)? != 0,
-                    sort_order: row.get(4)?,
-                    created_at: row.get(5)?,
-                    updated_at: row.get(6)?,
+                    content: row.get(3)?,
+                    completed: row.get::<_, i32>(4)? != 0,
+                    sort_order: row.get(5)?,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
                 })
             })?;
 
@@ -228,7 +231,7 @@ pub fn update_todo(db: State<Database>, id: i64, data: UpdateTodoRequest) -> Res
 
         // 获取子任务
         let mut subtask_stmt = conn.prepare(
-            "SELECT id, parent_id, title, completed, sort_order, created_at, updated_at 
+            "SELECT id, parent_id, title, content, completed, sort_order, created_at, updated_at 
              FROM subtasks WHERE parent_id = ? ORDER BY sort_order ASC",
         )?;
 
@@ -237,10 +240,11 @@ pub fn update_todo(db: State<Database>, id: i64, data: UpdateTodoRequest) -> Res
                 id: row.get(0)?,
                 parent_id: row.get(1)?,
                 title: row.get(2)?,
-                completed: row.get::<_, i32>(3)? != 0,
-                sort_order: row.get(4)?,
-                created_at: row.get(5)?,
-                updated_at: row.get(6)?,
+                content: row.get(3)?,
+                completed: row.get::<_, i32>(4)? != 0,
+                sort_order: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
             })
         })?;
 
@@ -287,14 +291,14 @@ pub fn create_subtask(db: State<Database>, data: CreateSubTaskRequest) -> Result
             .unwrap_or(-1);
 
         conn.execute(
-            "INSERT INTO subtasks (parent_id, title, sort_order) VALUES (?1, ?2, ?3)",
-            (data.parent_id, &data.title, max_order + 1),
+            "INSERT INTO subtasks (parent_id, title, content, sort_order) VALUES (?1, ?2, ?3, ?4)",
+            (data.parent_id, &data.title, &data.content, max_order + 1),
         )?;
 
         let id = conn.last_insert_rowid();
 
         conn.query_row(
-            "SELECT id, parent_id, title, completed, sort_order, created_at, updated_at 
+            "SELECT id, parent_id, title, content, completed, sort_order, created_at, updated_at 
              FROM subtasks WHERE id = ?",
             [id],
             |row| {
@@ -302,10 +306,11 @@ pub fn create_subtask(db: State<Database>, data: CreateSubTaskRequest) -> Result
                     id: row.get(0)?,
                     parent_id: row.get(1)?,
                     title: row.get(2)?,
-                    completed: row.get::<_, i32>(3)? != 0,
-                    sort_order: row.get(4)?,
-                    created_at: row.get(5)?,
-                    updated_at: row.get(6)?,
+                    content: row.get(3)?,
+                    completed: row.get::<_, i32>(4)? != 0,
+                    sort_order: row.get(5)?,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
                 })
             },
         )
@@ -326,6 +331,10 @@ pub fn update_subtask(
         if let Some(ref title) = data.title {
             updates.push("title = ?");
             params.push(Box::new(title.clone()));
+        }
+        if let Some(ref content) = data.content {
+            updates.push("content = ?");
+            params.push(Box::new(content.clone()));
         }
         if let Some(completed) = data.completed {
             updates.push("completed = ?");
@@ -351,7 +360,7 @@ pub fn update_subtask(
         conn.execute(&sql, params_refs.as_slice())?;
 
         conn.query_row(
-            "SELECT id, parent_id, title, completed, sort_order, created_at, updated_at 
+            "SELECT id, parent_id, title, content, completed, sort_order, created_at, updated_at 
              FROM subtasks WHERE id = ?",
             [id],
             |row| {
@@ -359,10 +368,35 @@ pub fn update_subtask(
                     id: row.get(0)?,
                     parent_id: row.get(1)?,
                     title: row.get(2)?,
-                    completed: row.get::<_, i32>(3)? != 0,
-                    sort_order: row.get(4)?,
-                    created_at: row.get(5)?,
-                    updated_at: row.get(6)?,
+                    content: row.get(3)?,
+                    completed: row.get::<_, i32>(4)? != 0,
+                    sort_order: row.get(5)?,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
+                })
+            },
+        )
+    })
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_subtask(db: State<Database>, id: i64) -> Result<SubTask, String> {
+    db.with_connection(|conn| {
+        conn.query_row(
+            "SELECT id, parent_id, title, content, completed, sort_order, created_at, updated_at 
+             FROM subtasks WHERE id = ?",
+            [id],
+            |row| {
+                Ok(SubTask {
+                    id: row.get(0)?,
+                    parent_id: row.get(1)?,
+                    title: row.get(2)?,
+                    content: row.get(3)?,
+                    completed: row.get::<_, i32>(4)? != 0,
+                    sort_order: row.get(5)?,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
                 })
             },
         )
@@ -377,4 +411,46 @@ pub fn delete_subtask(db: State<Database>, id: i64) -> Result<(), String> {
         Ok(())
     })
     .map_err(|e| e.to_string())
+}
+
+fn get_images_dir_path() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("mini-todo")
+        .join("images")
+}
+
+#[tauri::command]
+pub fn get_images_dir() -> Result<String, String> {
+    let dir = get_images_dir_path();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    dir.to_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| "Invalid path".to_string())
+}
+
+#[tauri::command]
+pub fn save_subtask_image(image_data: String, file_name: String) -> Result<String, String> {
+    use std::io::Write;
+
+    let dir = get_images_dir_path();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    let raw = if image_data.contains(',') {
+        image_data.splitn(2, ',').nth(1).unwrap_or("").to_string()
+    } else {
+        image_data
+    };
+    let bytes = general_purpose::STANDARD
+        .decode(&raw)
+        .map_err(|e| e.to_string())?;
+
+    let file_path = dir.join(&file_name);
+    let mut file = std::fs::File::create(&file_path).map_err(|e| e.to_string())?;
+    file.write_all(&bytes).map_err(|e| e.to_string())?;
+
+    file_path
+        .to_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| "Invalid path".to_string())
 }

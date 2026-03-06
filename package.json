@@ -11,6 +11,10 @@
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.1",
+    "@milkdown/kit": "^7.19.0",
+    "@milkdown/theme-nord": "^7.19.0",
+    "@milkdown/vue": "^7.19.0",
+    "@prosemirror-adapter/vue": "^0.4.6",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-autostart": "^2.5.1",
     "@tauri-apps/plugin-dialog": "^2",

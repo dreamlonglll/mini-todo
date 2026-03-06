@@ -42,6 +42,7 @@ export interface SubTask {
   id: number
   parentId: number
   title: string
+  content: string | null
   completed: boolean
   sortOrder: number
   createdAt: string
@@ -115,11 +116,13 @@ export interface UpdateTodoRequest {
 export interface CreateSubTaskRequest {
   parentId: number
   title: string
+  content?: string
 }
 
 // 更新子任务请求
 export interface UpdateSubTaskRequest {
   title?: string
+  content?: string
   completed?: boolean
   sortOrder?: number
 }
