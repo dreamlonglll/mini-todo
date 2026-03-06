@@ -6,7 +6,7 @@ import { getYearHolidays, type HolidayInfo } from '@/utils/holiday'
 
 const props = defineProps<{
   todos: Todo[]
-  isFixed?: boolean
+  isDarkTheme?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -405,7 +405,7 @@ defineExpose({
 </script>
 
 <template>
-  <div class="calendar-view" :class="{ 'fixed-mode': isFixed }">
+  <div class="calendar-view" :class="{ 'dark-theme': isDarkTheme }">
     <!-- 星期标题 -->
     <div class="weekday-header">
       <div v-for="day in weekDays" :key="day" class="weekday-cell">
@@ -658,8 +658,8 @@ defineExpose({
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
 }
 
-/* 固定模式样式 */
-.calendar-view.fixed-mode {
+/* 深色主题样式 */
+.calendar-view.dark-theme {
   /* 固定模式使用浅色边框 */
   .calendar-grid {
     border-top-color: rgba(255, 255, 255, 0.6);

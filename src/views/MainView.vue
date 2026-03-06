@@ -73,7 +73,7 @@ async function handleDelete(todo: Todo) {
 // 容器类名
 const containerClass = computed(() => ({
   'app-container': true,
-  'fixed-mode': appStore.isFixed
+  'dark-theme': appStore.isDarkTheme
 }))
 
 // 事件监听清理函数
@@ -429,11 +429,11 @@ async function openSettings() {
       </el-dialog>
 
       <!-- 右侧：日历视图 -->
-      <div v-if="showCalendar" class="right-panel" :class="{ 'fixed-mode': appStore.isFixed }">
-        <CalendarView 
+      <div v-if="showCalendar" class="right-panel" :class="{ 'dark-theme': appStore.isDarkTheme }">
+        <CalendarView
           ref="calendarRef"
           :todos="allTodos"
-          :is-fixed="appStore.isFixed"
+          :is-dark-theme="appStore.isDarkTheme"
           @select-todo="openEditor"
         />
       </div>
@@ -493,7 +493,7 @@ async function openSettings() {
   padding: 12px;
   background: transparent;
 
-  &.fixed-mode {
+  &.dark-theme {
     background: transparent;
     padding: 8px;
   }
@@ -503,8 +503,7 @@ async function openSettings() {
 .completed-btn-wrapper {
   padding: 8px 16px;
 
-  /* 固定模式下的样式 */
-  &.fixed-mode {
+  &.dark-theme {
     background-color: rgba(0, 0, 0, 0.15);
   }
 }

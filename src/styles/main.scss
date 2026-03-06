@@ -61,8 +61,8 @@
   --transition-slow: 300ms;
 }
 
-// 固定模式下使用浅色文字
-body.fixed-mode {
+// 深色主题下使用浅色文字
+body.dark-theme {
   --text-primary: #FFFFFF;
   --text-secondary: rgba(255, 255, 255, 0.85);
   --text-tertiary: rgba(255, 255, 255, 0.65);
@@ -87,9 +87,8 @@ html, body {
   background: var(--bg-primary);
 }
 
-// 固定模式下覆盖 CSS 变量
-body.fixed-mode {
-  // 覆盖背景色变量为半透明黑色
+// 深色主题下覆盖 CSS 变量
+body.dark-theme {
   --bg-primary: rgba(0, 0, 0, 0.1);
   --bg-secondary: rgba(0, 0, 0, 0.1);
   --bg-tertiary: rgba(255, 255, 255, 0.1);
@@ -100,18 +99,17 @@ body.fixed-mode {
   background: rgba(0, 0, 0, 0.1) !important;
 }
 
-body.fixed-mode #app,
-body.fixed-mode #app .app-container,
-body.fixed-mode #app .app-container .title-bar,
-body.fixed-mode #app .app-container .main-content,
-body.fixed-mode #app .app-container .quick-add,
-body.fixed-mode #app .app-container .right-panel  {
+body.dark-theme #app,
+body.dark-theme #app .app-container,
+body.dark-theme #app .app-container .title-bar,
+body.dark-theme #app .app-container .main-content,
+body.dark-theme #app .app-container .quick-add,
+body.dark-theme #app .app-container .right-panel  {
   background: rgba(0, 0, 0, 0.15) !important;
   background-color: rgba(0, 0, 0, 0.15) !important;
 }
 
-/* 固定模式下 todo-item 保持透明背景 */
-body.fixed-mode #app .app-container .todo-item {
+body.dark-theme #app .app-container .todo-item {
   background: transparent !important;
   background-color: transparent !important;
 }
@@ -135,14 +133,13 @@ body {
   overflow: hidden;
   border-radius: 0;
 
-  &.fixed-mode {
+  &.dark-theme {
     background: rgba(0, 0, 0, 0.1);
     border-radius: 0;
     margin: 0;
     height: 100%;
     box-shadow: none;
 
-    // 固定模式下所有背景都为半透明黑色
     .title-bar {
       background: rgba(0, 0, 0, 0.1);
     }
@@ -195,38 +192,38 @@ body {
   }
 }
 
-// macOS 固定模式：覆盖为透明背景，配合原生 Vibrancy 效果
-body.platform-macos.fixed-mode {
+// macOS 深色主题：覆盖为透明背景，配合原生 Vibrancy 效果
+body.platform-macos.dark-theme {
   --bg-primary: transparent;
   --bg-secondary: transparent;
   --bg-tertiary: rgba(255, 255, 255, 0.12);
   background: transparent !important;
 }
 
-body.platform-macos.fixed-mode #app,
-body.platform-macos.fixed-mode #app .app-container,
-body.platform-macos.fixed-mode #app .app-container .title-bar,
-body.platform-macos.fixed-mode #app .app-container .main-content,
-body.platform-macos.fixed-mode #app .app-container .quick-add,
-body.platform-macos.fixed-mode #app .app-container .right-panel {
+body.platform-macos.dark-theme #app,
+body.platform-macos.dark-theme #app .app-container,
+body.platform-macos.dark-theme #app .app-container .title-bar,
+body.platform-macos.dark-theme #app .app-container .main-content,
+body.platform-macos.dark-theme #app .app-container .quick-add,
+body.platform-macos.dark-theme #app .app-container .right-panel {
   background: transparent !important;
   background-color: transparent !important;
 }
 
-body.platform-macos.fixed-mode #app .app-container .quick-add {
+body.platform-macos.dark-theme #app .app-container .quick-add {
   background: rgba(255, 255, 255, 0.08) !important;
   border: 1px solid rgba(255, 255, 255, 0.22) !important;
 }
 
-body.platform-macos.fixed-mode #app .app-container .todo-item {
+body.platform-macos.dark-theme #app .app-container .todo-item {
   background: transparent !important;
 }
 
-body.platform-macos.fixed-mode #app .app-container .todo-item:hover {
+body.platform-macos.dark-theme #app .app-container .todo-item:hover {
   background: rgba(255, 255, 255, 0.12) !important;
 }
 
-body.platform-macos.fixed-mode #app .app-container .empty-state {
+body.platform-macos.dark-theme #app .app-container .empty-state {
   background: transparent !important;
 }
 
@@ -563,14 +560,8 @@ body.platform-macos.fixed-mode #app .app-container .empty-state {
   }
 }
 
-// 固定模式下的样式调整
-.fixed-mode {
-  .title-bar {
-    .btn-close {
-      display: none;
-    }
-  }
-
+// 深色主题下的样式调整
+.dark-theme {
   .todo-item:hover {
     background: rgba(255, 255, 255, 0.15);
   }
@@ -615,8 +606,8 @@ body.platform-macos.fixed-mode #app .app-container .empty-state {
   }
 }
 
-// 固定模式下的悬浮按钮
-.fixed-mode .fab-add {
+// 深色主题下的悬浮按钮
+.dark-theme .fab-add {
   background: var(--primary);
   box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4);
 }

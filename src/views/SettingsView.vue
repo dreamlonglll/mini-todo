@@ -315,6 +315,20 @@ async function handleCheckUpdate() {
             />
           </div>
           
+          <div class="settings-row">
+            <div class="row-left">
+              <el-icon class="row-icon"><Moon /></el-icon>
+              <div class="row-content">
+                <span class="settings-label">深色主题</span>
+                <span class="settings-desc">启用半透明深色外观</span>
+              </div>
+            </div>
+            <el-switch
+              :model-value="appStore.isDarkTheme"
+              @change="() => appStore.toggleDarkTheme()"
+            />
+          </div>
+
           <div class="settings-row notification-type-row">
             <div class="row-left">
               <el-icon class="row-icon"><Bell /></el-icon>

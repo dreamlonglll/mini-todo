@@ -34,6 +34,7 @@ export const useAppStore = defineStore('app', () => {
 
   // 状态
   const isFixed = ref(false)
+  const isDarkTheme = ref(false)
   const windowPosition = ref<WindowPosition | null>(null)
   const windowSize = ref<WindowSize | null>(null)
   const windowMode = ref<WindowMode>('normal')
@@ -120,6 +121,9 @@ export const useAppStore = defineStore('app', () => {
 
       // 加载贴边自动隐藏设置（需在固定模式应用前准备）
       await loadAutoHideEnabled()
+
+      // 加载深色主题设置
+      await loadDarkTheme()
       
       // 尝试获取当前屏幕配置的保存记录
       const savedConfig = await invoke<ScreenConfig | null>('get_screen_config', {
@@ -277,35 +281,48 @@ export const useAppStore = defineStore('app', () => {
     }
   }
 
-  // 应用固定模式
+  // 应用固定模式（仅锁定行为，不含主题）
   async function applyFixedMode() {
     try {
-      // 设置窗口属性（不再置顶，支持正常窗体堆叠）
       await appWindow.setResizable(false)
-      
-      // 设置 body 的 class 以启用透明背景
-      document.body.classList.add('fixed-mode')
-      
-      // 调用 Rust 端设置窗口为工具窗口样式（忽略 Win+D）
       await invoke('set_window_fixed_mode', { fixed: true })
     } catch (e) {
       console.error('Failed to apply fixed mode:', e)
     }
   }
 
-  // 应用普通模式
+  // 应用普通模式（仅解锁行为，不含主题）
   async function applyNormalMode() {
     try {
       await appWindow.setResizable(true)
-      
-      // 移除 body 的固定模式 class
-      document.body.classList.remove('fixed-mode')
-      
-      // 调用 Rust 端恢复窗口样式
       await invoke('set_window_fixed_mode', { fixed: false })
     } catch (e) {
       console.error('Failed to apply normal mode:', e)
     }
+  }
+
+  // 加载深色主题设置
+  async function loadDarkTheme() {
+    try {
+      const settings = await invoke<{ textTheme: string }>('get_settings')
+      isDarkTheme.value = settings.textTheme === 'light'
+      applyThemeClass()
+    } catch (e) {
+      console.error('Failed to load dark theme setting:', e)
+      isDarkTheme.value = false
+    }
+  }
+
+  // 切换深色主题
+  async function toggleDarkTheme() {
+    isDarkTheme.value = !isDarkTheme.value
+    applyThemeClass()
+    await saveWindowState()
+  }
+
+  // 应用主题 CSS class
+  function applyThemeClass() {
+    document.body.classList.toggle('dark-theme', isDarkTheme.value)
   }
 
   // 保存窗口状态（位置和尺寸）到当前屏幕配置
@@ -335,14 +352,13 @@ export const useAppStore = defineStore('app', () => {
       
       await invoke('save_screen_config', { config: configRequest })
       
-      // 同时保存到旧的 settings 表（保持向后兼容）
       await invoke('save_settings', {
         settings: {
           isFixed: isFixed.value,
           windowPosition: windowPosition.value,
           windowSize: windowSize.value,
           autoHideEnabled: autoHideEnabled.value,
-          textTheme: 'light'
+          textTheme: isDarkTheme.value ? 'light' : 'dark'
         }
       })
     } catch (e) {
@@ -463,6 +479,7 @@ export const useAppStore = defineStore('app', () => {
   return {
     // 状态
     isFixed,
+    isDarkTheme,
     windowPosition,
     windowSize,
     windowMode,
@@ -477,6 +494,7 @@ export const useAppStore = defineStore('app', () => {
     // 方法
     initSettings,
     toggleFixedMode,
+    toggleDarkTheme,
     saveWindowState,
     exportData,
     importData,

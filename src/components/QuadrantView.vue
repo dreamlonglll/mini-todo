@@ -13,8 +13,8 @@ const emit = defineEmits<{
 const todoStore = useTodoStore()
 const appStore = useAppStore()
 
-// 是否固定模式
-const isFixed = computed(() => appStore.isFixed)
+// 是否深色主题
+const isDarkTheme = computed(() => appStore.isDarkTheme)
 
 // 四象限本地数据（用于拖拽）
 const quadrantLists = ref<Record<QuadrantType, Todo[]>>({
@@ -97,7 +97,7 @@ function getQuadrantStyle(quadrant: typeof quadrantConfig.value[0]) {
 </script>
 
 <template>
-  <div class="quadrant-view" :class="{ 'fixed-mode': isFixed }">
+  <div class="quadrant-view" :class="{ 'dark-theme': isDarkTheme }">
     <div class="quadrant-grid">
       <div 
         v-for="quadrant in quadrantConfig" 
@@ -177,8 +177,8 @@ function getQuadrantStyle(quadrant: typeof quadrantConfig.value[0]) {
   }
 }
 
-/* 固定模式样式 */
-.quadrant-view.fixed-mode {
+/* 深色主题样式 */
+.quadrant-view.dark-theme {
   .quadrant-cell {
     background: rgba(0, 0, 0, 0.15);
     border-color: rgba(255, 255, 255, 0.1);

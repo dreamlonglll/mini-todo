@@ -25,6 +25,9 @@ const todoStore = useTodoStore()
 // 是否固定模式
 const isFixed = computed(() => appStore.isFixed)
 
+// 是否深色主题
+const isDarkTheme = computed(() => appStore.isDarkTheme)
+
 // 当前视图模式
 const viewMode = computed(() => todoStore.viewMode)
 
@@ -44,6 +47,11 @@ const latestVersion = computed(() => appStore.latestVersion)
 // 切换固定模式
 async function toggleFixed() {
   await appStore.toggleFixedMode()
+}
+
+// 切换深色主题
+async function toggleTheme() {
+  await appStore.toggleDarkTheme()
 }
 
 // 打开设置
@@ -74,7 +82,7 @@ async function handleVersionClick() {
 </script>
 
 <template>
-  <div class="title-bar" :class="{ 'no-drag': isFixed }">
+  <div class="title-bar" :class="{ 'no-drag': isFixed, 'dark-theme': isDarkTheme }">
     <div class="title-left">
       <span class="app-title-wrapper">
         <span class="app-title">待办清单</span>
@@ -130,6 +138,19 @@ async function handleVersionClick() {
         </svg>
         <!-- 列表图标 -->
         <el-icon v-else :size="16"><List /></el-icon>
+      </button>
+
+      <!-- 主题切换按钮 -->
+      <button 
+        class="title-btn" 
+        :class="{ active: isDarkTheme }"
+        :title="isDarkTheme ? '切换到浅色主题' : '切换到深色主题'"
+        @click="toggleTheme"
+      >
+        <el-icon :size="16">
+          <Moon v-if="!isDarkTheme" />
+          <Sunny v-else />
+        </el-icon>
       </button>
 
       <!-- 固定按钮 -->
@@ -229,8 +250,8 @@ async function handleVersionClick() {
   }
 }
 
-/* 固定模式下的按钮样式 */
-.title-bar.no-drag {
+/* 深色主题下的按钮样式 */
+.title-bar.dark-theme {
   .nav-btn {
     color: var(--text-primary) !important;
 
