@@ -1,6 +1,6 @@
 # Mini Todo
 
-一款简洁高效的 Windows 桌面待办事项管理应用，基于 Tauri 2 + Vue 3 + TypeScript 开发。
+一款简洁高效的跨平台桌面待办事项管理应用，基于 Tauri 2 + Vue 3 + TypeScript 开发，支持 Windows / macOS。
 
 ![列表模式](docs/images/list.png)
 ![四象限模式](docs/images/grid.png)
@@ -10,9 +10,19 @@
 
 ### 待办管理
 - 以列表模式/四象限模式展示待办项（支持子任务）
+- 子任务支持标题 + 内容分离，内容使用 Markdown 编辑器（Milkdown）
+- 子任务支持粘贴/拖拽上传图片，图片点击可预览
+- 子任务列表双击可快捷内联编辑标题
 - 支持日历展示，以及自定义颜色
 - 列表/四象限模式都拖拽排序
 - 系统提醒
+
+### 云同步（WebDAV）
+- 支持通过 WebDAV 协议进行云端数据同步（兼容坚果云、NextCloud 等）
+- 同步数据包含待办事项、子任务及图片
+- 支持定时自动同步 + 手动一键同步
+- 同步数据采用 Gzip 压缩，减少网络传输体积
+- 冲突检测与解决：当本地和远端同时修改时，用户可选择保留版本
 
 ### 日历模式
 - 月视图日历
@@ -39,10 +49,35 @@
 - 开机自启动
 - 版本更新检查
 - 数据导入/导出
+- WebDAV 云同步配置（设置页面内集成）
 
 ### 补充
 - 因为我没有MacOS和Linux桌面，所以大概率上会存在效果偏差
 - 如有相关电脑也愿意进行维护的，欢迎提交PR
+
+## 更新日志
+
+### v1.5.0
+
+#### 新增功能
+- **WebDAV 云同步**：支持通过 WebDAV 协议同步待办数据和图片，兼容坚果云、NextCloud 等服务
+- **同步按钮**：主界面标题栏新增一键同步按钮（先拉取再上传）
+- **子任务编辑器**：子任务支持标题 + 内容分离，内容使用 Milkdown Markdown 编辑器（独立窗口）
+- **图片支持**：子任务编辑器支持剪贴板粘贴/拖拽上传图片，图片点击可预览
+- **内联编辑**：子任务列表双击可快捷内联编辑标题
+- **深色主题分离**：锁定模式与深色主题解耦，可独立控制
+
+#### 性能优化
+- **Gzip 压缩**：同步数据采用 Gzip 压缩传输，大幅减少网络传输体积
+
+#### 问题修复
+- 修复 macOS 深色模式下非固定模式背景显示为白色的问题
+- 修复 macOS 非固定模式下标题栏无法拖拽的问题
+- 修复设置窗口未在当前屏幕正中间弹出的问题
+- 修复子任务内联编辑时悬浮操作按钮未隐藏的问题
+- 修复托盘固定模式菜单项与页面状态不同步的问题
+- 优化按钮中图标与文本的间距
+- 子任务编辑和删除按钮改为悬浮显示效果
 
 ## 安装
 
@@ -58,7 +93,7 @@
 ### 环境要求
 - Node.js 18+
 - Rust 1.70+
-- Windows 10/11
+- Windows 10/11 或 macOS
 
 ### 安装依赖
 
@@ -85,10 +120,12 @@ npm run tauri build
 |------|----------|------|
 | 前端框架 | Vue 3 + TypeScript | 组合式 API，类型安全 |
 | UI 组件库 | Element Plus | 企业级 UI 组件库 |
+| Markdown 编辑器 | Milkdown | 基于 ProseMirror 的插件化 WYSIWYG 编辑器 |
 | 状态管理 | Pinia | Vue 官方推荐状态管理 |
 | 桌面框架 | Tauri 2.x | 轻量级跨平台桌面框架 |
 | 后端语言 | Rust | 高性能，内存安全 |
 | 数据库 | SQLite | 轻量级本地数据库 |
+| 云同步协议 | WebDAV | 兼容坚果云、NextCloud 等 |
 
 ## 项目结构
 
@@ -118,3 +155,6 @@ MIT License
 - [Tauri](https://tauri.app/) - 构建更小、更快、更安全的桌面应用
 - [Vue.js](https://vuejs.org/) - 渐进式 JavaScript 框架
 - [Element Plus](https://element-plus.org/) - Vue 3 组件库
+- [Milkdown](https://milkdown.dev/) - 插件化 Markdown 编辑器
+- [lunar-javascript](https://github.com/6tail/lunar-javascript) - 农历/节气计算
+- [NateScarlet/holiday-cn](https://github.com/NateScarlet/holiday-cn) - 中国法定节假日数据
