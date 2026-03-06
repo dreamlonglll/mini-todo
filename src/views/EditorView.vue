@@ -872,7 +872,7 @@ function handleClose() {
                 >
                   <Document />
                 </el-icon>
-                <div class="subtask-actions">
+                <div v-if="inlineEditingSubtaskId !== subtask.id" class="subtask-actions">
                   <button 
                     v-if="isEdit"
                     class="action-btn edit-btn"
