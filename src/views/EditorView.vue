@@ -1094,7 +1094,7 @@ function handleClose() {
     .add-btn {
       display: inline-flex;
       align-items: center;
-      gap: 4px;
+      gap: 6px;
       padding: 4px 12px;
       font-size: 12px;
       font-weight: 500;

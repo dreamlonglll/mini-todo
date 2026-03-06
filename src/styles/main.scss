@@ -402,13 +402,13 @@ body.platform-macos.fixed-mode #app .app-container .empty-state {
       .subtask-count {
         display: flex;
         align-items: center;
-        gap: 2px;
+        gap: 4px;
       }
 
       .notify-time {
         display: flex;
         align-items: center;
-        gap: 2px;
+        gap: 4px;
       }
     }
   }
@@ -653,6 +653,12 @@ body.platform-macos.fixed-mode #app .app-container .empty-state {
 
 .el-button {
   border-radius: var(--radius-base) !important;
+
+  > span {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
 }
 
 .el-input__wrapper {
