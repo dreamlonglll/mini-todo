@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed, watch } from 'vue'
+import { ref, onMounted, computed, watch, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -444,6 +444,55 @@ function togglePendingSubtask(subtaskId: number) {
 // 子任务编辑窗口是否已打开
 const isSubtaskEditorOpen = ref(false)
 
+// 子任务内联编辑
+const inlineEditingSubtaskId = ref<number | null>(null)
+const inlineEditingTitle = ref('')
+
+function startInlineEdit(subtask: { id: number; title: string }) {
+  inlineEditingSubtaskId.value = subtask.id
+  inlineEditingTitle.value = subtask.title
+  nextTick(() => {
+    const input = document.querySelector('.subtask-inline-input') as HTMLInputElement
+    if (input) {
+      input.focus()
+      input.select()
+    }
+  })
+}
+
+async function saveInlineEdit(subtaskId: number) {
+  const newTitle = inlineEditingTitle.value.trim()
+  if (!newTitle) {
+    cancelInlineEdit()
+    return
+  }
+
+  try {
+    await invoke('update_subtask', {
+      id: subtaskId,
+      data: { title: newTitle },
+    })
+    await loadTodo()
+  } catch (e) {
+    console.error('Failed to update subtask title:', e)
+  }
+  inlineEditingSubtaskId.value = null
+}
+
+function cancelInlineEdit() {
+  inlineEditingSubtaskId.value = null
+  inlineEditingTitle.value = ''
+}
+
+function handleInlineEditKeydown(e: KeyboardEvent, subtaskId: number) {
+  if (e.key === 'Enter') {
+    e.preventDefault()
+    saveInlineEdit(subtaskId)
+  } else if (e.key === 'Escape') {
+    cancelInlineEdit()
+  }
+}
+
 // 打开子任务编辑独立窗口（仅编辑模式，子任务已持久化）
 async function openSubtaskEditorWindow(subtaskId: number) {
   if (isSubtaskEditorOpen.value) return
@@ -801,9 +850,17 @@ function handleClose() {
                 >
                   <el-icon v-if="subtask.completed" class="check-icon"><Check /></el-icon>
                 </div>
+                <input
+                  v-if="inlineEditingSubtaskId === subtask.id"
+                  v-model="inlineEditingTitle"
+                  class="subtask-inline-input"
+                  @blur="saveInlineEdit(subtask.id)"
+                  @keydown="handleInlineEditKeydown($event, subtask.id)"
+                />
                 <span 
+                  v-else
                   class="subtask-title"
-                  @dblclick="isEdit && openSubtaskEditorWindow(subtask.id)"
+                  @dblclick="isEdit && startInlineEdit(subtask)"
                 >
                   {{ subtask.title }}
                 </span>
@@ -1216,6 +1273,19 @@ function handleClose() {
     &:hover {
       background: #f1f5f9;
     }
+  }
+
+  .subtask-inline-input {
+    flex: 1;
+    font-size: 13px;
+    color: #334155;
+    line-height: 1.4;
+    padding: 2px 4px;
+    border: 1px solid #3b82f6;
+    border-radius: 4px;
+    outline: none;
+    background: #ffffff;
+    font-family: inherit;
   }
 
   .content-indicator {
