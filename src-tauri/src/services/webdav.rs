@@ -71,13 +71,20 @@ impl WebDavClient {
                 .send()
                 .map_err(|e| format!("创建目录失败: {}", e))?;
 
-            let status = resp.status().as_u16();
-            // 201 = created, 405 = already exists, 301 = redirect (already exists)
-            if status != 201 && status != 405 && status != 301 && status != 200 {
-                // Ignore errors for existing directories
-            }
+            let _status = resp.status().as_u16();
         }
         Ok(())
+    }
+
+    pub fn exists(&self, remote_path: &str) -> Result<bool, String> {
+        let url = self.full_url(remote_path);
+        let resp = self
+            .client
+            .head(&url)
+            .basic_auth(&self.username, Some(&self.password))
+            .send()
+            .map_err(|e| format!("检查文件失败: {}", e))?;
+        Ok(resp.status().is_success())
     }
 
     pub fn upload_bytes(&self, remote_path: &str, data: &[u8], content_type: &str) -> Result<(), String> {
@@ -100,6 +107,7 @@ impl WebDavClient {
         }
     }
 
+    #[allow(dead_code)]
     pub fn upload_text(&self, remote_path: &str, text: &str) -> Result<(), String> {
         self.upload_bytes(remote_path, text.as_bytes(), "application/json; charset=utf-8")
     }
@@ -125,6 +133,7 @@ impl WebDavClient {
         self.upload_bytes(remote_path, &data, content_type)
     }
 
+    #[allow(dead_code)]
     pub fn download_text(&self, remote_path: &str) -> Result<Option<String>, String> {
         let url = self.full_url(remote_path);
 
@@ -199,6 +208,7 @@ impl WebDavClient {
         Ok(true)
     }
 
+    #[allow(dead_code)]
     pub fn list_files(&self, remote_path: &str) -> Result<Vec<String>, String> {
         let url = self.full_url(remote_path);
 
@@ -248,6 +258,7 @@ impl WebDavClient {
         Ok(files)
     }
 
+    #[allow(dead_code)]
     pub fn get_last_modified(&self, remote_path: &str) -> Result<Option<String>, String> {
         let url = self.full_url(remote_path);
 

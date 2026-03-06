@@ -52,6 +52,7 @@ use commands::{
     update_subtask,
     update_todo,
     webdav_apply_remote,
+    webdav_auto_sync,
     webdav_download_sync,
     webdav_test_connection,
     webdav_upload_sync,
@@ -312,6 +313,7 @@ pub fn run() {
             webdav_upload_sync,
             webdav_download_sync,
             webdav_apply_remote,
+            webdav_auto_sync,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

@@ -74,24 +74,7 @@ fn set_setting(conn: &rusqlite::Connection, key: &str, value: &str) -> rusqlite:
 
 #[tauri::command]
 pub fn get_sync_settings(db: State<Database>) -> Result<SyncSettings, String> {
-    db.with_connection(|conn| {
-        let settings = SyncSettings {
-            webdav_url: get_setting(conn, "webdav_url").unwrap_or_default(),
-            webdav_username: get_setting(conn, "webdav_username").unwrap_or_default(),
-            webdav_password: get_setting(conn, "webdav_password").unwrap_or_default(),
-            auto_sync: get_setting(conn, "webdav_auto_sync")
-                .map(|v| v == "true")
-                .unwrap_or(false),
-            sync_interval: get_setting(conn, "webdav_sync_interval")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(15),
-            last_sync_at: get_setting(conn, "webdav_last_sync_at"),
-            device_id: get_setting(conn, "webdav_device_id")
-                .unwrap_or_else(generate_device_id),
-        };
-        Ok(settings)
-    })
-    .map_err(|e| e.to_string())
+    read_sync_settings(&*db)
 }
 
 #[tauri::command]
@@ -188,12 +171,14 @@ pub fn webdav_upload_sync(db: State<Database>) -> Result<String, String> {
     let compressed = gzip_compress(sync_json.as_bytes())?;
     client.upload_bytes(SYNC_DATA_FILE, &compressed, "application/gzip")?;
 
-    // Upload images
+    // Upload images (skip if already exists on remote)
     for img_name in &image_files {
         let local_path = images_dir.join(img_name);
         if local_path.exists() {
             let remote_path = format!("{}/{}", REMOTE_IMAGES_DIR, img_name);
-            client.upload_file(&remote_path, &local_path)?;
+            if !client.exists(&remote_path).unwrap_or(false) {
+                client.upload_file(&remote_path, &local_path)?;
+            }
         }
     }
 
@@ -308,7 +293,74 @@ pub fn webdav_apply_remote(db: State<Database>, sync_data_json: String) -> Resul
     Ok(now)
 }
 
+#[tauri::command]
+pub fn webdav_auto_sync(db: State<Database>) -> Result<String, String> {
+    let sync_settings = get_sync_settings_internal(&db)?;
+    if sync_settings.webdav_url.is_empty() || !sync_settings.auto_sync {
+        return Err("自动同步未启用".to_string());
+    }
+
+    let client = WebDavClient::new(
+        &sync_settings.webdav_url,
+        &sync_settings.webdav_username,
+        &sync_settings.webdav_password,
+    );
+
+    let has_local_changes = check_local_changes(&db, &sync_settings)?;
+
+    let remote_bytes = client.download_bytes(SYNC_DATA_FILE).ok().flatten();
+    if let Some(compressed) = remote_bytes {
+        if let Ok(remote_json) = gzip_decompress(&compressed) {
+            if let Ok(remote_data) = serde_json::from_str::<SyncData>(&remote_json) {
+                let remote_is_newer = is_remote_newer(&sync_settings, &remote_data.updated_at);
+
+                if remote_is_newer && !has_local_changes {
+                    let import_json = serde_json::json!({
+                        "version": remote_data.version,
+                        "exportedAt": remote_data.updated_at,
+                        "todos": remote_data.todos,
+                        "settings": remote_data.settings,
+                    });
+                    let import_str = serde_json::to_string(&import_json).map_err(|e| e.to_string())?;
+                    import_data_raw(&*db, &import_str)?;
+
+                    let images_dir = get_images_dir();
+                    std::fs::create_dir_all(&images_dir).ok();
+                    for img_name in &remote_data.images {
+                        let local_path = images_dir.join(img_name);
+                        if !local_path.exists() {
+                            let remote_path = format!("{}/{}", REMOTE_IMAGES_DIR, img_name);
+                            let _ = client.download_file(&remote_path, &local_path);
+                        }
+                    }
+
+                    let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%:z").to_string();
+                    db.with_connection(|conn| {
+                        set_setting(conn, "webdav_last_sync_at", &now)?;
+                        Ok(())
+                    }).map_err(|e| e.to_string())?;
+                    return Ok(now);
+                }
+
+                if remote_is_newer && has_local_changes {
+                    return Ok("conflict".to_string());
+                }
+            }
+        }
+    }
+
+    if has_local_changes {
+        return webdav_upload_sync(db);
+    }
+
+    Ok("no_changes".to_string())
+}
+
 fn get_sync_settings_internal(db: &State<Database>) -> Result<SyncSettings, String> {
+    read_sync_settings(&**db)
+}
+
+fn read_sync_settings(db: &Database) -> Result<SyncSettings, String> {
     db.with_connection(|conn| {
         let settings = SyncSettings {
             webdav_url: get_setting(conn, "webdav_url").unwrap_or_default(),
@@ -337,14 +389,21 @@ fn check_local_changes(db: &State<Database>, settings: &SyncSettings) -> Result<
     let last_sync = settings.last_sync_at.as_ref().unwrap();
 
     db.with_connection(|conn| {
-        let count: i64 = conn
+        let todo_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM todos WHERE updated_at > ?1",
                 [last_sync],
                 |row| row.get(0),
             )
             .unwrap_or(0);
-        Ok(count > 0)
+        let subtask_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM subtasks WHERE updated_at > ?1",
+                [last_sync],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        Ok(todo_count > 0 || subtask_count > 0)
     })
     .map_err(|e| e.to_string())
 }

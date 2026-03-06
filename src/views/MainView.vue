@@ -333,10 +333,10 @@ async function openSettings() {
     webview.once('tauri://destroyed', async () => {
       isModalOpen.value = false
       activeModalWindow = null
-      // 重新加载数据和设置（导入数据后需要刷新）
       await todoStore.fetchTodos()
       await todoStore.loadViewMode()
       await appStore.loadShowCalendar()
+      startAutoSync()
     })
     
     // 监听创建失败，清除模态状态
@@ -359,8 +359,12 @@ async function startAutoSync() {
       const intervalMs = (settings.syncInterval || 15) * 60 * 1000
       autoSyncTimer = setInterval(async () => {
         try {
-          await invoke<string>('webdav_upload_sync')
-          console.log('Auto sync completed')
+          const result = await invoke<string>('webdav_auto_sync')
+          if (result === 'conflict') {
+            console.log('Auto sync: conflict detected, skipping')
+          } else if (result !== 'no_changes') {
+            await todoStore.fetchTodos()
+          }
         } catch (e) {
           console.warn('Auto sync failed:', e)
         }
