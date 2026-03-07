@@ -1054,7 +1054,9 @@ function handleClose() {
       width="460px"
       append-to-body
       class="agent-config-dialog"
+      top="10vh"
     >
+      <div style="max-height: calc(80vh - 160px); overflow-y: auto; padding-right: 4px;">
       <el-form label-position="top" size="default">
         <el-form-item label="选择 Agent" required>
           <el-select
@@ -1110,6 +1112,7 @@ function handleClose() {
           </el-form-item>
         </template>
       </el-form>
+      </div>
 
       <template #footer>
         <el-button type="danger" plain @click="clearAgentConfig">
@@ -1687,7 +1690,5 @@ function handleClose() {
 <style>
 .agent-config-dialog .el-dialog__body {
   padding-top: 12px;
-  max-height: 60vh;
-  overflow-y: auto;
 }
 </style>
