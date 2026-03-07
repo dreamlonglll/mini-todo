@@ -2262,6 +2262,7 @@ dependencies = [
  "urlencoding",
  "window-vibrancy",
  "windows 0.58.0",
+ "winreg 0.55.0",
 ]
 
 [[package]]

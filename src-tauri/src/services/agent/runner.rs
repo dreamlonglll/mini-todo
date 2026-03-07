@@ -15,6 +15,118 @@ use super::codex::CodexRunner;
 use super::crypto;
 use super::worktree::WorktreeManager;
 
+/// 从 Windows 注册表读取完整的系统 + 用户 PATH，解决 Tauri GUI
+/// 进程启动时 PATH 不完整导致找不到 CLI 的问题。
+#[cfg(target_os = "windows")]
+fn get_registry_path() -> Option<String> {
+    use winreg::enums::*;
+    use winreg::RegKey;
+
+    let mut paths = Vec::new();
+
+    if let Ok(key) = RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey("SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment")
+    {
+        if let Ok(val) = key.get_value::<String, _>("Path") {
+            paths.push(val);
+        }
+    }
+
+    if let Ok(key) = RegKey::predef(HKEY_CURRENT_USER).open_subkey("Environment") {
+        if let Ok(val) = key.get_value::<String, _>("Path") {
+            paths.push(val);
+        }
+    }
+
+    if paths.is_empty() {
+        None
+    } else {
+        Some(paths.join(";"))
+    }
+}
+
+/// 合并当前进程 PATH 与注册表 PATH，返回完整的 PATH 字符串。
+#[cfg(target_os = "windows")]
+fn get_merged_path() -> String {
+    let current = std::env::var("PATH").unwrap_or_default();
+    match get_registry_path() {
+        Some(reg) if !reg.is_empty() => {
+            if current.is_empty() {
+                reg
+            } else {
+                format!("{};{}", current, reg)
+            }
+        }
+        _ => current,
+    }
+}
+
+/// 在合并后的 PATH 目录中搜索可执行文件的完整路径。
+/// 遍历 PATH 中的每个目录，结合 PATHEXT 扩展名查找匹配的可执行文件。
+#[cfg(target_os = "windows")]
+fn resolve_in_path(program: &str) -> Option<String> {
+    let merged = get_merged_path();
+    let pathext = std::env::var("PATHEXT")
+        .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD;.VBS;.JS".to_string());
+    let extensions: Vec<&str> = pathext.split(';').collect();
+
+    for dir in merged.split(';') {
+        let dir = dir.trim();
+        if dir.is_empty() {
+            continue;
+        }
+        let base = Path::new(dir);
+
+        for ext in &extensions {
+            let candidate = base.join(format!("{}{}", program, ext));
+            if candidate.exists() {
+                return Some(candidate.to_string_lossy().to_string());
+            }
+        }
+
+        let exact = base.join(program);
+        if exact.exists() {
+            return Some(exact.to_string_lossy().to_string());
+        }
+    }
+
+    None
+}
+
+/// 创建一个能正确找到 CLI 可执行文件的 Command。
+/// 在 Windows 上先通过注册表 PATH 解析出完整路径，解决 GUI 进程
+/// PATH 不完整的问题；同时为子进程设置完整 PATH 环境变量。
+pub fn create_command(program: &str) -> std::process::Command {
+    let resolved = resolve_program(program);
+    let mut cmd = std::process::Command::new(&resolved);
+
+    #[cfg(target_os = "windows")]
+    {
+        let merged = get_merged_path();
+        if !merged.is_empty() {
+            cmd.env("PATH", merged);
+        }
+    }
+
+    cmd
+}
+
+fn resolve_program(program: &str) -> String {
+    let path = Path::new(program);
+    if path.is_absolute() || program.contains('\\') || program.contains('/') {
+        return program.to_string();
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(resolved) = resolve_in_path(program) {
+            return resolved;
+        }
+    }
+
+    program.to_string()
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind")]
 pub enum AgentEvent {

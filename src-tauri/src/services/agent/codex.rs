@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use super::runner::{AgentEvent, AgentOutput, AgentRunner};
+use super::runner::{create_command, AgentEvent, AgentOutput, AgentRunner};
 
 pub struct CodexRunner;
 
@@ -21,7 +21,7 @@ impl AgentRunner for CodexRunner {
         model: Option<&str>,
         _allowed_tools: &[String],
     ) -> Command {
-        let mut cmd = Command::new(cli_path);
+        let mut cmd = create_command(cli_path);
         cmd.current_dir(working_dir);
         cmd.args(["exec", "--json", "--full-auto"]);
         cmd.args(["--sandbox", "workspace-write"]);
@@ -118,12 +118,16 @@ impl AgentRunner for CodexRunner {
     }
 
     async fn get_version(&self, cli_path: &str) -> Result<String, String> {
-        let output = Command::new(cli_path)
+        let output = create_command(cli_path)
             .arg("--version")
             .output()
             .map_err(|e| format!("无法执行 {}: {}", cli_path, e))?;
 
-        let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let version = raw
+            .rsplit_once(' ')
+            .map(|(_, ver)| ver.to_string())
+            .unwrap_or(raw);
         Ok(version)
     }
 
