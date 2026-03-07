@@ -42,7 +42,7 @@ impl TaskScheduler {
         let scheduler = self.clone();
         let app_clone = app.clone();
 
-        tokio::spawn(async move {
+        tauri::async_runtime::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
 
             loop {
@@ -52,7 +52,7 @@ impl TaskScheduler {
         });
 
         let scheduler2 = self.clone();
-        tokio::spawn(async move {
+        tauri::async_runtime::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
 
             loop {
@@ -183,7 +183,7 @@ impl TaskScheduler {
 
             let app_clone = app.clone();
             let project_path_clone = project_path.clone();
-            tokio::spawn(async move {
+            tauri::async_runtime::spawn(async move {
                 execute_task(&app_clone, task, &project_path_clone).await;
 
                 let scheduler = app_clone.state::<Arc<TaskScheduler>>();
