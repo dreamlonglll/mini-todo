@@ -11,6 +11,7 @@ use super::concurrency::ConcurrencyManager;
 use super::cron_manager;
 use super::priority_queue::{PriorityQueue, QueuedTask, calculate_priority};
 use super::state_machine;
+use super::triggers::TriggerManager;
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -23,6 +24,7 @@ pub struct TaskScheduler {
     queue: Mutex<PriorityQueue>,
     concurrency: ConcurrencyManager,
     running: Mutex<bool>,
+    trigger_manager: TriggerManager,
 }
 
 impl TaskScheduler {
@@ -31,6 +33,7 @@ impl TaskScheduler {
             queue: Mutex::new(PriorityQueue::new(50)),
             concurrency: ConcurrencyManager::new(3),
             running: Mutex::new(false),
+            trigger_manager: TriggerManager::new(),
         }
     }
 
@@ -67,8 +70,14 @@ impl TaskScheduler {
         }
 
         self.check_cron_tasks(app).await;
+        self.check_git_triggers(app).await;
+        self.check_file_triggers(app).await;
         self.promote_pending_to_queued(app).await;
         self.dispatch_queued_tasks(app).await;
+    }
+
+    pub fn trigger_manager(&self) -> &TriggerManager {
+        &self.trigger_manager
     }
 
     /// 启用/暂停调度器
@@ -274,6 +283,147 @@ impl TaskScheduler {
             }
 
             // 更新 last_scheduled_run
+            let _ = db.with_connection(|conn| {
+                conn.execute(
+                    "UPDATE todos SET last_scheduled_run = datetime('now', 'localtime') WHERE id = ?1",
+                    [todo_id],
+                )
+            });
+        }
+    }
+
+    /// 检查 Git Push 触发器：对策略为 git_push 的 Todo，检测其项目路径是否有新 commit
+    async fn check_git_triggers(&self, app: &tauri::AppHandle) {
+        let db = app.state::<Database>();
+
+        let git_todos: Vec<(i64, String)> = match db.with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, agent_project_path FROM todos
+                 WHERE schedule_enabled = 1
+                 AND schedule_strategy = 'git_push'
+                 AND agent_project_path IS NOT NULL
+                 AND agent_project_path != ''"
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?;
+            rows.collect()
+        }) {
+            Ok(todos) => todos,
+            Err(_) => return,
+        };
+
+        for (todo_id, project_path) in git_todos {
+            let has_changes = self.trigger_manager.check_git_changes(&project_path).await;
+
+            if !has_changes {
+                continue;
+            }
+
+            let subtasks: Vec<(i64, String)> = db
+                .with_connection(|conn| {
+                    let mut stmt = conn.prepare(
+                        "SELECT id, schedule_status FROM subtasks
+                         WHERE parent_id = ?1 AND completed = 0
+                         AND schedule_status IN ('none', 'completed', 'failed')"
+                    )?;
+                    let rows = stmt.query_map([todo_id], |row| {
+                        Ok((row.get(0)?, row.get(1)?))
+                    })?;
+                    rows.collect()
+                })
+                .unwrap_or_default();
+
+            for (subtask_id, current_status) in subtasks {
+                if state_machine::can_transition(
+                    &state_machine::ScheduleStatus::from_str(&current_status),
+                    &state_machine::ScheduleStatus::Pending,
+                ) {
+                    let _ = db.with_connection(|conn| {
+                        scheduler_db::update_schedule_status(conn, subtask_id, "pending")?;
+                        scheduler_db::reset_retry_count(conn, subtask_id)
+                    });
+                }
+            }
+
+            let _ = db.with_connection(|conn| {
+                conn.execute(
+                    "UPDATE todos SET last_scheduled_run = datetime('now', 'localtime') WHERE id = ?1",
+                    [todo_id],
+                )
+            });
+        }
+    }
+
+    /// 检查文件变更触发器：对策略为 file_watch 的 Todo，检测其项目路径是否有文件变更
+    async fn check_file_triggers(&self, app: &tauri::AppHandle) {
+        let db = app.state::<Database>();
+
+        let file_todos: Vec<(i64, String)> = match db.with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, agent_project_path FROM todos
+                 WHERE schedule_enabled = 1
+                 AND schedule_strategy = 'file_watch'
+                 AND agent_project_path IS NOT NULL
+                 AND agent_project_path != ''"
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?;
+            rows.collect()
+        }) {
+            Ok(todos) => todos,
+            Err(_) => return,
+        };
+
+        let active_ids: Vec<i64> = file_todos.iter().map(|(id, _)| *id).collect();
+        let watched_todos = self.trigger_manager.get_watched_todos().await;
+        for watched_id in watched_todos {
+            if !active_ids.contains(&watched_id) {
+                self.trigger_manager.unregister_file_watch(watched_id).await;
+            }
+        }
+
+        for (todo_id, project_path) in &file_todos {
+            let watched = self.trigger_manager.get_watched_todos().await;
+            if !watched.contains(todo_id) {
+                self.trigger_manager.register_file_watch(*todo_id, project_path).await;
+            }
+        }
+
+        for (todo_id, _project_path) in file_todos {
+            let has_changes = self.trigger_manager.check_file_changes(todo_id).await;
+
+            if !has_changes {
+                continue;
+            }
+
+            let subtasks: Vec<(i64, String)> = db
+                .with_connection(|conn| {
+                    let mut stmt = conn.prepare(
+                        "SELECT id, schedule_status FROM subtasks
+                         WHERE parent_id = ?1 AND completed = 0
+                         AND schedule_status IN ('none', 'completed', 'failed')"
+                    )?;
+                    let rows = stmt.query_map([todo_id], |row| {
+                        Ok((row.get(0)?, row.get(1)?))
+                    })?;
+                    rows.collect()
+                })
+                .unwrap_or_default();
+
+            for (subtask_id, current_status) in subtasks {
+                if state_machine::can_transition(
+                    &state_machine::ScheduleStatus::from_str(&current_status),
+                    &state_machine::ScheduleStatus::Pending,
+                ) {
+                    let _ = db.with_connection(|conn| {
+                        scheduler_db::update_schedule_status(conn, subtask_id, "pending")?;
+                        scheduler_db::reset_retry_count(conn, subtask_id)
+                    });
+                }
+            }
+
             let _ = db.with_connection(|conn| {
                 conn.execute(
                     "UPDATE todos SET last_scheduled_run = datetime('now', 'localtime') WHERE id = ?1",

@@ -248,3 +248,86 @@ pub fn get_scheduled_todos(
     })
     .map_err(|e| format!("获取定时任务列表失败: {}", e))
 }
+
+#[tauri::command]
+pub async fn init_git_trigger(
+    scheduler: State<'_, Arc<TaskScheduler>>,
+    project_path: String,
+) -> Result<(), String> {
+    scheduler.trigger_manager().init_project(&project_path).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn check_git_trigger(
+    scheduler: State<'_, Arc<TaskScheduler>>,
+    project_path: String,
+) -> Result<bool, String> {
+    Ok(scheduler.trigger_manager().check_git_changes(&project_path).await)
+}
+
+#[tauri::command]
+pub async fn register_file_watch(
+    scheduler: State<'_, Arc<TaskScheduler>>,
+    todo_id: i64,
+    project_path: String,
+) -> Result<(), String> {
+    scheduler.trigger_manager().register_file_watch(todo_id, &project_path).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn unregister_file_watch(
+    scheduler: State<'_, Arc<TaskScheduler>>,
+    todo_id: i64,
+) -> Result<(), String> {
+    scheduler.trigger_manager().unregister_file_watch(todo_id).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_last_commit_info(
+    scheduler: State<'_, Arc<TaskScheduler>>,
+    project_path: String,
+) -> Result<Option<String>, String> {
+    Ok(scheduler.trigger_manager().get_last_commit_info(&project_path).await)
+}
+
+#[tauri::command]
+pub async fn get_trigger_todos(
+    db: State<'_, Database>,
+) -> Result<Vec<serde_json::Value>, String> {
+    db.with_connection(|conn| {
+        let mut stmt = conn.prepare(
+            "SELECT t.id, t.title, t.schedule_strategy, t.schedule_enabled,
+                    t.agent_project_path, t.last_scheduled_run,
+                    (SELECT COUNT(*) FROM subtasks s WHERE s.parent_id = t.id AND s.completed = 0) as pending_subtasks
+             FROM todos t
+             WHERE t.schedule_strategy IN ('git_push', 'file_watch')
+             ORDER BY t.schedule_enabled DESC, t.title ASC"
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            let id: i64 = row.get(0)?;
+            let title: String = row.get(1)?;
+            let strategy: String = row.get(2)?;
+            let schedule_enabled: bool = row.get::<_, i32>(3)? != 0;
+            let project_path: Option<String> = row.get(4)?;
+            let last_run: Option<String> = row.get(5)?;
+            let pending_subtasks: i64 = row.get(6)?;
+
+            Ok(serde_json::json!({
+                "id": id,
+                "title": title,
+                "strategy": strategy,
+                "scheduleEnabled": schedule_enabled,
+                "projectPath": project_path,
+                "lastScheduledRun": last_run,
+                "pendingSubtasks": pending_subtasks
+            }))
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+    })
+    .map_err(|e| format!("获取触发任务列表失败: {}", e))
+}

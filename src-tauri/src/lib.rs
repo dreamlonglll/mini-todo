@@ -89,6 +89,12 @@ use commands::{
     validate_cron_expression,
     get_next_cron_execution,
     get_scheduled_todos,
+    init_git_trigger,
+    check_git_trigger,
+    register_file_watch,
+    unregister_file_watch,
+    get_last_commit_info,
+    get_trigger_todos,
     // Prompt 模板命令
     create_prompt_template,
     delete_prompt_template,
@@ -394,6 +400,13 @@ pub fn run() {
             validate_cron_expression,
             get_next_cron_execution,
             get_scheduled_todos,
+            // 触发器命令
+            init_git_trigger,
+            check_git_trigger,
+            register_file_watch,
+            unregister_file_watch,
+            get_last_commit_info,
+            get_trigger_todos,
             // Prompt 模板命令
             get_prompt_templates,
             get_prompt_template,
