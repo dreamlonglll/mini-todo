@@ -10,6 +10,7 @@ use tokio::process::Command as TokioCommand;
 use tokio::sync::Mutex;
 
 use crate::db::models::{AgentConfig, AgentHealthStatus};
+use crate::db::{Database, agent_execution_db};
 
 use super::claude_code::ClaudeCodeRunner;
 use super::codex::CodexRunner;
@@ -239,6 +240,148 @@ pub struct AgentOutput {
     pub duration_ms: u64,
 }
 
+/// 将 Agent CLI 输出的原始 JSON 行解析为人类可读的日志文本。
+/// 支持 Codex 和 Claude Code 两种格式。
+/// 返回 None 表示该行无需显示（如心跳/内部事件）。
+fn format_agent_json(line: &str, agent_type: &str) -> Option<(String, String)> {
+    let json: serde_json::Value = serde_json::from_str(line).ok()?;
+    let event_type = json["type"].as_str().unwrap_or("");
+
+    match agent_type {
+        "codex" => match event_type {
+            "item.started" | "item.completed" => {
+                let item = &json["item"];
+                let item_type = item["type"]
+                    .as_str()
+                    .or_else(|| item["item_type"].as_str())
+                    .unwrap_or("");
+                match item_type {
+                    "agent_message" | "assistant_message" => {
+                        let text = item["text"].as_str().unwrap_or("");
+                        if text.is_empty() {
+                            return None;
+                        }
+                        Some((text.to_string(), "stdout".to_string()))
+                    }
+                    "command_execution" => {
+                        let cmd_str = item["command"].as_str().unwrap_or("");
+                        let exit = item["exit_code"].as_i64();
+                        let output = item["output"].as_str().unwrap_or("");
+                        let mut parts = Vec::new();
+                        if !cmd_str.is_empty() {
+                            parts.push(format!("$ {}", cmd_str));
+                        }
+                        if !output.is_empty() {
+                            parts.push(output.to_string());
+                        }
+                        if let Some(code) = exit {
+                            if code != 0 {
+                                parts.push(format!("(exit code: {})", code));
+                            }
+                        }
+                        if parts.is_empty() {
+                            return None;
+                        }
+                        Some((parts.join("\n"), "stdout".to_string()))
+                    }
+                    "file_edit" | "file_write" => {
+                        let path = item["path"].as_str().unwrap_or("");
+                        if path.is_empty() {
+                            return None;
+                        }
+                        let label = if event_type == "item.started" {
+                            "Editing"
+                        } else {
+                            "Edited"
+                        };
+                        Some((format!("[{}] {}", label, path), "info".to_string()))
+                    }
+                    "file_read" => {
+                        let path = item["path"].as_str().unwrap_or("");
+                        if path.is_empty() {
+                            return None;
+                        }
+                        Some((format!("[Reading] {}", path), "info".to_string()))
+                    }
+                    _ => None,
+                }
+            }
+            "message.delta" => {
+                let text = json["delta"]["text"].as_str().unwrap_or("");
+                if text.is_empty() {
+                    return None;
+                }
+                Some((text.to_string(), "stdout".to_string()))
+            }
+            "turn.completed" => {
+                let usage = &json["usage"];
+                let input = usage["input_tokens"].as_u64().unwrap_or(0);
+                let output = usage["output_tokens"].as_u64().unwrap_or(0);
+                if input > 0 || output > 0 {
+                    Some((
+                        format!("[Token] input: {}, output: {}", input, output),
+                        "info".to_string(),
+                    ))
+                } else {
+                    None
+                }
+            }
+            "turn.failed" => {
+                let msg = json["error"]["message"]
+                    .as_str()
+                    .unwrap_or("unknown error");
+                Some((format!("[Error] {}", msg), "stderr".to_string()))
+            }
+            _ => None,
+        },
+
+        "claude_code" => match event_type {
+            "stream_event" => {
+                let text = json["event"]["delta"]["text"].as_str().unwrap_or("");
+                if text.is_empty() {
+                    return None;
+                }
+                Some((text.to_string(), "stdout".to_string()))
+            }
+            "result" => {
+                let result_text = json["result"].as_str().unwrap_or("");
+                if !result_text.is_empty() {
+                    Some((result_text.to_string(), "stdout".to_string()))
+                } else {
+                    None
+                }
+            }
+            "assistant" | "text" => {
+                let text = json["content"]
+                    .as_str()
+                    .or_else(|| json["text"].as_str())
+                    .unwrap_or("");
+                if text.is_empty() {
+                    return None;
+                }
+                Some((text.to_string(), "stdout".to_string()))
+            }
+            "tool_use" => {
+                let name = json["name"].as_str().unwrap_or("tool");
+                let input = &json["input"];
+                let path = input["path"]
+                    .as_str()
+                    .or_else(|| input["command"].as_str())
+                    .unwrap_or("");
+                if path.is_empty() {
+                    Some((format!("[Tool] {}", name), "info".to_string()))
+                } else {
+                    Some((format!("[Tool] {} {}", name, path), "info".to_string()))
+                }
+            }
+            "tool_result" => None,
+            _ => None,
+        },
+
+        _ => Some((line.to_string(), "stdout".to_string())),
+    }
+}
+
 pub struct ExecutionHandle {
     cancel_sender: tokio::sync::oneshot::Sender<()>,
     #[allow(dead_code)]
@@ -289,7 +432,7 @@ pub struct ExecutionState {
     pub duration_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CachedLog {
     pub content: String,
@@ -366,12 +509,15 @@ impl AgentManager {
         let timeout_secs = 600u64;
         let task_id_clone = task_id.clone();
         let event_name = format!("agent:log:{}", task_id);
+        let agent_type_for_task = config.agent_type.clone();
+        let agent_id_for_db = Some(config.id);
 
         tokio::spawn(async move {
             let start = Instant::now();
             let run_result = Self::run_process(
                 cmd,
                 timeout_secs,
+                agent_type_for_task,
                 states.clone(),
                 &task_id_clone,
                 app.clone(),
@@ -404,6 +550,8 @@ impl AgentManager {
                         );
                     }
                 }
+
+                Self::persist_execution(&app, state, agent_id_for_db);
             }
         });
 
@@ -413,6 +561,7 @@ impl AgentManager {
     async fn run_process(
         cmd: std::process::Command,
         timeout_secs: u64,
+        agent_type: String,
         states: Arc<Mutex<HashMap<String, ExecutionState>>>,
         task_id: &str,
         app: tauri::AppHandle,
@@ -466,17 +615,19 @@ impl AgentManager {
         let task_id_stdout = task_id.to_string();
         let app_stdout = app.clone();
         let event_name_stdout = event_name.to_string();
+        let agent_type_clone = agent_type.clone();
 
         let timeout = tokio::time::Duration::from_secs(timeout_secs);
-        let mut collected_events: Vec<AgentEvent> = Vec::new();
+        let mut total_input = 0u64;
+        let mut total_output = 0u64;
+        let mut text_response = String::new();
 
         let result = tokio::time::timeout(timeout, async {
             while let Ok(Some(line)) = stdout_reader.next_line().await {
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
-                    let event_type = json["type"].as_str().unwrap_or("");
+                if let Some((readable, level)) = format_agent_json(&line, &agent_type_clone) {
                     let log_event = AgentEvent::Log {
-                        content: line.clone(),
-                        level: "stdout".to_string(),
+                        content: readable.clone(),
+                        level: level.clone(),
                     };
                     let _ = app_stdout.emit(&event_name_stdout, &log_event);
 
@@ -487,29 +638,35 @@ impl AgentManager {
                     let mut lock = states_stdout.lock().await;
                     if let Some(s) = lock.get_mut(&task_id_stdout) {
                         s.logs.push(CachedLog {
-                            content: line.clone(),
-                            level: "stdout".to_string(),
+                            content: readable.clone(),
+                            level: level.clone(),
                             timestamp_ms: now,
                         });
                     }
                     drop(lock);
 
-                    if event_type == "turn.completed" || event_type == "result" {
-                        let usage_event = if event_type == "turn.completed" {
-                            let usage = &json["usage"];
-                            Some(AgentEvent::TokenUsage {
-                                input_tokens: usage["input_tokens"].as_u64().unwrap_or(0),
-                                output_tokens: usage["output_tokens"].as_u64().unwrap_or(0),
-                            })
-                        } else {
-                            None
-                        };
-                        if let Some(evt) = usage_event {
-                            let _ = app_stdout.emit(&event_name_stdout, &evt);
-                            collected_events.push(evt);
+                    if level == "stdout" {
+                        if !text_response.is_empty() {
+                            text_response.push('\n');
                         }
+                        text_response.push_str(&readable);
                     }
-                    collected_events.push(log_event);
+                }
+
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
+                    let event_type = json["type"].as_str().unwrap_or("");
+                    if event_type == "turn.completed" {
+                        let usage = &json["usage"];
+                        let inp = usage["input_tokens"].as_u64().unwrap_or(0);
+                        let out = usage["output_tokens"].as_u64().unwrap_or(0);
+                        total_input += inp;
+                        total_output += out;
+                        let evt = AgentEvent::TokenUsage {
+                            input_tokens: inp,
+                            output_tokens: out,
+                        };
+                        let _ = app_stdout.emit(&event_name_stdout, &evt);
+                    }
                 }
             }
             child.wait().await
@@ -521,64 +678,12 @@ impl AgentManager {
         match result {
             Ok(Ok(status)) => {
                 let exit_code = status.code().unwrap_or(-1);
-                let duration_ms = 0u64;
-                if exit_code != 0 && collected_events.is_empty() && !stderr_lines.is_empty() {
+                if exit_code != 0 && text_response.is_empty() && !stderr_lines.is_empty() {
                     return Err(format!(
                         "Agent 进程退出码 {}:\n{}",
                         exit_code,
                         stderr_lines.join("\n")
                     ));
-                }
-                let mut text_response = String::new();
-                let mut total_input = 0u64;
-                let mut total_output = 0u64;
-                for evt in &collected_events {
-                    match evt {
-                        AgentEvent::Log { content, .. } => {
-                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(content) {
-                                let t = json["type"].as_str().unwrap_or("");
-                                match t {
-                                    "item.started" | "item.completed" => {
-                                        let item = &json["item"];
-                                        let item_type = item["type"]
-                                            .as_str()
-                                            .or_else(|| item["item_type"].as_str())
-                                            .unwrap_or("");
-                                        match item_type {
-                                            "agent_message" | "assistant_message" => {
-                                                if let Some(text) = item["text"].as_str() {
-                                                    if !text_response.is_empty() {
-                                                        text_response.push('\n');
-                                                    }
-                                                    text_response.push_str(text);
-                                                }
-                                            }
-                                            "command_execution" => {
-                                                if let Some(cmd_str) = item["command"].as_str() {
-                                                    if !text_response.is_empty() {
-                                                        text_response.push('\n');
-                                                    }
-                                                    text_response.push_str(&format!("$ {}", cmd_str));
-                                                }
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                    "result" => {
-                                        if let Some(text) = json["result"].as_str() {
-                                            text_response = text.to_string();
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                        AgentEvent::TokenUsage { input_tokens, output_tokens } => {
-                            total_input += input_tokens;
-                            total_output += output_tokens;
-                        }
-                        _ => {}
-                    }
                 }
                 Ok(AgentOutput {
                     text_response,
@@ -588,7 +693,7 @@ impl AgentManager {
                     model_used: None,
                     session_id: None,
                     exit_code,
-                    duration_ms,
+                    duration_ms: 0,
                 })
             }
             Ok(Err(e)) => Err(format!("Agent 进程异常: {}", e)),
@@ -597,6 +702,48 @@ impl AgentManager {
                 Err(format!("Agent 执行超时（{}秒）", timeout_secs))
             }
         }
+    }
+
+    fn persist_execution(
+        app: &tauri::AppHandle,
+        state: &ExecutionState,
+        agent_id: Option<i64>,
+    ) {
+        use tauri::Manager;
+        let db = app.state::<Database>();
+        let logs_json = serde_json::to_string(&state.logs).unwrap_or_else(|_| "[]".to_string());
+        let result_text = state
+            .result
+            .as_ref()
+            .map(|o| o.text_response.clone())
+            .unwrap_or_default();
+        let input_tokens = state
+            .result
+            .as_ref()
+            .and_then(|o| o.input_tokens)
+            .unwrap_or(0) as i64;
+        let output_tokens = state
+            .result
+            .as_ref()
+            .and_then(|o| o.output_tokens)
+            .unwrap_or(0) as i64;
+
+        let _ = db.with_connection(|conn| {
+            agent_execution_db::save_execution(
+                conn,
+                &state.task_id,
+                state.subtask_id,
+                agent_id,
+                &state.status,
+                &logs_json,
+                &result_text,
+                state.error.as_deref(),
+                input_tokens,
+                output_tokens,
+                state.start_time_ms as i64,
+                state.duration_ms.unwrap_or(0) as i64,
+            )
+        });
     }
 
     pub async fn get_execution_state(&self, task_id: &str) -> Option<ExecutionState> {

@@ -261,3 +261,21 @@ pub struct AgentHealthStatus {
     pub version_compatible: bool,
     pub message: Option<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentExecution {
+    pub id: i64,
+    pub task_id: String,
+    pub subtask_id: Option<i64>,
+    pub agent_id: Option<i64>,
+    pub status: String,
+    pub logs: String,
+    pub result_text: String,
+    pub error: Option<String>,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub start_time_ms: i64,
+    pub duration_ms: i64,
+    pub created_at: String,
+}

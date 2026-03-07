@@ -202,8 +202,15 @@ const logPanelLogs = computed(() => {
 
 function buildPromptContext(): string {
   const lines: string[] = []
-  if (title.value.trim()) lines.push(`- ${title.value.trim()}`)
-  if (markdownContent.value.trim()) {
+  const hasTitle = !!title.value.trim()
+  const hasContent = !!markdownContent.value.trim()
+
+  if (hasTitle) {
+    lines.push(`【任务标题】${title.value.trim()}`)
+  }
+  if (hasContent) {
+    if (hasTitle) lines.push('')
+    lines.push(`【任务详情】`)
     lines.push(markdownContent.value.trim())
   }
   if (lines.length > 0) {
@@ -372,11 +379,19 @@ onBeforeUnmount(() => {
             <el-input :model-value="agentForm.projectPath" disabled />
           </el-form-item>
 
-          <el-form-item label="执行指令" required>
+          <el-form-item required>
+            <template #label>
+              <span style="display: flex; align-items: center; gap: 6px;">
+                <span>执行指令</span>
+                <el-tag size="small" type="info" effect="plain">
+                  基于子任务标题+内容生成
+                </el-tag>
+              </span>
+            </template>
             <el-input
               v-model="agentForm.prompt"
               type="textarea"
-              :rows="5"
+              :rows="8"
               placeholder="输入要 Agent 执行的指令..."
               :disabled="agentExecuting"
             />

@@ -68,7 +68,37 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute("INSERT INTO migrations (version) VALUES (10)", [])?;
     }
 
+    if current_version < 11 {
+        migration_v11(conn)?;
+        conn.execute("INSERT INTO migrations (version) VALUES (11)", [])?;
+    }
+
     Ok(())
+}
+
+/// 迁移 v11：创建 agent_executions 表，持久化 Agent 执行记录和日志。
+fn migration_v11(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS agent_executions (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id         TEXT    NOT NULL,
+            subtask_id      INTEGER,
+            agent_id        INTEGER,
+            status          TEXT    NOT NULL DEFAULT 'running',
+            logs            TEXT    NOT NULL DEFAULT '[]',
+            result_text     TEXT    NOT NULL DEFAULT '',
+            error           TEXT,
+            input_tokens    INTEGER NOT NULL DEFAULT 0,
+            output_tokens   INTEGER NOT NULL DEFAULT 0,
+            start_time_ms   INTEGER NOT NULL DEFAULT 0,
+            duration_ms     INTEGER NOT NULL DEFAULT 0,
+            created_at      TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
+            FOREIGN KEY (subtask_id) REFERENCES subtasks(id) ON DELETE SET NULL,
+            FOREIGN KEY (agent_id) REFERENCES agent_configs(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_executions_subtask ON agent_executions(subtask_id);
+        CREATE INDEX IF NOT EXISTS idx_agent_executions_task ON agent_executions(task_id);"
+    )
 }
 
 /// 迁移 v10：简化 agent_configs 表，移除不再需要的字段。

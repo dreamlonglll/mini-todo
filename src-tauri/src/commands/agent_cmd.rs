@@ -1,10 +1,11 @@
 use tauri::State;
 
 use crate::db::agent_db;
+use crate::db::agent_execution_db;
 use crate::db::models::{AgentConfig, AgentHealthStatus, CreateAgentRequest, UpdateAgentRequest};
 use crate::db::Database;
 use crate::services::agent::AgentManager;
-use crate::services::agent::runner::{create_command, ExecutionState};
+use crate::services::agent::runner::{create_command, CachedLog, ExecutionState};
 
 #[tauri::command]
 pub fn get_agents(db: State<'_, Database>) -> Result<Vec<AgentConfig>, String> {
@@ -106,10 +107,33 @@ pub async fn get_agent_execution_state(
 
 #[tauri::command]
 pub async fn get_agent_execution_by_subtask(
+    db: State<'_, Database>,
     agent_manager: State<'_, AgentManager>,
     subtask_id: i64,
 ) -> Result<Option<ExecutionState>, String> {
-    Ok(agent_manager.get_execution_by_subtask(subtask_id).await)
+    if let Some(state) = agent_manager.get_execution_by_subtask(subtask_id).await {
+        return Ok(Some(state));
+    }
+
+    let record = db
+        .with_connection(|conn| agent_execution_db::get_latest_by_subtask(conn, subtask_id))
+        .map_err(|e| e.to_string())?;
+
+    if let Some(rec) = record {
+        let logs: Vec<CachedLog> = serde_json::from_str(&rec.logs).unwrap_or_default();
+        return Ok(Some(ExecutionState {
+            task_id: rec.task_id,
+            subtask_id: rec.subtask_id,
+            status: rec.status,
+            logs,
+            result: None,
+            error: rec.error,
+            start_time_ms: rec.start_time_ms as u64,
+            duration_ms: Some(rec.duration_ms as u64),
+        }));
+    }
+
+    Ok(None)
 }
 
 #[tauri::command]
