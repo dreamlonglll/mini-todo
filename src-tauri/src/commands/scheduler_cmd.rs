@@ -1,6 +1,8 @@
+use std::sync::Arc;
 use tauri::State;
 use crate::db::Database;
 use crate::db::{scheduler_db, dependency_db};
+use crate::services::scheduler::engine::TaskScheduler;
 use crate::services::scheduler::state_machine;
 
 #[tauri::command]
@@ -153,4 +155,36 @@ pub fn update_todo_schedule_config(
         Ok(())
     })
     .map_err(|e| format!("更新调度配置失败: {}", e))
+}
+
+#[tauri::command]
+pub async fn start_scheduler(
+    scheduler: State<'_, Arc<TaskScheduler>>,
+) -> Result<(), String> {
+    scheduler.set_running(true).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn stop_scheduler(
+    scheduler: State<'_, Arc<TaskScheduler>>,
+) -> Result<(), String> {
+    scheduler.set_running(false).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_scheduler_status(
+    scheduler: State<'_, Arc<TaskScheduler>>,
+) -> Result<bool, String> {
+    Ok(scheduler.is_running().await)
+}
+
+#[tauri::command]
+pub async fn submit_task_to_scheduler(
+    scheduler: State<'_, Arc<TaskScheduler>>,
+    app: tauri::AppHandle,
+    subtask_id: i64,
+) -> Result<(), String> {
+    scheduler.submit_task(&app, subtask_id).await
 }

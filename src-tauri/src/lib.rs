@@ -4,6 +4,7 @@ mod services;
 
 use db::Database;
 use services::agent::AgentManager;
+use services::scheduler::engine::TaskScheduler;
 use services::NotificationService;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -74,8 +75,12 @@ use commands::{
     // 调度器命令
     add_task_dependency,
     check_dependencies_met,
+    get_scheduler_status,
     get_task_dependencies,
     remove_task_dependency,
+    start_scheduler,
+    stop_scheduler,
+    submit_task_to_scheduler,
     update_subtask_max_retries,
     update_subtask_priority,
     update_subtask_schedule_status,
@@ -112,6 +117,7 @@ pub fn run() {
     // 初始化数据库
     let database = Database::new().expect("Failed to initialize database");
     let agent_manager = AgentManager::new();
+    let task_scheduler = std::sync::Arc::new(TaskScheduler::new());
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -124,6 +130,7 @@ pub fn run() {
         ))
         .manage(database)
         .manage(agent_manager)
+        .manage(task_scheduler.clone())
         .setup(|app| {
             #[cfg(target_os = "windows")]
             {
@@ -265,6 +272,10 @@ pub fn run() {
             // 启动通知调度器
             NotificationService::start_scheduler(app.handle().clone());
 
+            // 启动任务调度引擎
+            let scheduler = app.state::<std::sync::Arc<TaskScheduler>>().inner().clone();
+            scheduler.start(app.handle().clone());
+
             // 启动固定模式监听器（定时检测窗口最小化状态）
             let handle = app.handle().clone();
             std::thread::spawn(move || {
@@ -365,6 +376,10 @@ pub fn run() {
             get_task_dependencies,
             check_dependencies_met,
             update_todo_schedule_config,
+            start_scheduler,
+            stop_scheduler,
+            get_scheduler_status,
+            submit_task_to_scheduler,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
