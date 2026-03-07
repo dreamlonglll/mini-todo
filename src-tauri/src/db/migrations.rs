@@ -93,6 +93,11 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute("INSERT INTO migrations (version) VALUES (15)", [])?;
     }
 
+    if current_version < 16 {
+        migration_v16(conn)?;
+        conn.execute("INSERT INTO migrations (version) VALUES (16)", [])?;
+    }
+
     Ok(())
 }
 
@@ -170,6 +175,99 @@ fn migration_v15(conn: &Connection) -> Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_task_deps_subtask ON task_dependencies(subtask_id);
         CREATE INDEX IF NOT EXISTS idx_task_deps_depends ON task_dependencies(depends_on_id);"
+    )
+}
+
+/// 迁移 v16：创建 Prompt 模板表，内置常用模板。
+fn migration_v16(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS prompt_templates (
+            id                  TEXT PRIMARY KEY,
+            name                TEXT NOT NULL,
+            category            TEXT,
+            description         TEXT,
+            template_content    TEXT NOT NULL,
+            variables           TEXT NOT NULL DEFAULT '[]',
+            recommended_agent   TEXT,
+            is_builtin          INTEGER NOT NULL DEFAULT 0,
+            created_at          TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+            updated_at          TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+        );
+
+        INSERT OR IGNORE INTO prompt_templates (id, name, category, description, template_content, variables, recommended_agent, is_builtin)
+        VALUES
+            ('builtin_feature', '功能开发', 'development', '新增功能的开发任务',
+             '请在项目中实现以下功能：
+
+{{feature_desc}}
+
+技术要求：
+{{tech_requirements}}
+
+注意事项：
+- 遵循项目现有的代码规范
+- 确保代码类型安全
+- 添加必要的错误处理',
+             '[{\"name\":\"feature_desc\",\"label\":\"功能描述\",\"type\":\"textarea\",\"required\":true},{\"name\":\"tech_requirements\",\"label\":\"技术要求\",\"type\":\"textarea\",\"required\":false,\"default_value\":\"无特殊要求\"}]',
+             'claude_code', 1),
+
+            ('builtin_bugfix', 'Bug 修复', 'bugfix', '修复已知问题',
+             '请修复以下问题：
+
+问题描述：{{bug_desc}}
+
+复现步骤：
+{{reproduce_steps}}
+
+期望行为：
+{{expected_behavior}}',
+             '[{\"name\":\"bug_desc\",\"label\":\"问题描述\",\"type\":\"textarea\",\"required\":true},{\"name\":\"reproduce_steps\",\"label\":\"复现步骤\",\"type\":\"textarea\",\"required\":false},{\"name\":\"expected_behavior\",\"label\":\"期望行为\",\"type\":\"textarea\",\"required\":false}]',
+             'codex', 1),
+
+            ('builtin_refactor', '代码重构', 'refactor', '优化和重构代码',
+             '请对以下范围的代码进行重构：
+
+重构范围：{{refactor_scope}}
+
+重构目标：{{refactor_goal}}
+
+约束条件：
+- 保持对外接口不变
+- 确保功能不受影响
+{{constraints}}',
+             '[{\"name\":\"refactor_scope\",\"label\":\"重构范围\",\"type\":\"textarea\",\"required\":true},{\"name\":\"refactor_goal\",\"label\":\"重构目标\",\"type\":\"textarea\",\"required\":true},{\"name\":\"constraints\",\"label\":\"额外约束\",\"type\":\"textarea\",\"required\":false}]',
+             'claude_code', 1),
+
+            ('builtin_test', '单元测试', 'test', '编写单元测试',
+             '请为以下文件/模块编写单元测试：
+
+目标文件：{{target_file}}
+
+测试框架：{{test_framework}}
+
+覆盖目标：{{coverage_goal}}
+
+要求：
+- 覆盖主要逻辑分支
+- 包含边界条件测试
+- 使用清晰的测试命名',
+             '[{\"name\":\"target_file\",\"label\":\"目标文件\",\"type\":\"text\",\"required\":true},{\"name\":\"test_framework\",\"label\":\"测试框架\",\"type\":\"text\",\"required\":false,\"default_value\":\"自动检测\"},{\"name\":\"coverage_goal\",\"label\":\"覆盖目标\",\"type\":\"text\",\"required\":false,\"default_value\":\"核心逻辑\"}]',
+             'codex', 1),
+
+            ('builtin_review', 'Code Review', 'review', '代码审查',
+             '请对以下范围的代码进行审查：
+
+审查范围：{{review_scope}}
+
+关注点：{{review_focus}}
+
+请从以下方面给出建议：
+- 代码质量与可读性
+- 潜在的 Bug 或安全问题
+- 性能优化建议
+- 架构设计改进',
+             '[{\"name\":\"review_scope\",\"label\":\"审查范围\",\"type\":\"textarea\",\"required\":true},{\"name\":\"review_focus\",\"label\":\"关注重点\",\"type\":\"textarea\",\"required\":false}]',
+             'claude_code', 1);"
     )
 }
 

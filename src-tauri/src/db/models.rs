@@ -323,6 +323,21 @@ pub struct TaskDependency {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptTemplate {
+    pub id: String,
+    pub name: String,
+    pub category: Option<String>,
+    pub description: Option<String>,
+    pub template_content: String,
+    pub variables: String,
+    pub recommended_agent: Option<String>,
+    pub is_builtin: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 // ========== Agent 集成相关模型 ==========
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

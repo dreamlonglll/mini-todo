@@ -209,14 +209,19 @@ impl TaskScheduler {
         Ok(())
     }
 
-    /// 重新计算所有排队任务的优先级
+    /// 重新计算所有排队任务的优先级，重建队列
     async fn refresh_priorities(&self, app: &tauri::AppHandle) {
         let db = app.state::<Database>();
-        let queue = self.queue.lock().await;
+        let mut queue = self.queue.lock().await;
 
         let tasks: Vec<QueuedTask> = queue.get_all().iter().map(|t| (*t).clone()).collect();
+        if tasks.is_empty() {
+            return;
+        }
 
-        for task in &tasks {
+        let mut updated_tasks = Vec::with_capacity(tasks.len());
+
+        for task in tasks {
             let quadrant = db
                 .with_connection(|conn| {
                     conn.query_row(
@@ -247,13 +252,20 @@ impl TaskScheduler {
                 })
                 .unwrap_or(0);
 
-            let _new_priority =
+            let new_priority =
                 calculate_priority(&quadrant, priority_score, created_minutes, None);
+
+            updated_tasks.push(QueuedTask {
+                priority: new_priority,
+                ..task
+            });
         }
 
-        // BinaryHeap 不支持就地更新优先级，需要重建
-        // 当前实现中，队列中任务的 priority 字段在入队时已固定
-        // 若需要动态更新，可以在此处 drain + re-enqueue
+        // drain 并重建队列
+        while queue.dequeue().is_some() {}
+        for task in updated_tasks {
+            let _ = queue.enqueue(task);
+        }
     }
 
     /// 获取当前队列状态（用于前端展示）

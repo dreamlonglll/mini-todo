@@ -86,6 +86,14 @@ use commands::{
     update_subtask_schedule_status,
     update_subtask_timeout,
     update_todo_schedule_config,
+    // Prompt 模板命令
+    create_prompt_template,
+    delete_prompt_template,
+    get_prompt_template,
+    get_prompt_templates,
+    get_prompt_templates_by_category,
+    render_prompt_template,
+    update_prompt_template,
 };
 
 #[cfg(target_os = "windows")]
@@ -380,6 +388,14 @@ pub fn run() {
             stop_scheduler,
             get_scheduler_status,
             submit_task_to_scheduler,
+            // Prompt 模板命令
+            get_prompt_templates,
+            get_prompt_template,
+            get_prompt_templates_by_category,
+            create_prompt_template,
+            update_prompt_template,
+            delete_prompt_template,
+            render_prompt_template,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
