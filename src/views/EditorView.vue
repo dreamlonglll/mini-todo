@@ -1068,7 +1068,7 @@ function handleClose() {
             <el-option
               v-for="agent in agentStore.enabledAgents"
               :key="agent.id"
-              :label="`${agent.name} (${AGENT_TYPE_INFO[agent.agentType]?.label || agent.agentType})`"
+              :label="AGENT_TYPE_INFO[agent.agentType]?.label || agent.agentType"
               :value="agent.id"
             />
           </el-select>
