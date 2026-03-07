@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Agent 灵感文档（个人灵感草稿，不纳入版本控制）
+docs/Agents灵感/

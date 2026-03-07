@@ -34,6 +34,11 @@ base64 = "0.22"
 reqwest = { version = "0.12", features = ["json", "blocking"] }
 urlencoding = "2"
 flate2 = "1.1.9"
+aes-gcm = "0.10"
+sha2 = "0.10"
+rand = "0.8"
+machine-uid = "0.5"
+async-trait = "0.1"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Dwm"] }

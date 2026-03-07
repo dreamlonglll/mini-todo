@@ -1,3 +1,4 @@
+pub mod agent_db;
 pub mod connection;
 pub mod migrations;
 pub mod models;

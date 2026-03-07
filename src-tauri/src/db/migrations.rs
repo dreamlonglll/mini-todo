@@ -53,7 +53,36 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute("INSERT INTO migrations (version) VALUES (7)", [])?;
     }
 
+    if current_version < 8 {
+        migration_v8(conn)?;
+        conn.execute("INSERT INTO migrations (version) VALUES (8)", [])?;
+    }
+
     Ok(())
+}
+
+/// 迁移 v8：创建 agent_configs 表，支持 AI Agent 集成
+fn migration_v8(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS agent_configs (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            name            TEXT    NOT NULL,
+            agent_type      TEXT    NOT NULL CHECK(agent_type IN ('claude_code', 'codex', 'custom')),
+            cli_path        TEXT    NOT NULL DEFAULT '',
+            cli_version     TEXT    NOT NULL DEFAULT '',
+            min_cli_version TEXT    NOT NULL DEFAULT '',
+            api_key_encrypted TEXT  NOT NULL DEFAULT '',
+            default_model   TEXT    NOT NULL DEFAULT '',
+            max_concurrent  INTEGER NOT NULL DEFAULT 1,
+            timeout_seconds INTEGER NOT NULL DEFAULT 300,
+            capabilities    TEXT    NOT NULL DEFAULT '{}',
+            env_vars        TEXT    NOT NULL DEFAULT '{}',
+            sandbox_config  TEXT    NOT NULL DEFAULT '{}',
+            enabled         INTEGER NOT NULL DEFAULT 1,
+            created_at      TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
+            updated_at      TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))
+        );"
+    )
 }
 
 /// 迁移 v7：subtasks 表新增 content 列，支持 Markdown 内容

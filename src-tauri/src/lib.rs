@@ -3,6 +3,7 @@ mod db;
 mod services;
 
 use db::Database;
+use services::agent::AgentManager;
 use services::NotificationService;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -57,6 +58,14 @@ use commands::{
     webdav_download_sync,
     webdav_test_connection,
     webdav_upload_sync,
+    // Agent 命令
+    check_agent_health,
+    check_all_agents_health,
+    create_agent,
+    delete_agent,
+    get_agent,
+    get_agents,
+    update_agent,
 };
 
 #[cfg(target_os = "windows")]
@@ -87,6 +96,7 @@ fn setup_window_rounded_corners(window: &tauri::WebviewWindow) {
 pub fn run() {
     // 初始化数据库
     let database = Database::new().expect("Failed to initialize database");
+    let agent_manager = AgentManager::new();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -98,6 +108,7 @@ pub fn run() {
             Some(vec!["--autostart"]),
         ))
         .manage(database)
+        .manage(agent_manager)
         .setup(|app| {
             #[cfg(target_os = "windows")]
             {
@@ -316,6 +327,14 @@ pub fn run() {
             webdav_download_sync,
             webdav_apply_remote,
             webdav_auto_sync,
+            // Agent 命令
+            get_agents,
+            get_agent,
+            create_agent,
+            update_agent,
+            delete_agent,
+            check_agent_health,
+            check_all_agents_health,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
