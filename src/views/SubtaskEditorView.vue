@@ -343,6 +343,47 @@ function handleClearExecution() {
   agentForm.value.prompt = buildPromptContext()
 }
 
+// ========== 调度状态控制 ==========
+const scheduleStatus = ref('none')
+
+async function loadScheduleStatus() {
+  try {
+    const subtask = await invoke<any>('get_subtask', { id: subtaskId })
+    if (subtask) {
+      scheduleStatus.value = subtask.scheduleStatus || 'none'
+    }
+  } catch (_) {
+    // ignore
+  }
+}
+
+async function toggleSchedulePending(val: boolean) {
+  try {
+    const targetStatus = val ? 'pending' : 'none'
+    const newStatus = await schedulerStore.updateSubtaskScheduleStatus(subtaskId, targetStatus)
+    scheduleStatus.value = newStatus
+  } catch (e) {
+    ElMessage.error('切换调度状态失败: ' + String(e))
+  }
+}
+
+const isSchedulePending = computed(() => {
+  return ['pending', 'queued', 'running'].includes(scheduleStatus.value)
+})
+
+const scheduleStatusLabel = computed(() => {
+  const map: Record<string, string> = {
+    none: '未调度',
+    pending: '待调度',
+    queued: '排队中',
+    running: '执行中',
+    completed: '已完成',
+    failed: '失败',
+    cancelled: '已取消',
+  }
+  return map[scheduleStatus.value] || scheduleStatus.value
+})
+
 onMounted(async () => {
   await loadSubtask()
   await nextTick()
@@ -350,6 +391,7 @@ onMounted(async () => {
   editorContainer.value?.addEventListener('click', handleImageClick)
   agentStore.loadAgents()
   agentStore.restoreExecutionForSubtask(subtaskId)
+  loadScheduleStatus()
 })
 
 onBeforeUnmount(() => {
@@ -411,6 +453,15 @@ onBeforeUnmount(() => {
             {{ currentAgentLabel || 'Agent' }}
           </template>
         </el-button>
+        <div v-if="hasAgentConfig && !isViewMode" class="schedule-toggle">
+          <el-switch
+            :model-value="isSchedulePending"
+            size="small"
+            :disabled="scheduleStatus === 'running'"
+            @change="toggleSchedulePending($event as boolean)"
+          />
+          <span class="schedule-label">{{ scheduleStatusLabel }}</span>
+        </div>
       </div>
       <div class="footer-right">
         <el-button @click="handleClose">
@@ -649,7 +700,19 @@ onBeforeUnmount(() => {
 
 .footer-left {
   display: flex;
+  align-items: center;
   gap: 8px;
+}
+
+.schedule-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.schedule-label {
+  font-size: 12px;
+  color: var(--text-secondary);
 }
 
 .footer-right {
