@@ -11,6 +11,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAppStore, APP_VERSION } from '@/stores'
 import type { ScreenConfig, SyncSettings, SyncDownloadResult } from '@/types'
 import AgentSettings from '@/components/AgentSettings.vue'
+import SchedulerPanel from '@/components/SchedulerPanel.vue'
 
 const appWindow = getCurrentWindow()
 const appStore = useAppStore()
@@ -677,6 +678,17 @@ async function handleCheckUpdate() {
         </div>
         <div class="card-body">
           <AgentSettings />
+        </div>
+      </div>
+
+      <!-- 任务调度 -->
+      <div class="settings-card">
+        <div class="card-header">
+          <el-icon class="card-icon"><Timer /></el-icon>
+          <h3 class="card-title">任务调度</h3>
+        </div>
+        <div class="card-body">
+          <SchedulerPanel />
         </div>
       </div>
 

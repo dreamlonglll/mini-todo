@@ -15,7 +15,9 @@ import type { Node } from '@milkdown/kit/prose/model'
 import type { Uploader, UploadOptions } from '@milkdown/kit/plugin/upload'
 import '@milkdown/theme-nord/style.css'
 import { useAgentStore } from '@/stores/agentStore'
+import { useSchedulerStore } from '@/stores/schedulerStore'
 import { AGENT_TYPE_INFO } from '@/types/agent'
+import type { PromptTemplate, TemplateVariable } from '@/types/scheduler'
 import AgentLogPanel from '@/components/AgentLogPanel.vue'
 
 const route = useRoute()
@@ -240,7 +242,57 @@ function openAgentDialog() {
   if (!currentExecution.value) {
     agentForm.value.prompt = buildPromptContext()
   }
+  loadTemplates()
   agentDialogVisible.value = true
+}
+
+// ========== Prompt 模板 ==========
+const schedulerStore = useSchedulerStore()
+const selectedTemplateId = ref<number | null>(null)
+const templateList = ref<PromptTemplate[]>([])
+const templateVariables = ref<TemplateVariable[]>([])
+const variableValues = ref<Record<string, string>>({})
+
+async function loadTemplates() {
+  try {
+    await schedulerStore.loadTemplates()
+    templateList.value = schedulerStore.templates
+  } catch (_) {
+    templateList.value = []
+  }
+}
+
+function onTemplateSelect(id: number | null) {
+  if (!id) {
+    templateVariables.value = []
+    variableValues.value = {}
+    return
+  }
+  const tpl = templateList.value.find(t => t.id === id)
+  if (!tpl) return
+
+  try {
+    const vars: TemplateVariable[] = JSON.parse(tpl.variables || '[]')
+    templateVariables.value = vars
+    variableValues.value = {}
+    for (const v of vars) {
+      variableValues.value[v.name] = v.defaultValue || ''
+    }
+  } catch (_) {
+    templateVariables.value = []
+    variableValues.value = {}
+  }
+}
+
+async function applyTemplate() {
+  if (!selectedTemplateId.value) return
+  try {
+    const rendered = await schedulerStore.renderTemplate(selectedTemplateId.value, variableValues.value)
+    agentForm.value.prompt = rendered
+    ElMessage.success('模板已应用')
+  } catch (e) {
+    ElMessage.error('应用模板失败: ' + String(e))
+  }
 }
 
 async function handleAgentExecute(background: boolean = false) {
@@ -389,6 +441,56 @@ onBeforeUnmount(() => {
 
           <el-form-item label="项目路径">
             <el-input :model-value="agentForm.projectPath" disabled />
+          </el-form-item>
+
+          <el-form-item v-if="!currentExecution && !isViewMode" label="Prompt 模板">
+            <div class="template-selector">
+              <el-select
+                v-model="selectedTemplateId"
+                placeholder="选择模板（可选）"
+                clearable
+                size="small"
+                style="width: 100%"
+                @change="onTemplateSelect"
+              >
+                <el-option
+                  v-for="tpl in templateList"
+                  :key="tpl.id"
+                  :label="tpl.name"
+                  :value="tpl.id"
+                >
+                  <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <span>{{ tpl.name }}</span>
+                    <span style="font-size: 11px; color: #999;">{{ tpl.category }}</span>
+                  </div>
+                </el-option>
+              </el-select>
+
+              <div v-if="templateVariables.length > 0" class="template-vars">
+                <div
+                  v-for="v in templateVariables"
+                  :key="v.name"
+                  class="template-var-item"
+                >
+                  <label>{{ v.label }}{{ v.required ? ' *' : '' }}</label>
+                  <el-input
+                    v-if="v.type === 'textarea'"
+                    v-model="variableValues[v.name]"
+                    type="textarea"
+                    :rows="2"
+                    size="small"
+                  />
+                  <el-input
+                    v-else
+                    v-model="variableValues[v.name]"
+                    size="small"
+                  />
+                </div>
+                <el-button type="primary" size="small" @click="applyTemplate">
+                  应用模板
+                </el-button>
+              </div>
+            </div>
           </el-form-item>
 
           <el-form-item v-if="!currentExecution" required>
@@ -653,6 +755,35 @@ onBeforeUnmount(() => {
   border: none;
   border-top: 1px solid #e2e8f0;
   margin: 1em 0;
+}
+
+.template-selector {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.template-vars {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+  background: #f8fafc;
+  border-radius: 6px;
+  border: 1px solid #e2e8f0;
+}
+
+.template-var-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+
+  label {
+    font-size: 12px;
+    color: #64748b;
+    font-weight: 500;
+  }
 }
 </style>
 

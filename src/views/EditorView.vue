@@ -9,7 +9,11 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import type { Todo, CreateTodoRequest, UpdateTodoRequest, CreateSubTaskRequest, QuadrantType } from '@/types'
 import { DEFAULT_COLOR, PRESET_COLORS, QUADRANT_INFO, DEFAULT_QUADRANT } from '@/types'
 import { useAgentStore } from '@/stores/agentStore'
+import { useSchedulerStore } from '@/stores/schedulerStore'
 import { AGENT_TYPE_INFO } from '@/types/agent'
+import { SCHEDULE_STATUS_MAP } from '@/types/scheduler'
+import type { ScheduleStrategy } from '@/types/scheduler'
+import CronEditor from '@/components/CronEditor.vue'
 
 const route = useRoute()
 const todoId = computed(() => route.query.id ? parseInt(route.query.id as string) : null)
@@ -246,6 +250,9 @@ async function loadTodo() {
         agentId: todo.value.agentId ?? null,
         projectPath: todo.value.agentProjectPath ?? '',
       }
+
+      // 恢复调度配置
+      initScheduleForm()
     }
   } catch (e) {
     console.error('Failed to load todo:', e)
@@ -621,6 +628,44 @@ const hasAgentConfig = computed(() => {
   return !!(agentForm.value.agentId || todo.value?.agentId)
 })
 
+// ========== 调度配置 ==========
+const schedulerStore = useSchedulerStore()
+
+const scheduleForm = ref({
+  strategy: 'manual' as ScheduleStrategy,
+  cronExpression: '',
+  enabled: false,
+})
+
+function initScheduleForm() {
+  if (todo.value) {
+    scheduleForm.value = {
+      strategy: (todo.value.scheduleStrategy as ScheduleStrategy) || 'manual',
+      cronExpression: todo.value.cronExpression || '',
+      enabled: !!todo.value.scheduleEnabled,
+    }
+  }
+}
+
+async function saveScheduleConfig() {
+  if (!todoId.value) return
+  try {
+    await schedulerStore.updateTodoScheduleConfig(
+      todoId.value,
+      scheduleForm.value.strategy,
+      scheduleForm.value.strategy === 'cron' ? scheduleForm.value.cronExpression : undefined,
+      scheduleForm.value.enabled,
+    )
+    ElMessage.success('调度配置已保存')
+  } catch (e) {
+    ElMessage.error('保存调度配置失败: ' + String(e))
+  }
+}
+
+function getScheduleStatusInfo(status: string) {
+  return SCHEDULE_STATUS_MAP[status as keyof typeof SCHEDULE_STATUS_MAP] || SCHEDULE_STATUS_MAP.none
+}
+
 // 关闭窗口
 function handleClose() {
   appWindow.close()
@@ -946,6 +991,15 @@ function handleClose() {
                 >
                   {{ subtask.title }}
                 </span>
+                <el-tag
+                  v-if="'scheduleStatus' in subtask && subtask.scheduleStatus && subtask.scheduleStatus !== 'none'"
+                  :type="getScheduleStatusInfo(subtask.scheduleStatus as string).type as any"
+                  size="small"
+                  effect="light"
+                  class="schedule-tag"
+                >
+                  {{ getScheduleStatusInfo(subtask.scheduleStatus as string).label }}
+                </el-tag>
                 <el-icon
                   v-if="subtask.content"
                   class="content-indicator"
@@ -1026,6 +1080,35 @@ function handleClose() {
           />
           <div class="form-tip">子任务执行 Agent 时使用此目录</div>
         </el-form-item>
+
+        <el-divider v-if="isEdit" />
+
+        <template v-if="isEdit">
+          <el-form-item label="调度策略">
+            <el-select
+              v-model="scheduleForm.strategy"
+              style="width: 100%"
+              placeholder="选择调度策略"
+            >
+              <el-option label="手动执行" value="manual" />
+              <el-option label="自动调度" value="auto" />
+              <el-option label="定时执行 (Cron)" value="cron" />
+              <el-option label="Git Push 触发" value="git_push" />
+              <el-option label="文件变更触发" value="file_watch" />
+            </el-select>
+          </el-form-item>
+
+          <el-form-item v-if="scheduleForm.strategy === 'cron'" label="Cron 表达式">
+            <CronEditor v-model="scheduleForm.cronExpression" />
+          </el-form-item>
+
+          <el-form-item label="启用调度">
+            <el-switch v-model="scheduleForm.enabled" />
+            <span class="form-tip" style="margin-left: 8px">
+              {{ scheduleForm.enabled ? '调度已启用' : '调度已暂停' }}
+            </span>
+          </el-form-item>
+        </template>
       </el-form>
 
       <template #footer>
@@ -1033,7 +1116,9 @@ function handleClose() {
           清除配置
         </el-button>
         <el-button @click="agentConfigVisible = false">取消</el-button>
-        <el-button type="primary" @click="saveAgentConfig">确定</el-button>
+        <el-button type="primary" @click="() => { saveAgentConfig(); if (isEdit) saveScheduleConfig() }">
+          确定
+        </el-button>
       </template>
     </el-dialog>
   </div>
@@ -1429,6 +1514,14 @@ function handleClose() {
     outline: none;
     background: #ffffff;
     font-family: inherit;
+  }
+
+  .schedule-tag {
+    flex-shrink: 0;
+    font-size: 10px;
+    padding: 0 4px;
+    height: 18px;
+    line-height: 18px;
   }
 
   .content-indicator {

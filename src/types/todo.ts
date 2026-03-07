@@ -47,6 +47,14 @@ export interface SubTask {
   sortOrder: number
   createdAt: string
   updatedAt: string
+  scheduleStatus?: string
+  priorityScore?: number
+  maxRetries?: number
+  retryCount?: number
+  timeoutSecs?: number
+  scheduledAt?: string | null
+  lastScheduledRun?: string | null
+  scheduleError?: string | null
 }
 
 // 待办事项接口
@@ -73,6 +81,14 @@ export interface Todo {
   agentId: number | null
   /** Agent 工作的项目目录（可为空） */
   agentProjectPath: string | null
+  /** 调度策略 */
+  scheduleStrategy?: string
+  /** Cron 表达式 */
+  cronExpression?: string | null
+  /** 是否启用调度 */
+  scheduleEnabled?: boolean
+  /** 上次调度执行时间 */
+  lastScheduledRun?: string | null
   subtasks: SubTask[]
 }
 
