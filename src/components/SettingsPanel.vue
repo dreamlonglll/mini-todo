@@ -4,7 +4,6 @@ import { useAppStore, useTodoStore } from '@/stores'
 import { save, open } from '@tauri-apps/plugin-dialog'
 import { writeTextFile, readTextFile } from '@tauri-apps/plugin-fs'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import AgentSettings from './AgentSettings.vue'
 
 defineProps<{
   visible: boolean
@@ -17,7 +16,6 @@ const emit = defineEmits<{
 const appStore = useAppStore()
 const todoStore = useTodoStore()
 
-const activeTab = ref('general')
 const exporting = ref(false)
 const importing = ref(false)
 
@@ -120,55 +118,47 @@ function handleClose() {
     @update:model-value="handleClose"
   >
     <div class="settings-content">
-      <el-tabs v-model="activeTab">
-        <el-tab-pane label="通用" name="general">
-          <!-- 数据管理 -->
-          <div class="settings-section">
-            <h3 class="section-title">数据管理</h3>
-            
-            <div class="settings-item">
-              <el-button 
-                type="primary" 
-                :loading="exporting"
-                style="width: 100%"
-                @click="handleExport"
-              >
-                <el-icon><Download /></el-icon>
-                <span>导出数据</span>
-              </el-button>
-            </div>
+      <!-- 数据管理 -->
+      <div class="settings-section">
+        <h3 class="section-title">数据管理</h3>
+        
+        <div class="settings-item">
+          <el-button 
+            type="primary" 
+            :loading="exporting"
+            style="width: 100%"
+            @click="handleExport"
+          >
+            <el-icon><Download /></el-icon>
+            <span>导出数据</span>
+          </el-button>
+        </div>
 
-            <div class="settings-item">
-              <el-button 
-                :loading="importing"
-                style="width: 100%"
-                @click="handleImport"
-              >
-                <el-icon><Upload /></el-icon>
-                <span>导入数据</span>
-              </el-button>
-            </div>
+        <div class="settings-item">
+          <el-button 
+            :loading="importing"
+            style="width: 100%"
+            @click="handleImport"
+          >
+            <el-icon><Upload /></el-icon>
+            <span>导入数据</span>
+          </el-button>
+        </div>
 
-            <p class="settings-hint">
-              导出数据可用于备份或迁移到其他设备
-            </p>
-          </div>
+        <p class="settings-hint">
+          导出数据可用于备份或迁移到其他设备
+        </p>
+      </div>
 
-          <!-- 关于 -->
-          <div class="settings-section">
-            <h3 class="section-title">关于</h3>
-            <div class="about-info">
-              <p><strong>Mini Todo</strong></p>
-              <p>版本: 0.1.0</p>
-              <p>一个简洁高效的桌面待办应用</p>
-            </div>
-          </div>
-        </el-tab-pane>
-
-        <el-tab-pane label="Agent" name="agent">
-          <AgentSettings />
-        </el-tab-pane>
-      </el-tabs>
+      <!-- 关于 -->
+      <div class="settings-section">
+        <h3 class="section-title">关于</h3>
+        <div class="about-info">
+          <p><strong>Mini Todo</strong></p>
+          <p>版本: 0.1.0</p>
+          <p>一个简洁高效的桌面待办应用</p>
+        </div>
+      </div>
     </div>
   </el-drawer>
 </template>

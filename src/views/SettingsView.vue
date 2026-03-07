@@ -10,6 +10,7 @@ import { enable, disable, isEnabled } from '@tauri-apps/plugin-autostart'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAppStore, APP_VERSION } from '@/stores'
 import type { ScreenConfig, SyncSettings, SyncDownloadResult } from '@/types'
+import AgentSettings from '@/components/AgentSettings.vue'
 
 const appWindow = getCurrentWindow()
 const appStore = useAppStore()
@@ -665,6 +666,17 @@ async function handleCheckUpdate() {
             <el-icon :size="14"><InfoFilled /></el-icon>
             通过 WebDAV 协议将待办数据和图片同步到云端存储
           </p>
+        </div>
+      </div>
+
+      <!-- Agent 管理 -->
+      <div class="settings-card">
+        <div class="card-header">
+          <el-icon class="card-icon"><MagicStick /></el-icon>
+          <h3 class="card-title">Agent 管理</h3>
+        </div>
+        <div class="card-body">
+          <AgentSettings />
         </div>
       </div>
 

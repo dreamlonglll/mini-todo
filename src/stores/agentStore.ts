@@ -6,7 +6,6 @@ import type {
   CreateAgentRequest,
   UpdateAgentRequest,
   AgentHealthStatus,
-  AgentEvent,
 } from '@/types/agent'
 
 export const useAgentStore = defineStore('agent', () => {

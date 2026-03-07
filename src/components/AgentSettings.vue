@@ -35,6 +35,7 @@ const form = ref({
   name: '',
   agentType: 'claude_code' as AgentType,
   cliPath: '',
+  baseUrl: '',
   apiKey: '',
   defaultModel: '',
   maxConcurrent: 1,
@@ -86,11 +87,43 @@ function removeEnvVar(index: number) {
   form.value.envVars.splice(index, 1)
 }
 
+function getBaseUrlEnvKey(agentType: AgentType): string {
+  switch (agentType) {
+    case 'claude_code': return 'ANTHROPIC_BASE_URL'
+    case 'codex': return 'OPENAI_BASE_URL'
+    default: return 'API_BASE_URL'
+  }
+}
+
+function extractBaseUrl(envVarsJson: string, agentType: AgentType): { baseUrl: string; remaining: EnvVar[] } {
+  const envKey = getBaseUrlEnvKey(agentType)
+  const vars = envVarsToArray(envVarsJson)
+  let baseUrl = ''
+  const remaining: EnvVar[] = []
+  for (const v of vars) {
+    if (v.key === envKey) {
+      baseUrl = v.value
+    } else {
+      remaining.push(v)
+    }
+  }
+  return { baseUrl, remaining }
+}
+
+function mergeBaseUrlToEnvVars(baseUrl: string, envVars: EnvVar[], agentType: AgentType): string {
+  const all = [...envVars]
+  if (baseUrl.trim()) {
+    all.unshift({ key: getBaseUrlEnvKey(agentType), value: baseUrl.trim() })
+  }
+  return envVarsToJson(all)
+}
+
 function resetForm() {
   form.value = {
     name: '',
     agentType: 'claude_code',
     cliPath: '',
+    baseUrl: '',
     apiKey: '',
     defaultModel: '',
     maxConcurrent: 1,
@@ -128,17 +161,20 @@ function openEditDialog(agent: AgentConfig) {
     sandbox = { ...DEFAULT_SANDBOX_CONFIG }
   }
 
+  const { baseUrl, remaining } = extractBaseUrl(agent.envVars, agent.agentType)
+
   form.value = {
     name: agent.name,
     agentType: agent.agentType,
     cliPath: agent.cliPath,
+    baseUrl,
     apiKey: '',
     defaultModel: agent.defaultModel,
     maxConcurrent: agent.maxConcurrent,
     timeoutSeconds: agent.timeoutSeconds,
     capabilities: caps,
     sandbox,
-    envVars: envVarsToArray(agent.envVars),
+    envVars: remaining,
     enabled: agent.enabled,
   }
   showAdvanced.value = false
@@ -167,6 +203,8 @@ async function handleSubmit() {
   }
 
   try {
+    const mergedEnvVars = mergeBaseUrlToEnvVars(form.value.baseUrl, form.value.envVars, form.value.agentType)
+
     if (dialogMode.value === 'add') {
       const request: CreateAgentRequest = {
         name: form.value.name,
@@ -177,7 +215,7 @@ async function handleSubmit() {
         maxConcurrent: form.value.maxConcurrent,
         timeoutSeconds: form.value.timeoutSeconds,
         capabilities: JSON.stringify(form.value.capabilities),
-        envVars: envVarsToJson(form.value.envVars),
+        envVars: mergedEnvVars,
         sandboxConfig: JSON.stringify(form.value.sandbox),
       }
       await agentStore.addAgent(request)
@@ -192,7 +230,7 @@ async function handleSubmit() {
         maxConcurrent: form.value.maxConcurrent,
         timeoutSeconds: form.value.timeoutSeconds,
         capabilities: JSON.stringify(form.value.capabilities),
-        envVars: envVarsToJson(form.value.envVars),
+        envVars: mergedEnvVars,
         sandboxConfig: JSON.stringify(form.value.sandbox),
         enabled: form.value.enabled,
       }
@@ -324,7 +362,10 @@ onMounted(() => {
       width="460px"
       :close-on-click-modal="false"
       append-to-body
+      class="agent-dialog"
+      top="5vh"
     >
+      <div style="max-height: 60vh; overflow-y: auto; padding-right: 8px;">
       <el-form label-position="top" size="default">
         <el-form-item label="名称" required>
           <el-input v-model="form.name" placeholder="例如 My Claude" />
@@ -354,6 +395,17 @@ onMounted(() => {
 
         <el-form-item label="CLI 路径" required>
           <el-input v-model="form.cliPath" placeholder="例如 claude 或完整路径" />
+        </el-form-item>
+
+        <el-form-item label="API Base URL">
+          <el-input
+            v-model="form.baseUrl"
+            placeholder="留空使用默认地址"
+            clearable
+          />
+          <div class="form-tip">
+            不填则使用官方默认地址，第三方 API 请填写完整 URL
+          </div>
         </el-form-item>
 
         <el-form-item label="API Key">
@@ -433,24 +485,6 @@ onMounted(() => {
               </p>
             </div>
 
-            <el-divider content-position="left">能力画像</el-divider>
-
-            <el-form-item label="代码生成">
-              <el-slider v-model="form.capabilities.codeGen" :min="1" :max="10" show-stops />
-            </el-form-item>
-            <el-form-item label="代码修复">
-              <el-slider v-model="form.capabilities.codeFix" :min="1" :max="10" show-stops />
-            </el-form-item>
-            <el-form-item label="测试与审查">
-              <el-slider v-model="form.capabilities.testReview" :min="1" :max="10" show-stops />
-            </el-form-item>
-            <el-form-item label="速度">
-              <el-slider v-model="form.capabilities.speed" :min="1" :max="10" show-stops />
-            </el-form-item>
-            <el-form-item label="成本效率">
-              <el-slider v-model="form.capabilities.costEfficiency" :min="1" :max="10" show-stops />
-            </el-form-item>
-
             <el-divider content-position="left">沙盒配置</el-divider>
 
             <el-form-item label="Worktree 隔离">
@@ -468,6 +502,7 @@ onMounted(() => {
           {{ showAdvanced ? '收起高级设置' : '展开高级设置' }}
         </el-button>
       </el-form>
+      </div>
 
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
@@ -567,5 +602,19 @@ onMounted(() => {
   font-size: 12px;
   color: var(--text-tertiary);
   margin-top: 6px;
+}
+
+.form-tip {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  margin-top: 4px;
+  line-height: 1.4;
+}
+</style>
+
+<style>
+.agent-dialog .el-dialog__body {
+  max-height: 60vh;
+  overflow-y: auto;
 }
 </style>
