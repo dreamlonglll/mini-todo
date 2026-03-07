@@ -2,16 +2,28 @@ use std::str::FromStr;
 use chrono::{Local, DateTime, NaiveDateTime, Utc};
 use cron::Schedule;
 
+/// 将 5 段标准 cron 自动转为 6 段（加秒前缀 0）
+fn normalize_cron(expression: &str) -> String {
+    let parts: Vec<&str> = expression.split_whitespace().collect();
+    if parts.len() == 5 {
+        format!("0 {}", expression)
+    } else {
+        expression.to_string()
+    }
+}
+
 /// 验证 Cron 表达式是否合法
 pub fn validate_cron(expression: &str) -> Result<(), String> {
-    Schedule::from_str(expression)
+    let expr = normalize_cron(expression);
+    Schedule::from_str(&expr)
         .map(|_| ())
         .map_err(|e| format!("无效的 Cron 表达式: {}", e))
 }
 
 /// 计算下一次执行时间
 pub fn next_execution_time(expression: &str) -> Result<DateTime<Local>, String> {
-    let schedule = Schedule::from_str(expression)
+    let expr = normalize_cron(expression);
+    let schedule = Schedule::from_str(&expr)
         .map_err(|e| format!("无效的 Cron 表达式: {}", e))?;
 
     schedule
@@ -26,7 +38,8 @@ pub fn should_trigger(
     expression: &str,
     last_run: Option<&str>,
 ) -> Result<bool, String> {
-    let schedule = Schedule::from_str(expression)
+    let expr = normalize_cron(expression);
+    let schedule = Schedule::from_str(&expr)
         .map_err(|e| format!("无效的 Cron 表达式: {}", e))?;
 
     let now = Local::now();
@@ -59,7 +72,8 @@ pub fn should_trigger(
 
 /// 获取 Cron 表达式的人类可读描述
 pub fn describe_cron(expression: &str) -> String {
-    let parts: Vec<&str> = expression.split_whitespace().collect();
+    let normalized = normalize_cron(expression);
+    let parts: Vec<&str> = normalized.split_whitespace().collect();
     if parts.len() < 6 {
         return expression.to_string();
     }
