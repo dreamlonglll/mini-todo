@@ -509,6 +509,65 @@ function handleInlineEditKeydown(e: KeyboardEvent, subtaskId: number) {
   }
 }
 
+// 打开子任务查看窗口（只读模式）
+async function openSubtaskViewWindow(subtaskId: number) {
+  if (isSubtaskEditorOpen.value) return
+
+  const agentId = agentForm.value.agentId ?? todo.value?.agentId ?? ''
+  const agentPath = encodeURIComponent(agentForm.value.projectPath || todo.value?.agentProjectPath || '')
+  const url = `#/subtask-editor?id=${subtaskId}&agentId=${agentId}&agentProjectPath=${agentPath}&mode=view`
+  const label = `subtask-viewer-${Date.now()}`
+
+  try {
+    isSubtaskEditorOpen.value = true
+
+    const windowWidth = 800
+    const windowHeight = 750
+    let x: number, y: number
+
+    const monitor = await currentMonitor() || await primaryMonitor()
+    if (monitor) {
+      const s = monitor.scaleFactor
+      const mx = monitor.position.x / s
+      const my = monitor.position.y / s
+      const mw = monitor.size.width / s
+      const mh = monitor.size.height / s
+      x = Math.round(mx + (mw - windowWidth) / 2)
+      y = Math.round(my + (mh - windowHeight) / 2)
+    } else {
+      const s = await appWindow.scaleFactor()
+      const pos = await appWindow.outerPosition()
+      const size = await appWindow.outerSize()
+      x = Math.round(pos.x / s + (size.width / s - windowWidth) / 2)
+      y = Math.round(pos.y / s + (size.height / s - windowHeight) / 2)
+    }
+
+    const webview = new WebviewWindow(label, {
+      url,
+      title: '查看子任务',
+      width: windowWidth,
+      height: windowHeight,
+      x,
+      y,
+      resizable: true,
+      decorations: false,
+      transparent: false,
+      parent: appWindow,
+    })
+
+    webview.once('tauri://destroyed', async () => {
+      isSubtaskEditorOpen.value = false
+    })
+
+    webview.once('tauri://error', () => {
+      isSubtaskEditorOpen.value = false
+    })
+  } catch (e) {
+    isSubtaskEditorOpen.value = false
+    console.error('Failed to open subtask viewer:', e)
+  }
+}
+
 // 打开子任务编辑独立窗口（仅编辑模式，子任务已持久化）
 async function openSubtaskEditorWindow(subtaskId: number) {
   if (isSubtaskEditorOpen.value) return
@@ -954,6 +1013,13 @@ function handleClose() {
                   <Document />
                 </el-icon>
                 <div v-if="inlineEditingSubtaskId !== subtask.id" class="subtask-actions">
+                  <button
+                    class="action-btn view-btn"
+                    @click="openSubtaskViewWindow(subtask.id)"
+                    title="查看子任务"
+                  >
+                    <el-icon><View /></el-icon>
+                  </button>
                   <button 
                     v-if="isEdit"
                     class="action-btn edit-btn"
@@ -1456,6 +1522,11 @@ function handleClose() {
       cursor: pointer;
       color: #94a3b8;
       transition: all 0.15s ease;
+
+      &.view-btn:hover {
+        background: #e0e7ff;
+        color: #6366f1;
+      }
 
       &.edit-btn:hover {
         background: #dbeafe;

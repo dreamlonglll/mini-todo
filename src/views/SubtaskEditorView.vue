@@ -5,7 +5,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { ElMessage } from 'element-plus'
-import { Editor, rootCtx, defaultValueCtx } from '@milkdown/kit/core'
+import { Editor, rootCtx, defaultValueCtx, editorViewOptionsCtx } from '@milkdown/kit/core'
 import { commonmark } from '@milkdown/kit/preset/commonmark'
 import { listener, listenerCtx } from '@milkdown/kit/plugin/listener'
 import { upload, uploadConfig } from '@milkdown/kit/plugin/upload'
@@ -24,6 +24,7 @@ const agentIdParam = route.query.agentId ? parseInt(route.query.agentId as strin
 const agentProjectPath = route.query.agentProjectPath
   ? decodeURIComponent(route.query.agentProjectPath as string)
   : ''
+const isViewMode = route.query.mode === 'view'
 const appWindow = getCurrentWindow()
 
 const title = ref('')
@@ -100,26 +101,36 @@ async function imageUploader(files: FileList, schema: any): Promise<Node[]> {
 async function initEditor() {
   if (!editorContainer.value) return
 
-  editorInstance = await Editor.make()
+  const builder = Editor.make()
     .config(nord)
     .config((ctx) => {
       ctx.set(rootCtx, editorContainer.value!)
       ctx.set(defaultValueCtx, markdownContent.value || '')
-      ctx.get(listenerCtx).markdownUpdated((_ctx, markdown, prevMarkdown) => {
-        if (markdown !== prevMarkdown) {
-          markdownContent.value = markdown
-        }
-      })
-      ctx.set(uploadConfig.key, {
-        uploader: imageUploader as Uploader,
-        enableHtmlFileUploader: true,
-        uploadWidgetFactory: (pos, spec) => Decoration.widget(pos, document.createElement('span'), spec),
-      } satisfies UploadOptions)
+      if (isViewMode) {
+        ctx.update(editorViewOptionsCtx, (prev) => ({
+          ...prev,
+          editable: () => false,
+        }))
+      } else {
+        ctx.get(listenerCtx).markdownUpdated((_ctx, markdown, prevMarkdown) => {
+          if (markdown !== prevMarkdown) {
+            markdownContent.value = markdown
+          }
+        })
+        ctx.set(uploadConfig.key, {
+          uploader: imageUploader as Uploader,
+          enableHtmlFileUploader: true,
+          uploadWidgetFactory: (pos, spec) => Decoration.widget(pos, document.createElement('span'), spec),
+        } satisfies UploadOptions)
+      }
     })
     .use(commonmark)
-    .use(listener)
-    .use(upload)
-    .create()
+
+  if (!isViewMode) {
+    builder.use(listener).use(upload)
+  }
+
+  editorInstance = await builder.create()
 }
 
 function destroyEditor() {
@@ -298,7 +309,7 @@ onBeforeUnmount(() => {
 <template>
   <div class="subtask-editor-window">
     <div class="window-header">
-      <h2>编辑子任务</h2>
+      <h2>{{ isViewMode ? '查看子任务' : '编辑子任务' }}</h2>
       <div class="window-controls">
         <button class="control-btn maximize-btn" title="最大化" @click="handleMaximize">
           <el-icon :size="14"><FullScreen /></el-icon>
@@ -316,6 +327,7 @@ onBeforeUnmount(() => {
           v-model="title"
           placeholder="请输入子任务标题"
           maxlength="200"
+          :disabled="isViewMode"
         />
       </div>
 
@@ -351,9 +363,9 @@ onBeforeUnmount(() => {
       <div class="footer-right">
         <el-button @click="handleClose">
           <el-icon><Close /></el-icon>
-          取消
+          {{ isViewMode ? '关闭' : '取消' }}
         </el-button>
-        <el-button type="primary" @click="handleSave" :disabled="!title.trim()">
+        <el-button v-if="!isViewMode" type="primary" @click="handleSave" :disabled="!title.trim()">
           <el-icon><Check /></el-icon>
           保存
         </el-button>
@@ -413,7 +425,7 @@ onBeforeUnmount(() => {
         <div class="agent-dialog-footer">
           <div class="footer-left-actions">
             <el-button
-              v-if="agentExecuting"
+              v-if="agentExecuting && !isViewMode"
               type="danger"
               size="small"
               @click="handleAgentCancel"
@@ -422,7 +434,7 @@ onBeforeUnmount(() => {
               取消执行
             </el-button>
             <el-button
-              v-if="currentExecution && !agentExecuting"
+              v-if="currentExecution && !agentExecuting && !isViewMode"
               size="small"
               @click="handleClearExecution"
             >
@@ -433,7 +445,7 @@ onBeforeUnmount(() => {
             <el-button @click="agentDialogVisible = false">
               关闭
             </el-button>
-            <template v-if="!currentExecution">
+            <template v-if="!currentExecution && !isViewMode">
               <el-button type="primary" @click="handleAgentExecute(false)">
                 <el-icon><VideoPlay /></el-icon>
                 开始执行
