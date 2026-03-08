@@ -8,6 +8,7 @@ pub mod settings_cmd;
 pub mod sync_cmd;
 pub mod todo;
 pub mod window;
+pub mod workflow_cmd;
 
 pub use agent_cmd::*;
 pub use data::*;
@@ -19,3 +20,4 @@ pub use settings_cmd::*;
 pub use sync_cmd::*;
 pub use todo::*;
 pub use window::*;
+pub use workflow_cmd::*;

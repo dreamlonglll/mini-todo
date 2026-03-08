@@ -10,7 +10,7 @@ pub const TODO_COLUMNS: &str =
     "id, title, description, color, quadrant, notify_at, notify_before,
      notified, completed, sort_order, start_time, end_time, created_at, updated_at,
      agent_id, agent_project_path, schedule_strategy, cron_expression, schedule_enabled,
-     last_scheduled_run, post_action";
+     last_scheduled_run, post_action, workflow_enabled, workflow_current_step";
 
 pub fn subtask_from_row(row: &Row) -> rusqlite::Result<SubTask> {
     Ok(SubTask {
@@ -56,6 +56,8 @@ pub fn todo_from_row(row: &Row) -> rusqlite::Result<Todo> {
         schedule_enabled: row.get::<_, i32>(18).unwrap_or(0) != 0,
         last_scheduled_run: row.get(19).unwrap_or(None),
         post_action: row.get::<_, String>(20).unwrap_or_else(|_| "none".to_string()),
+        workflow_enabled: row.get::<_, i32>(21).unwrap_or(0) != 0,
+        workflow_current_step: row.get::<_, i32>(22).unwrap_or(-1),
         subtasks: Vec::new(),
     })
 }
@@ -96,6 +98,10 @@ pub struct Todo {
     #[serde(default = "default_post_action")]
     pub post_action: String,
     #[serde(default)]
+    pub workflow_enabled: bool,
+    #[serde(default = "default_workflow_step")]
+    pub workflow_current_step: i32,
+    #[serde(default)]
     pub subtasks: Vec<SubTask>,
 }
 
@@ -103,8 +109,33 @@ fn default_post_action() -> String {
     "none".to_string()
 }
 
+fn default_workflow_step() -> i32 {
+    -1
+}
+
 fn default_schedule_strategy() -> String {
     "manual".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowStep {
+    pub id: i64,
+    pub todo_id: i64,
+    pub step_order: i32,
+    pub step_type: String,
+    pub subtask_id: Option<i64>,
+    pub prompt_text: Option<String>,
+    pub status: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowStepInput {
+    pub step_type: String,
+    pub subtask_id: Option<i64>,
+    pub prompt_text: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

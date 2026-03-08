@@ -4,12 +4,11 @@ use tokio::sync::Mutex;
 
 use tauri::Manager;
 
-use crate::db::{Database, agent_db, dependency_db, scheduler_db};
+use crate::db::{Database, agent_db, dependency_db, scheduler_db, workflow_db};
 use crate::services::agent::AgentManager;
 
 use super::concurrency::ConcurrencyManager;
 use super::cron_manager;
-use super::post_actions::{self, PostAction};
 use super::priority_queue::{PriorityQueue, QueuedTask, calculate_priority};
 use super::state_machine;
 use super::triggers::TriggerManager;
@@ -572,7 +571,6 @@ async fn execute_task(app: &tauri::AppHandle, task: QueuedTask, _project_path: &
 
     let task_id = format!("sched-{}-{}", task.subtask_id, now_ms());
 
-    let project_path_for_post = project_path.clone();
     let agent_manager = app.state::<AgentManager>();
     let result = agent_manager
         .start_background_execution(
@@ -620,28 +618,22 @@ async fn execute_task(app: &tauri::AppHandle, task: QueuedTask, _project_path: &
         let state = agent_manager.get_execution_state(&task_id).await;
         match state {
             Some(s) if s.status == "completed" => {
-                let post_action_str = db
+                let _ = db.with_connection(|conn| {
+                    scheduler_db::update_schedule_status(conn, task.subtask_id, "completed")
+                });
+
+                let is_workflow_step = db
                     .with_connection(|conn| {
-                        conn.query_row(
-                            "SELECT post_action FROM todos WHERE id = ?1",
-                            [task.todo_id],
-                            |row| row.get::<_, String>(0),
-                        )
+                        workflow_db::find_step_by_subtask(conn, task.subtask_id)
                     })
-                    .unwrap_or_else(|_| "none".to_string());
+                    .unwrap_or(None);
 
-                let action = PostAction::from_str(&post_action_str);
-                let should_trigger = post_actions::execute_post_action(
-                    app,
-                    task.subtask_id,
-                    &project_path_for_post,
-                    &title,
-                    &action,
-                )
-                .await
-                .unwrap_or(true);
-
-                if should_trigger {
+                if let Some(wf_step) = is_workflow_step {
+                    let _ = db.with_connection(|conn| {
+                        workflow_db::update_step_status(conn, wf_step.id, "completed")
+                    });
+                    let _ = super::workflow::advance_workflow(app, wf_step.todo_id).await;
+                } else {
                     trigger_downstream(app, task.subtask_id).await;
                 }
                 return;

@@ -89,8 +89,12 @@ export interface Todo {
   scheduleEnabled?: boolean
   /** 上次调度执行时间 */
   lastScheduledRun?: string | null
-  /** 子任务完成后的工作流动作 */
+  /** 子任务完成后的工作流动作（已废弃） */
   postAction?: PostActionType
+  /** 是否启用工作流 */
+  workflowEnabled?: boolean
+  /** 工作流当前步骤 */
+  workflowCurrentStep?: number
   subtasks: SubTask[]
 }
 

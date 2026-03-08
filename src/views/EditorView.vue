@@ -13,6 +13,7 @@ import { useSchedulerStore } from '@/stores/schedulerStore'
 import { AGENT_TYPE_INFO } from '@/types/agent'
 import { SCHEDULE_STATUS_MAP } from '@/types/scheduler'
 import type { ScheduleStrategy } from '@/types/scheduler'
+import { STEP_STATUS_MAP } from '@/types/workflow'
 import CronEditor from '@/components/CronEditor.vue'
 
 const route = useRoute()
@@ -254,6 +255,9 @@ async function loadTodo() {
 
       // 恢复调度配置
       initScheduleForm()
+
+      // 加载工作流
+      await loadWorkflowProgress()
     }
   } catch (e) {
     console.error('Failed to load todo:', e)
@@ -306,6 +310,7 @@ async function handleSave() {
         postAction: agentForm.value.postAction !== 'none' ? agentForm.value.postAction as import('@/types').PostActionType : undefined,
       }
       await invoke('update_todo', { id: todoId.value, data })
+      await saveWorkflowSteps()
     } else {
       const data: CreateTodoRequest = {
         title: form.value.title,
@@ -632,6 +637,115 @@ const hasAgentConfig = computed(() => {
   return !!(agentForm.value.agentId || todo.value?.agentId)
 })
 
+// ========== 工作流 ==========
+const workflowSteps = ref<Array<{ stepType: string; subtaskId?: number; promptText?: string }>>([])
+const workflowProgress = ref<import('@/types/workflow').WorkflowStep[]>([])
+
+const workflowCompletedCount = computed(() =>
+  workflowProgress.value.filter(s => s.status === 'completed' || s.status === 'skipped').length
+)
+
+function addWorkflowStep() {
+  workflowSteps.value.push({ stepType: 'subtask' })
+}
+
+function moveWorkflowStep(idx: number, dir: 'up' | 'down') {
+  const target = dir === 'up' ? idx - 1 : idx + 1
+  if (target < 0 || target >= workflowSteps.value.length) return
+  const tmp = workflowSteps.value[idx]
+  workflowSteps.value[idx] = workflowSteps.value[target]
+  workflowSteps.value[target] = tmp
+}
+
+function availableSubtasksForStep(currentIdx: number) {
+  const usedIds = workflowSteps.value
+    .filter((s, i) => i !== currentIdx && s.stepType === 'subtask' && s.subtaskId)
+    .map(s => s.subtaskId)
+  return (todo.value?.subtasks || pendingSubtasks.value).filter(st => !usedIds.includes(st.id))
+}
+
+function getSubtaskTitle(subtaskId?: number) {
+  if (!subtaskId) return '(未选择)'
+  const st = (todo.value?.subtasks || []).find(s => s.id === subtaskId)
+  return st?.title || `#${subtaskId}`
+}
+
+async function loadWorkflowProgress() {
+  if (!todo.value?.id) return
+  try {
+    workflowProgress.value = await invoke<import('@/types/workflow').WorkflowStep[]>(
+      'get_workflow_steps', { todoId: todo.value.id }
+    )
+    workflowSteps.value = workflowProgress.value.map(s => ({
+      stepType: s.stepType,
+      subtaskId: s.subtaskId,
+      promptText: s.promptText,
+    }))
+  } catch { /* ignore */ }
+}
+
+async function saveWorkflowSteps() {
+  if (!todo.value?.id) return
+  try {
+    await invoke('set_workflow_steps', {
+      todoId: todo.value.id,
+      steps: workflowSteps.value.map(s => ({
+        stepType: s.stepType,
+        subtaskId: s.subtaskId ?? null,
+        promptText: s.promptText ?? null,
+      })),
+    })
+  } catch { /* ignore */ }
+}
+
+async function doStartWorkflow() {
+  if (!todo.value?.id) return
+  try {
+    await saveWorkflowSteps()
+    await invoke('start_workflow', { todoId: todo.value.id })
+    ElMessage.success('工作流已启动')
+    await loadTodo()
+    await loadWorkflowProgress()
+  } catch (e) {
+    ElMessage.error('启动失败: ' + String(e))
+  }
+}
+
+async function doPauseWorkflow() {
+  if (!todo.value?.id) return
+  try {
+    await invoke('pause_workflow', { todoId: todo.value.id })
+    ElMessage.info('工作流已暂停')
+    await loadTodo()
+  } catch (e) {
+    ElMessage.error('暂停失败: ' + String(e))
+  }
+}
+
+async function doSkipStep() {
+  if (!todo.value?.id) return
+  try {
+    await invoke('skip_workflow_step', { todoId: todo.value.id })
+    ElMessage.info('已跳过当前步骤')
+    await loadTodo()
+    await loadWorkflowProgress()
+  } catch (e) {
+    ElMessage.error('跳过失败: ' + String(e))
+  }
+}
+
+async function doResetWorkflow() {
+  if (!todo.value?.id) return
+  try {
+    await invoke('reset_workflow', { todoId: todo.value.id })
+    ElMessage.success('工作流已重置')
+    await loadTodo()
+    await loadWorkflowProgress()
+  } catch (e) {
+    ElMessage.error('重置失败: ' + String(e))
+  }
+}
+
 // ========== 调度配置 ==========
 const schedulerStore = useSchedulerStore()
 
@@ -668,26 +782,6 @@ async function saveScheduleConfig() {
 
 function getScheduleStatusInfo(status: string) {
   return SCHEDULE_STATUS_MAP[status as keyof typeof SCHEDULE_STATUS_MAP] || SCHEDULE_STATUS_MAP.none
-}
-
-async function approveReview(subtaskId: number) {
-  try {
-    await invoke('approve_review', { subtaskId })
-    ElMessage.success('审核通过，继续执行下游任务')
-    loadTodo()
-  } catch (e) {
-    ElMessage.error('审核操作失败: ' + String(e))
-  }
-}
-
-async function rejectReview(subtaskId: number, action: 'fail' | 'retry') {
-  try {
-    await invoke('reject_review', { subtaskId, action })
-    ElMessage.success(action === 'retry' ? '已重新提交执行' : '任务已标记失败')
-    loadTodo()
-  } catch (e) {
-    ElMessage.error('审核操作失败: ' + String(e))
-  }
 }
 
 // 关闭窗口
@@ -985,6 +1079,40 @@ function handleClose() {
             </div>
           </div>
 
+          <!-- 工作流进度 -->
+          <div v-if="isEdit && workflowProgress.length > 0" class="workflow-progress-section">
+            <div class="workflow-progress-header">
+              <span>工作流进度 ({{ workflowCompletedCount }}/{{ workflowProgress.length }})</span>
+              <div class="workflow-controls">
+                <el-button v-if="!todo?.workflowEnabled" size="small" type="primary" @click="doStartWorkflow" :disabled="workflowProgress.length === 0">
+                  启动
+                </el-button>
+                <template v-else>
+                  <el-button size="small" @click="doPauseWorkflow">暂停</el-button>
+                  <el-button size="small" @click="doSkipStep">跳过</el-button>
+                </template>
+                <el-button size="small" type="danger" plain @click="doResetWorkflow">重置</el-button>
+              </div>
+            </div>
+            <el-progress
+              :percentage="workflowProgress.length > 0 ? Math.round(workflowCompletedCount / workflowProgress.length * 100) : 0"
+              :stroke-width="6"
+              style="margin: 6px 0"
+            />
+            <div class="workflow-steps-progress">
+              <div v-for="(step, idx) in workflowProgress" :key="step.id" class="workflow-step-progress-item">
+                <el-tag
+                  :type="STEP_STATUS_MAP[step.status as keyof typeof STEP_STATUS_MAP]?.type as any || 'info'"
+                  size="small"
+                  effect="light"
+                >
+                  {{ idx + 1 }}. {{ step.stepType === 'subtask' ? getSubtaskTitle(step.subtaskId) : '提示词' }}
+                  {{ STEP_STATUS_MAP[step.status as keyof typeof STEP_STATUS_MAP]?.label || step.status }}
+                </el-tag>
+              </div>
+            </div>
+          </div>
+
           <!-- 子任务列表 -->
           <div v-if="currentSubtaskList.length > 0" class="subtask-list-editor">
             <transition-group name="subtask-list" tag="div">
@@ -1024,17 +1152,6 @@ function handleClose() {
                 >
                   {{ getScheduleStatusInfo(subtask.scheduleStatus as string).label }}
                 </el-tag>
-                <template v-if="'scheduleStatus' in subtask && subtask.scheduleStatus === 'reviewing'">
-                  <el-button type="success" size="small" @click.stop="approveReview(subtask.id)">
-                    通过
-                  </el-button>
-                  <el-button type="warning" size="small" @click.stop="rejectReview(subtask.id, 'retry')">
-                    重试
-                  </el-button>
-                  <el-button type="danger" size="small" @click.stop="rejectReview(subtask.id, 'fail')">
-                    拒绝
-                  </el-button>
-                </template>
                 <el-icon
                   v-if="subtask.content"
                   class="content-indicator"
@@ -1148,18 +1265,56 @@ function handleClose() {
 
           <el-divider />
 
-          <el-form-item label="执行完成后">
-            <el-select
-              v-model="agentForm.postAction"
-              style="width: 100%"
-              placeholder="选择后续动作"
-            >
-              <el-option label="无操作" value="none" />
-              <el-option label="自动 Git Commit" value="git_commit" />
-              <el-option label="人工审核" value="review" />
-              <el-option label="Git Commit + 人工审核" value="git_commit_and_review" />
-            </el-select>
-            <div class="form-tip">子任务执行完成后自动执行的操作</div>
+          <el-form-item label="工作流">
+            <div style="width: 100%">
+              <div v-for="(step, idx) in workflowSteps" :key="idx" class="workflow-step-item">
+                <span class="step-number">{{ idx + 1 }}</span>
+                <el-select
+                  v-model="step.stepType"
+                  style="width: 110px"
+                  size="small"
+                  @change="step.subtaskId = undefined; step.promptText = undefined"
+                >
+                  <el-option label="执行子任务" value="subtask" />
+                  <el-option label="执行提示词" value="prompt" />
+                </el-select>
+                <el-select
+                  v-if="step.stepType === 'subtask'"
+                  v-model="step.subtaskId"
+                  style="flex: 1; min-width: 0"
+                  size="small"
+                  placeholder="选择子任务"
+                  clearable
+                >
+                  <el-option
+                    v-for="st in availableSubtasksForStep(idx)"
+                    :key="st.id"
+                    :label="st.title"
+                    :value="st.id"
+                  />
+                </el-select>
+                <el-input
+                  v-else
+                  v-model="step.promptText"
+                  style="flex: 1; min-width: 0"
+                  size="small"
+                  placeholder="输入提示词"
+                />
+                <el-button size="small" text :disabled="idx === 0" @click="moveWorkflowStep(idx, 'up')">
+                  <el-icon><Top /></el-icon>
+                </el-button>
+                <el-button size="small" text :disabled="idx === workflowSteps.length - 1" @click="moveWorkflowStep(idx, 'down')">
+                  <el-icon><Bottom /></el-icon>
+                </el-button>
+                <el-button size="small" text type="danger" @click="workflowSteps.splice(idx, 1)">
+                  <el-icon><Delete /></el-icon>
+                </el-button>
+              </div>
+              <el-button size="small" type="primary" plain @click="addWorkflowStep" style="margin-top: 4px">
+                添加步骤
+              </el-button>
+            </div>
+            <div class="form-tip">按顺序执行步骤，每步可选子任务或自定义提示词</div>
           </el-form-item>
         </template>
       </el-form>
@@ -1170,7 +1325,7 @@ function handleClose() {
           清除配置
         </el-button>
         <el-button @click="agentConfigVisible = false">取消</el-button>
-        <el-button type="primary" @click="() => { saveAgentConfig(); if (isEdit) saveScheduleConfig() }">
+        <el-button type="primary" @click="() => { saveAgentConfig(); if (isEdit) { saveScheduleConfig(); saveWorkflowSteps() } }">
           确定
         </el-button>
       </template>
@@ -1735,6 +1890,49 @@ function handleClose() {
   color: #94a3b8;
   margin-top: 4px;
   line-height: 1.4;
+}
+
+.workflow-step-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+
+.workflow-step-item .step-number {
+  font-size: 12px;
+  color: #94a3b8;
+  min-width: 16px;
+  text-align: center;
+}
+
+.workflow-progress-section {
+  margin: 8px 0 12px;
+  padding: 10px 12px;
+  background: rgba(59, 130, 246, 0.04);
+  border-radius: 6px;
+  border: 1px solid rgba(59, 130, 246, 0.1);
+}
+
+.workflow-progress-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13px;
+  font-weight: 500;
+  color: #64748b;
+}
+
+.workflow-controls {
+  display: flex;
+  gap: 4px;
+}
+
+.workflow-steps-progress {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
 }
 </style>
 

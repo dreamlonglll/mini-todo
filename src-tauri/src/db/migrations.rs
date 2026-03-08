@@ -108,6 +108,11 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute("INSERT INTO migrations (version) VALUES (18)", [])?;
     }
 
+    if current_version < 19 {
+        migration_v19(conn)?;
+        conn.execute("INSERT INTO migrations (version) VALUES (19)", [])?;
+    }
+
     Ok(())
 }
 
@@ -290,7 +295,7 @@ fn migration_v17(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// 迁移 v18：给 todos 表添加 post_action 字段，控制子任务完成后的工作流动作。
+/// 迁移 v18：给 todos 表添加 post_action 字段（已废弃，保留兼容）。
 fn migration_v18(conn: &Connection) -> Result<()> {
     let has_column: bool = conn
         .prepare("SELECT post_action FROM todos LIMIT 0")
@@ -299,6 +304,36 @@ fn migration_v18(conn: &Connection) -> Result<()> {
         conn.execute(
             "ALTER TABLE todos ADD COLUMN post_action TEXT NOT NULL DEFAULT 'none'",
             [],
+        )?;
+    }
+    Ok(())
+}
+
+/// 迁移 v19：创建 workflow_steps 表 + todos 表新增工作流字段。
+fn migration_v19(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS workflow_steps (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            todo_id     INTEGER NOT NULL,
+            step_order  INTEGER NOT NULL,
+            step_type   TEXT NOT NULL CHECK(step_type IN ('subtask', 'prompt')),
+            subtask_id  INTEGER,
+            prompt_text TEXT,
+            status      TEXT NOT NULL DEFAULT 'pending',
+            created_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+            FOREIGN KEY (todo_id) REFERENCES todos(id) ON DELETE CASCADE,
+            FOREIGN KEY (subtask_id) REFERENCES subtasks(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_workflow_steps_todo ON workflow_steps(todo_id, step_order);"
+    )?;
+
+    let has_wf_enabled: bool = conn
+        .prepare("SELECT workflow_enabled FROM todos LIMIT 0")
+        .is_ok();
+    if !has_wf_enabled {
+        conn.execute_batch(
+            "ALTER TABLE todos ADD COLUMN workflow_enabled INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE todos ADD COLUMN workflow_current_step INTEGER NOT NULL DEFAULT -1;"
         )?;
     }
     Ok(())

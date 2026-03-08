@@ -98,6 +98,13 @@ use commands::{
     // 审核命令
     approve_review,
     reject_review,
+    // 工作流命令
+    get_workflow_steps,
+    set_workflow_steps,
+    start_workflow,
+    pause_workflow,
+    reset_workflow,
+    skip_workflow_step,
     // Prompt 模板命令
     create_prompt_template,
     delete_prompt_template,
@@ -413,6 +420,13 @@ pub fn run() {
             // 审核命令
             approve_review,
             reject_review,
+            // 工作流命令
+            get_workflow_steps,
+            set_workflow_steps,
+            start_workflow,
+            pause_workflow,
+            reset_workflow,
+            skip_workflow_step,
             // Prompt 模板命令
             get_prompt_templates,
             get_prompt_template,

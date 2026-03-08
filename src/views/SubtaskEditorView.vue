@@ -392,26 +392,6 @@ const scheduleStatusLabel = computed(() => {
   return map[scheduleStatus.value] || scheduleStatus.value
 })
 
-async function approveReview() {
-  try {
-    await invoke('approve_review', { subtaskId })
-    ElMessage.success('审核通过，继续执行下游任务')
-    scheduleStatus.value = 'completed'
-  } catch (e) {
-    ElMessage.error('审核操作失败: ' + String(e))
-  }
-}
-
-async function rejectReview(action: 'fail' | 'retry') {
-  try {
-    await invoke('reject_review', { subtaskId, action })
-    ElMessage.success(action === 'retry' ? '已重新提交执行' : '任务已标记失败')
-    scheduleStatus.value = action === 'retry' ? 'pending' : 'failed'
-  } catch (e) {
-    ElMessage.error('审核操作失败: ' + String(e))
-  }
-}
-
 onMounted(async () => {
   await loadSubtask()
   await nextTick()
@@ -485,22 +465,11 @@ onBeforeUnmount(() => {
           <el-switch
             :model-value="isSchedulePending"
             size="small"
-            :disabled="scheduleStatus === 'running' || scheduleStatus === 'reviewing'"
+            :disabled="scheduleStatus === 'running'"
             @change="toggleSchedulePending($event as boolean)"
           />
           <span class="schedule-label">{{ scheduleStatusLabel }}</span>
         </div>
-        <template v-if="scheduleStatus === 'reviewing'">
-          <el-button type="success" size="small" @click="approveReview">
-            通过
-          </el-button>
-          <el-button type="warning" size="small" @click="rejectReview('retry')">
-            重试
-          </el-button>
-          <el-button type="danger" size="small" @click="rejectReview('fail')">
-            拒绝
-          </el-button>
-        </template>
       </div>
       <div class="footer-right">
         <el-button @click="handleClose">
