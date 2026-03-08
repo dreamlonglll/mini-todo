@@ -89,8 +89,12 @@ export interface Todo {
   scheduleEnabled?: boolean
   /** 上次调度执行时间 */
   lastScheduledRun?: string | null
+  /** 子任务完成后的工作流动作 */
+  postAction?: PostActionType
   subtasks: SubTask[]
 }
+
+export type PostActionType = 'none' | 'git_commit' | 'review' | 'git_commit_and_review'
 
 // 创建待办请求
 export interface CreateTodoRequest {
@@ -140,6 +144,8 @@ export interface UpdateTodoRequest {
   agentProjectPath?: string
   /** 是否明确清除 Agent 绑定 */
   clearAgent?: boolean
+  /** 子任务完成后的工作流动作 */
+  postAction?: PostActionType
 }
 
 // 创建子任务请求

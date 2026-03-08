@@ -5,6 +5,7 @@ export type ScheduleStatusType =
   | 'pending'
   | 'queued'
   | 'running'
+  | 'reviewing'
   | 'completed'
   | 'failed'
   | 'cancelled'
@@ -75,6 +76,7 @@ export const SCHEDULE_STATUS_MAP: Record<ScheduleStatusType, { label: string; ty
   pending: { label: '待调度', type: 'warning' },
   queued: { label: '排队中', type: '' },
   running: { label: '执行中', type: 'primary' },
+  reviewing: { label: '待审核', type: 'warning' },
   completed: { label: '已完成', type: 'success' },
   failed: { label: '失败', type: 'danger' },
   cancelled: { label: '已取消', type: 'info' },
@@ -86,6 +88,13 @@ export const STRATEGY_LABELS: Record<ScheduleStrategy, string> = {
   cron: '定时执行',
   git_push: 'Git Push 触发',
   file_watch: '文件变更触发',
+}
+
+export const POST_ACTION_LABELS: Record<string, string> = {
+  none: '无操作',
+  git_commit: '自动 Git Commit',
+  review: '人工审核',
+  git_commit_and_review: 'Git Commit + 人工审核',
 }
 
 export const CRON_PRESETS = [

@@ -262,8 +262,8 @@ pub fn import_data(db: State<Database>, json_data: String) -> Result<(), String>
         for todo in &import_data.todos {
             conn.execute(
                 "INSERT INTO todos (title, description, color, quadrant, notify_at, notify_before, 
-                                   notified, completed, sort_order, start_time, end_time, created_at, updated_at) 
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                                   notified, completed, sort_order, start_time, end_time, created_at, updated_at, post_action) 
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 (
                     &todo.title,
                     &todo.description,
@@ -278,6 +278,7 @@ pub fn import_data(db: State<Database>, json_data: String) -> Result<(), String>
                     &todo.end_time,
                     &todo.created_at,
                     &todo.updated_at,
+                    &todo.post_action,
                 ),
             )?;
 

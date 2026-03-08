@@ -10,7 +10,7 @@ pub const TODO_COLUMNS: &str =
     "id, title, description, color, quadrant, notify_at, notify_before,
      notified, completed, sort_order, start_time, end_time, created_at, updated_at,
      agent_id, agent_project_path, schedule_strategy, cron_expression, schedule_enabled,
-     last_scheduled_run";
+     last_scheduled_run, post_action";
 
 pub fn subtask_from_row(row: &Row) -> rusqlite::Result<SubTask> {
     Ok(SubTask {
@@ -55,6 +55,7 @@ pub fn todo_from_row(row: &Row) -> rusqlite::Result<Todo> {
         cron_expression: row.get(17).unwrap_or(None),
         schedule_enabled: row.get::<_, i32>(18).unwrap_or(0) != 0,
         last_scheduled_run: row.get(19).unwrap_or(None),
+        post_action: row.get::<_, String>(20).unwrap_or_else(|_| "none".to_string()),
         subtasks: Vec::new(),
     })
 }
@@ -92,8 +93,14 @@ pub struct Todo {
     pub schedule_enabled: bool,
     #[serde(default)]
     pub last_scheduled_run: Option<String>,
+    #[serde(default = "default_post_action")]
+    pub post_action: String,
     #[serde(default)]
     pub subtasks: Vec<SubTask>,
+}
+
+fn default_post_action() -> String {
+    "none".to_string()
 }
 
 fn default_schedule_strategy() -> String {
@@ -196,6 +203,8 @@ pub struct UpdateTodoRequest {
     /// 是否明确清除 Agent 绑定
     #[serde(default)]
     pub clear_agent: bool,
+    /// 子任务完成后的工作流动作
+    pub post_action: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

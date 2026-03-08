@@ -103,6 +103,11 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute("INSERT INTO migrations (version) VALUES (17)", [])?;
     }
 
+    if current_version < 18 {
+        migration_v18(conn)?;
+        conn.execute("INSERT INTO migrations (version) VALUES (18)", [])?;
+    }
+
     Ok(())
 }
 
@@ -282,6 +287,20 @@ fn migration_v17(conn: &Connection) -> Result<()> {
         "ALTER TABLE todos ADD COLUMN last_scheduled_run TEXT",
         [],
     )?;
+    Ok(())
+}
+
+/// 迁移 v18：给 todos 表添加 post_action 字段，控制子任务完成后的工作流动作。
+fn migration_v18(conn: &Connection) -> Result<()> {
+    let has_column: bool = conn
+        .prepare("SELECT post_action FROM todos LIMIT 0")
+        .is_ok();
+    if !has_column {
+        conn.execute(
+            "ALTER TABLE todos ADD COLUMN post_action TEXT NOT NULL DEFAULT 'none'",
+            [],
+        )?;
+    }
     Ok(())
 }
 

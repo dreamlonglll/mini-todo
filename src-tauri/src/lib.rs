@@ -95,6 +95,9 @@ use commands::{
     unregister_file_watch,
     get_last_commit_info,
     get_trigger_todos,
+    // 审核命令
+    approve_review,
+    reject_review,
     // Prompt 模板命令
     create_prompt_template,
     delete_prompt_template,
@@ -407,6 +410,9 @@ pub fn run() {
             unregister_file_watch,
             get_last_commit_info,
             get_trigger_todos,
+            // 审核命令
+            approve_review,
+            reject_review,
             // Prompt 模板命令
             get_prompt_templates,
             get_prompt_template,

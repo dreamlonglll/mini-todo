@@ -148,6 +148,10 @@ pub fn update_todo(db: State<Database>, id: i64, data: UpdateTodoRequest) -> Res
                 params.push(Box::new(path.clone()));
             }
         }
+        if let Some(ref post_action) = data.post_action {
+            updates.push("post_action = ?");
+            params.push(Box::new(post_action.clone()));
+        }
 
         if updates.is_empty() {
             return Err(rusqlite::Error::InvalidParameterName(

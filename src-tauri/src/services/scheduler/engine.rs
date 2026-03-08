@@ -9,6 +9,7 @@ use crate::services::agent::AgentManager;
 
 use super::concurrency::ConcurrencyManager;
 use super::cron_manager;
+use super::post_actions::{self, PostAction};
 use super::priority_queue::{PriorityQueue, QueuedTask, calculate_priority};
 use super::state_machine;
 use super::triggers::TriggerManager;
@@ -571,6 +572,7 @@ async fn execute_task(app: &tauri::AppHandle, task: QueuedTask, _project_path: &
 
     let task_id = format!("sched-{}-{}", task.subtask_id, now_ms());
 
+    let project_path_for_post = project_path.clone();
     let agent_manager = app.state::<AgentManager>();
     let result = agent_manager
         .start_background_execution(
@@ -618,12 +620,30 @@ async fn execute_task(app: &tauri::AppHandle, task: QueuedTask, _project_path: &
         let state = agent_manager.get_execution_state(&task_id).await;
         match state {
             Some(s) if s.status == "completed" => {
-                let _ = db.with_connection(|conn| {
-                    scheduler_db::update_schedule_status(conn, task.subtask_id, "completed")
-                });
+                let post_action_str = db
+                    .with_connection(|conn| {
+                        conn.query_row(
+                            "SELECT post_action FROM todos WHERE id = ?1",
+                            [task.todo_id],
+                            |row| row.get::<_, String>(0),
+                        )
+                    })
+                    .unwrap_or_else(|_| "none".to_string());
 
-                // 触发下游依赖任务
-                trigger_downstream(app, task.subtask_id).await;
+                let action = PostAction::from_str(&post_action_str);
+                let should_trigger = post_actions::execute_post_action(
+                    app,
+                    task.subtask_id,
+                    &project_path_for_post,
+                    &title,
+                    &action,
+                )
+                .await
+                .unwrap_or(true);
+
+                if should_trigger {
+                    trigger_downstream(app, task.subtask_id).await;
+                }
                 return;
             }
             Some(s) if s.status == "failed" || s.status == "cancelled" => {
@@ -702,7 +722,7 @@ async fn handle_task_failure(app: &tauri::AppHandle, subtask_id: i64, error: &st
 }
 
 /// 当任务完成时，触发下游依赖任务
-async fn trigger_downstream(app: &tauri::AppHandle, completed_subtask_id: i64) {
+pub async fn trigger_downstream(app: &tauri::AppHandle, completed_subtask_id: i64) {
     let db = app.state::<Database>();
 
     let downstream = match db.with_connection(|conn| {

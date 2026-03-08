@@ -249,6 +249,7 @@ async function loadTodo() {
       agentForm.value = {
         agentId: todo.value.agentId ?? null,
         projectPath: todo.value.agentProjectPath ?? '',
+        postAction: todo.value.postAction ?? 'none',
       }
 
       // 恢复调度配置
@@ -302,6 +303,7 @@ async function handleSave() {
         agentId: agentForm.value.agentId || undefined,
         agentProjectPath: agentForm.value.projectPath || undefined,
         clearAgent: shouldClearAgent,
+        postAction: agentForm.value.postAction !== 'none' ? agentForm.value.postAction as import('@/types').PostActionType : undefined,
       }
       await invoke('update_todo', { id: todoId.value, data })
     } else {
@@ -584,6 +586,7 @@ const agentConfigVisible = ref(false)
 const agentForm = ref({
   agentId: null as number | null,
   projectPath: '',
+  postAction: 'none' as string,
 })
 
 function openAgentConfig() {
@@ -595,6 +598,7 @@ function openAgentConfig() {
   agentForm.value = {
     agentId: todo.value?.agentId ?? agentStore.enabledAgents[0]?.id ?? null,
     projectPath: todo.value?.agentProjectPath ?? '',
+    postAction: todo.value?.postAction ?? 'none',
   }
   agentConfigVisible.value = true
 }
@@ -610,7 +614,7 @@ function saveAgentConfig() {
 }
 
 function clearAgentConfig() {
-  agentForm.value = { agentId: null, projectPath: '' }
+  agentForm.value = { agentId: null, projectPath: '', postAction: 'none' }
   agentConfigVisible.value = false
   ElMessage.info('已清除 Agent 配置')
 }
@@ -664,6 +668,26 @@ async function saveScheduleConfig() {
 
 function getScheduleStatusInfo(status: string) {
   return SCHEDULE_STATUS_MAP[status as keyof typeof SCHEDULE_STATUS_MAP] || SCHEDULE_STATUS_MAP.none
+}
+
+async function approveReview(subtaskId: number) {
+  try {
+    await invoke('approve_review', { subtaskId })
+    ElMessage.success('审核通过，继续执行下游任务')
+    loadTodo()
+  } catch (e) {
+    ElMessage.error('审核操作失败: ' + String(e))
+  }
+}
+
+async function rejectReview(subtaskId: number, action: 'fail' | 'retry') {
+  try {
+    await invoke('reject_review', { subtaskId, action })
+    ElMessage.success(action === 'retry' ? '已重新提交执行' : '任务已标记失败')
+    loadTodo()
+  } catch (e) {
+    ElMessage.error('审核操作失败: ' + String(e))
+  }
 }
 
 // 关闭窗口
@@ -1000,6 +1024,17 @@ function handleClose() {
                 >
                   {{ getScheduleStatusInfo(subtask.scheduleStatus as string).label }}
                 </el-tag>
+                <template v-if="'scheduleStatus' in subtask && subtask.scheduleStatus === 'reviewing'">
+                  <el-button type="success" size="small" @click.stop="approveReview(subtask.id)">
+                    通过
+                  </el-button>
+                  <el-button type="warning" size="small" @click.stop="rejectReview(subtask.id, 'retry')">
+                    重试
+                  </el-button>
+                  <el-button type="danger" size="small" @click.stop="rejectReview(subtask.id, 'fail')">
+                    拒绝
+                  </el-button>
+                </template>
                 <el-icon
                   v-if="subtask.content"
                   class="content-indicator"
@@ -1109,6 +1144,22 @@ function handleClose() {
             <span class="form-tip" style="margin-left: 8px">
               {{ scheduleForm.enabled ? '调度已启用' : '调度已暂停' }}
             </span>
+          </el-form-item>
+
+          <el-divider />
+
+          <el-form-item label="执行完成后">
+            <el-select
+              v-model="agentForm.postAction"
+              style="width: 100%"
+              placeholder="选择后续动作"
+            >
+              <el-option label="无操作" value="none" />
+              <el-option label="自动 Git Commit" value="git_commit" />
+              <el-option label="人工审核" value="review" />
+              <el-option label="Git Commit + 人工审核" value="git_commit_and_review" />
+            </el-select>
+            <div class="form-tip">子任务执行完成后自动执行的操作</div>
           </el-form-item>
         </template>
       </el-form>

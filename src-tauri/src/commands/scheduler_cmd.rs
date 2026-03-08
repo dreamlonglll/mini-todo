@@ -1,9 +1,9 @@
 use std::sync::Arc;
-use tauri::State;
+use tauri::{Manager, State};
 use crate::db::Database;
 use crate::db::{scheduler_db, dependency_db};
 use crate::services::scheduler::cron_manager;
-use crate::services::scheduler::engine::TaskScheduler;
+use crate::services::scheduler::engine::{self, TaskScheduler};
 use crate::services::scheduler::state_machine;
 
 #[tauri::command]
@@ -330,4 +330,71 @@ pub async fn get_trigger_todos(
         rows.collect::<Result<Vec<_>, _>>()
     })
     .map_err(|e| format!("获取触发任务列表失败: {}", e))
+}
+
+#[tauri::command]
+pub async fn approve_review(
+    app: tauri::AppHandle,
+    subtask_id: i64,
+) -> Result<(), String> {
+    let db = app.state::<Database>();
+
+    let current: String = db
+        .with_connection(|conn| {
+            conn.query_row(
+                "SELECT schedule_status FROM subtasks WHERE id = ?1",
+                [subtask_id],
+                |row| row.get(0),
+            )
+        })
+        .map_err(|e| format!("获取子任务状态失败: {}", e))?;
+
+    state_machine::try_transition(&current, "completed")?;
+
+    db.with_connection(|conn| {
+        scheduler_db::update_schedule_status(conn, subtask_id, "completed")
+    })
+    .map_err(|e| format!("更新状态失败: {}", e))?;
+
+    engine::trigger_downstream(&app, subtask_id).await;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn reject_review(
+    app: tauri::AppHandle,
+    subtask_id: i64,
+    action: String,
+) -> Result<(), String> {
+    let db = app.state::<Database>();
+
+    let current: String = db
+        .with_connection(|conn| {
+            conn.query_row(
+                "SELECT schedule_status FROM subtasks WHERE id = ?1",
+                [subtask_id],
+                |row| row.get(0),
+            )
+        })
+        .map_err(|e| format!("获取子任务状态失败: {}", e))?;
+
+    let target = match action.as_str() {
+        "retry" => "pending",
+        _ => "failed",
+    };
+
+    state_machine::try_transition(&current, target)?;
+
+    db.with_connection(|conn| {
+        scheduler_db::update_schedule_status(conn, subtask_id, target)?;
+        if target == "pending" {
+            scheduler_db::update_schedule_error(conn, subtask_id, None)?;
+            scheduler_db::reset_retry_count(conn, subtask_id)?;
+        }
+        Ok(())
+    })
+    .map_err(|e| format!("更新状态失败: {}", e))?;
+
+    Ok(())
 }

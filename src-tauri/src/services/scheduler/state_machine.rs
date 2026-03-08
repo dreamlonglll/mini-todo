@@ -9,6 +9,8 @@ pub enum ScheduleStatus {
     Queued,
     /// 执行中 - Agent 正在执行
     Running,
+    /// 待审核 - 执行完成，等待人工审核确认
+    Reviewing,
     /// 已完成
     Completed,
     /// 失败（超时/错误）
@@ -24,6 +26,7 @@ impl ScheduleStatus {
             ScheduleStatus::Pending => "pending",
             ScheduleStatus::Queued => "queued",
             ScheduleStatus::Running => "running",
+            ScheduleStatus::Reviewing => "reviewing",
             ScheduleStatus::Completed => "completed",
             ScheduleStatus::Failed => "failed",
             ScheduleStatus::Cancelled => "cancelled",
@@ -35,6 +38,7 @@ impl ScheduleStatus {
             "pending" => ScheduleStatus::Pending,
             "queued" => ScheduleStatus::Queued,
             "running" => ScheduleStatus::Running,
+            "reviewing" => ScheduleStatus::Reviewing,
             "completed" => ScheduleStatus::Completed,
             "failed" => ScheduleStatus::Failed,
             "cancelled" => ScheduleStatus::Cancelled,
@@ -61,10 +65,20 @@ pub fn can_transition(from: &ScheduleStatus, to: &ScheduleStatus) -> bool {
         (ScheduleStatus::Queued, ScheduleStatus::Cancelled) |
         // running -> completed: 执行成功
         (ScheduleStatus::Running, ScheduleStatus::Completed) |
+        // running -> reviewing: 执行完成，进入人工审核
+        (ScheduleStatus::Running, ScheduleStatus::Reviewing) |
         // running -> failed: 执行失败/超时
         (ScheduleStatus::Running, ScheduleStatus::Failed) |
         // running -> cancelled: 用户取消执行中的任务
         (ScheduleStatus::Running, ScheduleStatus::Cancelled) |
+        // reviewing -> completed: 审核通过
+        (ScheduleStatus::Reviewing, ScheduleStatus::Completed) |
+        // reviewing -> failed: 审核拒绝
+        (ScheduleStatus::Reviewing, ScheduleStatus::Failed) |
+        // reviewing -> pending: 审核拒绝并要求重新执行
+        (ScheduleStatus::Reviewing, ScheduleStatus::Pending) |
+        // reviewing -> cancelled: 取消审核
+        (ScheduleStatus::Reviewing, ScheduleStatus::Cancelled) |
         // failed -> pending: 重试 (重新排入)
         (ScheduleStatus::Failed, ScheduleStatus::Pending) |
         // cancelled -> pending: 重新提交已取消的任务
