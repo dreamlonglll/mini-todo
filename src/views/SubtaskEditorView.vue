@@ -343,6 +343,13 @@ function handleClearExecution() {
   agentForm.value.prompt = buildPromptContext()
 }
 
+async function handleReExecute(background: boolean) {
+  agentStore.removeExecution(subtaskId)
+  agentForm.value.prompt = buildPromptContext()
+  await nextTick()
+  await handleAgentExecute(background)
+}
+
 // ========== 调度状态控制 ==========
 const scheduleStatus = ref('none')
 
@@ -453,7 +460,7 @@ onBeforeUnmount(() => {
             {{ currentAgentLabel || 'Agent' }}
           </template>
         </el-button>
-        <div v-if="hasAgentConfig && !isViewMode" class="schedule-toggle">
+        <div v-if="hasAgentConfig && (!isViewMode || !currentExecution)" class="schedule-toggle">
           <el-switch
             :model-value="isSchedulePending"
             size="small"
@@ -494,7 +501,7 @@ onBeforeUnmount(() => {
             <el-input :model-value="agentForm.projectPath" disabled />
           </el-form-item>
 
-          <el-form-item v-if="!currentExecution && !isViewMode" label="Prompt 模板">
+          <el-form-item v-if="!currentExecution" label="Prompt 模板">
             <div class="template-selector">
               <el-select
                 v-model="selectedTemplateId"
@@ -578,7 +585,7 @@ onBeforeUnmount(() => {
         <div class="agent-dialog-footer">
           <div class="footer-left-actions">
             <el-button
-              v-if="agentExecuting && !isViewMode"
+              v-if="agentExecuting"
               type="danger"
               size="small"
               @click="handleAgentCancel"
@@ -598,7 +605,7 @@ onBeforeUnmount(() => {
             <el-button @click="agentDialogVisible = false">
               关闭
             </el-button>
-            <template v-if="!currentExecution && !isViewMode">
+            <template v-if="!currentExecution">
               <el-button type="primary" @click="handleAgentExecute(false)">
                 <el-icon><VideoPlay /></el-icon>
                 开始执行
@@ -606,6 +613,12 @@ onBeforeUnmount(() => {
               <el-button type="success" @click="handleAgentExecute(true)">
                 <el-icon><Position /></el-icon>
                 后台执行
+              </el-button>
+            </template>
+            <template v-if="currentExecution && !agentExecuting">
+              <el-button type="warning" @click="handleReExecute(true)">
+                <el-icon><RefreshRight /></el-icon>
+                重新执行
               </el-button>
             </template>
           </div>

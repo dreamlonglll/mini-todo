@@ -25,6 +25,7 @@ impl AgentRunner for ClaudeCodeRunner {
         cmd.current_dir(working_dir);
         cmd.args(["-p", prompt]);
         cmd.args(["--output-format", "stream-json"]);
+        cmd.arg("--include-partial-messages");
         cmd.arg("--verbose");
         cmd.arg("--dangerously-skip-permissions");
 

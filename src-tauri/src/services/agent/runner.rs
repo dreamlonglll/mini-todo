@@ -268,7 +268,14 @@ fn format_inline_commands(text: &str) -> String {
 /// 支持 Codex 和 Claude Code 两种格式。
 /// 返回 None 表示该行无需显示（如心跳/内部事件）。
 fn format_agent_json(line: &str, agent_type: &str) -> Option<(String, String)> {
-    let json: serde_json::Value = serde_json::from_str(line).ok()?;
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let json: serde_json::Value = match serde_json::from_str(trimmed) {
+        Ok(v) => v,
+        Err(_) => return Some((trimmed.to_string(), "stdout".to_string())),
+    };
     let event_type = json["type"].as_str().unwrap_or("");
 
     match agent_type {
@@ -379,36 +386,48 @@ fn format_agent_json(line: &str, agent_type: &str) -> Option<(String, String)> {
         },
 
         "claude_code" => match event_type {
-            "stream_event" => {
-                let text = json["event"]["delta"]["text"].as_str().unwrap_or("");
-                if text.is_empty() {
-                    return None;
-                }
-                Some((text.to_string(), "stdout".to_string()))
-            }
-            "result" => {
-                let result_text = json["result"].as_str().unwrap_or("");
-                if !result_text.is_empty() {
-                    Some((result_text.to_string(), "stdout".to_string()))
+            "assistant" => {
+                let content = &json["message"]["content"];
+                if let Some(arr) = content.as_array() {
+                    let mut texts = Vec::new();
+                    for block in arr {
+                        if let Some(text) = block["text"].as_str() {
+                            if !text.is_empty() {
+                                texts.push(text.to_string());
+                            }
+                        }
+                    }
+                    if texts.is_empty() {
+                        None
+                    } else {
+                        let formatted = format_inline_commands(&texts.join("\n"));
+                        Some((formatted, "stdout".to_string()))
+                    }
+                } else if let Some(text) = json["content"].as_str() {
+                    if text.is_empty() { None }
+                    else { Some((text.to_string(), "stdout".to_string())) }
                 } else {
                     None
                 }
             }
-            "assistant" | "text" => {
-                let text = json["content"]
-                    .as_str()
-                    .or_else(|| json["text"].as_str())
-                    .unwrap_or("");
-                if text.is_empty() {
-                    return None;
-                }
-                Some((text.to_string(), "stdout".to_string()))
+            "content_block_delta" => {
+                let text = json["delta"]["text"].as_str().unwrap_or("");
+                if text.is_empty() { None }
+                else { Some((text.to_string(), "stdout".to_string())) }
             }
             "tool_use" => {
-                let name = json["name"].as_str().unwrap_or("tool");
-                let input = &json["input"];
-                let path = input["path"]
+                let name = json["tool"]["name"]
                     .as_str()
+                    .or_else(|| json["name"].as_str())
+                    .unwrap_or("tool");
+                let input = if json["tool"]["input"].is_object() {
+                    &json["tool"]["input"]
+                } else {
+                    &json["input"]
+                };
+                let path = input["file_path"]
+                    .as_str()
+                    .or_else(|| input["path"].as_str())
                     .or_else(|| input["command"].as_str())
                     .unwrap_or("");
                 if path.is_empty() {
@@ -418,6 +437,25 @@ fn format_agent_json(line: &str, agent_type: &str) -> Option<(String, String)> {
                 }
             }
             "tool_result" => None,
+            "result" => {
+                let cost = json["total_cost_usd"].as_f64().or_else(|| json["cost_usd"].as_f64());
+                let num_turns = json["num_turns"].as_u64();
+                let duration = json["duration_ms"].as_u64();
+                let mut info_parts = Vec::new();
+                if let Some(c) = cost {
+                    info_parts.push(format!("Cost: ${:.4}", c));
+                }
+                if let Some(t) = num_turns {
+                    info_parts.push(format!("Turns: {}", t));
+                }
+                if let Some(d) = duration {
+                    info_parts.push(format!("Duration: {:.1}s", d as f64 / 1000.0));
+                }
+                if info_parts.is_empty() { None }
+                else { Some((format!("---\n*{}*", info_parts.join(" | ")), "info".to_string())) }
+            }
+            "system" => None,
+            "content_block_start" | "content_block_stop" | "message_start" | "message_stop" | "user" => None,
             _ => None,
         },
 
