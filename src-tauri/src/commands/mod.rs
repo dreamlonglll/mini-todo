@@ -1,6 +1,7 @@
 pub mod agent_cmd;
 pub mod data;
 pub mod holiday;
+pub mod intelligence_cmd;
 pub mod notification_cmd;
 pub mod prompt_template_cmd;
 pub mod scheduler_cmd;
@@ -12,6 +13,7 @@ pub mod window;
 pub use agent_cmd::*;
 pub use data::*;
 pub use holiday::*;
+pub use intelligence_cmd::*;
 pub use notification_cmd::*;
 pub use prompt_template_cmd::*;
 pub use scheduler_cmd::*;
