@@ -309,6 +309,7 @@ async function handleSave() {
         postAction: agentForm.value.postAction !== 'none' ? agentForm.value.postAction as import('@/types').PostActionType : undefined,
       }
       await invoke('update_todo', { id: todoId.value, data })
+      ElMessage.success('待办已保存')
     } else {
       const data: CreateTodoRequest = {
         title: form.value.title,
@@ -324,7 +325,6 @@ async function handleSave() {
       }
       const newTodo = await invoke<Todo>('create_todo', { data })
       
-      // 如果有待创建的子任务，批量创建
       if (pendingSubtasks.value.length > 0) {
         for (const subtask of pendingSubtasks.value) {
           const subtaskData: CreateSubTaskRequest = {
@@ -335,6 +335,7 @@ async function handleSave() {
           await invoke('create_subtask', { data: subtaskData })
         }
       }
+      ElMessage.success('待办已创建')
     }
 
     handleClose()
