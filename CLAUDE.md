@@ -192,25 +192,61 @@ mini-todo/
 | `prompt_templates` | 提示词模板库 |
 | `migrations` | 迁移版本记录 |
 
-### 数据导入导出
+### 数据导入导出与同步
 
-> **重要**：当数据库结构变更（新增表/字段/设置项）时，必须同步更新导入导出功能！
+> **重要**：当数据库结构变更（新增表/字段/设置项）时，必须同步更新导入导出和 WebDAV 同步功能！
 
-- **导出版本号**：当前 `2.0`（位于 `src-tauri/src/commands/data.rs`）
+- **导出版本号**：当前 `3.0`（位于 `src-tauri/src/commands/data.rs`）
 - **关键文件**：
   - 模型定义：`src-tauri/src/db/models.rs` → `ExportData`、`AppSettings`
-  - 导入导出逻辑：`src-tauri/src/commands/data.rs` → `export_data`、`import_data`
+  - 导入导出逻辑：`src-tauri/src/commands/data.rs` → `export_data_internal`、`import_data_raw`
+  - WebDAV 同步：`src-tauri/src/commands/sync_cmd.rs` → `SyncData`、`webdav_upload_sync`、`webdav_apply_remote`
   - 前端类型：`src/types/todo.ts` → `ExportData`（前端只传递 JSON 字符串，无需严格同步）
+
+#### 导入导出架构说明
+
+- `export_data`（手动导出 Tauri 命令）和 WebDAV 上传**共用** `export_data_internal()` 函数
+- `import_data`（手动导入 Tauri 命令）和 WebDAV 下载应用**共用** `import_data_raw()` 函数
+- `SyncData` 结构将 `ExportData` 的各字段以 `serde_json::Value` 形式传输，不要遗漏新字段
+
+#### 当前同步覆盖范围
+
+| 数据 | 是否同步 | 说明 |
+|------|---------|------|
+| `todos`（全字段） | 是 | 含 agent/调度/工作流全部字段 |
+| `subtasks`（全字段） | 是 | 含调度状态、重试、超时等字段 |
+| `settings`（部分） | 是 | 8 个应用设置项，不含 WebDAV 配置 |
+| `agent_configs` | 是 | CLI 路径为设备相关，需在目标设备更新 |
+| `workflow_steps` | 是 | 通过 todo_id/subtask_id 映射 |
+| `task_dependencies` | 是 | 通过 subtask_id 映射 |
+| `prompt_templates` | 是 | 仅用户自建模板，内置模板由迁移创建 |
+| `images`（文件） | 是 | 通过 WebDAV 独立上传/下载 |
+| `screen_configs` | 否 | 设备特定的屏幕配置 |
+| `agent_executions` | 否 | 执行历史，数据量大且为临时数据 |
+| `migrations` | 否 | 结构性表，应用启动自动管理 |
+
+#### 导入时的 ID 映射
+
+导入数据时，由于自增 ID 会变化，需维护三级映射：
+1. `agent_id_map`：旧 agent_config ID → 新 ID（用于 todos.agent_id）
+2. `todo_id_map`：旧 todo ID → 新 ID（用于 workflow_steps.todo_id）
+3. `subtask_id_map`：旧 subtask ID → 新 ID（用于 workflow_steps.subtask_id、task_dependencies）
 
 #### 维护检查清单
 
 当新增数据库迁移时，请检查：
 1. 新增的 **settings 键值** 是否已加入 `AppSettings` 结构体（含 `#[serde(default)]`）
-2. `export_data` 函数是否读取了新设置
-3. `import_data` 函数是否写入了新设置
-4. 新增的 **数据表** 是否需要纳入导出范围
-5. 旧版数据导入的兼容性（新字段必须有默认值）
-6. 导出版本号是否需要递增
+2. `read_app_settings` 函数是否读取了新设置
+3. `write_app_settings` 函数是否写入了新设置
+4. 新增的 **数据表** 是否需要纳入 `ExportData` 和 `SyncData`
+5. `export_data_internal` 是否查询了新表数据
+6. `import_data_raw` 是否导入了新表数据（注意 ID 映射和删除顺序）
+7. `SyncData` 是否新增了对应字段（含 `#[serde(default)]`）
+8. `webdav_upload_sync` 是否从导出 JSON 中提取了新字段（注意 camelCase 键名）
+9. `webdav_apply_remote` 和 `webdav_auto_sync` 构建的 import_json 是否包含新字段
+10. `check_local_changes` 是否检测了新表的变更
+11. 旧版数据导入的兼容性（新字段必须有 `#[serde(default)]`）
+12. 导出版本号是否需要递增
 
 ## 核心架构概念
 
