@@ -258,6 +258,12 @@ function canViewLog(idx: number): boolean {
   return !!status && status !== 'pending'
 }
 
+function isStepLocked(idx: number): boolean {
+  if (!workflowEnabled.value) return false
+  const status = getStepStatus(idx)
+  return !!status && (status === 'running' || status === 'completed')
+}
+
 function viewStepLog(idx: number) {
   const step = workflowSteps.value[idx]
   const progress = workflowProgress.value[idx]
@@ -465,6 +471,7 @@ function quickInsertPrompt(tpl: PromptTemplate) {
                   v-model="step.stepType"
                   style="width: 120px"
                   size="small"
+                  :disabled="isStepLocked(idx)"
                   @change="step.subtaskId = undefined; step.promptText = undefined"
                 >
                   <el-option label="执行子任务" value="subtask" />
@@ -477,6 +484,7 @@ function quickInsertPrompt(tpl: PromptTemplate) {
                   size="small"
                   placeholder="选择子任务"
                   clearable
+                  :disabled="isStepLocked(idx)"
                   popper-class="subtask-select-popper"
                   @change="(val: number) => onSubtaskSelected(idx, val)"
                 >
@@ -497,6 +505,7 @@ function quickInsertPrompt(tpl: PromptTemplate) {
                   size="small"
                   placeholder="从提示词库选择..."
                   clearable
+                  :disabled="isStepLocked(idx)"
                   @change="(val: number) => { const t = promptLibrary.find(p => p.id === val); if (t) selectPromptForStep(idx, t) }"
                 >
                   <el-option
@@ -515,13 +524,13 @@ function quickInsertPrompt(tpl: PromptTemplate) {
                   >
                     <el-icon :size="14"><Document /></el-icon>
                   </button>
-                  <button class="step-action-btn" :disabled="idx === 0" @click="moveWorkflowStep(idx, 'up')" title="上移">
+                  <button class="step-action-btn" :disabled="idx === 0 || isStepLocked(idx)" @click="moveWorkflowStep(idx, 'up')" title="上移">
                     <el-icon :size="14"><Top /></el-icon>
                   </button>
-                  <button class="step-action-btn" :disabled="idx === workflowSteps.length - 1" @click="moveWorkflowStep(idx, 'down')" title="下移">
+                  <button class="step-action-btn" :disabled="idx === workflowSteps.length - 1 || isStepLocked(idx)" @click="moveWorkflowStep(idx, 'down')" title="下移">
                     <el-icon :size="14"><Bottom /></el-icon>
                   </button>
-                  <button class="step-action-btn delete" @click="removeWorkflowStep(idx)" title="删除">
+                  <button class="step-action-btn delete" :disabled="isStepLocked(idx)" @click="removeWorkflowStep(idx)" title="删除">
                     <el-icon :size="14"><Delete /></el-icon>
                   </button>
                 </div>
@@ -530,6 +539,7 @@ function quickInsertPrompt(tpl: PromptTemplate) {
                 <el-switch
                   v-model="step.carryContext"
                   size="small"
+                  :disabled="isStepLocked(idx)"
                   active-text="带入上一步结果"
                   inactive-text=""
                 />
@@ -541,6 +551,7 @@ function quickInsertPrompt(tpl: PromptTemplate) {
                   :autosize="{ minRows: 1, maxRows: 4 }"
                   placeholder="输入提示词内容..."
                   resize="vertical"
+                  :disabled="isStepLocked(idx)"
                 />
               </div>
               <div v-if="step.stepType === 'subtask' && step.subtaskId" class="step-prompt-row">
@@ -554,6 +565,7 @@ function quickInsertPrompt(tpl: PromptTemplate) {
                   :autosize="{ minRows: 1, maxRows: 4 }"
                   placeholder="执行指令（自动生成）"
                   resize="vertical"
+                  :disabled="isStepLocked(idx)"
                 />
               </div>
             </div>
@@ -669,7 +681,7 @@ function quickInsertPrompt(tpl: PromptTemplate) {
           <el-icon><Close /></el-icon>
           取消
         </el-button>
-        <el-button type="primary" size="small" @click="handleSave">
+        <el-button type="primary" size="small" :disabled="workflowEnabled" @click="handleSave">
           <el-icon><Check /></el-icon>
           保存工作流
         </el-button>
