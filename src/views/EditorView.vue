@@ -1227,10 +1227,7 @@ function handleClose() {
               placeholder="选择调度策略"
             >
               <el-option label="手动执行" value="manual" />
-              <el-option label="自动调度" value="auto" />
               <el-option label="定时执行 (Cron)" value="cron" />
-              <el-option label="Git Push 触发" value="git_push" />
-              <el-option label="文件变更触发" value="file_watch" />
             </el-select>
           </el-form-item>
 

@@ -3,7 +3,6 @@ import { ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import type {
   ScheduledTodoInfo,
-  TriggerTodoInfo,
   TaskDependency,
   PromptTemplate,
   ScheduleStrategy,
@@ -12,7 +11,6 @@ import type {
 export const useSchedulerStore = defineStore('scheduler', () => {
   const isRunning = ref(false)
   const scheduledTodos = ref<ScheduledTodoInfo[]>([])
-  const triggerTodos = ref<TriggerTodoInfo[]>([])
   const templates = ref<PromptTemplate[]>([])
 
   // ========== 调度器控制 ==========
@@ -101,20 +99,6 @@ export const useSchedulerStore = defineStore('scheduler', () => {
     return invoke<string>('get_next_cron_execution', { expression })
   }
 
-  // ========== 触发器 ==========
-
-  async function loadTriggerTodos() {
-    triggerTodos.value = await invoke<TriggerTodoInfo[]>('get_trigger_todos')
-  }
-
-  async function initGitTrigger(projectPath: string) {
-    await invoke('init_git_trigger', { projectPath })
-  }
-
-  async function getLastCommitInfo(projectPath: string) {
-    return invoke<string | null>('get_last_commit_info', { projectPath })
-  }
-
   // ========== Prompt 模板 ==========
 
   async function loadTemplates() {
@@ -161,7 +145,6 @@ export const useSchedulerStore = defineStore('scheduler', () => {
   return {
     isRunning,
     scheduledTodos,
-    triggerTodos,
     templates,
     startScheduler,
     stopScheduler,
@@ -179,9 +162,6 @@ export const useSchedulerStore = defineStore('scheduler', () => {
     loadScheduledTodos,
     validateCron,
     getNextCronExecution,
-    loadTriggerTodos,
-    initGitTrigger,
-    getLastCommitInfo,
     loadTemplates,
     getTemplatesByCategory,
     createTemplate,

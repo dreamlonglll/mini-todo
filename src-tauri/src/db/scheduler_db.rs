@@ -106,23 +106,6 @@ pub fn get_pending_subtasks(
     rows.collect()
 }
 
-pub fn get_queued_subtasks(
-    conn: &Connection,
-) -> Result<Vec<(i64, i64, i64)>> {
-    let mut stmt = conn.prepare(
-        "SELECT s.id, s.parent_id, s.priority_score
-         FROM subtasks s
-         WHERE s.schedule_status = 'queued'
-         ORDER BY s.priority_score DESC",
-    )?;
-
-    let rows = stmt.query_map([], |row| {
-        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-    })?;
-
-    rows.collect()
-}
-
 pub fn update_todo_schedule_strategy(
     conn: &Connection,
     todo_id: i64,

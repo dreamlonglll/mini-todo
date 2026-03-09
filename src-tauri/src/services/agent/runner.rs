@@ -219,6 +219,7 @@ pub fn create_command(program: &str) -> std::process::Command {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind")]
+#[allow(dead_code)]
 pub enum AgentEvent {
     Log { content: String, level: String },
     Progress { message: String },
@@ -476,6 +477,7 @@ impl ExecutionHandle {
 }
 
 #[async_trait::async_trait]
+#[allow(dead_code)]
 pub trait AgentRunner: Send + Sync {
     fn build_command(
         &self,
@@ -853,14 +855,6 @@ impl AgentManager {
             .filter(|s| s.subtask_id == Some(subtask_id))
             .max_by_key(|s| s.start_time_ms)
             .cloned()
-    }
-
-    fn api_key_env_var(&self, agent_type: &str) -> &str {
-        match agent_type {
-            "claude_code" => "ANTHROPIC_API_KEY",
-            "codex" => "OPENAI_API_KEY",
-            _ => "API_KEY",
-        }
     }
 
     pub async fn check_health(&self, config: &AgentConfig) -> AgentHealthStatus {

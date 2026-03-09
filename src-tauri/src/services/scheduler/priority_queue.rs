@@ -52,23 +52,6 @@ impl PriorityQueue {
         self.heap.peek()
     }
 
-    pub fn len(&self) -> usize {
-        self.heap.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.heap.is_empty()
-    }
-
-    pub fn remove(&mut self, subtask_id: i64) {
-        let items: Vec<_> = self
-            .heap
-            .drain()
-            .filter(|t| t.subtask_id != subtask_id)
-            .collect();
-        self.heap = BinaryHeap::from(items);
-    }
-
     pub fn contains(&self, subtask_id: i64) -> bool {
         self.heap.iter().any(|t| t.subtask_id == subtask_id)
     }

@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { useSchedulerStore } from '@/stores'
-import { STRATEGY_LABELS } from '@/types/scheduler'
 
 const schedulerStore = useSchedulerStore()
 
@@ -18,7 +17,6 @@ async function refreshAll() {
     await Promise.all([
       schedulerStore.refreshSchedulerStatus(),
       schedulerStore.loadScheduledTodos(),
-      schedulerStore.loadTriggerTodos(),
       schedulerStore.loadTemplates(),
     ])
   } finally {
@@ -97,47 +95,6 @@ async function toggleTask(todoId: number, enabled: boolean) {
               <div v-if="task.lastScheduledRun" class="meta-item">
                 <el-icon><Finished /></el-icon>
                 <span>上次: {{ task.lastScheduledRun }}</span>
-              </div>
-              <div class="meta-item">
-                <el-icon><List /></el-icon>
-                <span>{{ task.pendingSubtasks }} 个待执行子任务</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </el-tab-pane>
-
-      <el-tab-pane label="触发器" name="triggers">
-        <div v-if="schedulerStore.triggerTodos.length === 0" class="empty-state">
-          暂无触发器任务
-        </div>
-        <div v-else class="task-list">
-          <div
-            v-for="task in schedulerStore.triggerTodos"
-            :key="task.id"
-            class="task-card"
-          >
-            <div class="task-header">
-              <div class="task-title-group">
-                <span class="task-title">{{ task.title }}</span>
-                <el-tag size="small" effect="light">
-                  {{ STRATEGY_LABELS[task.strategy as keyof typeof STRATEGY_LABELS] || task.strategy }}
-                </el-tag>
-              </div>
-              <el-switch
-                :model-value="task.scheduleEnabled"
-                size="small"
-                @change="toggleTask(task.id, $event as boolean)"
-              />
-            </div>
-            <div class="task-meta">
-              <div v-if="task.projectPath" class="meta-item">
-                <el-icon><Folder /></el-icon>
-                <span class="path-text">{{ task.projectPath }}</span>
-              </div>
-              <div v-if="task.lastScheduledRun" class="meta-item">
-                <el-icon><Finished /></el-icon>
-                <span>上次触发: {{ task.lastScheduledRun }}</span>
               </div>
               <div class="meta-item">
                 <el-icon><List /></el-icon>
@@ -257,13 +214,6 @@ async function toggleTask(todoId: number, enabled: boolean) {
   gap: 4px;
   font-size: 12px;
   color: var(--text-secondary);
-}
-
-.path-text {
-  max-width: 200px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .tpl-desc {

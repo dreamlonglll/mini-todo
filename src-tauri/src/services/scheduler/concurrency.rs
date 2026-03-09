@@ -58,15 +58,4 @@ impl ConcurrencyManager {
         }
     }
 
-    pub fn global_available(&self) -> usize {
-        self.global_semaphore.available_permits()
-    }
-
-    pub async fn running_projects(&self) -> Vec<(String, usize)> {
-        let locks = self.project_locks.read().await;
-        locks
-            .iter()
-            .map(|(path, lock)| (path.clone(), lock.running_count))
-            .collect()
-    }
 }
