@@ -111,11 +111,17 @@ function handleEvent(event: AgentEvent) {
       status.value = 'completed'
       stopTimer()
       appendLog(`[完成] exit_code=${event.exitCode}`, 'success')
+      if (subtaskId) {
+        invoke('update_subtask_schedule_status', { subtaskId, targetStatus: 'completed' }).catch(() => {})
+      }
       break
     case 'Failed':
       status.value = 'failed'
       stopTimer()
       appendLog(`[失败] ${event.error}`, 'stderr')
+      if (subtaskId) {
+        invoke('update_subtask_schedule_status', { subtaskId, targetStatus: 'failed' }).catch(() => {})
+      }
       break
   }
 }
@@ -355,6 +361,80 @@ async function handleMaximize() {
   }
 }
 
+const cancelling = ref(false)
+
+async function cancelExecution() {
+  if (!taskId.value || cancelling.value) return
+  cancelling.value = true
+  try {
+    await invoke('cancel_agent_execution', { taskId: taskId.value })
+    status.value = 'cancelled'
+    stopTimer()
+    appendLog('[已终止] 用户手动终止了任务', 'stderr')
+    if (subtaskId) {
+      invoke('update_subtask_schedule_status', { subtaskId, targetStatus: 'cancelled' }).catch(() => {})
+    }
+  } catch (e) {
+    console.error('终止任务失败:', e)
+  } finally {
+    cancelling.value = false
+  }
+}
+
+const reExecuting = ref(false)
+
+async function reExecute() {
+  if (!subtaskId || reExecuting.value) return
+  reExecuting.value = true
+  try {
+    const subtask = await invoke<any>('get_subtask', { id: subtaskId })
+    if (!subtask) throw new Error('子任务不存在')
+
+    const todos = await invoke<any[]>('get_todos')
+    const todo = todos.find((t: any) => t.id === subtask.parentId)
+    if (!todo || !todo.agentId) throw new Error('未配置 Agent')
+
+    const newTaskId = `subtask-${subtaskId}-${Date.now()}`
+
+    if (unlisten) {
+      unlisten()
+      unlisten = null
+    }
+    stopTimer()
+    logLines.value = []
+    status.value = 'running'
+    error.value = null
+    inputTokens.value = 0
+    outputTokens.value = 0
+    taskId.value = newTaskId
+
+    await invoke('update_subtask_schedule_status', {
+      subtaskId,
+      targetStatus: 'running',
+    }).catch(() => {})
+
+    const prompt = subtask.content || subtask.title
+    await invoke('start_agent_execution', {
+      agentId: todo.agentId,
+      prompt,
+      projectPath: todo.agentProjectPath || '',
+      taskId: newTaskId,
+      subtaskId,
+    })
+
+    startTimer(Date.now())
+    unlisten = await listen<AgentEvent>(`agent:log:${newTaskId}`, (event) => {
+      handleEvent(event.payload)
+    })
+  } catch (e: any) {
+    status.value = 'failed'
+    error.value = String(e)
+    appendLog(`[重新执行失败] ${e}`, 'stderr')
+  } finally {
+    reExecuting.value = false
+  }
+}
+
 onMounted(async () => {
   await loadData()
   await setupRealtime()
@@ -444,19 +524,42 @@ onBeforeUnmount(() => {
     </div>
 
     <div class="status-bar">
-      <span v-if="isRunning" class="status-running">
-        运行中 {{ formatElapsed(elapsed) }}
-      </span>
-      <span v-else-if="status === 'completed'" class="status-success">
-        已完成
-      </span>
-      <span v-else-if="status === 'failed'" class="status-error">
-        已失败
-      </span>
-      <span v-else>{{ logLines.length }} 条日志</span>
-      <span v-if="inputTokens > 0 || outputTokens > 0" class="token-info">
-        Token: {{ inputTokens }} in / {{ outputTokens }} out
-      </span>
+      <div class="status-left">
+        <span v-if="isRunning" class="status-running">
+          运行中 {{ formatElapsed(elapsed) }}
+        </span>
+        <span v-else-if="status === 'completed'" class="status-success">
+          已完成
+        </span>
+        <span v-else-if="status === 'failed'" class="status-error">
+          已失败
+        </span>
+        <span v-else-if="status === 'cancelled'" class="status-error">
+          已终止
+        </span>
+        <span v-else>{{ logLines.length }} 条日志</span>
+      </div>
+      <div class="status-right">
+        <span v-if="inputTokens > 0 || outputTokens > 0" class="token-info">
+          Token: {{ inputTokens }} in / {{ outputTokens }} out
+        </span>
+        <button
+          v-if="isRunning"
+          class="action-btn cancel-btn"
+          :disabled="cancelling"
+          @click="cancelExecution"
+        >
+          {{ cancelling ? '终止中...' : '终止任务' }}
+        </button>
+        <button
+          v-if="subtaskId && !isRunning && (status === 'completed' || status === 'failed' || status === 'cancelled')"
+          class="action-btn rerun-btn"
+          :disabled="reExecuting"
+          @click="reExecute"
+        >
+          {{ reExecuting ? '启动中...' : '重新执行' }}
+        </button>
+      </div>
     </div>
   </div>
 </template>
@@ -655,12 +758,24 @@ onBeforeUnmount(() => {
 .status-bar {
   display: flex;
   justify-content: space-between;
+  align-items: center;
   padding: 6px 16px;
   background: #252526;
   font-size: 12px;
   color: #858585;
   font-family: 'Consolas', 'Source Code Pro', 'Courier New', monospace;
   flex-shrink: 0;
+}
+
+.status-left {
+  display: flex;
+  align-items: center;
+}
+
+.status-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .status-running {
@@ -677,5 +792,40 @@ onBeforeUnmount(() => {
 
 .token-info {
   color: #858585;
+}
+
+.action-btn {
+  padding: 2px 10px;
+  font-size: 11px;
+  border: 1px solid;
+  border-radius: 3px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 0.15s ease;
+}
+
+.action-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.cancel-btn {
+  color: #f48771;
+  border-color: #f4877166;
+  background: transparent;
+}
+
+.cancel-btn:hover:not(:disabled) {
+  background: #f4877122;
+}
+
+.rerun-btn {
+  color: #6796e6;
+  border-color: #6796e666;
+  background: transparent;
+}
+
+.rerun-btn:hover:not(:disabled) {
+  background: #6796e622;
 }
 </style>

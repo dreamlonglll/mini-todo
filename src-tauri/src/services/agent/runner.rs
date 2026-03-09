@@ -466,8 +466,6 @@ fn format_agent_json(line: &str, agent_type: &str) -> Option<(String, String)> {
 
 pub struct ExecutionHandle {
     cancel_sender: tokio::sync::oneshot::Sender<()>,
-    #[allow(dead_code)]
-    child_pid: u32,
 }
 
 impl ExecutionHandle {
@@ -613,6 +611,18 @@ impl AgentManager {
         let agent_type_for_task = config.agent_type.clone();
         let agent_id_for_db = Some(config.id);
 
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+        {
+            let mut executions = self.active_executions.lock().await;
+            executions.insert(
+                task_id.clone(),
+                ExecutionHandle {
+                    cancel_sender: cancel_tx,
+                },
+            );
+        }
+
+        let active_execs = self.active_executions.clone();
         tokio::spawn(async move {
             let start = Instant::now();
             let run_result = Self::run_process(
@@ -623,6 +633,7 @@ impl AgentManager {
                 &task_id_clone,
                 app.clone(),
                 &event_name,
+                cancel_rx,
             )
             .await;
 
@@ -630,30 +641,34 @@ impl AgentManager {
             let mut states_lock = states.lock().await;
             if let Some(state) = states_lock.get_mut(&task_id_clone) {
                 state.duration_ms = Some(duration_ms);
-                match run_result {
-                    Ok(output) => {
-                        state.status = "completed".to_string();
-                        state.result = Some(output.clone());
-                        let _ = app.emit(
-                            &event_name,
-                            AgentEvent::Completed {
-                                exit_code: output.exit_code,
-                                result: output.text_response.clone(),
-                            },
-                        );
-                    }
-                    Err(err) => {
-                        state.status = "failed".to_string();
-                        state.error = Some(err.clone());
-                        let _ = app.emit(
-                            &event_name,
-                            AgentEvent::Failed { error: err },
-                        );
+                let already_cancelled = state.status == "cancelled";
+                if !already_cancelled {
+                    match run_result {
+                        Ok(output) => {
+                            state.status = "completed".to_string();
+                            state.result = Some(output.clone());
+                            let _ = app.emit(
+                                &event_name,
+                                AgentEvent::Completed {
+                                    exit_code: output.exit_code,
+                                    result: output.text_response.clone(),
+                                },
+                            );
+                        }
+                        Err(err) => {
+                            state.status = "failed".to_string();
+                            state.error = Some(err.clone());
+                            let _ = app.emit(
+                                &event_name,
+                                AgentEvent::Failed { error: err },
+                            );
+                        }
                     }
                 }
 
                 Self::persist_execution(&app, state, agent_id_for_db);
             }
+            active_execs.lock().await.remove(&task_id_clone);
         });
 
         Ok(())
@@ -667,6 +682,7 @@ impl AgentManager {
         task_id: &str,
         app: tauri::AppHandle,
         event_name: &str,
+        cancel_rx: tokio::sync::oneshot::Receiver<()>,
     ) -> Result<AgentOutput, String> {
         use tauri::Emitter;
 
@@ -723,7 +739,9 @@ impl AgentManager {
         let mut total_output = 0u64;
         let mut text_response = String::new();
 
-        let result = tokio::time::timeout(timeout, async {
+        let child_id = child.id();
+
+        let process_future = async {
             while let Ok(Some(line)) = stdout_reader.next_line().await {
                 if let Some((readable, level)) = format_agent_json(&line, &agent_type_clone) {
                     let log_event = AgentEvent::Log {
@@ -777,13 +795,46 @@ impl AgentManager {
                 }
             }
             child.wait().await
-        })
-        .await;
+        };
+
+        enum ProcessResult {
+            Completed(Result<std::process::ExitStatus, std::io::Error>),
+            Timeout,
+            Cancelled,
+        }
+
+        let result = tokio::select! {
+            res = tokio::time::timeout(timeout, process_future) => {
+                match res {
+                    Ok(wait_result) => ProcessResult::Completed(wait_result),
+                    Err(_) => ProcessResult::Timeout,
+                }
+            }
+            _ = cancel_rx => {
+                ProcessResult::Cancelled
+            }
+        };
+
+        // 超时或取消时，杀掉子进程
+        if matches!(result, ProcessResult::Timeout | ProcessResult::Cancelled) {
+            if let Some(pid) = child_id {
+                #[cfg(windows)]
+                {
+                    let _ = std::process::Command::new("taskkill")
+                        .args(["/F", "/T", "/PID", &pid.to_string()])
+                        .output();
+                }
+                #[cfg(not(windows))]
+                {
+                    unsafe { libc::kill(pid as i32, libc::SIGKILL); }
+                }
+            }
+        }
 
         let stderr_lines = stderr_handle.await.unwrap_or_default();
 
         match result {
-            Ok(Ok(status)) => {
+            ProcessResult::Completed(Ok(status)) => {
                 let exit_code = status.code().unwrap_or(-1);
                 if exit_code != 0 && text_response.is_empty() && !stderr_lines.is_empty() {
                     return Err(format!(
@@ -803,10 +854,12 @@ impl AgentManager {
                     duration_ms: 0,
                 })
             }
-            Ok(Err(e)) => Err(format!("Agent 进程异常: {}", e)),
-            Err(_) => {
-                let _ = child.kill().await;
+            ProcessResult::Completed(Err(e)) => Err(format!("Agent 进程异常: {}", e)),
+            ProcessResult::Timeout => {
                 Err(format!("Agent 执行超时（{}秒）", timeout_secs))
+            }
+            ProcessResult::Cancelled => {
+                Err("任务已被用户终止".to_string())
             }
         }
     }

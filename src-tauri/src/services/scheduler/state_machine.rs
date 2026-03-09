@@ -85,6 +85,12 @@ pub fn can_transition(from: &ScheduleStatus, to: &ScheduleStatus) -> bool {
         (ScheduleStatus::Cancelled, ScheduleStatus::Pending) |
         // completed -> pending: 再次执行已完成的任务
         (ScheduleStatus::Completed, ScheduleStatus::Pending) |
+        // completed -> running: 手动重新执行
+        (ScheduleStatus::Completed, ScheduleStatus::Running) |
+        // failed -> running: 手动重新执行
+        (ScheduleStatus::Failed, ScheduleStatus::Running) |
+        // cancelled -> running: 手动重新执行
+        (ScheduleStatus::Cancelled, ScheduleStatus::Running) |
         // failed -> none: 放弃重试，回到初始
         (ScheduleStatus::Failed, ScheduleStatus::None) |
         // cancelled -> none: 回到初始
