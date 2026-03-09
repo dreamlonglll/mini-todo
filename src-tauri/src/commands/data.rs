@@ -1,11 +1,12 @@
 use crate::db::{
     AppSettings, Database, ExportData, Todo, WindowPosition, WindowSize,
-    AgentConfig, WorkflowStep, TaskDependency, PromptTemplate,
+    AgentConfig, AgentExecution, WorkflowStep, TaskDependency, PromptTemplate,
     subtask_from_row, todo_from_row, SUBTASK_COLUMNS, TODO_COLUMNS,
 };
 use chrono::Local;
 use rusqlite::params;
 use std::collections::HashMap;
+use std::io::{Read as _, Write as _};
 use tauri::State;
 
 /// 从 settings 表读取字符串值的辅助函数
@@ -136,6 +137,34 @@ fn query_user_prompt_templates(conn: &rusqlite::Connection) -> rusqlite::Result<
     rows.collect()
 }
 
+fn query_all_agent_executions(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<AgentExecution>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, task_id, subtask_id, agent_id, agent_type, status, logs, result_text, error,
+                input_tokens, output_tokens, start_time_ms, duration_ms, created_at, session_id
+         FROM agent_executions ORDER BY id"
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(AgentExecution {
+            id: row.get(0)?,
+            task_id: row.get(1)?,
+            subtask_id: row.get(2)?,
+            agent_id: row.get(3)?,
+            agent_type: row.get(4)?,
+            status: row.get(5)?,
+            logs: row.get(6)?,
+            result_text: row.get(7)?,
+            error: row.get(8)?,
+            input_tokens: row.get(9)?,
+            output_tokens: row.get(10)?,
+            start_time_ms: row.get(11)?,
+            duration_ms: row.get(12)?,
+            created_at: row.get(13)?,
+            session_id: row.get(14)?,
+        })
+    })?;
+    rows.collect()
+}
+
 fn write_app_settings(conn: &rusqlite::Connection, settings: &AppSettings) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('is_fixed', ?1, datetime('now', 'localtime'))",
@@ -178,7 +207,7 @@ fn write_app_settings(conn: &rusqlite::Connection, settings: &AppSettings) -> ru
     Ok(())
 }
 
-pub fn export_data_internal(db: &Database) -> Result<String, String> {
+pub fn export_data_internal(db: &Database, include_executions: bool) -> Result<String, String> {
     let result = db.with_connection(|conn| {
         let todo_sql = format!("SELECT {} FROM todos ORDER BY sort_order ASC", TODO_COLUMNS);
         let mut stmt = conn.prepare(&todo_sql)?;
@@ -198,17 +227,21 @@ pub fn export_data_internal(db: &Database) -> Result<String, String> {
         }
 
         let settings = read_app_settings(conn);
-
         let agent_configs = query_agent_configs(conn)?;
         let workflow_steps = query_all_workflow_steps(conn)?;
         let task_dependencies = query_all_task_dependencies(conn)?;
         let prompt_templates = query_user_prompt_templates(conn)?;
+        let agent_executions = if include_executions {
+            query_all_agent_executions(conn)?
+        } else {
+            Vec::new()
+        };
 
-        Ok((todos, settings, agent_configs, workflow_steps, task_dependencies, prompt_templates))
+        Ok((todos, settings, agent_configs, workflow_steps, task_dependencies, prompt_templates, agent_executions))
     });
 
     match result {
-        Ok((todos, settings, agent_configs, workflow_steps, task_dependencies, prompt_templates)) => {
+        Ok((todos, settings, agent_configs, workflow_steps, task_dependencies, prompt_templates, agent_executions)) => {
             let export_data = ExportData {
                 version: "3.0".to_string(),
                 exported_at: Local::now().format("%Y-%m-%dT%H:%M:%S%:z").to_string(),
@@ -218,6 +251,7 @@ pub fn export_data_internal(db: &Database) -> Result<String, String> {
                 workflow_steps,
                 task_dependencies,
                 prompt_templates,
+                agent_executions,
             };
             serde_json::to_string_pretty(&export_data).map_err(|e| e.to_string())
         }
@@ -356,7 +390,33 @@ pub fn import_data_raw(db: &Database, json_data: &str) -> Result<(), String> {
             }
         }
 
-        // 7. Import settings
+        // 7. Import agent_executions with ID mapping
+        if !import.agent_executions.is_empty() {
+            conn.execute("DELETE FROM agent_executions", [])?;
+            for exec in &import.agent_executions {
+                let mapped_subtask_id = exec.subtask_id.and_then(|old_id| {
+                    if subtask_id_map.is_empty() { Some(old_id) } else { subtask_id_map.get(&old_id).copied() }
+                });
+                let mapped_agent_id = exec.agent_id.and_then(|old_id| {
+                    if agent_id_map.is_empty() { Some(old_id) } else { agent_id_map.get(&old_id).copied() }
+                });
+                conn.execute(
+                    "INSERT INTO agent_executions (task_id, subtask_id, agent_id, agent_type, status,
+                        logs, result_text, error, input_tokens, output_tokens, start_time_ms,
+                        duration_ms, created_at, session_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                    params![
+                        exec.task_id, mapped_subtask_id, mapped_agent_id,
+                        exec.agent_type, exec.status,
+                        exec.logs, exec.result_text, exec.error,
+                        exec.input_tokens, exec.output_tokens, exec.start_time_ms,
+                        exec.duration_ms, exec.created_at, exec.session_id,
+                    ],
+                )?;
+            }
+        }
+
+        // 8. Import settings
         write_app_settings(conn, &import.settings)?;
 
         Ok(())
@@ -366,10 +426,57 @@ pub fn import_data_raw(db: &Database, json_data: &str) -> Result<(), String> {
 
 #[tauri::command]
 pub fn export_data(db: State<Database>) -> Result<String, String> {
-    export_data_internal(&*db)
+    export_data_internal(&*db, false)
 }
 
 #[tauri::command]
 pub fn import_data(db: State<Database>, json_data: String) -> Result<(), String> {
     import_data_raw(&*db, &json_data)
+}
+
+#[tauri::command]
+pub fn export_data_to_file(db: State<Database>, file_path: String, include_executions: bool) -> Result<(), String> {
+    let json_data = export_data_internal(&*db, include_executions)?;
+
+    let file = std::fs::File::create(&file_path)
+        .map_err(|e| format!("创建文件失败: {}", e))?;
+    let mut zip = zip::ZipWriter::new(file);
+
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    zip.start_file("data.json", options)
+        .map_err(|e| format!("写入 ZIP 失败: {}", e))?;
+    zip.write_all(json_data.as_bytes())
+        .map_err(|e| format!("写入数据失败: {}", e))?;
+
+    zip.finish().map_err(|e| format!("完成 ZIP 失败: {}", e))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn import_data_from_file(db: State<Database>, file_path: String) -> Result<(), String> {
+    let file_bytes = std::fs::read(&file_path)
+        .map_err(|e| format!("读取文件失败: {}", e))?;
+
+    // ZIP magic bytes: PK (0x50, 0x4B)
+    let is_zip = file_bytes.len() >= 2 && file_bytes[0] == 0x50 && file_bytes[1] == 0x4B;
+
+    if is_zip {
+        let cursor = std::io::Cursor::new(&file_bytes);
+        let mut archive = zip::ZipArchive::new(cursor)
+            .map_err(|e| format!("解析 ZIP 失败: {}", e))?;
+
+        let mut json_data = String::new();
+        let mut data_file = archive.by_name("data.json")
+            .map_err(|e| format!("ZIP 中未找到 data.json: {}", e))?;
+        data_file.read_to_string(&mut json_data)
+            .map_err(|e| format!("读取 data.json 失败: {}", e))?;
+
+        import_data_raw(&*db, &json_data)
+    } else {
+        let json_data = String::from_utf8(file_bytes)
+            .map_err(|e| format!("文件编码错误: {}", e))?;
+        import_data_raw(&*db, &json_data)
+    }
 }

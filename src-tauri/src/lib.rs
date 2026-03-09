@@ -25,6 +25,7 @@ use commands::{
     delete_subtask,
     delete_todo,
     export_data,
+    export_data_to_file,
     get_images_dir,
     get_subtask,
     get_sync_settings,
@@ -37,6 +38,7 @@ use commands::{
     get_todos,
     get_window_persist_state,
     import_data,
+    import_data_from_file,
     import_subtasks_from_paths,
     is_fixed_mode,
     list_screen_configs,
@@ -361,6 +363,8 @@ pub fn run() {
             // 数据导入导出命令
             export_data,
             import_data,
+            export_data_to_file,
+            import_data_from_file,
             // 节假日命令
             fetch_holidays,
             // 通知设置命令

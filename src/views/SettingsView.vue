@@ -4,7 +4,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { emit } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { save, open } from '@tauri-apps/plugin-dialog'
-import { writeTextFile, readTextFile } from '@tauri-apps/plugin-fs'
+import { readTextFile } from '@tauri-apps/plugin-fs'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import { enable, disable, isEnabled } from '@tauri-apps/plugin-autostart'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -155,27 +155,26 @@ async function handleNotificationTypeChange(value: 'system' | 'app') {
 }
 
 // 导出数据
+const includeExecutions = ref(false)
+
 async function handleExport() {
   try {
     exporting.value = true
     
-    const jsonData = await invoke<string>('export_data')
-    if (!jsonData) {
-      ElMessage.error('导出失败')
-      return
-    }
-
     const filePath = await save({
       title: '导出待办数据',
-      defaultPath: `mini-todo-backup-${new Date().toISOString().slice(0, 10)}.json`,
+      defaultPath: `mini-todo-backup-${new Date().toISOString().slice(0, 10)}.zip`,
       filters: [{
-        name: 'JSON 文件',
-        extensions: ['json']
+        name: 'ZIP 压缩包',
+        extensions: ['zip']
       }]
     })
 
     if (filePath) {
-      await writeTextFile(filePath, jsonData)
+      await invoke('export_data_to_file', { 
+        filePath, 
+        includeExecutions: includeExecutions.value 
+      })
       ElMessage.success('导出成功')
     }
   } catch (e) {
@@ -191,10 +190,9 @@ async function handleImport() {
   try {
     const filePath = await open({
       title: '导入待办数据',
-      filters: [{
-        name: 'JSON 文件',
-        extensions: ['json']
-      }]
+      filters: [
+        { name: 'ZIP / JSON 文件', extensions: ['zip', 'json'] },
+      ]
     })
 
     if (!filePath) return
@@ -211,10 +209,14 @@ async function handleImport() {
 
     importing.value = true
 
-    const jsonData = await readTextFile(filePath as string)
-    await invoke('import_data', { jsonData })
+    const path = filePath as string
+    if (path.endsWith('.zip')) {
+      await invoke('import_data_from_file', { filePath: path })
+    } else {
+      const jsonData = await readTextFile(path)
+      await invoke('import_data', { jsonData })
+    }
     
-    // 通知主窗口导入成功（在主窗口显示提示）
     await emit('data-imported')
     handleClose()
   } catch (e) {
@@ -536,9 +538,15 @@ async function handleCheckUpdate() {
             </button>
           </div>
 
+          <div class="export-options">
+            <el-checkbox v-model="includeExecutions" size="small">
+              包含 Agent 执行日志
+            </el-checkbox>
+          </div>
+
           <p class="card-hint">
             <el-icon :size="14"><InfoFilled /></el-icon>
-            导出数据可用于备份或迁移到其他设备
+            导出为 ZIP 压缩包，可用于备份或迁移到其他设备
           </p>
         </div>
       </div>
@@ -925,7 +933,12 @@ async function handleCheckUpdate() {
 .data-actions {
   display: flex;
   gap: 12px;
-  margin-bottom: 16px;
+  margin-bottom: 12px;
+}
+
+.export-options {
+  margin-bottom: 12px;
+  padding-left: 2px;
 }
 
 .data-btn {

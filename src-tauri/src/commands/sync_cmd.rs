@@ -117,6 +117,8 @@ pub struct SyncData {
     pub task_dependencies: Vec<serde_json::Value>,
     #[serde(default)]
     pub prompt_templates: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub agent_executions: Vec<serde_json::Value>,
 }
 
 #[tauri::command]
@@ -136,8 +138,7 @@ pub fn webdav_upload_sync(db: State<Database>) -> Result<String, String> {
     client.ensure_dir(REMOTE_DIR)?;
     client.ensure_dir(REMOTE_IMAGES_DIR)?;
 
-    // Export data
-    let export_json = export_data_internal(&*db)?;
+    let export_json = export_data_internal(&*db, true)?;
 
     // Collect image list
     let images_dir = get_images_dir();
@@ -188,6 +189,11 @@ pub fn webdav_upload_sync(db: State<Database>) -> Result<String, String> {
             .unwrap_or_default(),
         prompt_templates: export_data
             .get("promptTemplates")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default(),
+        agent_executions: export_data
+            .get("agentExecutions")
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default(),
@@ -289,6 +295,7 @@ pub fn webdav_apply_remote(db: State<Database>, sync_data_json: String) -> Resul
         "workflowSteps": sync_data.workflow_steps,
         "taskDependencies": sync_data.task_dependencies,
         "promptTemplates": sync_data.prompt_templates,
+        "agentExecutions": sync_data.agent_executions,
     });
 
     let import_str = serde_json::to_string(&import_json).map_err(|e| e.to_string())?;
@@ -355,6 +362,7 @@ pub fn webdav_auto_sync(db: State<Database>) -> Result<String, String> {
                         "workflowSteps": remote_data.workflow_steps,
                         "taskDependencies": remote_data.task_dependencies,
                         "promptTemplates": remote_data.prompt_templates,
+                        "agentExecutions": remote_data.agent_executions,
                     });
                     let import_str = serde_json::to_string(&import_json).map_err(|e| e.to_string())?;
                     import_data_raw(&*db, &import_str)?;

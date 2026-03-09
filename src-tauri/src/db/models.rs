@@ -326,6 +326,8 @@ pub struct ExportData {
     pub task_dependencies: Vec<TaskDependency>,
     #[serde(default)]
     pub prompt_templates: Vec<PromptTemplate>,
+    #[serde(default)]
+    pub agent_executions: Vec<AgentExecution>,
 }
 
 /// 屏幕配置记录，用于存储不同屏幕组合下的窗口状态
