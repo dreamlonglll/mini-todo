@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, computed, ref, watch, nextTick } from 'vue'
-import dayjs from 'dayjs'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useTodoStore, useAppStore } from '@/stores'
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
@@ -16,9 +15,6 @@ import type { Todo, SyncSettings, SyncDownloadResult } from '@/types'
 const todoStore = useTodoStore()
 const appStore = useAppStore()
 const appWindow = getCurrentWindow()
-
-// 已完成弹窗显示状态
-const showCompletedDialog = ref(false)
 
 // 同步状态
 const isSyncing = ref(false)
@@ -51,27 +47,8 @@ function handleCalendarToday() {
 // 所有待办（用于日历显示）
 const allTodos = computed(() => todoStore.todos)
 
-// 已完成列表
-const completedList = computed(() => todoStore.completedTodos)
-
 // 已完成数量
 const completedCount = computed(() => todoStore.todoCount.completed)
-
-// 格式化已完成时间
-function formatCompletedTime(time: string) {
-  return dayjs(time).format('MM-DD HH:mm')
-}
-
-
-// 切换完成状态
-async function handleToggleComplete(todo: Todo) {
-  await todoStore.toggleComplete(todo.id)
-}
-
-// 删除待办
-async function handleDelete(todo: Todo) {
-  await todoStore.deleteTodo(todo.id)
-}
 
 // 容器类名
 const containerClass = computed(() => ({
@@ -262,6 +239,51 @@ onUnmounted(() => {
   }
   void reportAutoHideCursorInside(false)
 })
+
+// 打开已完成列表窗口
+async function openCompletedWindow() {
+  const label = `completed-${Date.now()}`
+  const winWidth = 460
+  const winHeight = 550
+
+  try {
+    let x: number, y: number
+    const monitor = await currentMonitor() || await primaryMonitor()
+    if (monitor) {
+      const s = monitor.scaleFactor
+      const mx = monitor.position.x / s
+      const my = monitor.position.y / s
+      const mw = monitor.size.width / s
+      const mh = monitor.size.height / s
+      x = Math.round(mx + (mw - winWidth) / 2)
+      y = Math.round(my + (mh - winHeight) / 2)
+    } else {
+      const s = await appWindow.scaleFactor()
+      const pos = await appWindow.outerPosition()
+      const size = await appWindow.outerSize()
+      x = Math.round(pos.x / s + (size.width / s - winWidth) / 2)
+      y = Math.round(pos.y / s + (size.height / s - winHeight) / 2)
+    }
+
+    const webview = new WebviewWindow(label, {
+      url: '#/completed',
+      title: '已完成',
+      width: winWidth,
+      height: winHeight,
+      x,
+      y,
+      resizable: true,
+      decorations: false,
+      transparent: false,
+    })
+
+    webview.once('tauri://destroyed', async () => {
+      await todoStore.fetchTodos()
+    })
+  } catch (e) {
+    console.error('Failed to open completed window:', e)
+  }
+}
 
 // 打开编辑器窗口（模态）
 async function openEditor(todo?: Todo, centerOnScreen = false) {
@@ -513,7 +535,7 @@ function stopAutoSync() {
       :completed-count="completedCount"
       :syncing="isSyncing"
       @open-settings="openSettings"
-      @open-completed="showCompletedDialog = true"
+      @open-completed="openCompletedWindow"
       @calendar-prev="handleCalendarPrev"
       @calendar-next="handleCalendarNext"
       @calendar-today="handleCalendarToday"
@@ -538,56 +560,7 @@ function stopAutoSync() {
         </div>
       </div>
 
-      <!-- 已完成弹窗 -->
-      <el-dialog
-        v-model="showCompletedDialog"
-        title="已完成"
-        width="500"
-        :modal="true"
-        append-to-body
-        class="completed-dialog"
-      >
-        <div class="completed-dialog-list">
-          <div 
-            v-for="todo in completedList" 
-            :key="todo.id" 
-            class="completed-item"
-            @click="openEditor(todo)"
-          >
-            <!-- 颜色标记 -->
-            <div class="completed-color" :style="{ backgroundColor: todo.color }"></div>
-            
-            <!-- 内容区域 -->
-            <div class="completed-content">
-              <div class="completed-title">{{ todo.title }}</div>
-              <div v-if="todo.notifyAt" class="completed-time">
-                <el-icon :size="12"><Clock /></el-icon>
-                {{ formatCompletedTime(todo.notifyAt) }}
-              </div>
-            </div>
-            
-            <!-- 操作按钮 -->
-            <div class="completed-actions">
-              <el-tooltip content="恢复为未完成" placement="top">
-                <button class="restore-btn" @click.stop="handleToggleComplete(todo)">
-                  <el-icon :size="16"><RefreshLeft /></el-icon>
-                </button>
-              </el-tooltip>
-              <el-tooltip content="删除" placement="top">
-                <button class="delete-btn" @click.stop="handleDelete(todo)">
-                  <el-icon :size="16"><Delete /></el-icon>
-                </button>
-              </el-tooltip>
-            </div>
-          </div>
-          
-          <!-- 空状态 -->
-          <div v-if="completedList.length === 0" class="completed-empty">
-            <el-icon :size="40"><Check /></el-icon>
-            <span>暂无已完成的待办</span>
-          </div>
-        </div>
-      </el-dialog>
+      <!-- 已完成列表（独立窗口） -->
 
       <!-- 右侧：日历视图 -->
       <div v-if="showCalendar" class="right-panel" :class="{ 'dark-theme': appStore.isDarkTheme }">
@@ -689,129 +662,4 @@ function stopAutoSync() {
   }
 }
 
-/* 已完成弹窗列表 */
-.completed-dialog-list {
-  max-height: 450px;
-  overflow-y: auto;
-  padding: 4px 0;
-}
-
-/* 已完成列表项 */
-.completed-item {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 12px 16px;
-  margin-bottom: 8px;
-  background: #f8fafc;
-  border-radius: 10px;
-  cursor: pointer;
-  transition: all 0.2s ease;
-
-  &:last-child {
-    margin-bottom: 0;
-  }
-
-  &:hover {
-    background: #f1f5f9;
-    
-    .completed-actions {
-      opacity: 1;
-    }
-  }
-
-  .completed-color {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    flex-shrink: 0;
-  }
-
-  .completed-content {
-    flex: 1;
-    min-width: 0;
-
-    .completed-title {
-      font-size: 14px;
-      color: #64748b;
-      text-decoration: line-through;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-
-    .completed-time {
-      display: flex;
-      align-items: center;
-      gap: 4px;
-      margin-top: 4px;
-      font-size: 12px;
-      color: #94a3b8;
-
-      .el-icon {
-        font-size: 12px;
-      }
-    }
-  }
-
-  .completed-actions {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    opacity: 0;
-    transition: opacity 0.15s ease;
-
-    button {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      width: 32px;
-      height: 32px;
-      border: none;
-      border-radius: 6px;
-      cursor: pointer;
-      transition: all 0.15s ease;
-    }
-
-    .restore-btn {
-      background: #dbeafe;
-      color: #3b82f6;
-
-      &:hover {
-        background: #bfdbfe;
-        color: #2563eb;
-      }
-    }
-
-    .delete-btn {
-      background: #fee2e2;
-      color: #ef4444;
-
-      &:hover {
-        background: #fecaca;
-        color: #dc2626;
-      }
-    }
-  }
-}
-
-/* 已完成空状态 */
-.completed-empty {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  padding: 40px 20px;
-  color: #94a3b8;
-  text-align: center;
-
-  .el-icon {
-    margin-bottom: 12px;
-    opacity: 0.5;
-  }
-
-  span {
-    font-size: 14px;
-  }
-}
 </style>

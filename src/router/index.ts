@@ -35,6 +35,11 @@ const routes: RouteRecordRaw[] = [
     path: '/agent-log',
     name: 'agent-log',
     component: () => import('@/views/AgentLogView.vue')
+  },
+  {
+    path: '/completed',
+    name: 'completed',
+    component: () => import('@/views/CompletedView.vue')
   }
 ]
 
