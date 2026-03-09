@@ -1,7 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Manager;
 
-use crate::db::{Database, agent_db, workflow_db};
+use crate::db::{Database, agent_db, agent_execution_db, workflow_db};
 use super::engine::update_status_and_notify;
 use crate::services::agent::AgentManager;
 
@@ -229,6 +229,42 @@ async fn execute_subtask_step(
     Ok(())
 }
 
+fn resolve_prev_session_id(
+    db: &Database,
+    todo_id: i64,
+    current_step_order: i32,
+) -> Option<String> {
+    if current_step_order == 0 {
+        return None;
+    }
+    let prev_order = current_step_order - 1;
+    let prev_step = db
+        .with_connection(|conn| workflow_db::get_step_at_order(conn, todo_id, prev_order))
+        .ok()
+        .flatten()?;
+
+    match prev_step.step_type.as_str() {
+        "subtask" => {
+            let subtask_id = prev_step.subtask_id?;
+            db.with_connection(|conn| {
+                let exec = agent_execution_db::get_latest_by_subtask(conn, subtask_id)?;
+                Ok(exec.and_then(|e| e.session_id))
+            })
+            .ok()
+            .flatten()
+        }
+        "prompt" => {
+            let prefix = format!("wf-{}-{}-", todo_id, prev_step.step_order);
+            db.with_connection(|conn| {
+                agent_execution_db::get_latest_session_id_by_task_prefix(conn, &prefix)
+            })
+            .ok()
+            .flatten()
+        }
+        _ => None,
+    }
+}
+
 async fn execute_prompt_step(
     app: &tauri::AppHandle,
     todo_id: i64,
@@ -268,6 +304,12 @@ async fn execute_prompt_step(
 
     let task_id = format!("wf-{}-{}-{}", todo_id, step.step_order, now_ms());
 
+    let resume_session = if step.carry_context {
+        resolve_prev_session_id(&db, todo_id, step.step_order)
+    } else {
+        None
+    };
+
     let agent_manager = app.state::<AgentManager>();
     agent_manager
         .start_background_execution(
@@ -277,6 +319,7 @@ async fn execute_prompt_step(
             task_id.clone(),
             None,
             app.clone(),
+            resume_session,
         )
         .await
         .map_err(|e| format!("启动 Agent 失败: {}", e))?;

@@ -113,6 +113,26 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute("INSERT INTO migrations (version) VALUES (19)", [])?;
     }
 
+    if current_version < 20 {
+        migration_v20(conn)?;
+        conn.execute("INSERT INTO migrations (version) VALUES (20)", [])?;
+    }
+
+    Ok(())
+}
+
+/// 迁移 v20：工作流上下文传递支持
+/// - agent_executions 新增 session_id 字段，保存 Agent 会话 ID
+/// - workflow_steps 新增 carry_context 字段，标记是否带入上一步结果
+fn migration_v20(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "ALTER TABLE agent_executions ADD COLUMN session_id TEXT",
+        [],
+    )?;
+    conn.execute(
+        "ALTER TABLE workflow_steps ADD COLUMN carry_context INTEGER NOT NULL DEFAULT 0",
+        [],
+    )?;
     Ok(())
 }
 

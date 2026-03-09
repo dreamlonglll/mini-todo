@@ -93,7 +93,7 @@ pub async fn start_agent_execution(
     }
 
     agent_manager
-        .start_background_execution(config, prompt, project_path, task_id, subtask_id, app)
+        .start_background_execution(config, prompt, project_path, task_id, subtask_id, app, None)
         .await
 }
 

@@ -484,6 +484,7 @@ pub trait AgentRunner: Send + Sync {
         working_dir: &Path,
         model: Option<&str>,
         allowed_tools: &[String],
+        resume_session: Option<&str>,
     ) -> std::process::Command;
 
     fn parse_event_line(&self, line: &str) -> Option<AgentEvent>;
@@ -553,6 +554,7 @@ impl AgentManager {
         task_id: String,
         subtask_id: Option<i64>,
         app: tauri::AppHandle,
+        resume_session: Option<String>,
     ) -> Result<(), String> {
         let runner = self
             .runners
@@ -567,6 +569,7 @@ impl AgentManager {
             Path::new(&work_dir),
             None,
             &[],
+            resume_session.as_deref(),
         );
 
         let now_ms = std::time::SystemTime::now()
@@ -887,6 +890,10 @@ impl AgentManager {
             .as_ref()
             .and_then(|o| o.output_tokens)
             .unwrap_or(0) as i64;
+        let session_id = state
+            .result
+            .as_ref()
+            .and_then(|o| o.session_id.clone());
 
         let _ = db.with_connection(|conn| {
             agent_execution_db::save_execution(
@@ -903,6 +910,7 @@ impl AgentManager {
                 output_tokens,
                 state.start_time_ms as i64,
                 state.duration_ms.unwrap_or(0) as i64,
+                session_id.as_deref(),
             )
         });
     }

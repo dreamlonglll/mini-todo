@@ -20,10 +20,17 @@ impl AgentRunner for CodexRunner {
         working_dir: &Path,
         model: Option<&str>,
         _allowed_tools: &[String],
+        resume_session: Option<&str>,
     ) -> Command {
         let mut cmd = create_command(cli_path);
         cmd.current_dir(working_dir);
-        cmd.args(["exec", "--json", "--full-auto"]);
+
+        if resume_session.is_some() {
+            cmd.args(["resume", "--last", "--json", "--full-auto"]);
+        } else {
+            cmd.args(["exec", "--json", "--full-auto"]);
+        }
+
         cmd.args(["--sandbox", "workspace-write"]);
         cmd.arg("--skip-git-repo-check");
         if let Some(m) = model {

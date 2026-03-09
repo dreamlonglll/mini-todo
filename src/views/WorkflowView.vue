@@ -27,7 +27,7 @@ const loading = ref(true)
 const todoTitle = ref('')
 const workflowEnabled = ref(false)
 const subtasks = ref<SubtaskOption[]>([])
-const workflowSteps = ref<Array<{ stepType: string; subtaskId?: number; promptText?: string }>>([])
+const workflowSteps = ref<Array<{ stepType: string; subtaskId?: number; promptText?: string; carryContext?: boolean }>>([])
 const workflowProgress = ref<WorkflowStep[]>([])
 
 const activeSection = ref<'workflow' | 'prompts'>('workflow')
@@ -70,10 +70,11 @@ async function loadData() {
 
     workflowProgress.value = await invoke<WorkflowStep[]>('get_workflow_steps', { todoId })
     workflowSteps.value = workflowProgress.value.map(s => {
-      const step: { stepType: string; subtaskId?: number; promptText?: string } = {
+      const step: { stepType: string; subtaskId?: number; promptText?: string; carryContext?: boolean } = {
         stepType: s.stepType,
         subtaskId: s.subtaskId,
         promptText: s.promptText,
+        carryContext: s.carryContext ?? false,
       }
       if (s.stepType === 'subtask' && s.subtaskId && !s.promptText) {
         step.promptText = buildSubtaskPrompt(s.subtaskId)
@@ -163,6 +164,7 @@ async function handleSave() {
         stepType: s.stepType,
         subtaskId: s.subtaskId ?? null,
         promptText: s.promptText ?? null,
+        carryContext: s.carryContext ?? false,
       })),
     })
     await loadData()
@@ -194,6 +196,7 @@ async function doStartWorkflow() {
         stepType: s.stepType,
         subtaskId: s.subtaskId ?? null,
         promptText: s.promptText ?? null,
+        carryContext: s.carryContext ?? false,
       })),
     })
     await invoke('start_workflow', { todoId })
@@ -519,6 +522,14 @@ function quickInsertPrompt(tpl: PromptTemplate) {
                     <el-icon :size="14"><Delete /></el-icon>
                   </button>
                 </div>
+              </div>
+              <div v-if="idx > 0" class="step-carry-context-row">
+                <el-switch
+                  v-model="step.carryContext"
+                  size="small"
+                  active-text="带入上一步结果"
+                  inactive-text=""
+                />
               </div>
               <div v-if="step.stepType === 'prompt'" class="step-prompt-row">
                 <el-input
@@ -970,6 +981,12 @@ function quickInsertPrompt(tpl: PromptTemplate) {
     overflow: hidden;
     white-space: nowrap;
   }
+}
+
+.step-carry-context-row {
+  display: flex;
+  align-items: center;
+  padding: 2px 0;
 }
 
 .step-prompt-row {

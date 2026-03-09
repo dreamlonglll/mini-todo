@@ -127,6 +127,7 @@ pub struct WorkflowStep {
     pub subtask_id: Option<i64>,
     pub prompt_text: Option<String>,
     pub status: String,
+    pub carry_context: bool,
     pub created_at: String,
 }
 
@@ -136,6 +137,8 @@ pub struct WorkflowStepInput {
     pub step_type: String,
     pub subtask_id: Option<i64>,
     pub prompt_text: Option<String>,
+    #[serde(default)]
+    pub carry_context: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -441,4 +444,5 @@ pub struct AgentExecution {
     pub start_time_ms: i64,
     pub duration_ms: i64,
     pub created_at: String,
+    pub session_id: Option<String>,
 }

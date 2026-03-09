@@ -6,6 +6,7 @@ export interface WorkflowStep {
   subtaskId?: number
   promptText?: string
   status: WorkflowStepStatus
+  carryContext: boolean
   createdAt: string
 }
 
@@ -15,6 +16,7 @@ export interface WorkflowStepInput {
   stepType: 'subtask' | 'prompt'
   subtaskId?: number
   promptText?: string
+  carryContext?: boolean
 }
 
 export const STEP_TYPE_LABELS: Record<string, string> = {

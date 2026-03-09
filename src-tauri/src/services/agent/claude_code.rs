@@ -20,10 +20,18 @@ impl AgentRunner for ClaudeCodeRunner {
         working_dir: &Path,
         model: Option<&str>,
         allowed_tools: &[String],
+        resume_session: Option<&str>,
     ) -> Command {
         let mut cmd = create_command(cli_path);
         cmd.current_dir(working_dir);
-        cmd.args(["-p", prompt]);
+
+        if let Some(session_id) = resume_session {
+            cmd.args(["-r", session_id]);
+            cmd.args(["-p", prompt]);
+        } else {
+            cmd.args(["-p", prompt]);
+        }
+
         cmd.args(["--output-format", "stream-json"]);
         cmd.arg("--include-partial-messages");
         cmd.arg("--verbose");

@@ -4,7 +4,7 @@ use tokio::sync::Mutex;
 
 use tauri::{Emitter, Manager};
 
-use crate::db::{Database, agent_db, dependency_db, scheduler_db, workflow_db};
+use crate::db::{Database, agent_db, agent_execution_db, dependency_db, scheduler_db, workflow_db};
 use crate::services::agent::AgentManager;
 
 use super::concurrency::ConcurrencyManager;
@@ -473,6 +473,33 @@ async fn execute_task(app: &tauri::AppHandle, task: QueuedTask, _project_path: &
 
     let task_id = format!("sched-{}-{}", task.subtask_id, now_ms());
 
+    let resume_session = db
+        .with_connection(|conn| {
+            let step = workflow_db::find_step_by_subtask(conn, task.subtask_id)?;
+            if let Some(ref s) = step {
+                if s.carry_context && s.step_order > 0 {
+                    let prev = workflow_db::get_step_at_order(conn, s.todo_id, s.step_order - 1)?;
+                    if let Some(prev_step) = prev {
+                        match prev_step.step_type.as_str() {
+                            "subtask" => {
+                                if let Some(sid) = prev_step.subtask_id {
+                                    let exec = agent_execution_db::get_latest_by_subtask(conn, sid)?;
+                                    return Ok(exec.and_then(|e| e.session_id));
+                                }
+                            }
+                            "prompt" => {
+                                let prefix = format!("wf-{}-{}-", s.todo_id, prev_step.step_order);
+                                return agent_execution_db::get_latest_session_id_by_task_prefix(conn, &prefix);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            Ok(None)
+        })
+        .unwrap_or(None);
+
     let agent_manager = app.state::<AgentManager>();
     let result = agent_manager
         .start_background_execution(
@@ -482,6 +509,7 @@ async fn execute_task(app: &tauri::AppHandle, task: QueuedTask, _project_path: &
             task_id.clone(),
             Some(task.subtask_id),
             app.clone(),
+            resume_session,
         )
         .await;
 
