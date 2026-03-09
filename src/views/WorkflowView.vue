@@ -174,8 +174,8 @@ async function handleSave() {
         promptText: s.promptText ?? null,
       })),
     })
+    await loadData()
     ElMessage.success('工作流配置已保存')
-    appWindow.close()
   } catch (e) {
     ElMessage.error('保存失败: ' + String(e))
   }
