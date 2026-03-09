@@ -240,7 +240,8 @@ impl TaskScheduler {
             let mut stmt = conn.prepare(
                 "SELECT id, cron_expression, last_scheduled_run
                  FROM todos
-                 WHERE schedule_enabled = 1 AND cron_expression IS NOT NULL AND cron_expression != ''"
+                 WHERE schedule_enabled = 1 AND completed = 0
+                 AND cron_expression IS NOT NULL AND cron_expression != ''"
             )?;
 
             let rows = stmt.query_map([], |row| {

@@ -96,7 +96,7 @@ pub fn get_pending_subtasks(
         "SELECT s.id, s.parent_id, s.priority_score
          FROM subtasks s
          JOIN todos t ON s.parent_id = t.id
-         WHERE s.schedule_status = 'pending'
+         WHERE s.schedule_status = 'pending' AND s.completed = 0
          AND (t.schedule_strategy != 'cron' OR t.schedule_enabled = 0)
          ORDER BY s.priority_score DESC",
     )?;
