@@ -18,7 +18,7 @@ import { useAgentStore } from '@/stores/agentStore'
 import { useSchedulerStore } from '@/stores/schedulerStore'
 import { AGENT_TYPE_INFO } from '@/types/agent'
 import type { PromptTemplate, TemplateVariable } from '@/types/scheduler'
-import AgentLogPanel from '@/components/AgentLogPanel.vue'
+import { openLogWindow } from '@/utils/logWindow'
 
 const route = useRoute()
 const subtaskId = parseInt(route.query.id as string)
@@ -205,14 +205,6 @@ const currentAgentLabel = computed(() => {
   return typeInfo?.label || agent.agentType
 })
 
-const logPanelStatus = computed<'idle' | 'running' | 'completed' | 'failed'>(() => {
-  return (currentExecution.value?.status as 'idle' | 'running' | 'completed' | 'failed') || 'idle'
-})
-
-const logPanelLogs = computed(() => {
-  return currentExecution.value?.logs || []
-})
-
 function buildPromptContext(): string {
   const lines: string[] = []
   const hasTitle = !!title.value.trim()
@@ -239,9 +231,16 @@ function openAgentDialog() {
     return
   }
 
-  if (!currentExecution.value) {
-    agentForm.value.prompt = buildPromptContext()
+  if (currentExecution.value) {
+    openLogWindow({
+      subtaskId,
+      taskId: agentTaskId.value || undefined,
+      title: `${title.value || '子任务'} - 执行日志`,
+    })
+    return
   }
+
+  agentForm.value.prompt = buildPromptContext()
   loadTemplates()
   agentDialogVisible.value = true
 }
@@ -295,7 +294,7 @@ async function applyTemplate() {
   }
 }
 
-async function handleAgentExecute(background: boolean = false) {
+async function handleAgentExecute() {
   if (!agentForm.value.agentId) {
     ElMessage.warning('未配置 Agent')
     return
@@ -309,45 +308,32 @@ async function handleAgentExecute(background: boolean = false) {
     return
   }
 
-  const taskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  const newTaskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 
   try {
     await agentStore.startBackgroundExecution(
       agentForm.value.agentId,
       agentForm.value.prompt,
       agentForm.value.projectPath,
-      taskId,
+      newTaskId,
       subtaskId,
     )
-    if (background) {
-      agentDialogVisible.value = false
-      ElMessage.info('Agent 已在后台执行')
-    }
+    agentDialogVisible.value = false
+    openLogWindow({
+      subtaskId,
+      taskId: newTaskId,
+      title: `${title.value || '子任务'} - 执行日志`,
+    })
   } catch (e) {
     ElMessage.error('Agent 启动失败: ' + String(e))
   }
 }
 
-async function handleAgentCancel() {
-  if (!agentTaskId.value) return
-  try {
-    await agentStore.cancelExecution(agentTaskId.value)
-    ElMessage.info('已发送取消请求')
-  } catch (e) {
-    ElMessage.error('取消失败: ' + String(e))
-  }
-}
-
-function handleClearExecution() {
+function handleNewExecution() {
   agentStore.removeExecution(subtaskId)
   agentForm.value.prompt = buildPromptContext()
-}
-
-async function handleReExecute(background: boolean) {
-  agentStore.removeExecution(subtaskId)
-  agentForm.value.prompt = buildPromptContext()
-  await nextTick()
-  await handleAgentExecute(background)
+  loadTemplates()
+  agentDialogVisible.value = true
 }
 
 // ========== 调度状态控制 ==========
@@ -442,25 +428,34 @@ onBeforeUnmount(() => {
     <div class="window-footer">
       <div class="footer-left">
         <el-button
-          v-if="hasAgentConfig"
-          :type="agentExecuting ? 'warning' : currentExecution?.status === 'completed' ? 'success' : currentExecution?.status === 'failed' ? 'danger' : 'info'"
+          v-if="hasAgentConfig && !currentExecution"
+          type="info"
           plain
           @click="openAgentDialog"
         >
           <el-icon><MagicStick /></el-icon>
-          <template v-if="agentExecuting">
-            执行中...
-          </template>
-          <template v-else-if="currentExecution?.status === 'completed'">
-            执行完成
-          </template>
-          <template v-else-if="currentExecution?.status === 'failed'">
-            执行失败
-          </template>
-          <template v-else>
-            {{ currentAgentLabel || 'Agent' }}
-          </template>
+          {{ currentAgentLabel || 'Agent' }}
         </el-button>
+        <template v-if="hasAgentConfig && currentExecution">
+          <el-button
+            :type="agentExecuting ? 'warning' : currentExecution.status === 'completed' ? 'success' : 'danger'"
+            plain
+            @click="openAgentDialog"
+          >
+            <el-icon><Tickets /></el-icon>
+            <template v-if="agentExecuting">执行中...</template>
+            <template v-else-if="currentExecution.status === 'completed'">查看日志</template>
+            <template v-else>查看日志</template>
+          </el-button>
+          <el-button
+            v-if="!agentExecuting && !isViewMode"
+            size="small"
+            @click="handleNewExecution"
+          >
+            <el-icon><RefreshRight /></el-icon>
+            重新执行
+          </el-button>
+        </template>
         <div v-if="hasAgentConfig && (!isViewMode || !currentExecution)" class="schedule-toggle">
           <el-switch
             :model-value="isSchedulePending"
@@ -502,7 +497,7 @@ onBeforeUnmount(() => {
             <el-input :model-value="agentForm.projectPath" disabled />
           </el-form-item>
 
-          <el-form-item v-if="!currentExecution" label="Prompt 模板">
+          <el-form-item label="Prompt 模板">
             <div class="template-selector">
               <el-select
                 v-model="selectedTemplateId"
@@ -552,7 +547,7 @@ onBeforeUnmount(() => {
             </div>
           </el-form-item>
 
-          <el-form-item v-if="!currentExecution" required>
+          <el-form-item required>
             <template #label>
               <span style="display: flex; align-items: center; gap: 6px;">
                 <span>执行指令</span>
@@ -566,62 +561,22 @@ onBeforeUnmount(() => {
               type="textarea"
               :rows="8"
               placeholder="输入要 Agent 执行的指令..."
-              :disabled="agentExecuting"
             />
           </el-form-item>
         </el-form>
-
-        <AgentLogPanel
-          v-if="agentTaskId"
-          :key="agentTaskId"
-          :task-id="agentTaskId"
-          :agent-type="currentExecution?.agentType || ''"
-          :initial-status="logPanelStatus"
-          :initial-logs="logPanelLogs"
-          :initial-start-time="currentExecution?.startTimeMs"
-        />
       </div>
 
       <template #footer>
         <div class="agent-dialog-footer">
-          <div class="footer-left-actions">
-            <el-button
-              v-if="agentExecuting"
-              type="danger"
-              size="small"
-              @click="handleAgentCancel"
-            >
-              <el-icon><CircleClose /></el-icon>
-              取消执行
-            </el-button>
-            <el-button
-              v-if="currentExecution && !agentExecuting && !isViewMode"
-              size="small"
-              @click="handleClearExecution"
-            >
-              清除记录
-            </el-button>
-          </div>
+          <div class="footer-left-actions"></div>
           <div class="footer-right-actions">
             <el-button @click="agentDialogVisible = false">
               关闭
             </el-button>
-            <template v-if="!currentExecution">
-              <el-button type="primary" @click="handleAgentExecute(false)">
-                <el-icon><VideoPlay /></el-icon>
-                开始执行
-              </el-button>
-              <el-button type="success" @click="handleAgentExecute(true)">
-                <el-icon><Position /></el-icon>
-                后台执行
-              </el-button>
-            </template>
-            <template v-if="currentExecution && !agentExecuting">
-              <el-button type="warning" @click="handleReExecute(true)">
-                <el-icon><RefreshRight /></el-icon>
-                重新执行
-              </el-button>
-            </template>
+            <el-button type="primary" @click="handleAgentExecute()">
+              <el-icon><VideoPlay /></el-icon>
+              开始执行
+            </el-button>
           </div>
         </div>
       </template>

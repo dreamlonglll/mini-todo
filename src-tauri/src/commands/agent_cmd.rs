@@ -131,6 +131,8 @@ pub async fn get_agent_execution_by_subtask(
             error: rec.error,
             start_time_ms: rec.start_time_ms as u64,
             duration_ms: Some(rec.duration_ms as u64),
+            input_tokens: rec.input_tokens as u64,
+            output_tokens: rec.output_tokens as u64,
         }));
     }
 

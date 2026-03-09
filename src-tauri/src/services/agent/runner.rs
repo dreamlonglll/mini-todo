@@ -514,6 +514,8 @@ pub struct ExecutionState {
     pub error: Option<String>,
     pub start_time_ms: u64,
     pub duration_ms: Option<u64>,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -584,6 +586,8 @@ impl AgentManager {
             error: None,
             start_time_ms: now_ms,
             duration_ms: None,
+            input_tokens: 0,
+            output_tokens: 0,
         };
         self.execution_states
             .lock()
@@ -763,6 +767,12 @@ impl AgentManager {
                             output_tokens: out,
                         };
                         let _ = app_stdout.emit(&event_name_stdout, &evt);
+                        let mut lock = states_stdout.lock().await;
+                        if let Some(s) = lock.get_mut(&task_id_stdout) {
+                            s.input_tokens = total_input;
+                            s.output_tokens = total_output;
+                        }
+                        drop(lock);
                     }
                 }
             }

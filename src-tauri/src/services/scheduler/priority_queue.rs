@@ -71,10 +71,10 @@ pub fn calculate_priority(
     let mut score: i64 = 0;
 
     score += match quadrant {
-        "important_urgent" => 30,
-        "important_not_urgent" => 20,
-        "urgent_not_important" => 15,
-        _ => 10,
+        "1" => 30,  // 重要且紧急
+        "2" => 20,  // 重要不紧急
+        "3" => 15,  // 紧急不重要
+        _ => 10,    // 不紧急不重要 (4) 或其他
     } * 3;
 
     let wait_bonus = (created_at_minutes_ago / 10).min(50);

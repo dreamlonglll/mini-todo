@@ -30,7 +30,7 @@ impl TaskScheduler {
         Self {
             queue: Mutex::new(PriorityQueue::new(50)),
             concurrency: ConcurrencyManager::new(3),
-            running: Mutex::new(false),
+            running: Mutex::new(true),
         }
     }
 

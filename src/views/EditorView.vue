@@ -14,6 +14,7 @@ import { AGENT_TYPE_INFO } from '@/types/agent'
 import { SCHEDULE_STATUS_MAP } from '@/types/scheduler'
 import type { ScheduleStrategy } from '@/types/scheduler'
 import CronEditor from '@/components/CronEditor.vue'
+import { openLogWindow } from '@/utils/logWindow'
 
 const route = useRoute()
 const todoId = computed(() => route.query.id ? parseInt(route.query.id as string) : null)
@@ -788,6 +789,18 @@ function getScheduleStatusInfo(status: string) {
   return SCHEDULE_STATUS_MAP[status as keyof typeof SCHEDULE_STATUS_MAP] || SCHEDULE_STATUS_MAP.none
 }
 
+function canViewLog(subtask: Record<string, any>): boolean {
+  const status = subtask.scheduleStatus
+  return !!status && !['none', 'pending', 'queued'].includes(status)
+}
+
+function viewSubtaskLog(subtask: { id: number; title: string }) {
+  openLogWindow({
+    subtaskId: subtask.id,
+    title: `${subtask.title} - 执行日志`,
+  })
+}
+
 // 关闭窗口
 function handleClose() {
   appWindow.close()
@@ -1143,6 +1156,14 @@ function handleClose() {
                   <Document />
                 </el-icon>
                 <div v-if="inlineEditingSubtaskId !== subtask.id" class="subtask-actions">
+                  <button
+                    v-if="canViewLog(subtask)"
+                    class="action-btn log-btn"
+                    @click.stop="viewSubtaskLog(subtask)"
+                    title="查看执行日志"
+                  >
+                    <el-icon><Tickets /></el-icon>
+                  </button>
                   <button
                     class="action-btn view-btn"
                     @click="openSubtaskWindow(subtask.id, 'view')"
@@ -1711,6 +1732,11 @@ function handleClose() {
       &.delete-btn:hover {
         background: #fee2e2;
         color: #ef4444;
+      }
+
+      &.log-btn:hover {
+        background: #fef3c7;
+        color: #d97706;
       }
     }
   }
