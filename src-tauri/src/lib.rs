@@ -105,6 +105,7 @@ use commands::{
     pause_workflow,
     reset_workflow,
     skip_workflow_step,
+    get_workflow_executions,
     // Prompt 模板命令
     create_prompt_template,
     delete_prompt_template,
@@ -427,6 +428,7 @@ pub fn run() {
             pause_workflow,
             reset_workflow,
             skip_workflow_step,
+            get_workflow_executions,
             // Prompt 模板命令
             get_prompt_templates,
             get_prompt_template,

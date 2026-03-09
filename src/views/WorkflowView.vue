@@ -6,13 +6,43 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useSchedulerStore } from '@/stores/schedulerStore'
 import type { PromptTemplate } from '@/types/scheduler'
-import type { WorkflowStep } from '@/types/workflow'
+import type { WorkflowStep, WorkflowStepStatus } from '@/types/workflow'
 import { STEP_STATUS_MAP } from '@/types/workflow'
 
 interface SubtaskOption {
   id: number
   title: string
   completed: boolean
+}
+
+interface CachedLog {
+  content: string
+  level: string
+  timestampMs: number
+}
+
+interface WorkflowExecutionInfo {
+  taskId: string
+  stepOrder: number
+  agentType: string
+  status: string
+  logs: CachedLog[]
+  error: string | null
+  inputTokens: number
+  outputTokens: number
+  startTimeMs: number
+  durationMs: number
+}
+
+interface ExecutionState {
+  taskId: string
+  subtaskId: number | null
+  agentType: string
+  status: string
+  logs: CachedLog[]
+  error: string | null
+  startTimeMs: number
+  durationMs: number | null
 }
 
 const route = useRoute()
@@ -29,6 +59,21 @@ const workflowSteps = ref<Array<{ stepType: string; subtaskId?: number; promptTe
 const workflowProgress = ref<WorkflowStep[]>([])
 
 const activeSection = ref<'workflow' | 'prompts'>('workflow')
+
+// ========== Log Viewer ==========
+const logDialogVisible = ref(false)
+const logDialogTitle = ref('')
+const logDialogLoading = ref(false)
+const logViewData = ref<{
+  status: string
+  agentType: string
+  error: string | null
+  inputTokens: number
+  outputTokens: number
+  startTimeMs: number
+  durationMs: number
+  logs: CachedLog[]
+} | null>(null)
 
 // ========== Prompt Library ==========
 const promptLibrary = ref<PromptTemplate[]>([])
@@ -202,6 +247,84 @@ const workflowCompletedCount = computed(() =>
   workflowProgress.value.filter(s => s.status === 'completed' || s.status === 'skipped').length
 )
 
+function getStepStatus(idx: number): string | null {
+  const progress = workflowProgress.value[idx]
+  return progress ? progress.status : null
+}
+
+function getStepStatusInfo(status: string) {
+  return STEP_STATUS_MAP[status as WorkflowStepStatus] || { label: status, type: 'info' }
+}
+
+function canViewLog(idx: number): boolean {
+  const status = getStepStatus(idx)
+  return !!status && status !== 'pending'
+}
+
+async function viewStepLog(idx: number) {
+  const step = workflowSteps.value[idx]
+  const progress = workflowProgress.value[idx]
+  if (!progress) return
+
+  logDialogTitle.value = `步骤 ${idx + 1} 执行日志`
+  logDialogVisible.value = true
+  logDialogLoading.value = true
+  logViewData.value = null
+
+  try {
+    if (step.stepType === 'subtask' && step.subtaskId) {
+      const state = await invoke<ExecutionState | null>('get_agent_execution_by_subtask', {
+        subtaskId: step.subtaskId,
+      })
+      if (state) {
+        logViewData.value = {
+          status: state.status,
+          agentType: state.agentType,
+          error: state.error,
+          inputTokens: 0,
+          outputTokens: 0,
+          startTimeMs: state.startTimeMs,
+          durationMs: state.durationMs ?? 0,
+          logs: state.logs,
+        }
+      }
+    } else if (step.stepType === 'prompt') {
+      const executions = await invoke<WorkflowExecutionInfo[]>('get_workflow_executions', { todoId })
+      const match = executions.find(e => e.stepOrder === idx)
+      if (match) {
+        logViewData.value = {
+          status: match.status,
+          agentType: match.agentType,
+          error: match.error,
+          inputTokens: match.inputTokens,
+          outputTokens: match.outputTokens,
+          startTimeMs: match.startTimeMs,
+          durationMs: match.durationMs,
+          logs: match.logs,
+        }
+      }
+    }
+  } catch (e) {
+    console.error('Failed to load step log:', e)
+  } finally {
+    logDialogLoading.value = false
+  }
+}
+
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`
+  const seconds = Math.round(ms / 1000)
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  const secs = seconds % 60
+  return `${minutes}m ${secs}s`
+}
+
+function formatTime(ms: number): string {
+  if (!ms) return '-'
+  return new Date(ms).toLocaleString('zh-CN')
+}
+
 // ========== Prompt CRUD ==========
 function startCreatePrompt() {
   isCreatingPrompt.value = true
@@ -372,9 +495,19 @@ function quickInsertPrompt(tpl: PromptTemplate) {
 
         <div v-else class="steps-list">
           <div v-for="(step, idx) in workflowSteps" :key="idx" class="step-card">
-            <span class="step-number">{{ idx + 1 }}</span>
+            <div class="step-number-area">
+              <span class="step-number">{{ idx + 1 }}</span>
+              <el-tag
+                v-if="getStepStatus(idx) && getStepStatus(idx) !== 'pending'"
+                :type="getStepStatusInfo(getStepStatus(idx)!).type"
+                size="small"
+                effect="light"
+                class="step-status-tag"
+              >
+                {{ getStepStatusInfo(getStepStatus(idx)!).label }}
+              </el-tag>
+            </div>
             <div class="step-content">
-              <!-- 第一行：类型选择 + 子任务/提示词库选择 -->
               <div class="step-top-row">
                 <el-select
                   v-model="step.stepType"
@@ -417,6 +550,14 @@ function quickInsertPrompt(tpl: PromptTemplate) {
                   />
                 </el-select>
                 <div class="step-actions-inline">
+                  <button
+                    v-if="canViewLog(idx)"
+                    class="step-action-btn log"
+                    @click="viewStepLog(idx)"
+                    title="查看日志"
+                  >
+                    <el-icon :size="14"><Document /></el-icon>
+                  </button>
                   <button class="step-action-btn" :disabled="idx === 0" @click="moveWorkflowStep(idx, 'up')" title="上移">
                     <el-icon :size="14"><Top /></el-icon>
                   </button>
@@ -428,7 +569,6 @@ function quickInsertPrompt(tpl: PromptTemplate) {
                   </button>
                 </div>
               </div>
-              <!-- 第二行：提示词文本（仅 prompt 类型） -->
               <div v-if="step.stepType === 'prompt'" class="step-prompt-row">
                 <el-input
                   v-model="step.promptText"
@@ -557,6 +697,74 @@ function quickInsertPrompt(tpl: PromptTemplate) {
         </el-button>
       </div>
     </div>
+
+    <!-- 日志查看弹窗 -->
+    <el-dialog
+      v-model="logDialogVisible"
+      :title="logDialogTitle"
+      width="620px"
+      append-to-body
+      destroy-on-close
+    >
+      <div v-loading="logDialogLoading" class="log-dialog-body">
+        <template v-if="logViewData">
+          <div class="log-meta">
+            <div class="log-meta-row">
+              <span class="log-meta-label">状态</span>
+              <el-tag
+                :type="getStepStatusInfo(logViewData.status).type"
+                size="small"
+                effect="light"
+              >
+                {{ getStepStatusInfo(logViewData.status).label }}
+              </el-tag>
+            </div>
+            <div class="log-meta-row">
+              <span class="log-meta-label">Agent</span>
+              <span class="log-meta-value">{{ logViewData.agentType }}</span>
+            </div>
+            <div class="log-meta-row">
+              <span class="log-meta-label">开始时间</span>
+              <span class="log-meta-value">{{ formatTime(logViewData.startTimeMs) }}</span>
+            </div>
+            <div class="log-meta-row">
+              <span class="log-meta-label">耗时</span>
+              <span class="log-meta-value">{{ formatDuration(logViewData.durationMs) }}</span>
+            </div>
+            <div v-if="logViewData.inputTokens || logViewData.outputTokens" class="log-meta-row">
+              <span class="log-meta-label">Tokens</span>
+              <span class="log-meta-value">{{ logViewData.inputTokens }} / {{ logViewData.outputTokens }}</span>
+            </div>
+            <div v-if="logViewData.error" class="log-meta-row error">
+              <span class="log-meta-label">错误</span>
+              <span class="log-meta-value log-error-text">{{ logViewData.error }}</span>
+            </div>
+          </div>
+          <div class="log-content-area">
+            <div class="log-content-header">
+              <span>输出日志</span>
+              <span class="log-line-count">{{ logViewData.logs.length }} 条</span>
+            </div>
+            <div v-if="logViewData.logs.length === 0" class="log-empty">
+              暂无日志输出
+            </div>
+            <div v-else class="log-lines">
+              <div
+                v-for="(log, li) in logViewData.logs"
+                :key="li"
+                class="log-line"
+                :class="'log-level-' + log.level"
+              >
+                <span class="log-line-content">{{ log.content }}</span>
+              </div>
+            </div>
+          </div>
+        </template>
+        <div v-else-if="!logDialogLoading" class="log-empty">
+          暂无执行记录
+        </div>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
@@ -819,6 +1027,15 @@ function quickInsertPrompt(tpl: PromptTemplate) {
   }
 }
 
+.step-number-area {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  margin-top: 4px;
+}
+
 .step-number {
   display: flex;
   align-items: center;
@@ -830,8 +1047,12 @@ function quickInsertPrompt(tpl: PromptTemplate) {
   color: #3b82f6;
   background: #eff6ff;
   border-radius: 6px;
-  flex-shrink: 0;
-  margin-top: 4px;
+}
+
+.step-status-tag {
+  font-size: 10px;
+  transform: scale(0.85);
+  white-space: nowrap;
 }
 
 .step-content {
@@ -886,6 +1107,15 @@ function quickInsertPrompt(tpl: PromptTemplate) {
   &.delete:hover:not(:disabled) {
     background: #fef2f2;
     color: #ef4444;
+  }
+
+  &.log {
+    color: #3b82f6;
+  }
+
+  &.log:hover:not(:disabled) {
+    background: #eff6ff;
+    color: #2563eb;
   }
 }
 
@@ -1022,5 +1252,110 @@ function quickInsertPrompt(tpl: PromptTemplate) {
 .footer-right {
   display: flex;
   gap: 8px;
+}
+
+/* ========== Log Dialog ========== */
+.log-dialog-body {
+  min-height: 120px;
+}
+
+.log-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 24px;
+  padding: 12px 14px;
+  background: #f8fafc;
+  border-radius: 8px;
+  margin-bottom: 14px;
+}
+
+.log-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+
+  &.error {
+    width: 100%;
+  }
+}
+
+.log-meta-label {
+  font-size: 12px;
+  color: #94a3b8;
+  flex-shrink: 0;
+}
+
+.log-meta-value {
+  font-size: 13px;
+  color: #334155;
+}
+
+.log-error-text {
+  color: #ef4444;
+  word-break: break-all;
+}
+
+.log-content-area {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.log-content-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  background: #f1f5f9;
+  font-size: 13px;
+  font-weight: 500;
+  color: #475569;
+}
+
+.log-line-count {
+  font-size: 11px;
+  color: #94a3b8;
+  font-weight: 400;
+}
+
+.log-lines {
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 8px 0;
+  background: #1e293b;
+
+  &::-webkit-scrollbar {
+    width: 5px;
+  }
+
+  &::-webkit-scrollbar-thumb {
+    background: #475569;
+    border-radius: 3px;
+  }
+}
+
+.log-line {
+  padding: 2px 12px;
+  font-family: 'Cascadia Code', 'Consolas', 'Monaco', monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #e2e8f0;
+  word-break: break-all;
+  white-space: pre-wrap;
+}
+
+.log-level-error {
+  color: #fca5a5;
+}
+
+.log-level-warn {
+  color: #fcd34d;
+}
+
+.log-empty {
+  text-align: center;
+  padding: 32px 16px;
+  color: #94a3b8;
+  font-size: 13px;
 }
 </style>

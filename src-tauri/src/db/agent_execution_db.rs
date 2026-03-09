@@ -40,6 +40,40 @@ pub fn save_execution(
     Ok(conn.last_insert_rowid())
 }
 
+pub fn get_by_task_id_prefix(
+    conn: &Connection,
+    prefix: &str,
+) -> Result<Vec<AgentExecution>> {
+    let pattern = format!("{}%", prefix);
+    let mut stmt = conn.prepare(
+        "SELECT id, task_id, subtask_id, agent_id, agent_type, status, logs, result_text, error,
+                input_tokens, output_tokens, start_time_ms, duration_ms, created_at
+         FROM agent_executions
+         WHERE task_id LIKE ?1
+         ORDER BY start_time_ms DESC",
+    )?;
+
+    let rows = stmt.query_map(params![pattern], |row| {
+        Ok(AgentExecution {
+            id: row.get(0)?,
+            task_id: row.get(1)?,
+            subtask_id: row.get(2)?,
+            agent_id: row.get(3)?,
+            agent_type: row.get(4)?,
+            status: row.get(5)?,
+            logs: row.get(6)?,
+            result_text: row.get(7)?,
+            error: row.get(8)?,
+            input_tokens: row.get(9)?,
+            output_tokens: row.get(10)?,
+            start_time_ms: row.get(11)?,
+            duration_ms: row.get(12)?,
+            created_at: row.get(13)?,
+        })
+    })?;
+    rows.collect()
+}
+
 pub fn get_latest_by_subtask(
     conn: &Connection,
     subtask_id: i64,
