@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 use crate::db::{Database, agent_db, dependency_db, scheduler_db, workflow_db};
 use crate::services::agent::AgentManager;
@@ -11,6 +11,28 @@ use super::concurrency::ConcurrencyManager;
 use super::cron_manager;
 use super::priority_queue::{PriorityQueue, QueuedTask, calculate_priority};
 use super::state_machine;
+
+#[derive(serde::Serialize, Clone)]
+struct ScheduleStatusChanged {
+    subtask_id: i64,
+    status: String,
+}
+
+pub fn update_status_and_notify(
+    app: &tauri::AppHandle,
+    db: &Database,
+    subtask_id: i64,
+    status: &str,
+) {
+    let _ = db.with_connection(|conn| scheduler_db::update_schedule_status(conn, subtask_id, status));
+    let _ = app.emit(
+        "schedule:status-changed",
+        ScheduleStatusChanged {
+            subtask_id,
+            status: status.to_string(),
+        },
+    );
+}
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -128,9 +150,7 @@ impl TaskScheduler {
                 })
                 .is_ok()
             {
-                let _ = db.with_connection(|conn| {
-                    scheduler_db::update_schedule_status(conn, subtask_id, "queued")
-                });
+                update_status_and_notify(app, &db, subtask_id, "queued");
             }
         }
     }
@@ -203,10 +223,7 @@ impl TaskScheduler {
 
         state_machine::try_transition(&current_status, "pending")?;
 
-        db.with_connection(|conn| {
-            scheduler_db::update_schedule_status(conn, subtask_id, "pending")
-        })
-        .map_err(|e| format!("更新状态失败: {}", e))?;
+        update_status_and_notify(app, &db, subtask_id, "pending");
 
         Ok(())
     }
@@ -246,13 +263,14 @@ impl TaskScheduler {
                 continue;
             }
 
-            // 查找该 Todo 下的 none/completed 状态子任务，将其提交为 pending
+            // 查找该 Todo 下未调度过的子任务，将其提交为 pending
+            // 仅触发 none 状态（已完成/失败的不再自动重新触发，需用户手动重置）
             let subtasks: Vec<(i64, String)> = db
                 .with_connection(|conn| {
                     let mut stmt = conn.prepare(
                         "SELECT id, schedule_status FROM subtasks
                          WHERE parent_id = ?1 AND completed = 0
-                         AND schedule_status IN ('none', 'completed', 'failed')"
+                         AND schedule_status = 'none'"
                     )?;
                     let rows = stmt.query_map([todo_id], |row| {
                         Ok((row.get(0)?, row.get(1)?))
@@ -266,8 +284,8 @@ impl TaskScheduler {
                     &state_machine::ScheduleStatus::from_str(&current_status),
                     &state_machine::ScheduleStatus::Pending,
                 ) {
+                    update_status_and_notify(app, &db, subtask_id, "pending");
                     let _ = db.with_connection(|conn| {
-                        scheduler_db::update_schedule_status(conn, subtask_id, "pending")?;
                         scheduler_db::reset_retry_count(conn, subtask_id)
                     });
                 }
@@ -348,9 +366,7 @@ impl TaskScheduler {
 async fn execute_task(app: &tauri::AppHandle, task: QueuedTask, _project_path: &str) {
     let db = app.state::<Database>();
 
-    let _ = db.with_connection(|conn| {
-        scheduler_db::update_schedule_status(conn, task.subtask_id, "running")
-    });
+    update_status_and_notify(app, &db, task.subtask_id, "running");
 
     let todo_info = db.with_connection(|conn| {
         conn.query_row(
@@ -463,9 +479,7 @@ async fn execute_task(app: &tauri::AppHandle, task: QueuedTask, _project_path: &
         let state = agent_manager.get_execution_state(&task_id).await;
         match state {
             Some(s) if s.status == "completed" => {
-                let _ = db.with_connection(|conn| {
-                    scheduler_db::update_schedule_status(conn, task.subtask_id, "completed")
-                });
+                update_status_and_notify(app, &db, task.subtask_id, "completed");
 
                 let is_workflow_step = db
                     .with_connection(|conn| {
@@ -500,8 +514,8 @@ async fn execute_task(app: &tauri::AppHandle, task: QueuedTask, _project_path: &
 /// 标记任务为失败（不重试）
 async fn mark_failed(app: &tauri::AppHandle, subtask_id: i64, error: &str) {
     let db = app.state::<Database>();
+    update_status_and_notify(app, &db, subtask_id, "failed");
     let _ = db.with_connection(|conn| {
-        scheduler_db::update_schedule_status(conn, subtask_id, "failed")?;
         scheduler_db::update_schedule_error(conn, subtask_id, Some(error))
     });
 }
@@ -510,37 +524,43 @@ async fn mark_failed(app: &tauri::AppHandle, subtask_id: i64, error: &str) {
 async fn handle_task_failure(app: &tauri::AppHandle, subtask_id: i64, error: &str) {
     let db = app.state::<Database>();
 
-    let should_retry = db
+    let retry_info: Option<(i64, i64)> = db
         .with_connection(|conn| {
-            let (retry_count, max_retries): (i64, i64) = conn.query_row(
+            conn.query_row(
                 "SELECT retry_count, max_retries FROM subtasks WHERE id = ?1",
                 [subtask_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
-            )?;
+            )
+        })
+        .ok();
 
-            if retry_count < max_retries {
+    let should_retry = if let Some((retry_count, max_retries)) = retry_info {
+        if retry_count < max_retries {
+            let _ = db.with_connection(|conn| {
                 scheduler_db::increment_retry_count(conn, subtask_id)?;
-                scheduler_db::update_schedule_status(conn, subtask_id, "pending")?;
                 scheduler_db::update_schedule_error(
                     conn,
                     subtask_id,
                     Some(&format!("第{}次重试失败: {}", retry_count + 1, error)),
-                )?;
-                Ok(true)
-            } else {
-                scheduler_db::update_schedule_status(conn, subtask_id, "failed")?;
+                )
+            });
+            update_status_and_notify(app, &db, subtask_id, "pending");
+            true
+        } else {
+            let _ = db.with_connection(|conn| {
                 scheduler_db::update_schedule_error(
                     conn,
                     subtask_id,
-                    Some(&format!(
-                        "已达最大重试次数({}): {}",
-                        max_retries, error
-                    )),
-                )?;
-                Ok(false)
-            }
-        })
-        .unwrap_or(false);
+                    Some(&format!("已达最大重试次数({}): {}", max_retries, error)),
+                )
+            });
+            update_status_and_notify(app, &db, subtask_id, "failed");
+            false
+        }
+    } else {
+        update_status_and_notify(app, &db, subtask_id, "failed");
+        false
+    };
 
     if should_retry {
         let retry_count = db
@@ -591,9 +611,7 @@ pub async fn trigger_downstream(app: &tauri::AppHandle, completed_subtask_id: i6
             .unwrap_or(false);
 
         if deps_met {
-            let _ = db.with_connection(|conn| {
-                scheduler_db::update_schedule_status(conn, downstream_id, "queued")
-            });
+            update_status_and_notify(app, &db, downstream_id, "queued");
         }
     }
 }

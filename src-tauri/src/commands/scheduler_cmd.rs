@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 use crate::db::Database;
 use crate::db::{scheduler_db, dependency_db};
 use crate::services::scheduler::cron_manager;
@@ -8,11 +8,12 @@ use crate::services::scheduler::state_machine;
 
 #[tauri::command]
 pub fn update_subtask_schedule_status(
+    app: tauri::AppHandle,
     db: State<Database>,
     subtask_id: i64,
     target_status: String,
 ) -> Result<String, String> {
-    db.with_connection(|conn| {
+    let new_status = db.with_connection(|conn| {
         let current: String = conn
             .query_row(
                 "SELECT schedule_status FROM subtasks WHERE id = ?1",
@@ -21,18 +22,25 @@ pub fn update_subtask_schedule_status(
             )
             .map_err(|_| rusqlite::Error::QueryReturnedNoRows)?;
 
-        let new_status = state_machine::try_transition(&current, &target_status)
+        let status = state_machine::try_transition(&current, &target_status)
             .map_err(|e| rusqlite::Error::InvalidParameterName(e))?;
 
-        scheduler_db::update_schedule_status(conn, subtask_id, &new_status)?;
+        scheduler_db::update_schedule_status(conn, subtask_id, &status)?;
 
-        if &new_status == "pending" || &new_status == "none" {
+        if &status == "pending" || &status == "none" {
             scheduler_db::update_schedule_error(conn, subtask_id, None)?;
         }
 
-        Ok(new_status)
+        Ok(status)
     })
-    .map_err(|e| format!("更新调度状态失败: {}", e))
+    .map_err(|e| format!("更新调度状态失败: {}", e))?;
+
+    let _ = app.emit(
+        "schedule:status-changed",
+        serde_json::json!({ "subtask_id": subtask_id, "status": new_status }),
+    );
+
+    Ok(new_status)
 }
 
 #[tauri::command]
@@ -273,6 +281,11 @@ pub async fn approve_review(
     })
     .map_err(|e| format!("更新状态失败: {}", e))?;
 
+    let _ = app.emit(
+        "schedule:status-changed",
+        serde_json::json!({ "subtask_id": subtask_id, "status": "completed" }),
+    );
+
     engine::trigger_downstream(&app, subtask_id).await;
 
     Ok(())
@@ -312,6 +325,11 @@ pub async fn reject_review(
         Ok(())
     })
     .map_err(|e| format!("更新状态失败: {}", e))?;
+
+    let _ = app.emit(
+        "schedule:status-changed",
+        serde_json::json!({ "subtask_id": subtask_id, "status": target }),
+    );
 
     Ok(())
 }

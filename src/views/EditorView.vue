@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed, watch, nextTick } from 'vue'
+import { ref, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -14,6 +14,7 @@ import { AGENT_TYPE_INFO } from '@/types/agent'
 import { SCHEDULE_STATUS_MAP } from '@/types/scheduler'
 import type { ScheduleStrategy } from '@/types/scheduler'
 import CronEditor from '@/components/CronEditor.vue'
+import { listen } from '@tauri-apps/api/event'
 import { openLogWindow } from '@/utils/logWindow'
 
 const route = useRoute()
@@ -199,12 +200,30 @@ function handleQuadrantSelect(quadrantId: QuadrantType) {
   }
 }
 
+let unlistenScheduleStatus: (() => void) | null = null
+
 // 初始化
 onMounted(async () => {
   if (todoId.value) {
     await loadTodo()
   }
   agentStore.loadAgents()
+
+  const unlisten = await listen<{ subtask_id: number; status: string }>(
+    'schedule:status-changed',
+    (event) => {
+      if (!todo.value?.subtasks) return
+      const st = todo.value.subtasks.find((s: any) => s.id === event.payload.subtask_id)
+      if (st) {
+        (st as any).scheduleStatus = event.payload.status
+      }
+    }
+  )
+  unlistenScheduleStatus = unlisten
+})
+
+onUnmounted(() => {
+  unlistenScheduleStatus?.()
 })
 
 // 加载待办数据

@@ -1,7 +1,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Manager;
 
-use crate::db::{Database, agent_db, scheduler_db, workflow_db};
+use crate::db::{Database, agent_db, workflow_db};
+use super::engine::update_status_and_notify;
 use crate::services::agent::AgentManager;
 
 fn now_ms() -> u64 {
@@ -223,9 +224,7 @@ async fn execute_subtask_step(
         return advance_workflow(app, step.todo_id).await;
     }
 
-    let _ = db.with_connection(|conn| {
-        scheduler_db::update_schedule_status(conn, subtask_id, "pending")
-    });
+    update_status_and_notify(app, &db, subtask_id, "pending");
 
     Ok(())
 }
