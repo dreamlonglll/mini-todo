@@ -504,32 +504,8 @@ async fn execute_task(app: &tauri::AppHandle, task: QueuedTask, _project_path: &
         return;
     }
 
-    // 等待执行完成（轮询 execution_states）
-    let timeout_secs = db
-        .with_connection(|conn| {
-            conn.query_row(
-                "SELECT timeout_secs FROM subtasks WHERE id = ?1",
-                [task.subtask_id],
-                |row| row.get::<_, i64>(0),
-            )
-        })
-        .unwrap_or(600) as u64;
-
-    let deadline = now_ms() + timeout_secs * 1000;
-
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-
-        if now_ms() > deadline {
-            let _ = agent_manager.cancel_execution(&task_id).await;
-            handle_task_failure(
-                app,
-                task.subtask_id,
-                &format!("执行超时（{}秒），已自动终止", timeout_secs),
-            )
-            .await;
-            return;
-        }
 
         let state = agent_manager.get_execution_state(&task_id).await;
         match state {

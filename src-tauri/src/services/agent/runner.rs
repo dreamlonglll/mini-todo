@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use serde::Serialize;
-use tauri::{Emitter, Manager};
+use tauri::Emitter;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command as TokioCommand;
 use tokio::sync::Mutex;
@@ -596,19 +596,6 @@ impl AgentManager {
             .insert(task_id.clone(), state);
 
         let states = self.execution_states.clone();
-        let timeout_secs = if let Some(sid) = subtask_id {
-            let db = app.state::<Database>();
-            db.with_connection(|conn| {
-                conn.query_row(
-                    "SELECT timeout_secs FROM subtasks WHERE id = ?",
-                    [sid],
-                    |row| row.get::<_, i64>(0),
-                )
-            })
-            .unwrap_or(600) as u64
-        } else {
-            600u64
-        };
         let task_id_clone = task_id.clone();
         let event_name = format!("agent:log:{}", task_id);
         let agent_type_for_task = config.agent_type.clone();
@@ -630,7 +617,6 @@ impl AgentManager {
             let start = Instant::now();
             let run_result = Self::run_process(
                 cmd,
-                timeout_secs,
                 agent_type_for_task,
                 states.clone(),
                 &task_id_clone,
@@ -679,7 +665,6 @@ impl AgentManager {
 
     async fn run_process(
         cmd: std::process::Command,
-        timeout_secs: u64,
         agent_type: String,
         states: Arc<Mutex<HashMap<String, ExecutionState>>>,
         task_id: &str,
@@ -737,7 +722,6 @@ impl AgentManager {
         let event_name_stdout = event_name.to_string();
         let agent_type_clone = agent_type.clone();
 
-        let timeout = tokio::time::Duration::from_secs(timeout_secs);
         let mut total_input = 0u64;
         let mut total_output = 0u64;
         let mut text_response = String::new();
@@ -824,24 +808,19 @@ impl AgentManager {
 
         enum ProcessResult {
             Completed(Result<std::process::ExitStatus, std::io::Error>),
-            Timeout,
             Cancelled,
         }
 
         let result = tokio::select! {
-            res = tokio::time::timeout(timeout, process_future) => {
-                match res {
-                    Ok(wait_result) => ProcessResult::Completed(wait_result),
-                    Err(_) => ProcessResult::Timeout,
-                }
+            wait_result = process_future => {
+                ProcessResult::Completed(wait_result)
             }
             _ = cancel_rx => {
                 ProcessResult::Cancelled
             }
         };
 
-        // 超时或取消时，杀掉子进程
-        if matches!(result, ProcessResult::Timeout | ProcessResult::Cancelled) {
+        if matches!(result, ProcessResult::Cancelled) {
             if let Some(pid) = child_id {
                 #[cfg(windows)]
                 {
@@ -880,9 +859,6 @@ impl AgentManager {
                 })
             }
             ProcessResult::Completed(Err(e)) => Err(format!("Agent 进程异常: {}", e)),
-            ProcessResult::Timeout => {
-                Err(format!("Agent 执行超时（{}秒）", timeout_secs))
-            }
             ProcessResult::Cancelled => {
                 Err("任务已被用户终止".to_string())
             }

@@ -291,20 +291,10 @@ async fn execute_prompt_step(
         .await
         .map_err(|e| format!("启动 Agent 失败: {}", e))?;
 
-    let timeout_secs: u64 = 600;
-    let deadline = now_ms() + timeout_secs * 1000;
     let step_id = step.id;
 
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-
-        if now_ms() > deadline {
-            let _ = agent_manager.cancel_execution(&task_id).await;
-            let _ = db.with_connection(|conn| {
-                workflow_db::update_step_status(conn, step_id, "failed")
-            });
-            return Err(format!("提示词步骤执行超时（{}秒）", timeout_secs));
-        }
 
         let state = agent_manager.get_execution_state(&task_id).await;
         match state {
