@@ -926,6 +926,15 @@ impl AgentManager {
             .cloned()
     }
 
+    pub async fn get_execution_by_task_prefix(&self, prefix: &str) -> Option<ExecutionState> {
+        let states = self.execution_states.lock().await;
+        states
+            .values()
+            .filter(|s| s.task_id.starts_with(prefix))
+            .max_by_key(|s| s.start_time_ms)
+            .cloned()
+    }
+
     pub async fn check_health(&self, config: &AgentConfig) -> AgentHealthStatus {
         let runner = match self.runners.get(&config.agent_type) {
             Some(r) => r,

@@ -408,6 +408,20 @@ impl TaskScheduler {
 async fn execute_task(app: &tauri::AppHandle, task: QueuedTask, _project_path: &str) {
     let db = app.state::<Database>();
 
+    let current_status = db
+        .with_connection(|conn| {
+            conn.query_row(
+                "SELECT schedule_status FROM subtasks WHERE id = ?1",
+                [task.subtask_id],
+                |row| row.get::<_, String>(0),
+            )
+        })
+        .unwrap_or_default();
+
+    if !matches!(current_status.as_str(), "queued" | "pending" | "running") {
+        return;
+    }
+
     update_status_and_notify(app, &db, task.subtask_id, "running");
 
     let todo_info = db.with_connection(|conn| {
@@ -473,6 +487,9 @@ async fn execute_task(app: &tauri::AppHandle, task: QueuedTask, _project_path: &
     };
 
     let task_id = format!("sched-{}-{}", task.subtask_id, now_ms());
+    let workflow_step = db
+        .with_connection(|conn| workflow_db::find_step_by_subtask(conn, task.subtask_id))
+        .unwrap_or(None);
 
     let resume_session = db
         .with_connection(|conn| {
@@ -504,21 +521,30 @@ async fn execute_task(app: &tauri::AppHandle, task: QueuedTask, _project_path: &
         return;
     }
 
+    if let Some(ref wf_step) = workflow_step {
+        super::workflow::register_active_task(app, wf_step.todo_id, wf_step.step_order, task_id.clone());
+    }
+
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+
+        if let Some(ref wf_step) = workflow_step {
+            if !super::workflow::is_active_task(app, wf_step.todo_id, wf_step.step_order, &task_id) {
+                return;
+            }
+        }
 
         let state = agent_manager.get_execution_state(&task_id).await;
         match state {
             Some(s) if s.status == "completed" => {
+                if let Some(ref wf_step) = workflow_step {
+                    if !super::workflow::is_active_task(app, wf_step.todo_id, wf_step.step_order, &task_id) {
+                        return;
+                    }
+                }
                 update_status_and_notify(app, &db, task.subtask_id, "completed");
 
-                let is_workflow_step = db
-                    .with_connection(|conn| {
-                        workflow_db::find_step_by_subtask(conn, task.subtask_id)
-                    })
-                    .unwrap_or(None);
-
-                if let Some(wf_step) = is_workflow_step {
+                if let Some(wf_step) = workflow_step.clone() {
                     let _ = db.with_connection(|conn| {
                         workflow_db::update_step_status(conn, wf_step.id, "completed")
                     });
@@ -529,11 +555,21 @@ async fn execute_task(app: &tauri::AppHandle, task: QueuedTask, _project_path: &
                 return;
             }
             Some(s) if s.status == "failed" || s.status == "cancelled" => {
+                if let Some(ref wf_step) = workflow_step {
+                    if !super::workflow::is_active_task(app, wf_step.todo_id, wf_step.step_order, &task_id) {
+                        return;
+                    }
+                }
                 let error_msg = s.error.unwrap_or_else(|| "执行失败".to_string());
                 handle_task_failure(app, task.subtask_id, &error_msg).await;
                 return;
             }
             None => {
+                if let Some(ref wf_step) = workflow_step {
+                    if !super::workflow::is_active_task(app, wf_step.todo_id, wf_step.step_order, &task_id) {
+                        return;
+                    }
+                }
                 handle_task_failure(app, task.subtask_id, "执行状态丢失").await;
                 return;
             }

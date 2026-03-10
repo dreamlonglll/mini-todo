@@ -5,6 +5,7 @@ mod services;
 use db::Database;
 use services::agent::AgentManager;
 use services::scheduler::engine::TaskScheduler;
+use services::scheduler::workflow::WorkflowRuntime;
 use services::NotificationService;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -99,9 +100,9 @@ use commands::{
     get_workflow_steps,
     set_workflow_steps,
     start_workflow,
-    pause_workflow,
+    stop_workflow,
+    continue_workflow,
     reset_workflow,
-    skip_workflow_step,
     get_workflow_executions,
     // Prompt 模板命令
     create_prompt_template,
@@ -143,6 +144,7 @@ pub fn run() {
     let database = Database::new().expect("Failed to initialize database");
     let agent_manager = AgentManager::new();
     let task_scheduler = std::sync::Arc::new(TaskScheduler::new());
+    let workflow_runtime = WorkflowRuntime::default();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -156,6 +158,7 @@ pub fn run() {
         .manage(database)
         .manage(agent_manager)
         .manage(task_scheduler.clone())
+        .manage(workflow_runtime)
         .setup(|app| {
             #[cfg(target_os = "windows")]
             {
@@ -418,9 +421,9 @@ pub fn run() {
             get_workflow_steps,
             set_workflow_steps,
             start_workflow,
-            pause_workflow,
+            stop_workflow,
+            continue_workflow,
             reset_workflow,
-            skip_workflow_step,
             get_workflow_executions,
             // Prompt 模板命令
             get_prompt_templates,

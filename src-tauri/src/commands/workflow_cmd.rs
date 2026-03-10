@@ -31,25 +31,30 @@ pub async fn start_workflow(
 }
 
 #[tauri::command]
-pub fn pause_workflow(
-    db: State<Database>,
+pub async fn stop_workflow(
+    app: tauri::AppHandle,
     todo_id: i64,
 ) -> Result<(), String> {
-    db.with_connection(|conn| {
-        conn.execute(
-            "UPDATE todos SET workflow_enabled = 0 WHERE id = ?1",
-            [todo_id],
-        )
-    })
-    .map_err(|e| format!("暂停工作流失败: {}", e))?;
-    Ok(())
+    crate::services::scheduler::workflow::stop_workflow(&app, todo_id).await
 }
 
 #[tauri::command]
-pub fn reset_workflow(
-    db: State<Database>,
+pub async fn continue_workflow(
+    app: tauri::AppHandle,
     todo_id: i64,
 ) -> Result<(), String> {
+    crate::services::scheduler::workflow::continue_workflow(&app, todo_id).await
+}
+
+#[tauri::command]
+pub async fn reset_workflow(
+    app: tauri::AppHandle,
+    db: State<'_, Database>,
+    todo_id: i64,
+) -> Result<(), String> {
+    crate::services::scheduler::workflow::stop_workflow(&app, todo_id).await?;
+    crate::services::scheduler::workflow::clear_todo_active_tasks(&app, todo_id);
+
     db.with_connection(|conn| {
         workflow_db::reset_all_steps(conn, todo_id)?;
         conn.execute(
@@ -59,14 +64,6 @@ pub fn reset_workflow(
         Ok(())
     })
     .map_err(|e| format!("重置工作流失败: {}", e))
-}
-
-#[tauri::command]
-pub async fn skip_workflow_step(
-    app: tauri::AppHandle,
-    todo_id: i64,
-) -> Result<(), String> {
-    crate::services::scheduler::workflow::skip_current_step(&app, todo_id).await
 }
 
 #[derive(serde::Serialize)]

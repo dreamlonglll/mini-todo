@@ -26,6 +26,7 @@ const loading = ref(true)
 
 const todoTitle = ref('')
 const workflowEnabled = ref(false)
+const workflowCurrentStep = ref(-1)
 const subtasks = ref<SubtaskOption[]>([])
 const workflowSteps = ref<Array<{ stepType: string; subtaskId?: number; promptText?: string; carryContext?: boolean }>>([])
 const workflowProgress = ref<WorkflowStep[]>([])
@@ -60,6 +61,7 @@ async function loadData() {
     if (todo) {
       todoTitle.value = todo.title
       workflowEnabled.value = !!todo.workflowEnabled
+      workflowCurrentStep.value = typeof todo.workflowCurrentStep === 'number' ? todo.workflowCurrentStep : -1
       subtasks.value = (todo.subtasks || []).map((s: any) => ({
         id: s.id,
         title: s.title,
@@ -213,23 +215,23 @@ async function doStartWorkflow() {
   }
 }
 
-async function doPauseWorkflow() {
+async function doStopWorkflow() {
   try {
-    await invoke('pause_workflow', { todoId })
-    ElMessage.info('工作流已暂停')
+    await invoke('stop_workflow', { todoId })
+    ElMessage.info('工作流已停止')
     await loadData()
   } catch (e) {
-    ElMessage.error('暂停失败: ' + String(e))
+    ElMessage.error('停止失败: ' + String(e))
   }
 }
 
-async function doSkipStep() {
+async function doContinueWorkflow() {
   try {
-    await invoke('skip_workflow_step', { todoId })
-    ElMessage.info('已跳过当前步骤')
+    await invoke('continue_workflow', { todoId })
+    ElMessage.success('工作流已继续')
     await loadData()
   } catch (e) {
-    ElMessage.error('跳过失败: ' + String(e))
+    ElMessage.error('继续失败: ' + String(e))
   }
 }
 
@@ -247,6 +249,12 @@ const workflowCompletedCount = computed(() =>
   workflowProgress.value.filter(s => s.status === 'completed' || s.status === 'skipped').length
 )
 
+const canContinueWorkflow = computed(() =>
+  !workflowEnabled.value &&
+  workflowCurrentStep.value >= 0 &&
+  workflowCurrentStep.value < workflowProgress.value.length
+)
+
 function getStepStatus(idx: number): string | null {
   const progress = workflowProgress.value[idx]
   return progress ? progress.status : null
@@ -262,9 +270,8 @@ function canViewLog(idx: number): boolean {
 }
 
 function isStepLocked(idx: number): boolean {
-  if (!workflowEnabled.value) return false
-  const status = getStepStatus(idx)
-  return !!status && (status === 'running' || status === 'completed')
+  void idx
+  return workflowEnabled.value || canContinueWorkflow.value
 }
 
 function viewStepLog(idx: number) {
@@ -358,6 +365,7 @@ async function deletePrompt(tpl: PromptTemplate) {
 }
 
 function quickInsertPrompt(tpl: PromptTemplate) {
+  if (workflowEnabled.value || canContinueWorkflow.value) return
   workflowSteps.value.push({
     stepType: 'prompt',
     promptText: tpl.templateContent,
@@ -416,13 +424,16 @@ function quickInsertPrompt(tpl: PromptTemplate) {
           <div class="progress-header">
             <span class="progress-title">执行进度 {{ workflowCompletedCount }}/{{ workflowProgress.length }}</span>
             <div class="progress-controls">
-              <el-button v-if="!workflowEnabled" size="small" type="primary" @click="doStartWorkflow" :disabled="workflowProgress.length === 0">
-                启动
+              <el-button
+                v-if="!workflowEnabled"
+                size="small"
+                type="primary"
+                :disabled="workflowProgress.length === 0"
+                @click="canContinueWorkflow ? doContinueWorkflow() : doStartWorkflow()"
+              >
+                {{ canContinueWorkflow ? '继续' : '启动' }}
               </el-button>
-              <template v-else>
-                <el-button size="small" @click="doPauseWorkflow">暂停</el-button>
-                <el-button size="small" @click="doSkipStep">跳过</el-button>
-              </template>
+              <el-button v-else size="small" @click="doStopWorkflow">停止</el-button>
               <el-button size="small" type="danger" plain @click="doResetWorkflow">重置</el-button>
             </div>
           </div>
@@ -437,11 +448,11 @@ function quickInsertPrompt(tpl: PromptTemplate) {
         <div class="steps-header">
           <span class="steps-title">步骤列表</span>
           <div class="steps-actions">
-            <el-button size="small" type="danger" plain @click="handleClearWorkflow" :disabled="workflowSteps.length === 0">
+            <el-button size="small" type="danger" plain @click="handleClearWorkflow" :disabled="workflowSteps.length === 0 || workflowEnabled || canContinueWorkflow">
               <el-icon><Delete /></el-icon>
               清空
             </el-button>
-            <el-button size="small" type="primary" @click="addWorkflowStep">
+            <el-button size="small" type="primary" @click="addWorkflowStep" :disabled="workflowEnabled || canContinueWorkflow">
               <el-icon><Plus /></el-icon>
               添加步骤
             </el-button>
@@ -651,6 +662,7 @@ function quickInsertPrompt(tpl: PromptTemplate) {
                     size="small"
                     type="primary"
                     plain
+                    :disabled="workflowEnabled || canContinueWorkflow"
                     @click="quickInsertPrompt(tpl)"
                     title="添加到工作流"
                   >
@@ -683,7 +695,7 @@ function quickInsertPrompt(tpl: PromptTemplate) {
           <el-icon><Close /></el-icon>
           取消
         </el-button>
-        <el-button type="primary" size="small" :disabled="workflowEnabled" @click="handleSave">
+        <el-button type="primary" size="small" :disabled="workflowEnabled || canContinueWorkflow" @click="handleSave">
           <el-icon><Check /></el-icon>
           保存工作流
         </el-button>
