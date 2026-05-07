@@ -38,3 +38,37 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 2: Issue #6: 待办列表自动刷新
+
+**Date**: 2026-05-07
+**Task**: Issue #6: 待办列表自动刷新
+**Branch**: `main`
+
+### Summary
+
+分析 Issue #6，实现窗口焦点刷新 + 60s 低频轮询自动刷新待办列表，更新前端 state-management spec
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `22824aa` | (see git log) |
+| `a67d270` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
