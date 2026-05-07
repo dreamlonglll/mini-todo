@@ -47,6 +47,10 @@ export const useAppStore = defineStore('app', () => {
   const showCalendar = ref(false)
   // 是否启用贴边自动隐藏
   const autoHideEnabled = ref(true)
+
+  // 待办字体设置
+  const todoFontFamily = ref('')
+  const todoFontSize = ref(14)
   
   // 版本更新相关状态
   const hasUpdate = ref(false)
@@ -202,6 +206,9 @@ export const useAppStore = defineStore('app', () => {
       
       // 加载日历显示状态
       await loadShowCalendar()
+
+      // 加载待办字体设置
+      await loadTodoFontSettings()
     } catch (e) {
       console.error('Failed to load settings:', e)
     }
@@ -246,6 +253,40 @@ export const useAppStore = defineStore('app', () => {
     } catch (e) {
       console.error('Failed to set show calendar:', e)
     }
+  }
+
+  // 加载待办字体设置
+  async function loadTodoFontSettings() {
+    try {
+      todoFontFamily.value = await invoke<string>('get_todo_font_family')
+      todoFontSize.value = await invoke<number>('get_todo_font_size')
+      applyTodoFontStyles()
+    } catch (e) {
+      console.error('Failed to load todo font settings:', e)
+    }
+  }
+
+  async function setTodoFontFamily(family: string) {
+    todoFontFamily.value = family
+    applyTodoFontStyles()
+    await invoke('set_todo_font_family', { fontFamily: family })
+  }
+
+  async function setTodoFontSize(size: number) {
+    todoFontSize.value = size
+    applyTodoFontStyles()
+    await invoke('set_todo_font_size', { fontSize: size })
+  }
+
+  function applyTodoFontStyles() {
+    const root = document.documentElement
+    const fallback = '-apple-system, "Segoe UI", "Microsoft YaHei", sans-serif'
+    const fontStack = todoFontFamily.value
+      ? `"${todoFontFamily.value}", ${fallback}`
+      : fallback
+    root.style.setProperty('--todo-font-stack', fontStack)
+    root.style.setProperty('--todo-font-size', `${todoFontSize.value}px`)
+    root.style.setProperty('--todo-sub-font-size', `${todoFontSize.value - 2}px`)
   }
 
   // 设置贴边自动隐藏
@@ -512,6 +553,13 @@ export const useAppStore = defineStore('app', () => {
     setShowCalendar,
     // 自动隐藏方法
     loadAutoHideEnabled,
-    setAutoHideEnabled
+    setAutoHideEnabled,
+    // 待办字体方法
+    todoFontFamily,
+    todoFontSize,
+    loadTodoFontSettings,
+    setTodoFontFamily,
+    setTodoFontSize,
+    applyTodoFontStyles
   }
 })

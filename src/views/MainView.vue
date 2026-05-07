@@ -67,6 +67,7 @@ let unlistenTrayOpenSettings: (() => void) | null = null
 let unlistenDataImported: (() => void) | null = null
 let unlistenFocus: (() => void) | null = null
 let unlistenSyncCompleted: (() => void) | null = null
+let unlistenFontChanged: (() => void) | null = null
 
 // 自动同步定时器
 let autoSyncTimer: ReturnType<typeof setInterval> | null = null
@@ -207,6 +208,10 @@ onMounted(async () => {
     ElMessage.success('数据导入成功')
   })
 
+  unlistenFontChanged = await listen('todo-font-changed', async () => {
+    await appStore.loadTodoFontSettings()
+  })
+
   unlistenFocus = await appWindow.onFocusChanged(async ({ payload: focused }) => {
     if (focused) {
       if (isModalOpen.value) {
@@ -246,6 +251,7 @@ onUnmounted(() => {
   if (unlistenTrayAddTodo) unlistenTrayAddTodo()
   if (unlistenTrayOpenSettings) unlistenTrayOpenSettings()
   if (unlistenDataImported) unlistenDataImported()
+  if (unlistenFontChanged) unlistenFontChanged()
   if (unlistenFocus) unlistenFocus()
   if (unlistenSyncCompleted) unlistenSyncCompleted()
   stopAutoSync()
@@ -400,8 +406,8 @@ async function openSettings() {
   try {
     isModalOpen.value = true
     
-    const settingsWidth = 480
-    const settingsHeight = 720
+    const settingsWidth = 680
+    const settingsHeight = 560
     let x: number, y: number
     
     const monitor = await currentMonitor() || await primaryMonitor()
@@ -442,6 +448,7 @@ async function openSettings() {
       await todoStore.fetchTodos()
       await todoStore.loadViewMode()
       await appStore.loadShowCalendar()
+      await appStore.loadTodoFontSettings()
       startAutoSync()
     })
     

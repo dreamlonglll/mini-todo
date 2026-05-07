@@ -36,6 +36,9 @@ use commands::{
     get_screen_config,
     get_settings,
     get_show_calendar,
+    get_system_fonts,
+    get_todo_font_family,
+    get_todo_font_size,
     get_todos,
     get_window_persist_state,
     import_data,
@@ -53,6 +56,8 @@ use commands::{
     set_auto_hide_enabled,
     set_notification_type,
     set_show_calendar,
+    set_todo_font_family,
+    set_todo_font_size,
     set_window_fixed_mode,
     update_screen_config_name,
     update_subtask,
@@ -378,6 +383,12 @@ pub fn run() {
             // 日历设置命令
             get_show_calendar,
             set_show_calendar,
+            // 字体设置命令
+            get_system_fonts,
+            get_todo_font_family,
+            set_todo_font_family,
+            get_todo_font_size,
+            set_todo_font_size,
             // 数据导入导出命令
             export_data,
             import_data,

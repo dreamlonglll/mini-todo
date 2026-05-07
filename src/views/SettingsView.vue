@@ -16,6 +16,18 @@ import SchedulerPanel from '@/components/SchedulerPanel.vue'
 const appWindow = getCurrentWindow()
 const appStore = useAppStore()
 
+// 当前激活的菜单
+const activeMenu = ref('general')
+
+const menuItems = [
+  { key: 'general', label: '常规', icon: 'Setting' },
+  { key: 'appearance', label: '外观', icon: 'Brush' },
+  { key: 'data', label: '数据与同步', icon: 'Folder' },
+  { key: 'agent', label: 'Agent 与调度', icon: 'MagicStick' },
+  { key: 'screen', label: '屏幕配置', icon: 'Monitor' },
+  { key: 'about', label: '关于', icon: 'InfoFilled' },
+]
+
 const exporting = ref(false)
 const importing = ref(false)
 const checking = ref(false)
@@ -39,42 +51,67 @@ const autoHideEnabled = computed(() => appStore.autoHideEnabled)
 const hasUpdate = computed(() => appStore.hasUpdate)
 const latestVersion = computed(() => appStore.latestVersion)
 
-// 初始化时获取开机自启状态和屏幕配置
+// 字体设置
+const systemFonts = ref<string[]>([])
+const fontFamily = ref('')
+const fontSize = ref(14)
+
 onMounted(async () => {
   try {
     autoStart.value = await isEnabled()
   } catch (e) {
     console.error('Failed to get autostart status:', e)
   }
-  
-  // 加载通知类型设置
+
   try {
     const type = await invoke<string>('get_notification_type')
     notificationType.value = type === 'app' ? 'app' : 'system'
   } catch (e) {
     console.error('Failed to get notification type:', e)
   }
-  
-  // 加载屏幕配置列表
+
   await appStore.loadScreenConfigs()
-  
-  // 加载日历显示状态
   await appStore.loadShowCalendar()
-  // 加载贴边自动隐藏状态
   await appStore.loadAutoHideEnabled()
-  
-  // 加载 WebDAV 同步设置
   await loadSyncSettings()
+
+  // 加载字体设置
+  try {
+    systemFonts.value = await invoke<string[]>('get_system_fonts')
+    fontFamily.value = await invoke<string>('get_todo_font_family')
+    fontSize.value = await invoke<number>('get_todo_font_size')
+  } catch (e) {
+    console.error('Failed to load font settings:', e)
+  }
 })
+
+// 字体变更
+async function handleFontFamilyChange(val: string) {
+  fontFamily.value = val
+  try {
+    await invoke('set_todo_font_family', { fontFamily: val })
+    await emit('todo-font-changed')
+  } catch (e) {
+    console.error('Failed to save font family:', e)
+  }
+}
+
+async function handleFontSizePersist(val: number) {
+  try {
+    await invoke('set_todo_font_size', { fontSize: val })
+    await emit('todo-font-changed')
+  } catch (e) {
+    console.error('Failed to save font size:', e)
+  }
+}
 
 // 删除屏幕配置
 async function handleDeleteConfig(config: ScreenConfig) {
-  // 不允许删除当前正在使用的配置
   if (config.configId === currentConfigId.value) {
     ElMessage.warning('不能删除当前正在使用的屏幕配置')
     return
   }
-  
+
   try {
     await ElMessageBox.confirm(
       `确定删除屏幕配置 "${config.displayName || config.configId}" 吗？`,
@@ -85,7 +122,7 @@ async function handleDeleteConfig(config: ScreenConfig) {
         type: 'warning'
       }
     )
-    
+
     const success = await appStore.deleteScreenConfig(config.configId)
     if (success) {
       ElMessage.success('删除成功')
@@ -97,24 +134,22 @@ async function handleDeleteConfig(config: ScreenConfig) {
   }
 }
 
-// 格式化屏幕配置信息
 function formatConfigInfo(configId: string): string {
   if (configId === 'legacy') return '旧版本迁移的配置'
   if (configId === 'unknown') return '未知屏幕配置'
-  
+
   const parts = configId.split('_')
   if (parts.length < 2) return configId
-  
+
   const count = parts[0]
   const monitors = parts.slice(1).map(p => {
     const [res, scale] = p.split('@')
     return `${res} ${scale}%`
   })
-  
+
   return `${count} 个显示器: ${monitors.join(', ')}`
 }
 
-// 切换开机自启
 async function handleAutoStartChange(value: boolean) {
   try {
     autoStartLoading.value = true
@@ -129,14 +164,12 @@ async function handleAutoStartChange(value: boolean) {
   } catch (e) {
     console.error('Failed to toggle autostart:', e)
     ElMessage.error('设置开机自启失败')
-    // 恢复原状态
     autoStart.value = !value
   } finally {
     autoStartLoading.value = false
   }
 }
 
-// 切换通知类型
 async function handleNotificationTypeChange(value: 'system' | 'app') {
   const oldValue = notificationType.value
   try {
@@ -147,20 +180,18 @@ async function handleNotificationTypeChange(value: 'system' | 'app') {
   } catch (e) {
     console.error('Failed to set notification type:', e)
     ElMessage.error('设置通知类型失败')
-    // 恢复原状态
     notificationType.value = oldValue
   } finally {
     notificationTypeLoading.value = false
   }
 }
 
-// 导出数据
 const includeExecutions = ref(false)
 
 async function handleExport() {
   try {
     exporting.value = true
-    
+
     const filePath = await save({
       title: '导出待办数据',
       defaultPath: `mini-todo-backup-${new Date().toISOString().slice(0, 10)}.zip`,
@@ -171,9 +202,9 @@ async function handleExport() {
     })
 
     if (filePath) {
-      await invoke('export_data_to_file', { 
-        filePath, 
-        includeExecutions: includeExecutions.value 
+      await invoke('export_data_to_file', {
+        filePath,
+        includeExecutions: includeExecutions.value
       })
       ElMessage.success('导出成功')
     }
@@ -185,7 +216,6 @@ async function handleExport() {
   }
 }
 
-// 导入数据
 async function handleImport() {
   try {
     const filePath = await open({
@@ -216,7 +246,7 @@ async function handleImport() {
       const jsonData = await readTextFile(path)
       await invoke('import_data', { jsonData })
     }
-    
+
     await emit('data-imported')
     handleClose()
   } catch (e) {
@@ -229,7 +259,6 @@ async function handleImport() {
   }
 }
 
-// 关闭窗口
 function handleClose() {
   appWindow.close()
 }
@@ -396,12 +425,11 @@ function formatTime(time: string | null | undefined): string {
   }
 }
 
-// 检查更新
 async function handleCheckUpdate() {
   try {
     checking.value = true
     await appStore.checkForUpdates()
-    
+
     if (hasUpdate.value) {
       await ElMessageBox.confirm(
         `发现新版本 ${latestVersion.value}，是否前往下载？`,
@@ -435,27 +463,41 @@ async function handleCheckUpdate() {
       </el-button>
     </div>
 
-    <div class="settings-content">
-      <!-- 通用设置 -->
-      <div class="settings-card">
-        <div class="card-header">
-          <el-icon class="card-icon"><Setting /></el-icon>
-          <h3 class="card-title">通用设置</h3>
+    <div class="settings-body">
+      <!-- 左侧菜单 -->
+      <div class="settings-menu">
+        <div
+          v-for="item in menuItems"
+          :key="item.key"
+          class="menu-item"
+          :class="{ active: activeMenu === item.key }"
+          @click="activeMenu = item.key"
+        >
+          <el-icon :size="16">
+            <component :is="item.icon" />
+          </el-icon>
+          <span>{{ item.label }}</span>
         </div>
-        
-        <div class="card-body">
+      </div>
+
+      <!-- 右侧内容区 -->
+      <div class="settings-content">
+        <!-- 常规 -->
+        <div v-show="activeMenu === 'general'" class="panel">
+          <h3 class="panel-title">常规</h3>
+
           <div class="settings-row">
             <div class="row-left">
               <el-icon class="row-icon"><Monitor /></el-icon>
               <span class="settings-label">开机自启</span>
             </div>
-            <el-switch 
+            <el-switch
               v-model="autoStart"
               :loading="autoStartLoading"
               @change="handleAutoStartChange"
             />
           </div>
-          
+
           <div class="settings-row">
             <div class="row-left">
               <el-icon class="row-icon"><Calendar /></el-icon>
@@ -464,7 +506,7 @@ async function handleCheckUpdate() {
                 <span class="settings-desc">开启后主界面将显示日历视图</span>
               </div>
             </div>
-            <el-switch 
+            <el-switch
               :model-value="showCalendar"
               @change="(val: boolean) => appStore.setShowCalendar(val)"
             />
@@ -483,7 +525,7 @@ async function handleCheckUpdate() {
               @change="(val: boolean) => appStore.setAutoHideEnabled(val)"
             />
           </div>
-          
+
           <div class="settings-row">
             <div class="row-left">
               <el-icon class="row-icon"><Moon /></el-icon>
@@ -506,7 +548,7 @@ async function handleCheckUpdate() {
                 <span class="settings-desc">选择待办提醒的通知展示方式</span>
               </div>
             </div>
-            <el-radio-group 
+            <el-radio-group
               :model-value="notificationType"
               :disabled="notificationTypeLoading"
               size="small"
@@ -517,18 +559,57 @@ async function handleCheckUpdate() {
             </el-radio-group>
           </div>
         </div>
-      </div>
 
-      <!-- 数据管理 -->
-      <div class="settings-card">
-        <div class="card-header">
-          <el-icon class="card-icon"><Folder /></el-icon>
-          <h3 class="card-title">数据管理</h3>
+        <!-- 外观 -->
+        <div v-show="activeMenu === 'appearance'" class="panel">
+          <h3 class="panel-title">外观</h3>
+
+          <div class="form-section">
+            <label class="form-label">待办字体</label>
+            <el-select
+              :model-value="fontFamily"
+              filterable
+              clearable
+              placeholder="跟随系统"
+              style="width: 100%"
+              @change="handleFontFamilyChange"
+            >
+              <el-option
+                v-for="font in systemFonts"
+                :key="font"
+                :label="font"
+                :value="font"
+                :style="{ fontFamily: font }"
+              />
+            </el-select>
+          </div>
+
+          <div class="form-section">
+            <label class="form-label">
+              字体大小
+              <span class="form-label-value">{{ fontSize }}px</span>
+            </label>
+            <el-slider
+              v-model="fontSize"
+              :min="12"
+              :max="20"
+              :step="1"
+              :show-tooltip="false"
+              @change="handleFontSizePersist"
+            />
+          </div>
+
+          <div class="font-preview" :style="{ fontFamily: fontFamily || undefined, fontSize: fontSize + 'px' }">
+            待办事项预览 Todo Preview 1234
+          </div>
         </div>
-        
-        <div class="card-body">
+
+        <!-- 数据与同步 -->
+        <div v-show="activeMenu === 'data'" class="panel">
+          <h3 class="panel-title">数据管理</h3>
+
           <div class="data-actions">
-            <button 
+            <button
               class="data-btn primary"
               :disabled="exporting"
               @click="handleExport"
@@ -537,7 +618,7 @@ async function handleCheckUpdate() {
               <span>{{ exporting ? '导出中...' : '导出数据' }}</span>
             </button>
 
-            <button 
+            <button
               class="data-btn"
               :disabled="importing"
               @click="handleImport"
@@ -557,20 +638,16 @@ async function handleCheckUpdate() {
             <el-icon :size="14"><InfoFilled /></el-icon>
             导出为 ZIP 压缩包，可用于备份或迁移到其他设备
           </p>
-        </div>
-      </div>
 
-      <!-- WebDAV 云同步 -->
-      <div class="settings-card">
-        <div class="card-header">
-          <el-icon class="card-icon"><Connection /></el-icon>
-          <h3 class="card-title">云同步 (WebDAV)</h3>
-          <span v-if="syncSettings.lastSyncAt" class="last-sync-time">
-            上次同步: {{ formatTime(syncSettings.lastSyncAt) }}
-          </span>
-        </div>
-        
-        <div class="card-body">
+          <div class="section-divider"></div>
+
+          <h3 class="panel-title">
+            云同步 (WebDAV)
+            <span v-if="syncSettings.lastSyncAt" class="last-sync-time">
+              上次同步: {{ formatTime(syncSettings.lastSyncAt) }}
+            </span>
+          </h3>
+
           <div class="sync-form">
             <div class="form-item">
               <label class="form-label">服务器地址</label>
@@ -581,7 +658,7 @@ async function handleCheckUpdate() {
                 clearable
               />
             </div>
-            
+
             <div class="form-row">
               <div class="form-item flex-1">
                 <label class="form-label">用户名</label>
@@ -608,10 +685,10 @@ async function handleCheckUpdate() {
                 </el-input>
               </div>
             </div>
-            
+
             <div class="form-actions">
-              <button 
-                class="data-btn" 
+              <button
+                class="data-btn"
                 :disabled="testingConnection"
                 @click="testConnection"
               >
@@ -625,7 +702,7 @@ async function handleCheckUpdate() {
             </div>
           </div>
 
-          <div class="sync-divider"></div>
+          <div class="section-divider"></div>
 
           <div class="settings-row">
             <div class="row-left">
@@ -640,7 +717,7 @@ async function handleCheckUpdate() {
               @change="saveSyncSettings"
             />
           </div>
-          
+
           <div v-if="syncSettings.autoSync" class="settings-row">
             <div class="row-left">
               <el-icon class="row-icon"><Clock /></el-icon>
@@ -662,7 +739,7 @@ async function handleCheckUpdate() {
           </div>
 
           <div class="sync-actions">
-            <button 
+            <button
               class="data-btn primary"
               :disabled="syncing || !syncSettings.webdavUrl"
               @click="handleUploadSync"
@@ -670,7 +747,7 @@ async function handleCheckUpdate() {
               <el-icon><Upload /></el-icon>
               <span>{{ syncStatus === 'uploading' ? '上传中...' : '上传到云端' }}</span>
             </button>
-            <button 
+            <button
               class="data-btn"
               :disabled="syncing || !syncSettings.webdavUrl"
               @click="handleDownloadSync"
@@ -685,51 +762,35 @@ async function handleCheckUpdate() {
             通过 WebDAV 协议将待办数据和图片同步到云端存储
           </p>
         </div>
-      </div>
 
-      <!-- Agent 管理 -->
-      <div class="settings-card">
-        <div class="card-header">
-          <el-icon class="card-icon"><MagicStick /></el-icon>
-          <h3 class="card-title">Agent 管理</h3>
-        </div>
-        <div class="card-body">
+        <!-- Agent 与调度 -->
+        <div v-show="activeMenu === 'agent'" class="panel">
+          <h3 class="panel-title">Agent 管理</h3>
           <AgentSettings />
-        </div>
-      </div>
 
-      <!-- 任务调度 -->
-      <div class="settings-card">
-        <div class="card-header">
-          <el-icon class="card-icon"><Timer /></el-icon>
-          <h3 class="card-title">任务调度</h3>
-        </div>
-        <div class="card-body">
+          <div class="section-divider"></div>
+
+          <h3 class="panel-title">任务调度</h3>
           <SchedulerPanel />
         </div>
-      </div>
 
-      <!-- 屏幕配置管理 -->
-      <div class="settings-card">
-        <div class="card-header">
-          <el-icon class="card-icon"><Monitor /></el-icon>
-          <h3 class="card-title">屏幕配置</h3>
-        </div>
-        
-        <div class="card-body">
+        <!-- 屏幕配置 -->
+        <div v-show="activeMenu === 'screen'" class="panel">
+          <h3 class="panel-title">屏幕配置</h3>
+
           <p class="card-hint" style="margin-bottom: 12px;">
             <el-icon :size="14"><InfoFilled /></el-icon>
             应用会根据不同的屏幕组合自动保存和恢复窗口位置
           </p>
-          
+
           <div v-if="screenConfigs.length === 0" class="empty-configs">
             <el-icon :size="28"><Monitor /></el-icon>
             <span>暂无保存的屏幕配置</span>
           </div>
-          
+
           <div v-else class="config-list">
-            <div 
-              v-for="config in screenConfigs" 
+            <div
+              v-for="config in screenConfigs"
               :key="config.id"
               class="config-item"
               :class="{ active: config.configId === currentConfigId }"
@@ -745,14 +806,14 @@ async function handleCheckUpdate() {
                   {{ formatConfigInfo(config.configId) }}
                 </div>
                 <div class="config-meta">
-                  {{ config.isFixed ? '固定模式' : '普通模式' }} | 
+                  {{ config.isFixed ? '固定模式' : '普通模式' }} |
                   位置: ({{ config.windowX }}, {{ config.windowY }})
                 </div>
               </div>
               <div class="config-actions">
-                <el-button 
-                  type="danger" 
-                  text 
+                <el-button
+                  type="danger"
+                  text
                   size="small"
                   :disabled="config.configId === currentConfigId"
                   @click="handleDeleteConfig(config)"
@@ -763,34 +824,34 @@ async function handleCheckUpdate() {
             </div>
           </div>
         </div>
-      </div>
 
-      <!-- 关于 -->
-      <div class="settings-card about-card">
-        <div class="about-content">
-          <div class="app-logo">
-            <el-icon :size="36"><Promotion /></el-icon>
+        <!-- 关于 -->
+        <div v-show="activeMenu === 'about'" class="panel">
+          <div class="about-content">
+            <div class="app-logo">
+              <el-icon :size="36"><Promotion /></el-icon>
+            </div>
+            <div class="app-info">
+              <h3 class="app-name">Mini Todo</h3>
+              <p class="app-version">
+                版本 {{ APP_VERSION }}
+                <span v-if="hasUpdate" class="update-badge">
+                  新版本 {{ latestVersion }}
+                </span>
+              </p>
+              <p class="app-desc">一个简洁高效的桌面待办应用</p>
+            </div>
           </div>
-          <div class="app-info">
-            <h3 class="app-name">Mini Todo</h3>
-            <p class="app-version">
-              版本 {{ APP_VERSION }}
-              <span v-if="hasUpdate" class="update-badge">
-                新版本 {{ latestVersion }}
-              </span>
-            </p>
-            <p class="app-desc">一个简洁高效的桌面待办应用</p>
-          </div>
+
+          <button
+            class="check-update-btn"
+            :disabled="checking"
+            @click="handleCheckUpdate"
+          >
+            <el-icon><Refresh /></el-icon>
+            <span>{{ checking ? '检查中...' : '检查更新' }}</span>
+          </button>
         </div>
-        
-        <button 
-          class="check-update-btn"
-          :disabled="checking"
-          @click="handleCheckUpdate"
-        >
-          <el-icon><Refresh /></el-icon>
-          <span>{{ checking ? '检查中...' : '检查更新' }}</span>
-        </button>
       </div>
     </div>
   </div>
@@ -808,7 +869,7 @@ async function handleCheckUpdate() {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 20px;
+  padding: 12px 20px;
   background: #ffffff;
   border-bottom: 1px solid #e2e8f0;
   -webkit-app-region: drag;
@@ -825,55 +886,61 @@ async function handleCheckUpdate() {
   }
 }
 
-.settings-content {
+.settings-body {
+  display: flex;
   flex: 1;
-  padding: 20px;
+  overflow: hidden;
+}
+
+/* 左侧菜单 */
+.settings-menu {
+  width: 160px;
+  flex-shrink: 0;
+  background: #ffffff;
+  border-right: 1px solid #e2e8f0;
+  padding: 8px;
   overflow-y: auto;
 }
 
-/* 卡片样式 */
-.settings-card {
-  background: #ffffff;
-  border-radius: 12px;
-  margin-bottom: 16px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
-}
-
-.card-header {
+.menu-item {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 16px 20px 0;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #64748b;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  user-select: none;
+
+  &:hover {
+    background: #f1f5f9;
+    color: #334155;
+  }
+
+  &.active {
+    background: #eff6ff;
+    color: #3b82f6;
+  }
 }
 
-.card-icon {
-  font-size: 20px;
-  color: #3b82f6;
+/* 右侧内容区 */
+.settings-content {
+  flex: 1;
+  padding: 20px 24px;
+  overflow-y: auto;
 }
 
-.card-title {
-  margin: 0;
+.panel-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 16px;
   font-size: 15px;
   font-weight: 600;
   color: #1e293b;
-}
-
-.card-body {
-  padding: 16px 20px 20px;
-}
-
-.card-hint {
-  display: flex;
-  align-items: flex-start;
-  gap: 6px;
-  font-size: 12px;
-  color: #64748b;
-  margin: 0;
-
-  .el-icon {
-    margin-top: 1px;
-    color: #94a3b8;
-  }
 }
 
 /* 设置行 */
@@ -918,24 +985,75 @@ async function handleCheckUpdate() {
   margin-top: 2px;
 }
 
-/* 通知类型设置行 */
 .notification-type-row {
   flex-wrap: wrap;
   gap: 8px;
-  
+
   .row-left {
     flex: 1;
     min-width: 150px;
   }
-  
+
   :deep(.el-radio-group) {
     flex-shrink: 0;
   }
-  
+
   :deep(.el-radio-button__inner) {
     padding: 6px 12px;
     font-size: 12px;
   }
+}
+
+/* 表单区域 */
+.form-section {
+  margin-bottom: 20px;
+}
+
+.form-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px;
+  color: #64748b;
+  font-weight: 500;
+  margin-bottom: 8px;
+}
+
+.form-label-value {
+  font-size: 12px;
+  color: #3b82f6;
+  font-weight: 600;
+}
+
+/* 字体预览 */
+.font-preview {
+  padding: 16px;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  color: #334155;
+  line-height: 1.5;
+}
+
+.card-hint {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 12px;
+  color: #64748b;
+  margin: 0;
+
+  .el-icon {
+    margin-top: 1px;
+    color: #94a3b8;
+  }
+}
+
+/* 分隔线 */
+.section-divider {
+  height: 1px;
+  background: #e2e8f0;
+  margin: 20px 0;
 }
 
 /* 数据操作按钮 */
@@ -956,11 +1074,11 @@ async function handleCheckUpdate() {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  padding: 12px 16px;
+  padding: 10px 16px;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
   background: #ffffff;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 500;
   color: #334155;
   cursor: pointer;
@@ -988,11 +1106,63 @@ async function handleCheckUpdate() {
   }
 
   .el-icon {
-    font-size: 18px;
+    font-size: 16px;
   }
 }
 
-/* 屏幕配置样式 */
+/* WebDAV */
+.last-sync-time {
+  margin-left: auto;
+  font-size: 11px;
+  color: #94a3b8;
+  font-weight: 400;
+}
+
+.sync-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.form-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.form-row {
+  display: flex;
+  gap: 12px;
+}
+
+.flex-1 {
+  flex: 1;
+}
+
+.form-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.password-toggle {
+  cursor: pointer;
+  color: #94a3b8;
+  transition: color 0.2s;
+
+  &:hover {
+    color: #64748b;
+  }
+}
+
+.sync-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 16px;
+  margin-bottom: 12px;
+}
+
+/* 屏幕配置 */
 .empty-configs {
   display: flex;
   flex-direction: column;
@@ -1023,13 +1193,13 @@ async function handleCheckUpdate() {
   align-items: center;
   justify-content: space-between;
   padding: 12px 14px;
-  background: #f8fafc;
+  background: #ffffff;
   border-radius: 8px;
-  border: 1px solid transparent;
+  border: 1px solid #e2e8f0;
   transition: all 0.2s ease;
 
   &:hover {
-    background: #f1f5f9;
+    background: #f8fafc;
   }
 
   &.active {
@@ -1081,11 +1251,7 @@ async function handleCheckUpdate() {
   margin-left: 8px;
 }
 
-/* 关于卡片 */
-.about-card {
-  padding: 20px;
-}
-
+/* 关于 */
 .about-content {
   display: flex;
   align-items: center;
@@ -1168,69 +1334,5 @@ async function handleCheckUpdate() {
   .el-icon {
     font-size: 16px;
   }
-}
-
-/* WebDAV 同步样式 */
-.last-sync-time {
-  margin-left: auto;
-  font-size: 11px;
-  color: #94a3b8;
-  font-weight: 400;
-}
-
-.sync-form {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.form-item {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.form-label {
-  font-size: 12px;
-  color: #64748b;
-  font-weight: 500;
-}
-
-.form-row {
-  display: flex;
-  gap: 12px;
-}
-
-.flex-1 {
-  flex: 1;
-}
-
-.form-actions {
-  display: flex;
-  gap: 8px;
-  margin-top: 4px;
-}
-
-.password-toggle {
-  cursor: pointer;
-  color: #94a3b8;
-  transition: color 0.2s;
-
-  &:hover {
-    color: #64748b;
-  }
-}
-
-.sync-divider {
-  height: 1px;
-  background: #f1f5f9;
-  margin: 16px 0;
-}
-
-.sync-actions {
-  display: flex;
-  gap: 12px;
-  margin-top: 16px;
-  margin-bottom: 12px;
 }
 </style>

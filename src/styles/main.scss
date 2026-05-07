@@ -401,7 +401,8 @@ body.platform-macos.dark-theme #app .app-container .empty-state {
     min-width: 0;
 
     .todo-title {
-      font-size: 14px;
+      font-size: var(--todo-font-size, 14px);
+      font-family: var(--todo-font-stack, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif);
       color: var(--text-primary);
       word-break: break-word;
     }
@@ -411,7 +412,8 @@ body.platform-macos.dark-theme #app .app-container .empty-state {
       align-items: center;
       gap: var(--space-2);
       margin-top: var(--space-1);
-      font-size: 12px;
+      font-size: var(--todo-sub-font-size, 12px);
+      font-family: var(--todo-font-stack, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif);
       color: var(--text-tertiary);
 
       .subtask-count {
@@ -455,7 +457,8 @@ body.platform-macos.dark-theme #app .app-container .empty-state {
         align-items: center;
         gap: 6px;
         padding: 2px 0;
-        font-size: 12px;
+        font-size: var(--todo-sub-font-size, 12px);
+        font-family: var(--todo-font-stack, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif);
         color: var(--text-secondary);
 
         .subtask-status-icon {
