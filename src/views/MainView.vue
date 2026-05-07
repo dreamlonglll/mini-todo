@@ -71,6 +71,10 @@ let unlistenSyncCompleted: (() => void) | null = null
 // 自动同步定时器
 let autoSyncTimer: ReturnType<typeof setInterval> | null = null
 
+// 自动刷新定时器（低频轮询，捕获外部 DB 变更）
+let autoRefreshTimer: ReturnType<typeof setInterval> | null = null
+const AUTO_REFRESH_INTERVAL = 60_000
+
 // 防抖保存定时器
 const saveDebounceTimer = ref<number | null>(null)
 
@@ -204,8 +208,12 @@ onMounted(async () => {
   })
 
   unlistenFocus = await appWindow.onFocusChanged(async ({ payload: focused }) => {
-    if (focused && isModalOpen.value) {
-      await bringModalToFront()
+    if (focused) {
+      if (isModalOpen.value) {
+        await bringModalToFront()
+      } else {
+        await todoStore.fetchTodos()
+      }
     }
   })
 
@@ -216,6 +224,13 @@ onMounted(async () => {
 
   // 初始化自动同步
   startAutoSync()
+
+  // 启动低频轮询刷新
+  autoRefreshTimer = setInterval(() => {
+    if (!isModalOpen.value) {
+      todoStore.fetchTodos()
+    }
+  }, AUTO_REFRESH_INTERVAL)
 
   // 初始化鼠标在窗口内状态（用于 macOS 自动隐藏唤起）
   void reportAutoHideCursorInside(true)
@@ -234,6 +249,10 @@ onUnmounted(() => {
   if (unlistenFocus) unlistenFocus()
   if (unlistenSyncCompleted) unlistenSyncCompleted()
   stopAutoSync()
+  if (autoRefreshTimer) {
+    clearInterval(autoRefreshTimer)
+    autoRefreshTimer = null
+  }
   if (saveDebounceTimer.value) {
     clearTimeout(saveDebounceTimer.value)
   }
