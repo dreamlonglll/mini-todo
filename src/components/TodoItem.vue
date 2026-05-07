@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useTodoStore } from '@/stores'
 import { ElMessageBox } from 'element-plus'
 import dayjs from 'dayjs'
@@ -72,6 +72,19 @@ async function topTodo(e: Event) {
   await todoStore.reorderTodos([props.todo.id, ...ids])
 }
 
+// 子任务按完成状态排序：未完成在前
+const sortedSubtasks = computed(() =>
+  [...props.todo.subtasks].sort((a, b) => Number(a.completed) - Number(b.completed))
+)
+
+// 子任务列表展开状态
+const subtaskExpanded = ref(false)
+
+function toggleSubtaskExpand(e: Event) {
+  e.stopPropagation()
+  subtaskExpanded.value = !subtaskExpanded.value
+}
+
 // 点击待办
 function handleClick() {
   emit('click')
@@ -93,9 +106,10 @@ function handleClick() {
       
       <div v-if="subtaskStats.total > 0 || formattedNotifyTime" class="todo-meta">
         <!-- 子任务统计 -->
-        <span v-if="subtaskStats.total > 0" class="subtask-count">
+        <span v-if="subtaskStats.total > 0" class="subtask-count" :class="{ expanded: subtaskExpanded }" @click="toggleSubtaskExpand">
           <el-icon :size="12"><Finished /></el-icon>
           {{ subtaskStats.completed }}/{{ subtaskStats.total }}
+          <el-icon :size="10" class="expand-arrow"><ArrowDown v-if="subtaskExpanded" /><ArrowRight v-else /></el-icon>
         </span>
 
         <!-- 通知时间 -->
@@ -104,6 +118,26 @@ function handleClick() {
           {{ formattedNotifyTime }}
         </span>
       </div>
+
+      <!-- 子任务标题列表 -->
+      <Transition name="subtask-list">
+        <div v-if="subtaskExpanded && subtaskStats.total > 0" class="subtask-list">
+          <div
+            v-for="subtask in sortedSubtasks"
+            :key="subtask.id"
+            class="subtask-item"
+            :class="{ 'is-completed': subtask.completed }"
+          >
+            <el-icon :size="12" class="subtask-status-icon">
+              <SuccessFilled v-if="subtask.completed" />
+              <CirclePlus v-else />
+            </el-icon>
+            <el-tooltip :content="subtask.title" placement="top" :show-after="500" :disabled="!subtask.title || subtask.title.length < 20">
+              <span class="subtask-title">{{ subtask.title }}</span>
+            </el-tooltip>
+          </div>
+        </div>
+      </Transition>
     </div>
 
     <!-- 操作按钮 -->

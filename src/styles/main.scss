@@ -418,6 +418,24 @@ body.platform-macos.dark-theme #app .app-container .empty-state {
         display: flex;
         align-items: center;
         gap: 4px;
+        cursor: pointer;
+        border-radius: var(--radius-sm);
+        padding: 0 4px;
+        margin: 0 -4px;
+        transition: color var(--transition-fast), background var(--transition-fast);
+
+        .expand-arrow {
+          transition: transform var(--transition-fast);
+        }
+
+        &:hover {
+          color: var(--text-secondary);
+          background: rgba(0, 0, 0, 0.05);
+        }
+
+        &.expanded {
+          color: var(--text-secondary);
+        }
       }
 
       .notify-time {
@@ -425,6 +443,58 @@ body.platform-macos.dark-theme #app .app-container .empty-state {
         align-items: center;
         gap: 4px;
       }
+    }
+
+    .subtask-list {
+      margin-top: var(--space-1);
+      padding-left: 2px;
+      overflow: hidden;
+
+      .subtask-item {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 2px 0;
+        font-size: 12px;
+        color: var(--text-secondary);
+
+        .subtask-status-icon {
+          flex-shrink: 0;
+          color: var(--text-tertiary);
+        }
+
+        .subtask-title {
+          flex: 1;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          min-width: 0;
+        }
+
+        &.is-completed {
+          .subtask-title {
+            text-decoration: line-through;
+            color: var(--text-tertiary);
+          }
+
+          .subtask-status-icon {
+            color: var(--color-success, #10B981);
+          }
+        }
+      }
+    }
+
+    // 子任务列表展开/收起动画
+    .subtask-list-enter-active,
+    .subtask-list-leave-active {
+      transition: all 0.2s ease;
+      max-height: 300px;
+    }
+
+    .subtask-list-enter-from,
+    .subtask-list-leave-to {
+      opacity: 0;
+      max-height: 0;
     }
   }
 
@@ -587,6 +657,10 @@ body.platform-macos.dark-theme #app .app-container .empty-state {
   .todo-item .todo-actions {
     background: rgba(30, 30, 30, 0.9);
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+  }
+
+  .todo-item .subtask-count:hover {
+    background: rgba(255, 255, 255, 0.1);
   }
 
   .quick-add {
