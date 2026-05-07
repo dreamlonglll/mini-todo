@@ -35,6 +35,7 @@
 | Modal close | `tauri://destroyed` event → `fetchTodos()` | Editor/settings/completed window close |
 | Sync complete | `sync-completed` event → `fetchTodos()` | After WebDAV sync applies remote data |
 | Auto sync | `webdav_auto_sync` result check → `fetchTodos()` | Only when remote data was applied |
+| Settings event | `todo-font-changed` event → `loadTodoFontSettings()` | Real-time cross-window style sync |
 
 ### Convention: Skip Refresh During Modal
 
@@ -43,6 +44,19 @@ All background refresh paths (focus, polling) check `isModalOpen` before calling
 ### Don't: Add fetchTodos() in Child Components
 
 Child components (`TodoList`, `TodoItem`, `QuadrantView`) should emit events or call store mutation methods that update local state. Full re-fetches from DB should only happen in `MainView.vue` to avoid redundant queries and race conditions.
+
+---
+
+### Cross-Window Settings Update Pattern
+
+When a setting in the child window (e.g., SettingsView) must take immediate effect on the main window:
+
+1. Child window saves to DB via `invoke()`
+2. Child window emits a Tauri event: `await emit('todo-font-changed')`
+3. Main window listens for the event in `onMounted` and reloads the setting
+4. Main window cleans up the listener in `onUnmounted`
+
+This avoids polling and gives instant feedback. The "modal close" refresh path is still a fallback.
 
 ---
 
