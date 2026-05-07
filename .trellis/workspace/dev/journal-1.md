@@ -72,3 +72,37 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 3: 设置界面重构 + 待办字体自定义
+
+**Date**: 2026-05-07
+**Task**: 设置界面重构 + 待办字体自定义
+**Branch**: `main`
+
+### Summary
+
+重构设置窗口为左右分栏布局（左侧菜单+右侧面板），新增外观设置支持系统字体选择和字体大小自定义，通过 Rust DirectWrite API 枚举字体，Tauri 事件实现跨窗口实时预览
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `289742a` | (see git log) |
+| `223ed7d` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
