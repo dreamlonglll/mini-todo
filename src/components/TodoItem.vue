@@ -133,7 +133,7 @@ function handleClick() {
     <div class="todo-content">
       <div class="todo-title">{{ todo.title }}</div>
       
-      <div v-if="subtaskStats.total > 0 || formattedNotifyTime" class="todo-meta">
+      <div v-if="subtaskStats.total > 0 || formattedNotifyTime || isRepeat" class="todo-meta">
         <!-- 子任务统计 -->
         <span v-if="subtaskStats.total > 0" class="subtask-count" :class="{ expanded: subtaskExpanded }" @click="toggleSubtaskExpand">
           <el-icon :size="12"><Finished /></el-icon>

@@ -44,6 +44,26 @@ root.style.setProperty('--todo-font-stack', fontStack)
 font-family: var(--todo-font-stack, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif);
 ```
 
+### Don't: Add conditional child without updating container v-if
+
+**Problem**:
+```vue
+<!-- Container only checks subtasks and notifyTime -->
+<div v-if="subtaskStats.total > 0 || formattedNotifyTime" class="todo-meta">
+  <!-- ...existing children... -->
+  <!-- New child added, but container v-if doesn't include its condition -->
+  <span v-if="isRepeat"><el-icon><RefreshRight /></el-icon></span>
+</div>
+```
+
+**Why it's bad**: The new child never renders when it's the only truthy condition, because the container itself is hidden.
+
+**Instead**:
+```vue
+<!-- Update container condition to include ALL child visibility conditions -->
+<div v-if="subtaskStats.total > 0 || formattedNotifyTime || isRepeat" class="todo-meta">
+```
+
 ---
 
 ## Required Patterns
