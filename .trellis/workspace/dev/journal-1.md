@@ -106,3 +106,37 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 4: feat: 重复提醒功能实现
+
+**Date**: 2026-05-09
+**Task**: feat: 重复提醒功能实现
+**Branch**: `main`
+
+### Summary
+
+实现闹钟式重复提醒功能（daily/weekly/monthly），含数据库迁移、通知推进算法、EditorView UI、TodoItem 图标、导入导出覆盖。质量检查修复了容器 v-if 条件遗漏问题。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `7dde72f` | (see git log) |
+| `9c56618` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

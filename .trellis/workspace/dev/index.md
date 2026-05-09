@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 3
-- **Last Active**: 2026-05-07
+- **Total Sessions**: 4
+- **Last Active**: 2026-05-09
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~108 | Active |
+| `journal-1.md` | ~142 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 4 | 2026-05-09 | feat: 重复提醒功能实现 | `7dde72f`, `9c56618` | `main` |
 | 3 | 2026-05-07 | 设置界面重构 + 待办字体自定义 | `289742a`, `223ed7d` | `main` |
 | 2 | 2026-05-07 | Issue #6: 待办列表自动刷新 | `22824aa`, `a67d270` | `main` |
 | 1 | 2026-05-07 | feat: 子任务标题展示 | `facdc38` | `main` |
