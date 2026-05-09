@@ -181,6 +181,23 @@ const customNotifyBefore = ref(15)
 const isCustomNotifyBefore = ref(false)
 const isUpdatingCompleteState = ref(false)
 
+// 重复提醒
+const repeatEnabled = ref(false)
+const repeatType = ref<'daily' | 'weekly' | 'monthly'>('daily')
+const repeatInterval = ref(1)
+const repeatWeekdays = ref<number[]>([])
+const repeatMonthDay = ref(1)
+
+const weekdayOptions = [
+  { label: '周一', value: 1 },
+  { label: '周二', value: 2 },
+  { label: '周三', value: 3 },
+  { label: '周四', value: 4 },
+  { label: '周五', value: 5 },
+  { label: '周六', value: 6 },
+  { label: '周日', value: 7 },
+]
+
 // 原始的通知时间（用于判断是否需要清除）
 const originalNotifyAt = ref<string | null>(null)
 // 原始的开始和截止时间（用于判断是否需要清除）
@@ -266,6 +283,17 @@ async function loadTodo() {
         customNotifyBefore.value = todo.value.notifyBefore
       }
 
+      // 加载重复提醒设置
+      repeatEnabled.value = !!todo.value.repeatEnabled
+      if (todo.value.repeatType) {
+        repeatType.value = todo.value.repeatType as 'daily' | 'weekly' | 'monthly'
+      }
+      repeatInterval.value = todo.value.repeatInterval || 1
+      repeatWeekdays.value = todo.value.repeatWeekdays
+        ? todo.value.repeatWeekdays.split(',').map(Number).filter(n => n >= 1 && n <= 7)
+        : []
+      repeatMonthDay.value = todo.value.repeatMonthDay || 1
+
       // 恢复 Agent 配置
       agentForm.value = {
         agentId: todo.value.agentId ?? null,
@@ -312,13 +340,16 @@ async function handleSave() {
       
       const shouldClearAgent = (todo.value?.agentId !== null) && !agentForm.value.agentId
 
+      const wasRepeatEnabled = !!todo.value?.repeatEnabled
+      const shouldClearRepeat = wasRepeatEnabled && !repeatEnabled.value
+
       const data: UpdateTodoRequest = {
         title: form.value.title,
         description: form.value.description || null,
         color: form.value.color,
         quadrant: form.value.quadrant,
         notifyAt: form.value.notifyAt || undefined,
-        notifyBefore: form.value.notifyBefore,
+        notifyBefore: repeatEnabled.value ? 0 : form.value.notifyBefore,
         clearNotifyAt: shouldClearNotifyAt,
         startTime: form.value.startTime || undefined,
         endTime: form.value.endTime || undefined,
@@ -328,6 +359,14 @@ async function handleSave() {
         agentProjectPath: agentForm.value.projectPath || undefined,
         clearAgent: shouldClearAgent,
         postAction: agentForm.value.postAction !== 'none' ? agentForm.value.postAction as import('@/types').PostActionType : undefined,
+        clearRepeat: shouldClearRepeat,
+        repeatEnabled: repeatEnabled.value || undefined,
+        repeatType: repeatEnabled.value ? repeatType.value : undefined,
+        repeatInterval: repeatEnabled.value ? repeatInterval.value : undefined,
+        repeatWeekdays: repeatEnabled.value && repeatType.value === 'weekly' && repeatWeekdays.value.length > 0
+          ? repeatWeekdays.value.sort((a, b) => a - b).join(',') : undefined,
+        repeatMonthDay: repeatEnabled.value && repeatType.value === 'monthly'
+          ? repeatMonthDay.value : undefined,
       }
       await invoke('update_todo', { id: todoId.value, data })
       ElMessage.success('待办已保存')
@@ -1049,7 +1088,7 @@ function onHeaderMouseDown(e: MouseEvent) {
           </el-form-item>
 
           <!-- 提醒时间 - 拆分为日期和时间 -->
-          <el-form-item label="提醒时间">
+          <el-form-item :label="repeatEnabled ? '首次提醒' : '提醒时间'">
             <div class="notify-datetime-picker">
               <el-date-picker
                 v-model="notifyDate"
@@ -1080,21 +1119,21 @@ function onHeaderMouseDown(e: MouseEvent) {
             </div>
           </el-form-item>
 
-          <!-- 提前通知 -->
-          <el-form-item v-if="form.notifyAt" label="提前提醒">
-            <el-select 
+          <!-- 提前通知（重复模式下隐藏） -->
+          <el-form-item v-if="form.notifyAt && !repeatEnabled" label="提前提醒">
+            <el-select
               :model-value="isCustomNotifyBefore ? -1 : form.notifyBefore"
               @change="handleNotifyBeforeChange"
               style="width: 100%"
             >
-              <el-option 
+              <el-option
                 v-for="opt in notifyBeforeOptions"
                 :key="opt.value"
                 :label="opt.label"
                 :value="opt.value"
               />
             </el-select>
-            
+
             <el-input-number
               v-if="isCustomNotifyBefore"
               v-model="customNotifyBefore"
@@ -1105,6 +1144,52 @@ function onHeaderMouseDown(e: MouseEvent) {
               <template #suffix>分钟前</template>
             </el-input-number>
           </el-form-item>
+
+          <!-- 重复提醒 -->
+          <el-form-item label="重复">
+            <el-switch v-model="repeatEnabled" />
+          </el-form-item>
+
+          <template v-if="repeatEnabled">
+            <el-form-item label="重复方式">
+              <el-select v-model="repeatType" style="width: 100%">
+                <el-option label="每天" value="daily" />
+                <el-option label="每周" value="weekly" />
+                <el-option label="每月" value="monthly" />
+              </el-select>
+            </el-form-item>
+
+            <el-form-item :label="'每 ' + repeatInterval + ' ' + ({ daily: '天', weekly: '周', monthly: '月' }[repeatType] || '天')">
+              <el-input-number
+                v-model="repeatInterval"
+                :min="1"
+                :max="99"
+                style="width: 100%"
+              />
+            </el-form-item>
+
+            <!-- 周模式：选择星期几 -->
+            <el-form-item v-if="repeatType === 'weekly'" label="星期">
+              <el-checkbox-group v-model="repeatWeekdays" class="weekday-checkbox-group">
+                <el-checkbox
+                  v-for="opt in weekdayOptions"
+                  :key="opt.value"
+                  :label="opt.label"
+                  :value="opt.value"
+                />
+              </el-checkbox-group>
+            </el-form-item>
+
+            <!-- 月模式：选择日期 -->
+            <el-form-item v-if="repeatType === 'monthly'" label="每月几号">
+              <el-input-number
+                v-model="repeatMonthDay"
+                :min="1"
+                :max="31"
+                style="width: 100%"
+              />
+            </el-form-item>
+          </template>
 
         </el-form>
       </div>
@@ -1910,6 +1995,12 @@ function onHeaderMouseDown(e: MouseEvent) {
 .fade-enter-from,
 .fade-leave-to {
   opacity: 0;
+}
+
+.weekday-checkbox-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 0;
 }
 
 .subtask-list-enter-active,

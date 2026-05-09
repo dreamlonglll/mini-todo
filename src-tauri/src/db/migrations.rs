@@ -123,7 +123,23 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute("INSERT INTO migrations (version) VALUES (21)", [])?;
     }
 
+    if current_version < 22 {
+        migration_v22(conn)?;
+        conn.execute("INSERT INTO migrations (version) VALUES (22)", [])?;
+    }
+
     Ok(())
+}
+
+/// 迁移 v22：todos 表新增重复提醒字段
+fn migration_v22(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "ALTER TABLE todos ADD COLUMN repeat_enabled INTEGER NOT NULL DEFAULT 0;
+         ALTER TABLE todos ADD COLUMN repeat_type TEXT;
+         ALTER TABLE todos ADD COLUMN repeat_interval INTEGER NOT NULL DEFAULT 1;
+         ALTER TABLE todos ADD COLUMN repeat_weekdays TEXT;
+         ALTER TABLE todos ADD COLUMN repeat_month_day INTEGER;"
+    )
 }
 
 /// 迁移 v21：移除内置提示词模板

@@ -38,6 +38,35 @@ const formattedNotifyTime = computed(() => {
   return dayjs(props.todo.notifyAt).format('MM-DD HH:mm')
 })
 
+// 是否重复提醒
+const isRepeat = computed(() => !!props.todo.repeatEnabled)
+
+// 重复提醒的 tooltip 文字
+const repeatTooltip = computed(() => {
+  if (!isRepeat.value || !props.todo.repeatType) return ''
+  const interval = props.todo.repeatInterval || 1
+  const weekdayNames = ['一', '二', '三', '四', '五', '六', '日']
+  switch (props.todo.repeatType) {
+    case 'daily':
+      return interval === 1 ? '每天重复' : `每 ${interval} 天重复`
+    case 'weekly': {
+      const days = (props.todo.repeatWeekdays || '')
+        .split(',')
+        .filter(Boolean)
+        .map(d => weekdayNames[parseInt(d) - 1] || d)
+        .join('、')
+      const prefix = interval === 1 ? '每周' : `每 ${interval} 周`
+      return days ? `${prefix} 周${days}` : prefix
+    }
+    case 'monthly': {
+      const day = props.todo.repeatMonthDay || 1
+      return interval === 1 ? `每月 ${day} 号` : `每 ${interval} 月 ${day} 号`
+    }
+    default:
+      return '重复提醒'
+  }
+})
+
 // 切换完成状态
 function toggleComplete(e: Event) {
   e.stopPropagation()
@@ -111,6 +140,13 @@ function handleClick() {
           {{ subtaskStats.completed }}/{{ subtaskStats.total }}
           <el-icon :size="10" class="expand-arrow"><ArrowDown v-if="subtaskExpanded" /><ArrowRight v-else /></el-icon>
         </span>
+
+        <!-- 重复提醒标识 -->
+        <el-tooltip v-if="isRepeat" :content="repeatTooltip" placement="top" :show-after="300">
+          <span class="repeat-badge">
+            <el-icon :size="12"><RefreshRight /></el-icon>
+          </span>
+        </el-tooltip>
 
         <!-- 通知时间 -->
         <span v-if="formattedNotifyTime" class="notify-time">

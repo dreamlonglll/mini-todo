@@ -1,4 +1,5 @@
 use crate::db::Database;
+use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, NaiveTime};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::async_runtime;
@@ -26,6 +27,11 @@ impl NotificationService {
         async_runtime::spawn(async move {
             // 等待应用初始化完成
             tokio::time::sleep(Duration::from_secs(5)).await;
+
+            // 启动时补发一次错过的重复提醒
+            if let Err(e) = Self::catch_up_missed_repeats(&app_handle) {
+                eprintln!("补发错过的重复提醒失败: {}", e);
+            }
 
             loop {
                 Self::sleep_until_next_minute().await;
@@ -80,8 +86,11 @@ impl NotificationService {
                 }
             }
 
-            // 标记为已通知
-            Self::mark_as_notified(&db, todo.id)?;
+            if todo.repeat_enabled {
+                Self::advance_repeat(&db, &todo)?;
+            } else {
+                Self::mark_as_notified(&db, todo.id)?;
+            }
         }
 
         Ok(())
@@ -107,7 +116,8 @@ impl NotificationService {
         db.with_connection(|conn| {
             let mut stmt = conn.prepare(
                 r#"
-                SELECT id, title, description
+                SELECT id, title, description, repeat_enabled, repeat_type, repeat_interval,
+                       repeat_weekdays, repeat_month_day, notify_at
                 FROM todos
                 WHERE completed = 0
                   AND notified = 0
@@ -121,6 +131,12 @@ impl NotificationService {
                     id: row.get(0)?,
                     title: row.get(1)?,
                     description: row.get::<_, Option<String>>(2)?,
+                    repeat_enabled: row.get::<_, i32>(3).unwrap_or(0) != 0,
+                    repeat_type: row.get(4).unwrap_or(None),
+                    repeat_interval: row.get(5).unwrap_or(1),
+                    repeat_weekdays: row.get(6).unwrap_or(None),
+                    repeat_month_day: row.get(7).unwrap_or(None),
+                    notify_at: row.get(8).unwrap_or(None),
                 })
             })?
             .filter_map(|r| r.ok())
@@ -254,6 +270,192 @@ impl NotificationService {
         })
         .map_err(|e| e.to_string())
     }
+
+    /// 推进重复提醒到下一次
+    fn advance_repeat(db: &Database, todo: &PendingNotification) -> Result<(), String> {
+        let notify_at_str = match &todo.notify_at {
+            Some(s) => s.clone(),
+            None => return Self::mark_as_notified(db, todo.id),
+        };
+
+        let current_dt = NaiveDateTime::parse_from_str(&notify_at_str, "%Y-%m-%dT%H:%M:%S")
+            .or_else(|_| NaiveDateTime::parse_from_str(&notify_at_str, "%Y-%m-%dT%H:%M"))
+            .map_err(|e| format!("解析 notify_at 失败: {}", e))?;
+
+        let now = Local::now().naive_local();
+        let next = Self::calc_next_occurrence(current_dt, now, todo);
+
+        match next {
+            Some(next_dt) => {
+                let next_str = next_dt.format("%Y-%m-%dT%H:%M:%S").to_string();
+                db.with_connection(|conn| {
+                    conn.execute(
+                        "UPDATE todos SET notify_at = ?, notified = 0, updated_at = datetime('now', 'localtime') WHERE id = ?",
+                        rusqlite::params![next_str, todo.id],
+                    )?;
+                    Ok(())
+                })
+                .map_err(|e| e.to_string())
+            }
+            None => Self::mark_as_notified(db, todo.id),
+        }
+    }
+
+    /// 计算下一次重复时间（循环推进直到 > now）
+    fn calc_next_occurrence(
+        from: NaiveDateTime,
+        now: NaiveDateTime,
+        todo: &PendingNotification,
+    ) -> Option<NaiveDateTime> {
+        let repeat_type = todo.repeat_type.as_deref()?;
+        let interval = todo.repeat_interval.max(1);
+        let time = from.time();
+        let mut candidate = from;
+
+        for _ in 0..366 * 5 {
+            candidate = match repeat_type {
+                "daily" => candidate + chrono::Duration::days(interval as i64),
+                "weekly" => Self::next_weekly(candidate, interval, todo.repeat_weekdays.as_deref(), time)?,
+                "monthly" => Self::next_monthly(candidate, interval, todo.repeat_month_day, time)?,
+                _ => return None,
+            };
+            if candidate > now {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
+    /// 周模式：找下一个匹配的星期
+    fn next_weekly(
+        current: NaiveDateTime,
+        interval: i32,
+        weekdays_str: Option<&str>,
+        time: NaiveTime,
+    ) -> Option<NaiveDateTime> {
+        let mut weekdays: Vec<u32> = weekdays_str
+            .unwrap_or("1,2,3,4,5,6,7")
+            .split(',')
+            .filter_map(|s| s.trim().parse::<u32>().ok())
+            .filter(|&d| d >= 1 && d <= 7)
+            .collect();
+        weekdays.sort_unstable();
+
+        if weekdays.is_empty() {
+            return Some(current + chrono::Duration::weeks(interval as i64));
+        }
+
+        let current_iso = current.date().weekday().number_from_monday();
+        // 在当前周内找下一个匹配日
+        for &wd in &weekdays {
+            if wd > current_iso {
+                let diff = wd - current_iso;
+                let date = current.date() + chrono::Duration::days(diff as i64);
+                return Some(NaiveDateTime::new(date, time));
+            }
+        }
+        // 跳到 interval 周后的第一个匹配日
+        let days_to_monday = 7 - current_iso + 1;
+        let base_date = current.date() + chrono::Duration::days(days_to_monday as i64)
+            + chrono::Duration::weeks((interval - 1) as i64);
+        let first_wd = weekdays.iter().min().copied().unwrap_or(1);
+        let date = base_date + chrono::Duration::days((first_wd - 1) as i64);
+        Some(NaiveDateTime::new(date, time))
+    }
+
+    /// 月模式：跳到下 N 个月的指定日
+    fn next_monthly(
+        current: NaiveDateTime,
+        interval: i32,
+        month_day: Option<i32>,
+        time: NaiveTime,
+    ) -> Option<NaiveDateTime> {
+        let target_day = month_day.unwrap_or(current.day() as i32).max(1).min(31) as u32;
+        let mut month = current.month() as i32 + interval;
+        let mut year = current.year();
+
+        while month > 12 {
+            month -= 12;
+            year += 1;
+        }
+        while month < 1 {
+            month += 12;
+            year -= 1;
+        }
+
+        let last_day = last_day_of_month(year, month as u32);
+        let day = target_day.min(last_day);
+        let date = NaiveDate::from_ymd_opt(year, month as u32, day)?;
+        Some(NaiveDateTime::new(date, time))
+    }
+
+    /// 启动时补发错过的重复提醒
+    fn catch_up_missed_repeats(app_handle: &tauri::AppHandle) -> Result<(), String> {
+        let db = app_handle.state::<Database>();
+        let notification_type = Self::get_notification_type(&db);
+
+        let overdue = db.with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                r#"
+                SELECT id, title, description, repeat_enabled, repeat_type, repeat_interval,
+                       repeat_weekdays, repeat_month_day, notify_at
+                FROM todos
+                WHERE completed = 0
+                  AND repeat_enabled = 1
+                  AND notified = 0
+                  AND notify_at IS NOT NULL
+                  AND datetime(notify_at) <= datetime('now', 'localtime')
+                "#
+            )?;
+
+            let todos: Vec<PendingNotification> = stmt.query_map([], |row| {
+                Ok(PendingNotification {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    description: row.get::<_, Option<String>>(2)?,
+                    repeat_enabled: row.get::<_, i32>(3).unwrap_or(0) != 0,
+                    repeat_type: row.get(4).unwrap_or(None),
+                    repeat_interval: row.get(5).unwrap_or(1),
+                    repeat_weekdays: row.get(6).unwrap_or(None),
+                    repeat_month_day: row.get(7).unwrap_or(None),
+                    notify_at: row.get(8).unwrap_or(None),
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+            Ok(todos)
+        }).map_err(|e| e.to_string())?;
+
+        for todo in &overdue {
+            match notification_type.as_str() {
+                "app" => {
+                    let _ = Self::send_app_notification(app_handle, &todo.title, &todo.description);
+                }
+                _ => {
+                    let _ = Self::send_system_notification(app_handle, &todo.title, &todo.description);
+                }
+            }
+            Self::advance_repeat(&db, todo)?;
+        }
+
+        Ok(())
+    }
+}
+
+fn last_day_of_month(year: i32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 30,
+    }
 }
 
 /// 待发送通知的待办
@@ -261,4 +463,10 @@ struct PendingNotification {
     id: i64,
     title: String,
     description: Option<String>,
+    repeat_enabled: bool,
+    repeat_type: Option<String>,
+    repeat_interval: i32,
+    repeat_weekdays: Option<String>,
+    repeat_month_day: Option<i32>,
+    notify_at: Option<String>,
 }

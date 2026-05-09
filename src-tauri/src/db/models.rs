@@ -10,7 +10,8 @@ pub const TODO_COLUMNS: &str =
     "id, title, description, color, quadrant, notify_at, notify_before,
      notified, completed, sort_order, start_time, end_time, created_at, updated_at,
      agent_id, agent_project_path, schedule_strategy, cron_expression, schedule_enabled,
-     last_scheduled_run, post_action, workflow_enabled, workflow_current_step";
+     last_scheduled_run, post_action, workflow_enabled, workflow_current_step,
+     repeat_enabled, repeat_type, repeat_interval, repeat_weekdays, repeat_month_day";
 
 pub fn subtask_from_row(row: &Row) -> rusqlite::Result<SubTask> {
     Ok(SubTask {
@@ -58,6 +59,11 @@ pub fn todo_from_row(row: &Row) -> rusqlite::Result<Todo> {
         post_action: row.get::<_, String>(20).unwrap_or_else(|_| "none".to_string()),
         workflow_enabled: row.get::<_, i32>(21).unwrap_or(0) != 0,
         workflow_current_step: row.get::<_, i32>(22).unwrap_or(-1),
+        repeat_enabled: row.get::<_, i32>(23).unwrap_or(0) != 0,
+        repeat_type: row.get(24).unwrap_or(None),
+        repeat_interval: row.get(25).unwrap_or(1),
+        repeat_weekdays: row.get(26).unwrap_or(None),
+        repeat_month_day: row.get(27).unwrap_or(None),
         subtasks: Vec::new(),
     })
 }
@@ -102,6 +108,16 @@ pub struct Todo {
     #[serde(default = "default_workflow_step")]
     pub workflow_current_step: i32,
     #[serde(default)]
+    pub repeat_enabled: bool,
+    #[serde(default)]
+    pub repeat_type: Option<String>,
+    #[serde(default = "default_repeat_interval")]
+    pub repeat_interval: i32,
+    #[serde(default)]
+    pub repeat_weekdays: Option<String>,
+    #[serde(default)]
+    pub repeat_month_day: Option<i32>,
+    #[serde(default)]
     pub subtasks: Vec<SubTask>,
 }
 
@@ -115,6 +131,10 @@ fn default_workflow_step() -> i32 {
 
 fn default_schedule_strategy() -> String {
     "manual".to_string()
+}
+
+fn default_repeat_interval() -> i32 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -239,6 +259,19 @@ pub struct UpdateTodoRequest {
     pub clear_agent: bool,
     /// 子任务完成后的工作流动作
     pub post_action: Option<String>,
+    /// 是否启用重复提醒
+    pub repeat_enabled: Option<bool>,
+    /// 重复类型：daily / weekly / monthly
+    pub repeat_type: Option<String>,
+    /// 重复间隔
+    pub repeat_interval: Option<i32>,
+    /// 周重复的星期几（逗号分隔，如 "1,3,5"）
+    pub repeat_weekdays: Option<String>,
+    /// 月重复的日期（1~31）
+    pub repeat_month_day: Option<i32>,
+    /// 是否明确清除重复提醒
+    #[serde(default)]
+    pub clear_repeat: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

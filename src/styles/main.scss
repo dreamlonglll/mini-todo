@@ -440,6 +440,13 @@ body.platform-macos.dark-theme #app .app-container .empty-state {
         }
       }
 
+      .repeat-badge {
+        display: flex;
+        align-items: center;
+        color: var(--el-color-primary);
+        cursor: default;
+      }
+
       .notify-time {
         display: flex;
         align-items: center;

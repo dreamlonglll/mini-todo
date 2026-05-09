@@ -2336,7 +2336,7 @@ checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
 name = "mini-todo"
-version = "1.6.2"
+version = "1.6.3"
 dependencies = [
  "aes-gcm",
  "async-trait",

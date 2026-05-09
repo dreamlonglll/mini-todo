@@ -95,6 +95,16 @@ export interface Todo {
   workflowEnabled?: boolean
   /** 工作流当前步骤 */
   workflowCurrentStep?: number
+  /** 是否启用重复提醒 */
+  repeatEnabled?: boolean
+  /** 重复类型：daily / weekly / monthly */
+  repeatType?: string | null
+  /** 重复间隔 */
+  repeatInterval?: number
+  /** 周重复的星期几（逗号分隔，如 "1,3,5"） */
+  repeatWeekdays?: string | null
+  /** 月重复的日期（1~31） */
+  repeatMonthDay?: number | null
   subtasks: SubTask[]
 }
 
@@ -150,6 +160,18 @@ export interface UpdateTodoRequest {
   clearAgent?: boolean
   /** 子任务完成后的工作流动作 */
   postAction?: PostActionType
+  /** 是否启用重复提醒 */
+  repeatEnabled?: boolean
+  /** 重复类型 */
+  repeatType?: string | null
+  /** 重复间隔 */
+  repeatInterval?: number
+  /** 周重复的星期几 */
+  repeatWeekdays?: string | null
+  /** 月重复的日期 */
+  repeatMonthDay?: number | null
+  /** 是否明确清除重复提醒 */
+  clearRepeat?: boolean
 }
 
 // 创建子任务请求

@@ -297,14 +297,18 @@ pub fn import_data_raw(db: &Database, json_data: &str) -> Result<(), String> {
             let sched_enabled_i = if todo.schedule_enabled { 1i32 } else { 0 };
             let wf_enabled_i = if todo.workflow_enabled { 1i32 } else { 0 };
 
+            let repeat_enabled_i = if todo.repeat_enabled { 1i32 } else { 0 };
+
             conn.execute(
                 "INSERT INTO todos (title, description, color, quadrant, notify_at, notify_before,
                                    notified, completed, sort_order, start_time, end_time, created_at, updated_at,
                                    agent_id, agent_project_path, schedule_strategy, cron_expression,
                                    schedule_enabled, last_scheduled_run, post_action,
-                                   workflow_enabled, workflow_current_step)
+                                   workflow_enabled, workflow_current_step,
+                                   repeat_enabled, repeat_type, repeat_interval, repeat_weekdays, repeat_month_day)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-                         ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+                         ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22,
+                         ?23, ?24, ?25, ?26, ?27)",
                 params![
                     todo.title, todo.description, todo.color, todo.quadrant,
                     todo.notify_at, todo.notify_before,
@@ -315,6 +319,8 @@ pub fn import_data_raw(db: &Database, json_data: &str) -> Result<(), String> {
                     todo.schedule_strategy, todo.cron_expression,
                     sched_enabled_i, todo.last_scheduled_run, todo.post_action,
                     wf_enabled_i, todo.workflow_current_step,
+                    repeat_enabled_i, todo.repeat_type, todo.repeat_interval,
+                    todo.repeat_weekdays, todo.repeat_month_day,
                 ],
             )?;
 

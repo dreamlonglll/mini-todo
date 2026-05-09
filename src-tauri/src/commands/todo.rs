@@ -152,6 +152,39 @@ pub fn update_todo(db: State<Database>, id: i64, data: UpdateTodoRequest) -> Res
             updates.push("post_action = ?");
             params.push(Box::new(post_action.clone()));
         }
+        // 重复提醒
+        if data.clear_repeat {
+            updates.push("repeat_enabled = 0");
+            updates.push("repeat_type = NULL");
+            updates.push("repeat_interval = 1");
+            updates.push("repeat_weekdays = NULL");
+            updates.push("repeat_month_day = NULL");
+            updates.push("notify_before = 0");
+        } else {
+            if let Some(enabled) = data.repeat_enabled {
+                updates.push("repeat_enabled = ?");
+                params.push(Box::new(if enabled { 1i32 } else { 0 }));
+                if enabled {
+                    updates.push("notify_before = 0");
+                }
+            }
+            if let Some(ref repeat_type) = data.repeat_type {
+                updates.push("repeat_type = ?");
+                params.push(Box::new(repeat_type.clone()));
+            }
+            if let Some(interval) = data.repeat_interval {
+                updates.push("repeat_interval = ?");
+                params.push(Box::new(interval));
+            }
+            if let Some(ref weekdays) = data.repeat_weekdays {
+                updates.push("repeat_weekdays = ?");
+                params.push(Box::new(weekdays.clone()));
+            }
+            if let Some(month_day) = data.repeat_month_day {
+                updates.push("repeat_month_day = ?");
+                params.push(Box::new(month_day));
+            }
+        }
 
         if updates.is_empty() {
             return Err(rusqlite::Error::InvalidParameterName(
