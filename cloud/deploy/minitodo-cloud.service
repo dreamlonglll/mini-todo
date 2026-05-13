@@ -1,0 +1,30 @@
+[Unit]
+Description=mini-todo cloud API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=minitodo
+Group=minitodo
+WorkingDirectory=/opt/minitodo-cloud
+# 配置文件可由 --config 指定，或通过 MINITODO_CONFIG 环境变量
+Environment=RUST_LOG=info,minitodo_cloud=info
+ExecStart=/opt/minitodo-cloud/minitodo-cloud --config /etc/minitodo/config.toml
+
+# 失败自动重启
+Restart=on-failure
+RestartSec=3
+
+# 资源/权限收紧（按需调整）
+ReadWritePaths=/var/lib/minitodo
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+
+# 文件描述符
+LimitNOFILE=8192
+
+[Install]
+WantedBy=multi-user.target

@@ -145,7 +145,7 @@ npm run tauri build
 
 ## 项目结构
 
-> 项目按平台拆分子目录，`pc/` 为 Windows 桌面端（Tauri），未来可平行加入 `mobile/`、`web/`。
+> 项目按平台拆分子目录，`pc/` 为 Windows 桌面端（Tauri），`cloud/` 为云端 HTTP API（Rust + Axum），未来可平行加入 `mobile/`、`web/`。
 
 ```
 mini-todo/
@@ -167,8 +167,16 @@ mini-todo/
 │   ├── package.json
 │   ├── vite.config.ts
 │   └── tsconfig.json
+├── cloud/                       # 云端 HTTP API（Rust + Axum，独立 crate）
+│                                # 通过 WebDAV 与 PC 端共用同一份数据；详见 cloud/README.md
 └── docs/                        # 共享文档
 ```
+
+## 云端 API（可选）
+
+如需在 PC 之外通过 AI（如 Claude Code Skill）读写自己的待办，可在 VPS 上部署 `cloud/`
+子项目。它通过 WebDAV 与 PC 端共用 `sync-data.json.gz` 通道，因此不要求 PC 在线。详见
+[`cloud/README.md`](cloud/README.md)。
 
 ## 许可证
 

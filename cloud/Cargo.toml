@@ -1,0 +1,48 @@
+[package]
+name = "minitodo-cloud"
+version = "0.1.0"
+edition = "2021"
+description = "Cloud HTTP API for mini-todo, syncing via WebDAV"
+license = "MIT"
+
+[[bin]]
+name = "minitodo-cloud"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
+
+# HTTP server
+axum = { version = "0.7", features = ["macros"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace"] }
+
+# HTTP client (WebDAV)
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking"] }
+
+# Storage
+rusqlite = { version = "0.32", features = ["bundled", "serde_json"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+
+# Compression (gzip for sync-data.json.gz)
+flate2 = "1.0"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# URL encoding for WebDAV paths
+urlencoding = "2"

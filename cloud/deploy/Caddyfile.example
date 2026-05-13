@@ -1,0 +1,20 @@
+# 用法：把本文件内容并入 /etc/caddy/Caddyfile，替换 minitodo.example.com 为你
+# 自己的域名，然后 `systemctl reload caddy`。Caddy 会自动申请 Let's Encrypt
+# 证书并续期。
+
+minitodo.example.com {
+    encode zstd gzip
+
+    # 反代到 cloud HTTP server（默认 127.0.0.1:8787）
+    reverse_proxy 127.0.0.1:8787 {
+        header_up Host {host}
+        header_up X-Real-IP {remote}
+        header_up X-Forwarded-For {remote}
+        header_up X-Forwarded-Proto {scheme}
+    }
+
+    # 仅在排查时打开访问日志
+    # log {
+    #     output file /var/log/caddy/minitodo.log
+    # }
+}

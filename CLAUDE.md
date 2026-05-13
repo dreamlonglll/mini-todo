@@ -6,6 +6,8 @@
 
 Mini-Todo 是一款基于 **Tauri 2.x + Vue 3 + TypeScript** 开发的 Windows 桌面待办事项管理应用，定位为简洁、聚焦的本地待办工具，支持子任务、四象限、日历、重复提醒、系统通知与 WebDAV 云同步。
 
+仓库按平台拆子目录，`pc/` 是 Windows 桌面端，`cloud/` 是云端 HTTP API（mini-todo 在远程 VPS 上的复刻，通过同一个 WebDAV 通道与 PC 同步数据，供 AI / Claude Code Skill 通过 REST 读写）。详见 `cloud/README.md`。
+
 ## 技术栈
 
 | 层级 | 技术选型 | 说明 |
@@ -85,6 +87,20 @@ mini-todo/
 │   ├── package.json                        # Node 依赖配置
 │   ├── tsconfig.json                       # TypeScript 配置
 │   └── vite.config.ts                      # Vite 构建配置
+├── cloud/                                  # 云端 HTTP API（独立 Rust crate）
+│   ├── Cargo.toml                          # axum + tokio + rusqlite + reqwest + ...
+│   ├── config.example.toml                 # 配置示例
+│   ├── README.md                           # 部署 / 配置说明
+│   ├── deploy/
+│   │   ├── minitodo-cloud.service          # systemd unit 示例
+│   │   └── Caddyfile.example               # Caddy 反代示例
+│   └── src/
+│       ├── main.rs                         # tokio + axum 启动
+│       ├── config.rs                       # config.toml 解析
+│       ├── time.rs                         # 与 PC SQLite 一致的时间格式
+│       ├── db/                             # rusqlite + KV-style schema
+│       ├── sync/                           # WebDAV 客户端 + pull worker + 图片镜像
+│       └── api/                            # axum router + Bearer auth + /health
 ├── CLAUDE.md                               # 项目指南（本文档）
 ├── README.md
 └── AGENTS.md
@@ -255,6 +271,34 @@ SyncSettings (远端配置 + device_id + last_sync_at)
   ├── webdav_apply_remote    → SyncData → import_data_raw
   └── webdav_auto_sync       → 按 sync_interval 轮询，自动 upload 或 apply
 ```
+
+## cloud/ 子项目（云端 API）
+
+> 当前状态：PR1 骨架（只读 + 后台拉同步）已完成；REST CRUD / Skill / PC 端
+> 412 重试等仍在路上。详见 `cloud/README.md`、`.trellis/tasks/05-13-cloud-api-and-skill/prd.md`。
+
+`cloud/` 是一个独立的 Rust crate（**不在** `pc/` 的 Cargo workspace 里），部署到 VPS 上为
+AI / Claude Code Skill 提供 mini-todo 数据的 HTTP REST 访问能力。两端的契约：
+
+- **共用同一个 WebDAV `sync-data.json.gz` 通道**。云端是 WebDAV 客户端，不依赖 PC 在线
+- **WebDAV 是 source of truth**，云端 SQLite 是缓存，重启会重新从 WebDAV 灌满
+- **时间格式与 PC SQLite 完全一致**：`YYYY-MM-DD HH:MM:SS` 无时区后缀，按 `config.toml` 的 `timezone` 取墙钟时间
+- **写冲突策略**：两端都走条件 PUT（`If-Unmodified-Since`），冲突时 per-record LWW merge 后重试（PR3 把 PC 端的"整包覆盖"语义改成"merge"）
+- **schema 漂移宽容**：云端 SQLite 是 KV-style（`todos(id, data_json, updated_at)`），PC 加新字段时云端不需要改代码，列表/过滤用 SQLite JSON1 `json_extract`
+
+```
+cloud/
+├── src/main.rs               # 启动序列：load config → open SQLite → 同步 pull_once → spawn pull/image worker → axum
+├── src/config.rs             # config.toml；缺必填字段直接 panic 退出
+├── src/time.rs               # FixedOffset 模拟"本地时区现在"
+├── src/db/                   # rusqlite + 4 张表（todos/subtasks/settings/meta）
+├── src/sync/webdav.rs        # GET（带 If-None-Match）/ PUT（带 If-Unmodified-Since）/ PROPFIND
+├── src/sync/pull.rs          # 60s 轮询：GET → gunzip → per-record LWW merge
+├── src/sync/images.rs        # 启动时一次性镜像 WebDAV /mini-todo/images/ 到本地
+└── src/api/                  # axum：Bearer auth + X-Sync-Status header + /health
+```
+
+后续 PR2 增加 `/todos` `/subtasks` `/images` CRUD + dirty flag push worker；PR3 修改 `pc/src-tauri/src/services/webdav.rs` 与 `pc/src-tauri/src/commands/sync_cmd.rs`，让 PC 端 PUT 时也走条件请求并支持 412 重试。
 
 ### 前后端通信
 

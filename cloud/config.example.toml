@@ -1,0 +1,44 @@
+# minitodo-cloud 配置示例
+# 复制为 config.toml 并填写你自己的值，然后启动服务：
+#   minitodo-cloud --config /etc/minitodo/config.toml
+# 缺少任何一个必填字段时，进程会以清晰的错误信息退出。
+
+# ============================================================
+# WebDAV 上游（与 PC 端共用的同步通道）
+# ============================================================
+# WebDAV 服务器根 URL（不要带尾部 /mini-todo，路径会由程序自行拼接）
+# 例如使用 nginx-dav / Caddy webdav module / NextCloud / 坚果云
+webdav_url      = "https://dav.example.com/dav"
+webdav_username = "your-webdav-user"
+webdav_password = "your-webdav-pass"
+
+# ============================================================
+# HTTP API 鉴权与监听
+# ============================================================
+# 任意客户端访问 API 必须携带 `Authorization: Bearer <api_key>`
+# 建议用 `openssl rand -hex 32` 生成
+api_key = "REPLACE_ME_WITH_LONG_RANDOM_HEX"
+
+# 监听地址。Caddy 反代时保持 127.0.0.1 不要直接对外
+bind = "127.0.0.1:8787"
+
+# ============================================================
+# 时区（必须与 PC 端一致，PC 用本地时区写 SQLite）
+# ============================================================
+# 标准 IANA 时区名，例如 "Asia/Shanghai"、"UTC"、"America/Los_Angeles"
+# 程序会用对应的 FixedOffset 模拟「本地时区现在」生成
+# 与 PC 端 `datetime('now','localtime')` 完全一致的 "%Y-%m-%d %H:%M:%S" 字符串
+timezone = "Asia/Shanghai"
+
+# ============================================================
+# 同步参数
+# ============================================================
+# Pull worker 拉 WebDAV `sync-data.json.gz` 的间隔（秒）
+pull_interval = 60
+
+# ============================================================
+# 本地数据存放
+# ============================================================
+# SQLite 与镜像图片的存放目录。systemd 模板里默认是 /var/lib/minitodo
+data_dir   = "/var/lib/minitodo"
+images_dir = "/var/lib/minitodo/images"

@@ -1,0 +1,17 @@
+# Rust 编译产物
+/target/
+
+# 用户实际配置（注意 example 保留）
+config.toml
+
+# 本机 SQLite / 数据目录（默认就放在 /var/lib/minitodo，仓库不该出现，但保险）
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
