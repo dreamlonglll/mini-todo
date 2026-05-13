@@ -154,9 +154,9 @@ PC 端协同（PR3）：
 Skill / AI 集成：
 
 - [x] Claude Code Skill（`cloud/skill/minitodo/`，含 Python CLI、install 脚本、SKILL.md）
-- [x] `due-soon` 子命令：合并 overdue + 未来 N 小时内到期未完成，输出可选 JSON / 表格 / 紧凑中文文本
+- [x] CLI 覆盖 today / list / add / done / search / show / update / delete / health
 - [x] 同一份 skill 可装到 openclaw workspace（`install.sh --target openclaw`）
-- [x] openclaw cron 临期提醒：每天定时唤起 isolated session 调用 skill，`--announce` 推送到 default channel
+- [x] openclaw cron 临期提醒：cron 唤起 agent 后由 **agent 自己**拉 `list --pending --json` + 判断哪些该推 + 组织格式，`--announce` 推到 default channel
 
 ## REST API 速查
 
@@ -187,48 +187,31 @@ push worker 会在 WebDAV 恢复后自动回写。
 
 [`skill/minitodo/`](skill/minitodo/) 既可作为 Claude Code Skill，也可装到
 [openclaw](https://github.com/openclaw/openclaw) 的 workspace 让 cron 调度器
-定时检查临期待办、自动推到 default channel。
+定时唤起 agent、由 **agent 自己**判断临期待办并推到 default channel。
 
-> **给 openclaw agent**：完整的安装/配置/故障排查指南见
-> [`openclaw.md`](openclaw.md)（带前置检查、验证命令、卸载步骤）。
+> 设计理由：mini-todo 的重复提醒只更新 `notifyAt`、不动 `dueDate`，服务端
+> query 又只能按 `dueDate` 筛——客户端硬编码"临期规则"永远会有漏推/误推。
+> 把判断交给 agent 看原始 JSON、按 cron prompt 给的窗口自己判断更稳。
 
-最小落地步骤（前提：`config.toml` 已填好 `endpoint` + `api_key`）：
+> **给 openclaw agent**：完整的安装/配置/cron message 模板/故障排查指南见
+> [`openclaw.md`](openclaw.md)（带前置检查、§6 询问用户偏好、§7 cron prompt 模板、卸载步骤）。
 
-```bash
-# 1. 装到 openclaw workspace
-cd cloud/skill/minitodo
-bash install.sh --target openclaw
-
-# 2. 注册每天 8 点的临期提醒（推到 session 最近使用的 channel）
-openclaw cron add \
-  --name minitodo-due-soon \
-  --cron "0 8 * * *" \
-  --tz "Asia/Shanghai" \
-  --session isolated \
-  --message "调用 minitodo skill 的 due-soon 子命令检查未来 24 小时内的临期和已逾期待办。命令：python ~/.openclaw/workspace/skills/minitodo/minitodo.py due-soon --hours 24 --notify-text --silent-if-empty。把命令 stdout 的内容直接作为回复发出来；如果 stdout 为空就只回复'今日无临期事项'。不要追加解释。" \
-  --announce
-
-# 3. 立即跑一次验证
-openclaw cron run minitodo-due-soon
-```
-
-cron 的 `--announce` 不带 `--channel` / `--to` 时使用 session history 的"最近
-channel"作为 default channel；要固定推到 Slack / Telegram / Discord 等，参考
-[`skill/minitodo/SKILL.md`](skill/minitodo/SKILL.md) 的"显式指定 channel"小节。
-
-skill 输出形如：
+输出形如（由 agent 按 prompt 自己组织、每条带 `#{id}` 便于反馈）：
 
 ```
 mini-todo 临期提醒｜2026-05-13 08:00
 已逾期（1）：
-  - [高] 写报告 (05-12 18:00，已逾期 14 小时)
+  - #1734567890123456 [高] 写报告 (05-12 18:00，已逾期 14 小时)
 未来 24h 到期（2）：
-  - [中] 买菜 (05-13 10:00，2 小时后)
-  - [低] 开会 (05-13 19:00，11 小时后)
+  - #1734567890123457 [中] 买菜 (05-13 10:00，2 小时后)
+  - #1734567890123458 [低] 开会 (05-13 19:00，11 小时后)
 ```
 
-> 也可手动跑：
-> `python ~/.openclaw/workspace/skills/minitodo/minitodo.py due-soon --hours 24 --notify-text`
+要手动复现这一查询：
+```bash
+python ~/.openclaw/workspace/skills/minitodo/minitodo.py list --pending --json
+```
+拿到 JSON 后按"dueDate 优先、缺则 notifyAt"取时间锚，自己挑窗口内的输出即可。
 
 ## 开发
 
