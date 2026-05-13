@@ -1,10 +1,9 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, nextTick, computed } from 'vue'
+import { ref, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import { invoke } from '@tauri-apps/api/core'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { ElMessage } from 'element-plus'
 import { Editor, rootCtx, defaultValueCtx, editorViewOptionsCtx } from '@milkdown/kit/core'
 import { commonmark } from '@milkdown/kit/preset/commonmark'
 import { listener, listenerCtx } from '@milkdown/kit/plugin/listener'
@@ -14,21 +13,11 @@ import { nord } from '@milkdown/theme-nord'
 import type { Node } from '@milkdown/kit/prose/model'
 import type { Uploader, UploadOptions } from '@milkdown/kit/plugin/upload'
 import '@milkdown/theme-nord/style.css'
-import { useAgentStore } from '@/stores/agentStore'
-import { useSchedulerStore } from '@/stores/schedulerStore'
 import { handleFileLinkClick } from '@/utils/fileLink'
 import { revealItemInDir } from '@tauri-apps/plugin-opener'
-import { AGENT_TYPE_INFO } from '@/types/agent'
-import type { PromptTemplate, TemplateVariable } from '@/types/scheduler'
-import { listen } from '@tauri-apps/api/event'
-import { openLogWindow } from '@/utils/logWindow'
 
 const route = useRoute()
 const subtaskId = parseInt(route.query.id as string)
-const agentIdParam = route.query.agentId ? parseInt(route.query.agentId as string) : null
-const agentProjectPath = route.query.agentProjectPath
-  ? decodeURIComponent(route.query.agentProjectPath as string)
-  : ''
 const isViewMode = route.query.mode === 'view'
 const appWindow = getCurrentWindow()
 
@@ -212,227 +201,15 @@ function onHeaderMouseDown(e: MouseEvent) {
   appWindow.startDragging()
 }
 
-// ========== Agent 执行 ==========
-const agentStore = useAgentStore()
-const agentDialogVisible = ref(false)
-
-const agentForm = ref({
-  agentId: agentIdParam,
-  projectPath: agentProjectPath,
-  prompt: '',
-})
-
-const hasAgentConfig = computed(() => !!agentForm.value.agentId)
-
-const currentExecution = computed(() => agentStore.getExecutionForSubtask(subtaskId))
-const agentExecuting = computed(() => currentExecution.value?.status === 'running')
-const agentTaskId = computed(() => currentExecution.value?.taskId || '')
-
-const currentAgentLabel = computed(() => {
-  if (!agentForm.value.agentId) return ''
-  const agent = agentStore.agents.find(a => a.id === agentForm.value.agentId)
-  if (!agent) return ''
-  const typeInfo = AGENT_TYPE_INFO[agent.agentType]
-  return typeInfo?.label || agent.agentType
-})
-
-function buildPromptContext(): string {
-  const lines: string[] = []
-  const hasTitle = !!title.value.trim()
-  const hasContent = !!markdownContent.value.trim()
-
-  if (hasTitle) {
-    lines.push(`【任务标题】${title.value.trim()}`)
-  }
-  if (hasContent) {
-    if (hasTitle) lines.push('')
-    lines.push(`【任务详情】`)
-    lines.push(markdownContent.value.trim())
-  }
-  if (lines.length > 0) {
-    lines.push('')
-    lines.push('请根据以上任务信息执行相应操作。')
-  }
-  return lines.join('\n')
-}
-
-function openAgentDialog() {
-  if (!hasAgentConfig.value) {
-    ElMessage.warning('请先在待办编辑页配置 Agent')
-    return
-  }
-
-  if (currentExecution.value) {
-    openLogWindow({
-      subtaskId,
-      taskId: agentTaskId.value || undefined,
-      title: `${title.value || '子任务'} - 执行日志`,
-    })
-    return
-  }
-
-  agentForm.value.prompt = buildPromptContext()
-  loadTemplates()
-  agentDialogVisible.value = true
-}
-
-// ========== Prompt 模板 ==========
-const schedulerStore = useSchedulerStore()
-const selectedTemplateId = ref<string | null>(null)
-const templateList = ref<PromptTemplate[]>([])
-const templateVariables = ref<TemplateVariable[]>([])
-const variableValues = ref<Record<string, string>>({})
-
-async function loadTemplates() {
-  try {
-    await schedulerStore.loadTemplates()
-    templateList.value = schedulerStore.templates
-  } catch (_) {
-    templateList.value = []
-  }
-}
-
-function onTemplateSelect(id: string | null) {
-  if (!id) {
-    templateVariables.value = []
-    variableValues.value = {}
-    return
-  }
-  const tpl = templateList.value.find(t => t.id === id)
-  if (!tpl) return
-
-  try {
-    const vars: TemplateVariable[] = JSON.parse(tpl.variables || '[]')
-    templateVariables.value = vars
-    variableValues.value = {}
-    for (const v of vars) {
-      variableValues.value[v.name] = v.defaultValue || ''
-    }
-  } catch (_) {
-    templateVariables.value = []
-    variableValues.value = {}
-  }
-}
-
-async function applyTemplate() {
-  if (!selectedTemplateId.value) return
-  try {
-    const rendered = await schedulerStore.renderTemplate(selectedTemplateId.value, variableValues.value)
-    agentForm.value.prompt = rendered
-    ElMessage.success('模板已应用')
-  } catch (e) {
-    ElMessage.error('应用模板失败: ' + String(e))
-  }
-}
-
-async function handleAgentExecute() {
-  if (!agentForm.value.agentId) {
-    ElMessage.warning('未配置 Agent')
-    return
-  }
-  if (!agentForm.value.prompt.trim()) {
-    ElMessage.warning('请输入执行指令')
-    return
-  }
-  if (!agentForm.value.projectPath.trim()) {
-    ElMessage.warning('未配置项目路径，请在待办编辑页设置')
-    return
-  }
-
-  const newTaskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-
-  try {
-    await agentStore.startBackgroundExecution(
-      agentForm.value.agentId,
-      agentForm.value.prompt,
-      agentForm.value.projectPath,
-      newTaskId,
-      subtaskId,
-    )
-    agentDialogVisible.value = false
-    openLogWindow({
-      subtaskId,
-      taskId: newTaskId,
-      title: `${title.value || '子任务'} - 执行日志`,
-    })
-  } catch (e) {
-    ElMessage.error('Agent 启动失败: ' + String(e))
-  }
-}
-
-function handleNewExecution() {
-  agentStore.removeExecution(subtaskId)
-  agentForm.value.prompt = buildPromptContext()
-  loadTemplates()
-  agentDialogVisible.value = true
-}
-
-// ========== 调度状态控制 ==========
-const scheduleStatus = ref('none')
-
-async function loadScheduleStatus() {
-  try {
-    const subtask = await invoke<any>('get_subtask', { id: subtaskId })
-    if (subtask) {
-      scheduleStatus.value = subtask.scheduleStatus || 'none'
-    }
-  } catch (_) {
-    // ignore
-  }
-}
-
-async function toggleSchedulePending(val: boolean) {
-  try {
-    const targetStatus = val ? 'pending' : 'none'
-    const newStatus = await schedulerStore.updateSubtaskScheduleStatus(subtaskId, targetStatus)
-    scheduleStatus.value = newStatus
-  } catch (e) {
-    ElMessage.error('切换调度状态失败: ' + String(e))
-  }
-}
-
-const isSchedulePending = computed(() => {
-  return ['pending', 'queued', 'running'].includes(scheduleStatus.value)
-})
-
-const scheduleStatusLabel = computed(() => {
-  const map: Record<string, string> = {
-    none: '未调度',
-    pending: '待调度',
-    queued: '排队中',
-    running: '执行中',
-    reviewing: '待审核',
-    completed: '已完成',
-    failed: '失败',
-    cancelled: '已取消',
-  }
-  return map[scheduleStatus.value] || scheduleStatus.value
-})
-
-let unlistenScheduleStatus: (() => void) | null = null
-
 onMounted(async () => {
   await loadSubtask()
   await nextTick()
   await initEditor()
   editorContainer.value?.addEventListener('click', handleImageClick)
   editorContainer.value?.addEventListener('click', handleFileLinkClick)
-  agentStore.loadAgents()
-  agentStore.restoreExecutionForSubtask(subtaskId)
-  loadScheduleStatus()
-
-  unlistenScheduleStatus = await listen<{ subtask_id: number; status: string }>(
-    'schedule:status-changed',
-    (event) => {
-      if (event.payload.subtask_id === subtaskId) {
-        scheduleStatus.value = event.payload.status
-      }
-    }
-  )
 })
 
 onBeforeUnmount(() => {
-  unlistenScheduleStatus?.()
   editorContainer.value?.removeEventListener('click', handleImageClick)
   editorContainer.value?.removeEventListener('click', handleFileLinkClick)
   destroyEditor()
@@ -471,46 +248,6 @@ onBeforeUnmount(() => {
     </div>
 
     <div class="window-footer">
-      <div class="footer-left">
-        <el-button
-          v-if="hasAgentConfig && !currentExecution"
-          type="info"
-          plain
-          @click="openAgentDialog"
-        >
-          <el-icon><MagicStick /></el-icon>
-          {{ currentAgentLabel || 'Agent' }}
-        </el-button>
-        <template v-if="hasAgentConfig && currentExecution">
-          <el-button
-            :type="agentExecuting ? 'warning' : currentExecution.status === 'completed' ? 'success' : 'danger'"
-            plain
-            @click="openAgentDialog"
-          >
-            <el-icon><Tickets /></el-icon>
-            <template v-if="agentExecuting">执行中...</template>
-            <template v-else-if="currentExecution.status === 'completed'">查看日志</template>
-            <template v-else>查看日志</template>
-          </el-button>
-          <el-button
-            v-if="!agentExecuting && !isViewMode"
-            size="small"
-            @click="handleNewExecution"
-          >
-            <el-icon><RefreshRight /></el-icon>
-            重新执行
-          </el-button>
-        </template>
-        <div v-if="hasAgentConfig && (!isViewMode || !currentExecution)" class="schedule-toggle">
-          <el-switch
-            :model-value="isSchedulePending"
-            size="small"
-            :disabled="scheduleStatus === 'running'"
-            @change="toggleSchedulePending($event as boolean)"
-          />
-          <span class="schedule-label">{{ scheduleStatusLabel }}</span>
-        </div>
-      </div>
       <div class="footer-right">
         <el-button @click="handleClose">
           <el-icon><Close /></el-icon>
@@ -522,110 +259,6 @@ onBeforeUnmount(() => {
         </el-button>
       </div>
     </div>
-
-    <!-- Agent 执行对话框 -->
-    <el-dialog
-      v-model="agentDialogVisible"
-      title="Agent 执行"
-      width="80%"
-      append-to-body
-      class="agent-exec-dialog"
-      top="10vh"
-    >
-      <div class="agent-dialog-body" style="max-height: calc(80vh - 160px); overflow-y: auto;">
-        <el-form label-position="top" size="default">
-          <el-form-item label="Agent">
-            <el-input :model-value="currentAgentLabel" disabled />
-          </el-form-item>
-
-          <el-form-item label="项目路径">
-            <el-input :model-value="agentForm.projectPath" disabled />
-          </el-form-item>
-
-          <el-form-item label="Prompt 模板">
-            <div class="template-selector">
-              <el-select
-                v-model="selectedTemplateId"
-                placeholder="选择模板（可选）"
-                clearable
-                size="small"
-                style="width: 100%"
-                @change="onTemplateSelect"
-              >
-                <el-option
-                  v-for="tpl in templateList"
-                  :key="tpl.id"
-                  :label="tpl.name"
-                  :value="tpl.id"
-                >
-                  <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <span>{{ tpl.name }}</span>
-                    <span style="font-size: 11px; color: #999;">{{ tpl.category }}</span>
-                  </div>
-                </el-option>
-              </el-select>
-
-              <div v-if="templateVariables.length > 0" class="template-vars">
-                <div
-                  v-for="v in templateVariables"
-                  :key="v.name"
-                  class="template-var-item"
-                >
-                  <label>{{ v.label }}{{ v.required ? ' *' : '' }}</label>
-                  <el-input
-                    v-if="v.type === 'textarea'"
-                    v-model="variableValues[v.name]"
-                    type="textarea"
-                    :rows="2"
-                    size="small"
-                  />
-                  <el-input
-                    v-else
-                    v-model="variableValues[v.name]"
-                    size="small"
-                  />
-                </div>
-                <el-button type="primary" size="small" @click="applyTemplate">
-                  应用模板
-                </el-button>
-              </div>
-            </div>
-          </el-form-item>
-
-          <el-form-item required>
-            <template #label>
-              <span style="display: flex; align-items: center; gap: 6px;">
-                <span>执行指令</span>
-                <el-tag size="small" type="info" effect="plain">
-                  基于子任务标题+内容生成
-                </el-tag>
-              </span>
-            </template>
-            <el-input
-              v-model="agentForm.prompt"
-              type="textarea"
-              :rows="8"
-              placeholder="输入要 Agent 执行的指令..."
-            />
-          </el-form-item>
-        </el-form>
-      </div>
-
-      <template #footer>
-        <div class="agent-dialog-footer">
-          <div class="footer-left-actions"></div>
-          <div class="footer-right-actions">
-            <el-button @click="agentDialogVisible = false">
-              关闭
-            </el-button>
-            <el-button type="primary" @click="handleAgentExecute()">
-              <el-icon><VideoPlay /></el-icon>
-              开始执行
-            </el-button>
-          </div>
-        </div>
-      </template>
-    </el-dialog>
 
     <!-- 图片预览 -->
     <el-image-viewer
@@ -706,27 +339,10 @@ onBeforeUnmount(() => {
 
 .window-footer {
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-end;
   align-items: center;
   padding: 12px 16px;
   border-top: 1px solid var(--border, #e2e8f0);
-}
-
-.footer-left {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.schedule-toggle {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.schedule-label {
-  font-size: 12px;
-  color: var(--text-secondary);
 }
 
 .footer-right {
@@ -834,59 +450,4 @@ onBeforeUnmount(() => {
   margin: 1em 0;
 }
 
-.template-selector {
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.template-vars {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 8px;
-  background: #f8fafc;
-  border-radius: 6px;
-  border: 1px solid #e2e8f0;
-}
-
-.template-var-item {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-
-  label {
-    font-size: 12px;
-    color: #64748b;
-    font-weight: 500;
-  }
-}
-</style>
-
-<style>
-.agent-exec-dialog .el-dialog__body {
-  padding: 12px 20px 0;
-}
-.agent-exec-dialog .el-dialog__footer {
-  padding: 12px 20px;
-}
-.agent-dialog-body {
-  padding-right: 4px;
-  padding-bottom: 8px;
-}
-.agent-dialog-footer {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  width: 100%;
-}
-.agent-dialog-footer .footer-left-actions {
-  display: flex;
-  gap: 8px;
-}
-.agent-dialog-footer .footer-right-actions {
-  display: flex;
-  gap: 8px;
-}
 </style>

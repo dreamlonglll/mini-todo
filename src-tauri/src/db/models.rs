@@ -2,15 +2,11 @@ use rusqlite::Row;
 use serde::{Deserialize, Serialize};
 
 pub const SUBTASK_COLUMNS: &str =
-    "id, parent_id, title, content, completed, sort_order, created_at, updated_at,
-     schedule_status, priority_score, max_retries, retry_count, timeout_secs,
-     scheduled_at, last_scheduled_run, schedule_error";
+    "id, parent_id, title, content, completed, sort_order, created_at, updated_at";
 
 pub const TODO_COLUMNS: &str =
     "id, title, description, color, quadrant, notify_at, notify_before,
      notified, completed, sort_order, start_time, end_time, created_at, updated_at,
-     agent_id, agent_project_path, schedule_strategy, cron_expression, schedule_enabled,
-     last_scheduled_run, post_action, workflow_enabled, workflow_current_step,
      repeat_enabled, repeat_type, repeat_interval, repeat_weekdays, repeat_month_day";
 
 pub fn subtask_from_row(row: &Row) -> rusqlite::Result<SubTask> {
@@ -23,14 +19,6 @@ pub fn subtask_from_row(row: &Row) -> rusqlite::Result<SubTask> {
         sort_order: row.get(5)?,
         created_at: row.get(6)?,
         updated_at: row.get(7)?,
-        schedule_status: row.get::<_, String>(8).unwrap_or_else(|_| "none".to_string()),
-        priority_score: row.get(9).unwrap_or(0),
-        max_retries: row.get(10).unwrap_or(0),
-        retry_count: row.get(11).unwrap_or(0),
-        timeout_secs: row.get(12).unwrap_or(600),
-        scheduled_at: row.get(13).unwrap_or(None),
-        last_scheduled_run: row.get(14).unwrap_or(None),
-        schedule_error: row.get(15).unwrap_or(None),
     })
 }
 
@@ -50,20 +38,11 @@ pub fn todo_from_row(row: &Row) -> rusqlite::Result<Todo> {
         end_time: row.get(11)?,
         created_at: row.get(12)?,
         updated_at: row.get(13)?,
-        agent_id: row.get(14)?,
-        agent_project_path: row.get(15)?,
-        schedule_strategy: row.get::<_, String>(16).unwrap_or_else(|_| "manual".to_string()),
-        cron_expression: row.get(17).unwrap_or(None),
-        schedule_enabled: row.get::<_, i32>(18).unwrap_or(0) != 0,
-        last_scheduled_run: row.get(19).unwrap_or(None),
-        post_action: row.get::<_, String>(20).unwrap_or_else(|_| "none".to_string()),
-        workflow_enabled: row.get::<_, i32>(21).unwrap_or(0) != 0,
-        workflow_current_step: row.get::<_, i32>(22).unwrap_or(-1),
-        repeat_enabled: row.get::<_, i32>(23).unwrap_or(0) != 0,
-        repeat_type: row.get(24).unwrap_or(None),
-        repeat_interval: row.get(25).unwrap_or(1),
-        repeat_weekdays: row.get(26).unwrap_or(None),
-        repeat_month_day: row.get(27).unwrap_or(None),
+        repeat_enabled: row.get::<_, i32>(14).unwrap_or(0) != 0,
+        repeat_type: row.get(15).unwrap_or(None),
+        repeat_interval: row.get(16).unwrap_or(1),
+        repeat_weekdays: row.get(17).unwrap_or(None),
+        repeat_month_day: row.get(18).unwrap_or(None),
         subtasks: Vec::new(),
     })
 }
@@ -89,24 +68,6 @@ pub struct Todo {
     pub end_time: Option<String>,
     pub created_at: String,
     pub updated_at: String,
-    /// 绑定的 Agent 配置 ID（可为空）
-    pub agent_id: Option<i64>,
-    /// Agent 工作的项目目录（可为空）
-    pub agent_project_path: Option<String>,
-    #[serde(default = "default_schedule_strategy")]
-    pub schedule_strategy: String,
-    #[serde(default)]
-    pub cron_expression: Option<String>,
-    #[serde(default)]
-    pub schedule_enabled: bool,
-    #[serde(default)]
-    pub last_scheduled_run: Option<String>,
-    #[serde(default = "default_post_action")]
-    pub post_action: String,
-    #[serde(default)]
-    pub workflow_enabled: bool,
-    #[serde(default = "default_workflow_step")]
-    pub workflow_current_step: i32,
     #[serde(default)]
     pub repeat_enabled: bool,
     #[serde(default)]
@@ -121,44 +82,8 @@ pub struct Todo {
     pub subtasks: Vec<SubTask>,
 }
 
-fn default_post_action() -> String {
-    "none".to_string()
-}
-
-fn default_workflow_step() -> i32 {
-    -1
-}
-
-fn default_schedule_strategy() -> String {
-    "manual".to_string()
-}
-
 fn default_repeat_interval() -> i32 {
     1
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkflowStep {
-    pub id: i64,
-    pub todo_id: i64,
-    pub step_order: i32,
-    pub step_type: String,
-    pub subtask_id: Option<i64>,
-    pub prompt_text: Option<String>,
-    pub status: String,
-    pub carry_context: bool,
-    pub created_at: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkflowStepInput {
-    pub step_type: String,
-    pub subtask_id: Option<i64>,
-    pub prompt_text: Option<String>,
-    #[serde(default)]
-    pub carry_context: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -172,30 +97,6 @@ pub struct SubTask {
     pub sort_order: i32,
     pub created_at: String,
     pub updated_at: String,
-    #[serde(default = "default_schedule_status")]
-    pub schedule_status: String,
-    #[serde(default)]
-    pub priority_score: i64,
-    #[serde(default)]
-    pub max_retries: i64,
-    #[serde(default)]
-    pub retry_count: i64,
-    #[serde(default = "default_timeout_secs")]
-    pub timeout_secs: i64,
-    #[serde(default)]
-    pub scheduled_at: Option<String>,
-    #[serde(default)]
-    pub last_scheduled_run: Option<String>,
-    #[serde(default)]
-    pub schedule_error: Option<String>,
-}
-
-fn default_schedule_status() -> String {
-    "none".to_string()
-}
-
-fn default_timeout_secs() -> i64 {
-    600
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -214,10 +115,6 @@ pub struct CreateTodoRequest {
     pub start_time: Option<String>,
     /// 截止时间（可为空）
     pub end_time: Option<String>,
-    /// 绑定的 Agent 配置 ID
-    pub agent_id: Option<i64>,
-    /// Agent 工作的项目目录
-    pub agent_project_path: Option<String>,
 }
 
 fn default_quadrant() -> i32 {
@@ -250,15 +147,6 @@ pub struct UpdateTodoRequest {
     /// 是否明确清除截止时间
     #[serde(default)]
     pub clear_end_time: bool,
-    /// 绑定的 Agent 配置 ID
-    pub agent_id: Option<i64>,
-    /// Agent 工作的项目目录
-    pub agent_project_path: Option<String>,
-    /// 是否明确清除 Agent 绑定
-    #[serde(default)]
-    pub clear_agent: bool,
-    /// 子任务完成后的工作流动作
-    pub post_action: Option<String>,
     /// 是否启用重复提醒
     pub repeat_enabled: Option<bool>,
     /// 重复类型：daily / weekly / monthly
@@ -344,6 +232,10 @@ fn default_notification_type() -> String {
     "system".to_string()
 }
 
+/// 数据导出格式。
+/// v4.0 起不再包含 agent_configs / workflow_steps / task_dependencies / prompt_templates /
+/// agent_executions 等 AI Agent 相关字段；反序列化保持向后兼容，旧 v3.0 备份中的这些字段
+/// 在解析时通过 `#[serde(default)]` 静默跳过。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportData {
@@ -351,16 +243,6 @@ pub struct ExportData {
     pub exported_at: String,
     pub todos: Vec<Todo>,
     pub settings: AppSettings,
-    #[serde(default)]
-    pub agent_configs: Vec<AgentConfig>,
-    #[serde(default)]
-    pub workflow_steps: Vec<WorkflowStep>,
-    #[serde(default)]
-    pub task_dependencies: Vec<TaskDependency>,
-    #[serde(default)]
-    pub prompt_templates: Vec<PromptTemplate>,
-    #[serde(default)]
-    pub agent_executions: Vec<AgentExecution>,
 }
 
 /// 屏幕配置记录，用于存储不同屏幕组合下的窗口状态
@@ -399,93 +281,4 @@ pub struct SaveScreenConfigRequest {
     pub window_width: i32,
     pub window_height: i32,
     pub is_fixed: bool,
-}
-
-// ========== 任务调度相关模型 ==========
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TaskDependency {
-    pub id: i64,
-    pub subtask_id: i64,
-    pub depends_on_id: i64,
-    pub dependency_type: String,
-    pub created_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PromptTemplate {
-    pub id: String,
-    pub name: String,
-    pub category: Option<String>,
-    pub description: Option<String>,
-    pub template_content: String,
-    pub variables: String,
-    pub recommended_agent: Option<String>,
-    pub is_builtin: bool,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-// ========== Agent 集成相关模型 ==========
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentConfig {
-    pub id: i64,
-    pub name: String,
-    pub agent_type: String,
-    pub cli_path: String,
-    pub enabled: bool,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateAgentRequest {
-    pub name: String,
-    pub agent_type: String,
-    pub cli_path: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UpdateAgentRequest {
-    pub name: Option<String>,
-    pub agent_type: Option<String>,
-    pub cli_path: Option<String>,
-    pub enabled: Option<bool>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentHealthStatus {
-    pub agent_id: i64,
-    pub status: String,
-    pub cli_found: bool,
-    pub detected_version: Option<String>,
-    pub version_compatible: bool,
-    pub message: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentExecution {
-    pub id: i64,
-    pub task_id: String,
-    pub subtask_id: Option<i64>,
-    pub agent_id: Option<i64>,
-    pub agent_type: String,
-    pub status: String,
-    pub logs: String,
-    pub result_text: String,
-    pub error: Option<String>,
-    pub input_tokens: i64,
-    pub output_tokens: i64,
-    pub start_time_ms: i64,
-    pub duration_ms: i64,
-    pub created_at: String,
-    pub session_id: Option<String>,
 }

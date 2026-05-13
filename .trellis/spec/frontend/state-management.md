@@ -8,7 +8,7 @@
 
 - **Solution**: Pinia (Vue 3 official state management)
 - **Pattern**: Composition API style (`defineStore` with `setup()` syntax)
-- **Stores**: `todoStore` (todos/subtasks CRUD), `appStore` (window/theme/settings), `agentStore`, `schedulerStore`
+- **Stores**: `todoStore` (todos/subtasks CRUD), `appStore` (window/theme/settings)
 
 ---
 
@@ -18,7 +18,6 @@
 |----------|-------|---------|
 | Domain data | `todoStore` | `todos`, `subtasks` |
 | App-level UI | `appStore` | `isDarkTheme`, `isFixed`, `showCalendar` |
-| Feature state | `agentStore`, `schedulerStore` | Agent configs, scheduler status |
 | Local UI state | Component `ref()` | `isModalOpen`, `isSyncing` |
 
 ---

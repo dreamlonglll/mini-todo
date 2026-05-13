@@ -1,6 +1,6 @@
 [package]
 name = "mini-todo"
-version = "1.6.4"
+version = "2.0.0"
 description = "A minimal todo desktop app with Windows pinning support"
 authors = ["you"]
 edition = "2021"
@@ -39,8 +39,6 @@ aes-gcm = "0.10"
 sha2 = "0.10"
 rand = "0.8"
 machine-uid = "0.5"
-async-trait = "0.1"
-cron = "0.15.0"
 notify = "7"
 
 [target.'cfg(windows)'.dependencies]

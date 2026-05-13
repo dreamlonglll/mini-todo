@@ -51,8 +51,8 @@ pub fn create_todo(db: State<Database>, data: CreateTodoRequest) -> Result<Todo,
             .unwrap_or(-1);
 
         conn.execute(
-            "INSERT INTO todos (title, description, color, quadrant, notify_at, notify_before, start_time, end_time, sort_order, agent_id, agent_project_path) 
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            "INSERT INTO todos (title, description, color, quadrant, notify_at, notify_before, start_time, end_time, sort_order)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             (
                 &data.title,
                 &data.description,
@@ -63,8 +63,6 @@ pub fn create_todo(db: State<Database>, data: CreateTodoRequest) -> Result<Todo,
                 &data.start_time,
                 &data.end_time,
                 max_order + 1,
-                &data.agent_id,
-                &data.agent_project_path,
             ),
         )?;
 
@@ -133,24 +131,6 @@ pub fn update_todo(db: State<Database>, id: i64, data: UpdateTodoRequest) -> Res
         } else if let Some(ref end_time) = data.end_time {
             updates.push("end_time = ?");
             params.push(Box::new(end_time.clone()));
-        }
-        // Agent 绑定
-        if data.clear_agent {
-            updates.push("agent_id = NULL");
-            updates.push("agent_project_path = NULL");
-        } else {
-            if let Some(agent_id) = data.agent_id {
-                updates.push("agent_id = ?");
-                params.push(Box::new(agent_id));
-            }
-            if let Some(ref path) = data.agent_project_path {
-                updates.push("agent_project_path = ?");
-                params.push(Box::new(path.clone()));
-            }
-        }
-        if let Some(ref post_action) = data.post_action {
-            updates.push("post_action = ?");
-            params.push(Box::new(post_action.clone()));
         }
         // 重复提醒
         if data.clear_repeat {

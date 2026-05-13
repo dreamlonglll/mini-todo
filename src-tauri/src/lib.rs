@@ -3,9 +3,6 @@ mod db;
 mod services;
 
 use db::Database;
-use services::agent::AgentManager;
-use services::scheduler::engine::TaskScheduler;
-use services::scheduler::workflow::WorkflowRuntime;
 use services::NotificationService;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -67,55 +64,6 @@ use commands::{
     webdav_download_sync,
     webdav_test_connection,
     webdav_upload_sync,
-    // Agent 命令
-    auto_detect_agents,
-    cancel_agent_execution,
-    check_agent_health,
-    check_all_agents_health,
-    create_agent,
-    delete_agent,
-    get_agent,
-    get_agent_execution_by_subtask,
-    get_agent_execution_state,
-    get_agents,
-    start_agent_execution,
-    update_agent,
-    // 调度器命令
-    add_task_dependency,
-    check_dependencies_met,
-    get_scheduler_status,
-    get_task_dependencies,
-    remove_task_dependency,
-    start_scheduler,
-    stop_scheduler,
-    submit_task_to_scheduler,
-    update_subtask_max_retries,
-    update_subtask_priority,
-    update_subtask_schedule_status,
-    update_subtask_timeout,
-    update_todo_schedule_config,
-    validate_cron_expression,
-    get_next_cron_execution,
-    get_scheduled_todos,
-    // 审核命令
-    approve_review,
-    reject_review,
-    // 工作流命令
-    get_workflow_steps,
-    set_workflow_steps,
-    start_workflow,
-    stop_workflow,
-    continue_workflow,
-    reset_workflow,
-    get_workflow_executions,
-    // Prompt 模板命令
-    create_prompt_template,
-    delete_prompt_template,
-    get_prompt_template,
-    get_prompt_templates,
-    get_prompt_templates_by_category,
-    render_prompt_template,
-    update_prompt_template,
 };
 
 #[cfg(target_os = "windows")]
@@ -156,9 +104,6 @@ fn setup_macos_transparent_webview(window: &tauri::WebviewWindow) {
 pub fn run() {
     // 初始化数据库
     let database = Database::new().expect("Failed to initialize database");
-    let agent_manager = AgentManager::new();
-    let task_scheduler = std::sync::Arc::new(TaskScheduler::new());
-    let workflow_runtime = WorkflowRuntime::default();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -170,9 +115,6 @@ pub fn run() {
             Some(vec!["--autostart"]),
         ))
         .manage(database)
-        .manage(agent_manager)
-        .manage(task_scheduler.clone())
-        .manage(workflow_runtime)
         .setup(|app| {
             #[cfg(target_os = "windows")]
             {
@@ -321,10 +263,6 @@ pub fn run() {
             // 启动通知调度器
             NotificationService::start_scheduler(app.handle().clone());
 
-            // 启动任务调度引擎
-            let scheduler = app.state::<std::sync::Arc<TaskScheduler>>().inner().clone();
-            scheduler.start(app.handle().clone());
-
             // 启动固定模式监听器（定时检测窗口最小化状态）
             let handle = app.handle().clone();
             std::thread::spawn(move || {
@@ -410,55 +348,6 @@ pub fn run() {
             webdav_download_sync,
             webdav_apply_remote,
             webdav_auto_sync,
-            // Agent 命令
-            get_agents,
-            get_agent,
-            create_agent,
-            update_agent,
-            delete_agent,
-            check_agent_health,
-            check_all_agents_health,
-            auto_detect_agents,
-            start_agent_execution,
-            get_agent_execution_state,
-            get_agent_execution_by_subtask,
-            cancel_agent_execution,
-            // 调度器命令
-            update_subtask_schedule_status,
-            update_subtask_priority,
-            update_subtask_timeout,
-            update_subtask_max_retries,
-            add_task_dependency,
-            remove_task_dependency,
-            get_task_dependencies,
-            check_dependencies_met,
-            update_todo_schedule_config,
-            start_scheduler,
-            stop_scheduler,
-            get_scheduler_status,
-            submit_task_to_scheduler,
-            validate_cron_expression,
-            get_next_cron_execution,
-            get_scheduled_todos,
-            // 审核命令
-            approve_review,
-            reject_review,
-            // 工作流命令
-            get_workflow_steps,
-            set_workflow_steps,
-            start_workflow,
-            stop_workflow,
-            continue_workflow,
-            reset_workflow,
-            get_workflow_executions,
-            // Prompt 模板命令
-            get_prompt_templates,
-            get_prompt_template,
-            get_prompt_templates_by_category,
-            create_prompt_template,
-            update_prompt_template,
-            delete_prompt_template,
-            render_prompt_template,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

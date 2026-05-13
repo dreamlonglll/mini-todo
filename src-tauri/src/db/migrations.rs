@@ -128,6 +128,61 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute("INSERT INTO migrations (version) VALUES (22)", [])?;
     }
 
+    if current_version < 23 {
+        migration_v23(conn)?;
+        conn.execute("INSERT INTO migrations (version) VALUES (23)", [])?;
+    }
+
+    Ok(())
+}
+
+/// 迁移 v23：移除所有 AI Agent / 任务调度 / 工作流相关表和字段。
+///
+/// 删除的表：agent_configs / agent_executions / workflow_steps / task_dependencies / prompt_templates。
+/// 从 todos 表移除：agent_id / agent_project_path / schedule_strategy / cron_expression /
+///   schedule_enabled / last_scheduled_run / post_action / workflow_enabled / workflow_current_step。
+/// 从 subtasks 表移除：schedule_status / priority_score / max_retries / retry_count /
+///   timeout_secs / scheduled_at / last_scheduled_run / schedule_error。
+///
+/// 重复提醒字段（repeat_enabled / repeat_type / repeat_interval / repeat_weekdays /
+/// repeat_month_day）保留，由 v22 引入。
+fn migration_v23(conn: &Connection) -> Result<()> {
+    // 删除 AI Agent 相关表
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS agent_executions;
+         DROP TABLE IF EXISTS workflow_steps;
+         DROP TABLE IF EXISTS task_dependencies;
+         DROP TABLE IF EXISTS prompt_templates;
+         DROP TABLE IF EXISTS agent_configs;",
+    )?;
+
+    // 移除 todos 表的 Agent / 调度 / 工作流字段
+    // SQLite 3.35+ 支持 ALTER TABLE DROP COLUMN（rusqlite 0.32 bundled SQLite >= 3.40 满足）
+    conn.execute_batch(
+        "ALTER TABLE todos DROP COLUMN agent_id;
+         ALTER TABLE todos DROP COLUMN agent_project_path;
+         ALTER TABLE todos DROP COLUMN schedule_strategy;
+         ALTER TABLE todos DROP COLUMN cron_expression;
+         ALTER TABLE todos DROP COLUMN schedule_enabled;
+         ALTER TABLE todos DROP COLUMN last_scheduled_run;
+         ALTER TABLE todos DROP COLUMN post_action;
+         ALTER TABLE todos DROP COLUMN workflow_enabled;
+         ALTER TABLE todos DROP COLUMN workflow_current_step;",
+    )?;
+
+    // 移除 subtasks 表的调度字段
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_subtasks_schedule_status;
+         ALTER TABLE subtasks DROP COLUMN schedule_status;
+         ALTER TABLE subtasks DROP COLUMN priority_score;
+         ALTER TABLE subtasks DROP COLUMN max_retries;
+         ALTER TABLE subtasks DROP COLUMN retry_count;
+         ALTER TABLE subtasks DROP COLUMN timeout_secs;
+         ALTER TABLE subtasks DROP COLUMN scheduled_at;
+         ALTER TABLE subtasks DROP COLUMN last_scheduled_run;
+         ALTER TABLE subtasks DROP COLUMN schedule_error;",
+    )?;
+
     Ok(())
 }
 

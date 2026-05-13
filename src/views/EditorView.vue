@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
+import { ref, onMounted, computed, watch, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -9,14 +9,6 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import type { Todo, CreateTodoRequest, UpdateTodoRequest, CreateSubTaskRequest, QuadrantType } from '@/types'
 import { DEFAULT_COLOR, PRESET_COLORS, QUADRANT_INFO, DEFAULT_QUADRANT } from '@/types'
-import { useAgentStore } from '@/stores/agentStore'
-import { useSchedulerStore } from '@/stores/schedulerStore'
-import { AGENT_TYPE_INFO } from '@/types/agent'
-import { SCHEDULE_STATUS_MAP } from '@/types/scheduler'
-import type { ScheduleStrategy } from '@/types/scheduler'
-import CronEditor from '@/components/CronEditor.vue'
-import { listen } from '@tauri-apps/api/event'
-import { openLogWindow } from '@/utils/logWindow'
 
 const route = useRoute()
 const todoId = computed(() => route.query.id ? parseInt(route.query.id as string) : null)
@@ -218,30 +210,11 @@ function handleQuadrantSelect(quadrantId: QuadrantType) {
   }
 }
 
-let unlistenScheduleStatus: (() => void) | null = null
-
 // 初始化
 onMounted(async () => {
   if (todoId.value) {
     await loadTodo()
   }
-  agentStore.loadAgents()
-
-  const unlisten = await listen<{ subtask_id: number; status: string }>(
-    'schedule:status-changed',
-    (event) => {
-      if (!todo.value?.subtasks) return
-      const st = todo.value.subtasks.find((s: any) => s.id === event.payload.subtask_id)
-      if (st) {
-        (st as any).scheduleStatus = event.payload.status
-      }
-    }
-  )
-  unlistenScheduleStatus = unlisten
-})
-
-onUnmounted(() => {
-  unlistenScheduleStatus?.()
 })
 
 // 加载待办数据
@@ -293,19 +266,6 @@ async function loadTodo() {
         ? todo.value.repeatWeekdays.split(',').map(Number).filter(n => n >= 1 && n <= 7)
         : []
       repeatMonthDay.value = todo.value.repeatMonthDay || 1
-
-      // 恢复 Agent 配置
-      agentForm.value = {
-        agentId: todo.value.agentId ?? null,
-        projectPath: todo.value.agentProjectPath ?? '',
-        postAction: todo.value.postAction ?? 'none',
-      }
-
-      // 恢复调度配置
-      initScheduleForm()
-
-      // 加载工作流
-      await loadWorkflowProgress()
     }
   } catch (e) {
     console.error('Failed to load todo:', e)
@@ -338,8 +298,6 @@ async function handleSave() {
       const shouldClearStartTime = originalStartTime.value !== null && !form.value.startTime
       const shouldClearEndTime = originalEndTime.value !== null && !form.value.endTime
       
-      const shouldClearAgent = (todo.value?.agentId !== null) && !agentForm.value.agentId
-
       const wasRepeatEnabled = !!todo.value?.repeatEnabled
       const shouldClearRepeat = wasRepeatEnabled && !repeatEnabled.value
 
@@ -355,10 +313,6 @@ async function handleSave() {
         endTime: form.value.endTime || undefined,
         clearStartTime: shouldClearStartTime,
         clearEndTime: shouldClearEndTime,
-        agentId: agentForm.value.agentId || undefined,
-        agentProjectPath: agentForm.value.projectPath || undefined,
-        clearAgent: shouldClearAgent,
-        postAction: agentForm.value.postAction !== 'none' ? agentForm.value.postAction as import('@/types').PostActionType : undefined,
         clearRepeat: shouldClearRepeat,
         repeatEnabled: repeatEnabled.value || undefined,
         repeatType: repeatEnabled.value ? repeatType.value : undefined,
@@ -380,8 +334,6 @@ async function handleSave() {
         notifyBefore: form.value.notifyBefore,
         startTime: form.value.startTime || undefined,
         endTime: form.value.endTime || undefined,
-        agentId: agentForm.value.agentId || undefined,
-        agentProjectPath: agentForm.value.projectPath || undefined,
       }
       const newTodo = await invoke<Todo>('create_todo', { data })
       
@@ -649,10 +601,8 @@ function handleInlineEditKeydown(e: KeyboardEvent, subtaskId: number) {
 async function openSubtaskWindow(subtaskId: number, mode: 'edit' | 'view') {
   if (isSubtaskEditorOpen.value) return
 
-  const agentId = agentForm.value.agentId ?? todo.value?.agentId ?? ''
-  const agentPath = encodeURIComponent(agentForm.value.projectPath || todo.value?.agentProjectPath || '')
   const modeParam = mode === 'view' ? '&mode=view' : ''
-  const url = `#/subtask-editor?id=${subtaskId}&agentId=${agentId}&agentProjectPath=${agentPath}${modeParam}`
+  const url = `#/subtask-editor?id=${subtaskId}${modeParam}`
   const label = `subtask-${mode}-${Date.now()}`
   const isEditMode = mode === 'edit'
 
@@ -705,234 +655,6 @@ async function openSubtaskWindow(subtaskId: number, mode: 'edit' | 'view') {
     isSubtaskEditorOpen.value = false
     console.error(`Failed to open subtask ${mode}:`, e)
   }
-}
-
-// ========== Agent 配置 ==========
-const agentStore = useAgentStore()
-const agentConfigVisible = ref(false)
-
-const agentForm = ref({
-  agentId: null as number | null,
-  projectPath: '',
-  postAction: 'none' as string,
-})
-
-const agentDialogForm = ref({
-  agentId: null as number | null,
-  projectPath: '',
-  postAction: 'none' as string,
-})
-
-function openAgentConfig() {
-  if (agentStore.enabledAgents.length === 0) {
-    ElMessage.warning('请先在设置中配置并启用 Agent')
-    return
-  }
-
-  agentDialogForm.value = {
-    agentId: todo.value?.agentId ?? agentStore.enabledAgents[0]?.id ?? null,
-    projectPath: todo.value?.agentProjectPath ?? '',
-    postAction: todo.value?.postAction ?? 'none',
-  }
-  agentConfigVisible.value = true
-}
-
-async function saveAgentConfig() {
-  if (!agentDialogForm.value.agentId) {
-    ElMessage.warning('请选择 Agent')
-    return
-  }
-  if (!agentDialogForm.value.projectPath.trim()) {
-    ElMessage.warning('请填写项目路径')
-    return
-  }
-
-  agentForm.value = { ...agentDialogForm.value }
-  agentConfigVisible.value = false
-
-  if (isEdit.value && todoId.value) {
-    try {
-      const shouldClearAgent = (todo.value?.agentId !== null) && !agentForm.value.agentId
-      const data: UpdateTodoRequest = {
-        agentId: agentForm.value.agentId || undefined,
-        agentProjectPath: agentForm.value.projectPath || undefined,
-        clearAgent: shouldClearAgent,
-        postAction: agentForm.value.postAction !== 'none' ? agentForm.value.postAction as import('@/types').PostActionType : undefined,
-      }
-      await invoke('update_todo', { id: todoId.value, data })
-      await saveScheduleConfig(true)
-      ElMessage.success('Agent 与调度配置已保存')
-    } catch (e) {
-      ElMessage.error('保存 Agent 配置失败: ' + String(e))
-    }
-  }
-}
-
-async function clearAgentConfig() {
-  agentForm.value = { agentId: null, projectPath: '', postAction: 'none' }
-  agentConfigVisible.value = false
-
-  if (isEdit.value && todoId.value) {
-    try {
-      const data: UpdateTodoRequest = {
-        clearAgent: true,
-      }
-      await invoke('update_todo', { id: todoId.value, data })
-      ElMessage.success('已清除 Agent 配置')
-    } catch (e) {
-      ElMessage.error('清除 Agent 配置失败: ' + String(e))
-    }
-  } else {
-    ElMessage.info('已清除 Agent 配置')
-  }
-}
-
-const currentAgentLabel = computed(() => {
-  const id = agentForm.value.agentId ?? todo.value?.agentId
-  if (!id) return ''
-  const agent = agentStore.agents.find(a => a.id === id)
-  if (!agent) return ''
-  const typeInfo = AGENT_TYPE_INFO[agent.agentType]
-  return typeInfo?.label || agent.agentType
-})
-
-const hasAgentConfig = computed(() => {
-  return !!(agentForm.value.agentId || todo.value?.agentId)
-})
-
-const isWorkflowWindowOpen = ref(false)
-
-const hasWorkflowSteps = computed(() => workflowSteps.value.length > 0)
-
-async function openWorkflowWindow() {
-  if (!isEdit.value || !todoId.value) {
-    ElMessage.info('请先保存待办后再配置工作流')
-    return
-  }
-  if (isWorkflowWindowOpen.value) return
-
-  const url = `#/workflow?todoId=${todoId.value}`
-  const label = `workflow-${Date.now()}`
-
-  try {
-    isWorkflowWindowOpen.value = true
-
-    const windowWidth = 800
-    const windowHeight = 650
-    let x: number, y: number
-
-    const monitor = await currentMonitor() || await primaryMonitor()
-    if (monitor) {
-      const s = monitor.scaleFactor
-      const mx = monitor.position.x / s
-      const my = monitor.position.y / s
-      const mw = monitor.size.width / s
-      const mh = monitor.size.height / s
-      x = Math.round(mx + (mw - windowWidth) / 2)
-      y = Math.round(my + (mh - windowHeight) / 2)
-    } else {
-      const s = await appWindow.scaleFactor()
-      const pos = await appWindow.outerPosition()
-      const size = await appWindow.outerSize()
-      x = Math.round(pos.x / s + (size.width / s - windowWidth) / 2)
-      y = Math.round(pos.y / s + (size.height / s - windowHeight) / 2)
-    }
-
-    const webview = new WebviewWindow(label, {
-      url,
-      title: '工作流配置',
-      width: windowWidth,
-      height: windowHeight,
-      x,
-      y,
-      resizable: true,
-      decorations: false,
-      transparent: false,
-      parent: appWindow,
-    })
-
-    webview.once('tauri://destroyed', async () => {
-      isWorkflowWindowOpen.value = false
-      await loadWorkflowProgress()
-    })
-
-    webview.once('tauri://error', () => {
-      isWorkflowWindowOpen.value = false
-    })
-  } catch (e) {
-    isWorkflowWindowOpen.value = false
-    console.error('Failed to open workflow window:', e)
-  }
-}
-
-// ========== 工作流 ==========
-const workflowSteps = ref<Array<{ stepType: string; subtaskId?: number; promptText?: string }>>([])
-const workflowProgress = ref<import('@/types/workflow').WorkflowStep[]>([])
-
-async function loadWorkflowProgress() {
-  if (!todo.value?.id) return
-  try {
-    workflowProgress.value = await invoke<import('@/types/workflow').WorkflowStep[]>(
-      'get_workflow_steps', { todoId: todo.value.id }
-    )
-    workflowSteps.value = workflowProgress.value.map(s => ({
-      stepType: s.stepType,
-      subtaskId: s.subtaskId,
-      promptText: s.promptText,
-    }))
-  } catch { /* ignore */ }
-}
-
-// ========== 调度配置 ==========
-const schedulerStore = useSchedulerStore()
-
-const scheduleForm = ref({
-  strategy: 'manual' as ScheduleStrategy,
-  cronExpression: '',
-  enabled: false,
-})
-
-function initScheduleForm() {
-  if (todo.value) {
-    scheduleForm.value = {
-      strategy: (todo.value.scheduleStrategy as ScheduleStrategy) || 'manual',
-      cronExpression: todo.value.cronExpression || '',
-      enabled: !!todo.value.scheduleEnabled,
-    }
-  }
-}
-
-async function saveScheduleConfig(silent = false) {
-  if (!todoId.value) return
-  try {
-    await schedulerStore.updateTodoScheduleConfig(
-      todoId.value,
-      scheduleForm.value.strategy,
-      scheduleForm.value.strategy === 'cron' ? scheduleForm.value.cronExpression : undefined,
-      scheduleForm.value.enabled,
-    )
-    if (!silent) {
-      ElMessage.success('调度配置已保存')
-    }
-  } catch (e) {
-    ElMessage.error('保存调度配置失败: ' + String(e))
-  }
-}
-
-function getScheduleStatusInfo(status: string) {
-  return SCHEDULE_STATUS_MAP[status as keyof typeof SCHEDULE_STATUS_MAP] || SCHEDULE_STATUS_MAP.none
-}
-
-function canViewLog(subtask: Record<string, any>): boolean {
-  const status = subtask.scheduleStatus
-  return !!status && !['none', 'pending', 'queued'].includes(status)
-}
-
-function viewSubtaskLog(subtask: { id: number; title: string }) {
-  openLogWindow({
-    subtaskId: subtask.id,
-    title: `${subtask.title} - 执行日志`,
-  })
 }
 
 // 关闭窗口
@@ -1195,26 +917,6 @@ function onHeaderMouseDown(e: MouseEvent) {
       </div>
 
       <div class="window-footer">
-        <div class="footer-left">
-          <el-button
-            :type="hasAgentConfig ? 'primary' : 'info'"
-            plain
-            size="small"
-            @click="openAgentConfig"
-          >
-            <el-icon><MagicStick /></el-icon>
-            {{ hasAgentConfig ? currentAgentLabel : 'Agent' }}
-          </el-button>
-          <el-button
-            :type="hasWorkflowSteps ? 'primary' : 'info'"
-            plain
-            size="small"
-            @click="openWorkflowWindow"
-          >
-            <el-icon><SetUp /></el-icon>
-            {{ hasWorkflowSteps ? `工作流 (${workflowSteps.length})` : '工作流' }}
-          </el-button>
-        </div>
         <div class="footer-right">
           <el-button
             v-if="isEdit && todo && !todo.completed"
@@ -1338,15 +1040,6 @@ function onHeaderMouseDown(e: MouseEvent) {
                 >
                   {{ subtask.title }}
                 </span>
-                <el-tag
-                  v-if="'scheduleStatus' in subtask && subtask.scheduleStatus && subtask.scheduleStatus !== 'none'"
-                  :type="getScheduleStatusInfo(subtask.scheduleStatus as string).type as any"
-                  size="small"
-                  effect="light"
-                  class="schedule-tag"
-                >
-                  {{ getScheduleStatusInfo(subtask.scheduleStatus as string).label }}
-                </el-tag>
                 <el-icon
                   v-if="subtask.content"
                   class="content-indicator"
@@ -1356,14 +1049,6 @@ function onHeaderMouseDown(e: MouseEvent) {
                   <Document />
                 </el-icon>
                 <div v-if="inlineEditingSubtaskId !== subtask.id" class="subtask-actions">
-                  <button
-                    v-if="canViewLog(subtask)"
-                    class="action-btn log-btn"
-                    @click.stop="viewSubtaskLog(subtask)"
-                    title="查看执行日志"
-                  >
-                    <el-icon><Tickets /></el-icon>
-                  </button>
                   <button
                     class="action-btn view-btn"
                     @click="openSubtaskWindow(subtask.id, 'view')"
@@ -1401,83 +1086,6 @@ function onHeaderMouseDown(e: MouseEvent) {
 
     <!-- 模态遮罩：子任务编辑窗口打开时阻止操作 -->
     <div v-if="isSubtaskEditorOpen" class="modal-overlay"></div>
-
-    <!-- Agent 配置对话框 -->
-    <el-dialog
-      v-model="agentConfigVisible"
-      title="Agent 配置"
-      width="460px"
-      append-to-body
-      class="agent-config-dialog"
-      top="10vh"
-    >
-      <div style="max-height: calc(80vh - 160px); overflow-y: auto; padding-right: 4px;">
-      <el-form label-position="top" size="default">
-        <el-form-item label="选择 Agent" required>
-          <el-select
-            v-model="agentDialogForm.agentId"
-            style="width: 100%"
-            placeholder="选择要绑定的 Agent"
-            clearable
-          >
-            <el-option
-              v-for="agent in agentStore.enabledAgents"
-              :key="agent.id"
-              :label="AGENT_TYPE_INFO[agent.agentType]?.label || agent.agentType"
-              :value="agent.id"
-            />
-          </el-select>
-        </el-form-item>
-
-        <el-form-item label="项目路径">
-          <el-input
-            v-model="agentDialogForm.projectPath"
-            placeholder="Agent 工作的项目目录，如 D:\Git\my-project"
-            clearable
-          />
-          <div class="form-tip">子任务执行 Agent 时使用此目录</div>
-        </el-form-item>
-
-        <el-divider v-if="isEdit" />
-
-        <template v-if="isEdit">
-          <el-form-item label="调度策略">
-            <el-select
-              v-model="scheduleForm.strategy"
-              style="width: 100%"
-              placeholder="选择调度策略"
-            >
-              <el-option label="手动执行" value="manual" />
-              <el-option label="定时执行 (Cron)" value="cron" />
-            </el-select>
-          </el-form-item>
-
-          <el-form-item v-if="scheduleForm.strategy === 'cron'" label="Cron 表达式">
-            <CronEditor v-model="scheduleForm.cronExpression" />
-          </el-form-item>
-
-          <el-form-item label="启用调度">
-            <el-switch v-model="scheduleForm.enabled" />
-            <span class="form-tip" style="margin-left: 8px">
-              {{ scheduleForm.enabled ? '调度已启用' : '调度已暂停' }}
-            </span>
-          </el-form-item>
-
-        </template>
-      </el-form>
-      </div>
-
-      <template #footer>
-        <el-button type="danger" plain @click="clearAgentConfig">
-          清除配置
-        </el-button>
-        <el-button @click="agentConfigVisible = false">取消</el-button>
-        <el-button type="primary" @click="saveAgentConfig">
-          确定
-        </el-button>
-      </template>
-    </el-dialog>
-
   </div>
 </template>
 
@@ -1531,12 +1139,6 @@ function onHeaderMouseDown(e: MouseEvent) {
   border-top: 1px solid var(--border);
   gap: 12px;
   flex-wrap: wrap;
-}
-
-.footer-left {
-  display: flex;
-  gap: 6px;
-  flex-shrink: 0;
 }
 
 .footer-right {
@@ -1899,14 +1501,6 @@ function onHeaderMouseDown(e: MouseEvent) {
     font-family: inherit;
   }
 
-  .schedule-tag {
-    flex-shrink: 0;
-    font-size: 10px;
-    padding: 0 4px;
-    height: 18px;
-    line-height: 18px;
-  }
-
   .content-indicator {
     color: #3b82f6;
     flex-shrink: 0;
@@ -2077,10 +1671,4 @@ function onHeaderMouseDown(e: MouseEvent) {
   line-height: 1.4;
 }
 
-</style>
-
-<style>
-.agent-config-dialog .el-dialog__body {
-  padding-top: 12px;
-}
 </style>

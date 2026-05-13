@@ -10,8 +10,6 @@ import { enable, disable, isEnabled } from '@tauri-apps/plugin-autostart'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAppStore, APP_VERSION } from '@/stores'
 import type { ScreenConfig, SyncSettings, SyncDownloadResult } from '@/types'
-import AgentSettings from '@/components/AgentSettings.vue'
-import SchedulerPanel from '@/components/SchedulerPanel.vue'
 
 const appWindow = getCurrentWindow()
 const appStore = useAppStore()
@@ -23,7 +21,6 @@ const menuItems = [
   { key: 'general', label: '常规', icon: 'Setting' },
   { key: 'appearance', label: '外观', icon: 'Brush' },
   { key: 'data', label: '数据与同步', icon: 'Folder' },
-  { key: 'agent', label: 'Agent 与调度', icon: 'MagicStick' },
   { key: 'screen', label: '屏幕配置', icon: 'Monitor' },
   { key: 'about', label: '关于', icon: 'InfoFilled' },
 ]
@@ -186,8 +183,6 @@ async function handleNotificationTypeChange(value: 'system' | 'app') {
   }
 }
 
-const includeExecutions = ref(false)
-
 async function handleExport() {
   try {
     exporting.value = true
@@ -202,10 +197,7 @@ async function handleExport() {
     })
 
     if (filePath) {
-      await invoke('export_data_to_file', {
-        filePath,
-        includeExecutions: includeExecutions.value
-      })
+      await invoke('export_data_to_file', { filePath })
       ElMessage.success('导出成功')
     }
   } catch (e) {
@@ -628,12 +620,6 @@ async function handleCheckUpdate() {
             </button>
           </div>
 
-          <div class="export-options">
-            <el-checkbox v-model="includeExecutions" size="small">
-              包含 Agent 执行日志
-            </el-checkbox>
-          </div>
-
           <p class="card-hint">
             <el-icon :size="14"><InfoFilled /></el-icon>
             导出为 ZIP 压缩包，可用于备份或迁移到其他设备
@@ -761,17 +747,6 @@ async function handleCheckUpdate() {
             <el-icon :size="14"><InfoFilled /></el-icon>
             通过 WebDAV 协议将待办数据和图片同步到云端存储
           </p>
-        </div>
-
-        <!-- Agent 与调度 -->
-        <div v-show="activeMenu === 'agent'" class="panel">
-          <h3 class="panel-title">Agent 管理</h3>
-          <AgentSettings />
-
-          <div class="section-divider"></div>
-
-          <h3 class="panel-title">任务调度</h3>
-          <SchedulerPanel />
         </div>
 
         <!-- 屏幕配置 -->
@@ -1061,11 +1036,6 @@ async function handleCheckUpdate() {
   display: flex;
   gap: 12px;
   margin-bottom: 12px;
-}
-
-.export-options {
-  margin-bottom: 12px;
-  padding-left: 2px;
 }
 
 .data-btn {

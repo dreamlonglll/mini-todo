@@ -1,0 +1,8 @@
+{"file": ".trellis/spec/frontend/index.md", "reason": "前端规范总入口，编辑 Vue/TS 时需查阅"}
+{"file": ".trellis/spec/frontend/component-guidelines.md", "reason": "EditorView/SubtaskEditorView/MainView/TodoItem 原地删段时遵循组件规范"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "删除 agentStore/schedulerStore 时遵循 Pinia 状态管理规范"}
+{"file": ".trellis/spec/frontend/type-safety.md", "reason": "Todo/SubTask 类型字段裁剪时遵循类型安全规范"}
+{"file": ".trellis/spec/frontend/directory-structure.md", "reason": "整体文件删除前确认目录结构约束"}
+{"file": ".trellis/spec/frontend/hook-guidelines.md", "reason": "EditorView 内 watch/onMounted 调整时参考钩子规范"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "顺手清理 unused 时避免过度抽象/破坏复用"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "migration v23 + 后端 commands + 前端 stores 跨层一致性参考"}

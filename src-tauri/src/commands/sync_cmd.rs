@@ -100,6 +100,11 @@ pub fn webdav_test_connection(url: String, username: String, password: String) -
     client.test_connection()
 }
 
+/// WebDAV 同步数据格式。
+///
+/// v2.0 起不再包含 AI Agent 相关数据。反序列化对历史远端 v3.0 数据仍兼容
+/// （多余字段被 serde 忽略），因此可以从已升级到 v2.0 的另一端拉到旧数据
+/// 并平滑过渡。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncData {
@@ -109,16 +114,6 @@ pub struct SyncData {
     pub todos: Vec<serde_json::Value>,
     pub settings: serde_json::Value,
     pub images: Vec<String>,
-    #[serde(default)]
-    pub agent_configs: Vec<serde_json::Value>,
-    #[serde(default)]
-    pub workflow_steps: Vec<serde_json::Value>,
-    #[serde(default)]
-    pub task_dependencies: Vec<serde_json::Value>,
-    #[serde(default)]
-    pub prompt_templates: Vec<serde_json::Value>,
-    #[serde(default)]
-    pub agent_executions: Vec<serde_json::Value>,
 }
 
 #[tauri::command]
@@ -138,7 +133,7 @@ pub fn webdav_upload_sync(db: State<Database>) -> Result<String, String> {
     client.ensure_dir(REMOTE_DIR)?;
     client.ensure_dir(REMOTE_IMAGES_DIR)?;
 
-    let export_json = export_data_internal(&*db, true)?;
+    let export_json = export_data_internal(&*db)?;
 
     // Collect image list
     let images_dir = get_images_dir();
@@ -159,7 +154,7 @@ pub fn webdav_upload_sync(db: State<Database>) -> Result<String, String> {
 
     let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%:z").to_string();
     let sync_data = SyncData {
-        version: export_data.get("version").and_then(|v| v.as_str()).unwrap_or("3.0").to_string(),
+        version: export_data.get("version").and_then(|v| v.as_str()).unwrap_or("4.0").to_string(),
         device_id: sync_settings.device_id.clone(),
         updated_at: now.clone(),
         todos: export_data
@@ -172,31 +167,6 @@ pub fn webdav_upload_sync(db: State<Database>) -> Result<String, String> {
             .cloned()
             .unwrap_or(serde_json::Value::Null),
         images: image_files.clone(),
-        agent_configs: export_data
-            .get("agentConfigs")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default(),
-        workflow_steps: export_data
-            .get("workflowSteps")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default(),
-        task_dependencies: export_data
-            .get("taskDependencies")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default(),
-        prompt_templates: export_data
-            .get("promptTemplates")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default(),
-        agent_executions: export_data
-            .get("agentExecutions")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default(),
     };
 
     let sync_json = serde_json::to_string(&sync_data).map_err(|e| e.to_string())?;
@@ -291,11 +261,6 @@ pub fn webdav_apply_remote(db: State<Database>, sync_data_json: String) -> Resul
         "exportedAt": sync_data.updated_at,
         "todos": sync_data.todos,
         "settings": sync_data.settings,
-        "agentConfigs": sync_data.agent_configs,
-        "workflowSteps": sync_data.workflow_steps,
-        "taskDependencies": sync_data.task_dependencies,
-        "promptTemplates": sync_data.prompt_templates,
-        "agentExecutions": sync_data.agent_executions,
     });
 
     let import_str = serde_json::to_string(&import_json).map_err(|e| e.to_string())?;
@@ -358,11 +323,6 @@ pub fn webdav_auto_sync(db: State<Database>) -> Result<String, String> {
                         "exportedAt": remote_data.updated_at,
                         "todos": remote_data.todos,
                         "settings": remote_data.settings,
-                        "agentConfigs": remote_data.agent_configs,
-                        "workflowSteps": remote_data.workflow_steps,
-                        "taskDependencies": remote_data.task_dependencies,
-                        "promptTemplates": remote_data.prompt_templates,
-                        "agentExecutions": remote_data.agent_executions,
                     });
                     let import_str = serde_json::to_string(&import_json).map_err(|e| e.to_string())?;
                     import_data_raw(&*db, &import_str)?;
@@ -446,21 +406,7 @@ fn check_local_changes(db: &State<Database>, settings: &SyncSettings) -> Result<
                 |row| row.get(0),
             )
             .unwrap_or(0);
-        let agent_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM agent_configs WHERE updated_at > ?1",
-                [last_sync],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-        let template_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM prompt_templates WHERE updated_at > ?1 AND is_builtin = 0",
-                [last_sync],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-        Ok(todo_count > 0 || subtask_count > 0 || agent_count > 0 || template_count > 0)
+        Ok(todo_count > 0 || subtask_count > 0)
     })
     .map_err(|e| e.to_string())
 }

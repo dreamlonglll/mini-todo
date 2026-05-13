@@ -27,16 +27,6 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/views/SubtaskEditorView.vue')
   },
   {
-    path: '/workflow',
-    name: 'workflow',
-    component: () => import('@/views/WorkflowView.vue')
-  },
-  {
-    path: '/agent-log',
-    name: 'agent-log',
-    component: () => import('@/views/AgentLogView.vue')
-  },
-  {
     path: '/completed',
     name: 'completed',
     component: () => import('@/views/CompletedView.vue')

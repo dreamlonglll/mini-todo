@@ -47,14 +47,6 @@ export interface SubTask {
   sortOrder: number
   createdAt: string
   updatedAt: string
-  scheduleStatus?: string
-  priorityScore?: number
-  maxRetries?: number
-  retryCount?: number
-  timeoutSecs?: number
-  scheduledAt?: string | null
-  lastScheduledRun?: string | null
-  scheduleError?: string | null
 }
 
 // 待办事项接口
@@ -77,24 +69,6 @@ export interface Todo {
   endTime: string | null
   createdAt: string
   updatedAt: string
-  /** 绑定的 Agent 配置 ID（可为空） */
-  agentId: number | null
-  /** Agent 工作的项目目录（可为空） */
-  agentProjectPath: string | null
-  /** 调度策略 */
-  scheduleStrategy?: string
-  /** Cron 表达式 */
-  cronExpression?: string | null
-  /** 是否启用调度 */
-  scheduleEnabled?: boolean
-  /** 上次调度执行时间 */
-  lastScheduledRun?: string | null
-  /** 子任务完成后的工作流动作（已废弃） */
-  postAction?: PostActionType
-  /** 是否启用工作流 */
-  workflowEnabled?: boolean
-  /** 工作流当前步骤 */
-  workflowCurrentStep?: number
   /** 是否启用重复提醒 */
   repeatEnabled?: boolean
   /** 重复类型：daily / weekly / monthly */
@@ -107,8 +81,6 @@ export interface Todo {
   repeatMonthDay?: number | null
   subtasks: SubTask[]
 }
-
-export type PostActionType = 'none' | 'git_commit' | 'review' | 'git_commit_and_review'
 
 // 创建待办请求
 export interface CreateTodoRequest {
@@ -124,10 +96,6 @@ export interface CreateTodoRequest {
   startTime?: string
   /** 截止时间 */
   endTime?: string
-  /** 绑定的 Agent 配置 ID */
-  agentId?: number
-  /** Agent 工作的项目目录 */
-  agentProjectPath?: string
 }
 
 // 更新待办请求
@@ -152,14 +120,6 @@ export interface UpdateTodoRequest {
   clearStartTime?: boolean
   /** 是否明确清除截止时间 */
   clearEndTime?: boolean
-  /** 绑定的 Agent 配置 ID */
-  agentId?: number
-  /** Agent 工作的项目目录 */
-  agentProjectPath?: string
-  /** 是否明确清除 Agent 绑定 */
-  clearAgent?: boolean
-  /** 子任务完成后的工作流动作 */
-  postAction?: PostActionType
   /** 是否启用重复提醒 */
   repeatEnabled?: boolean
   /** 重复类型 */

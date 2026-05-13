@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "最终质量验证：lint、type-check、unused、dead code 检查标准"}
+{"file": ".trellis/spec/frontend/type-safety.md", "reason": "验证 Todo/SubTask 类型字段裁剪后类型安全"}
+{"file": ".trellis/spec/frontend/component-guidelines.md", "reason": "验证 .vue 文件删段后组件规范保持"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "验证 migration v23 + ExportData + WebDAV SyncData 的跨层一致性（CLAUDE.md 维护检查清单 1-12 项）"}
