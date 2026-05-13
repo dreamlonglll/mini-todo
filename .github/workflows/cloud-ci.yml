@@ -1,0 +1,62 @@
+name: Cloud CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'cloud/**'
+      - '.github/workflows/cloud-ci.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'cloud/**'
+      - '.github/workflows/cloud-ci.yml'
+  workflow_dispatch:
+
+jobs:
+  rust:
+    name: Rust check (cloud)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cloud
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './cloud -> target'
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Tests
+        run: cargo test --locked --no-fail-fast
+
+  skill:
+    name: Python skill syntax check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cloud/skill/minitodo
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Compile-check minitodo.py
+        run: python -m py_compile minitodo.py
