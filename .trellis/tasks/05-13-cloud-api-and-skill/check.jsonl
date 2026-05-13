@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "review 时必须用 guide 末尾 checklist 复核：data flow 是否完整画出、每个 boundary 的 format/error 是否定义、round-trip 是否验证（PC PUT → cloud GET → cloud SQLite → cloud PUT → PC GET 链路）"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "review cloud/src/sync/webdav.rs 时检查与 pc/src-tauri/src/services/webdav.rs 的重复逻辑是否合理（client struct、错误类型、header 处理），以及 PC 端 412 重试逻辑是否复用了已有 download_bytes 而非另起一套"}
+{"file": "CLAUDE.md", "reason": "review 时核对：v24 migration 是否破坏旧库、ExportData/SyncData 维护清单 11 项是否全部对齐、时间字符串格式（datetime 'now','localtime' vs FixedOffset）是否完全一致、新表/字段是否有 #[serde(default)] 兜底"}

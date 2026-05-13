@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "本任务跨 cloud / PC / WebDAV 三层，sync 数据流必须按此 guide 第 1-3 步显式画出边界与契约；guide 末尾 'Backward-compatible deserialization for export/sync DTOs' 章节直接对应 cloud 端 KV-style + 未知字段透传的关键设计"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "cloud/src/sync/webdav.rs 与 pc/src-tauri/src/services/webdav.rs 高度同构（reqwest + If-Unmodified-Since + Last-Modified），实现前必须先读 PC 现有客户端并按此 guide 决定借鉴/复制/抽离的边界，避免逻辑双份漂移"}
+{"file": "CLAUDE.md", "reason": "项目结构、Serde camelCase、SQLite localtime 时间格式、WebDAV 同步范围、ExportData/SyncData 维护检查清单 11 项 —— cloud 端 schema 与时间字符串必须与 PC 端 12 项检查清单完全一致才能保证数据双向兼容"}
