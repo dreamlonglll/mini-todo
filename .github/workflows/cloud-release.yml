@@ -1,0 +1,118 @@
+name: Cloud Release
+
+on:
+  push:
+    tags:
+      - 'cloud-v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build & release minitodo-cloud (Linux x86_64)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './cloud -> target'
+
+      - name: Build release binary
+        working-directory: cloud
+        run: cargo build --release --locked
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/cloud-v* ]]; then
+            VERSION="${GITHUB_REF_NAME#cloud-v}"
+          else
+            VERSION="$(awk -F\" '/^version/ {print $2; exit}' cloud/Cargo.toml)-dev"
+          fi
+          STAGE="minitodo-cloud-${VERSION}-linux-x86_64"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "stage=$STAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Stage release artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          STAGE="${{ steps.ver.outputs.stage }}"
+          DIST="$GITHUB_WORKSPACE/dist"
+          OUT="$DIST/$STAGE"
+          mkdir -p "$OUT"
+          cp cloud/target/release/minitodo-cloud "$OUT/"
+          cp cloud/config.example.toml cloud/README.md "$OUT/"
+          cp -r cloud/deploy "$OUT/"
+          rsync -a --exclude '__pycache__' --exclude '*.pyc' cloud/skill/ "$OUT/skill/"
+          cd "$DIST"
+          tar czf "$STAGE.tar.gz" "$STAGE"
+          sha256sum "$STAGE.tar.gz" > "$STAGE.tar.gz.sha256"
+          ls -lah "$STAGE.tar.gz"*
+
+      - name: Generate changelog
+        id: changelog
+        if: startsWith(github.ref, 'refs/tags/cloud-v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          CURRENT_TAG="$GITHUB_REF_NAME"
+          PREV_TAG=$(git tag --sort=-v:refname | grep '^cloud-v' | sed -n '2p' || true)
+          if [ -z "$PREV_TAG" ]; then
+            LOGS=$(git log "$CURRENT_TAG" --pretty=format:"- %s" --no-merges -- cloud/ .github/workflows/cloud-release.yml .github/workflows/cloud-ci.yml || true)
+          else
+            LOGS=$(git log "${PREV_TAG}..${CURRENT_TAG}" --pretty=format:"- %s" --no-merges -- cloud/ .github/workflows/cloud-release.yml .github/workflows/cloud-ci.yml || true)
+          fi
+          {
+            echo "body<<CHANGELOG_EOF"
+            echo "## cloud 更新内容"
+            echo ""
+            echo "${LOGS:-- 初始版本发布}"
+            echo ""
+            echo "## 安装"
+            echo ""
+            echo '```bash'
+            echo "tar xzf ${{ steps.ver.outputs.stage }}.tar.gz"
+            echo "cd ${{ steps.ver.outputs.stage }}"
+            echo "cp config.example.toml config.toml  # 修改 webdav / api_key / timezone"
+            echo "sudo cp deploy/minitodo-cloud.service /etc/systemd/system/"
+            echo "sudo systemctl daemon-reload && sudo systemctl enable --now minitodo-cloud"
+            echo '```'
+            echo ""
+            echo "> 二进制基于 ubuntu-latest (glibc) 编译。若 VPS glibc 过旧，请使用源码自行 \`cargo build --release\`。"
+            echo ""
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        if: startsWith(github.ref, 'refs/tags/cloud-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: minitodo-cloud ${{ github.ref_name }}
+          body: ${{ steps.changelog.outputs.body }}
+          files: |
+            dist/minitodo-cloud-*.tar.gz
+            dist/minitodo-cloud-*.tar.gz.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload artifact (non-tag runs)
+        if: ${{ !startsWith(github.ref, 'refs/tags/cloud-v') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: minitodo-cloud-linux-x86_64
+          path: |
+            dist/minitodo-cloud-*.tar.gz
+            dist/minitodo-cloud-*.tar.gz.sha256
+          retention-days: 14
