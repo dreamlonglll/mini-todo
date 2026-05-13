@@ -3,20 +3,18 @@ name: Cloud Release
 on:
   push:
     tags:
-      - 'cloud-v*'
+      - 'v*'
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build & release minitodo-cloud (Linux x86_64)
+    name: Build & attach minitodo-cloud (Linux x86_64)
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -34,13 +32,12 @@ jobs:
         id: ver
         shell: bash
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/cloud-v* ]]; then
-            VERSION="${GITHUB_REF_NAME#cloud-v}"
-          else
-            VERSION="$(awk -F\" '/^version/ {print $2; exit}' cloud/Cargo.toml)-dev"
+          CLOUD_VERSION="$(awk -F\" '/^version/ {print $2; exit}' cloud/Cargo.toml)"
+          if [[ "$GITHUB_REF" != refs/tags/v* ]]; then
+            CLOUD_VERSION="${CLOUD_VERSION}-dev"
           fi
-          STAGE="minitodo-cloud-${VERSION}-linux-x86_64"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          STAGE="minitodo-cloud-${CLOUD_VERSION}-linux-x86_64"
+          echo "version=$CLOUD_VERSION" >> "$GITHUB_OUTPUT"
           echo "stage=$STAGE" >> "$GITHUB_OUTPUT"
 
       - name: Stage release artifacts
@@ -60,47 +57,11 @@ jobs:
           sha256sum "$STAGE.tar.gz" > "$STAGE.tar.gz.sha256"
           ls -lah "$STAGE.tar.gz"*
 
-      - name: Generate changelog
-        id: changelog
-        if: startsWith(github.ref, 'refs/tags/cloud-v')
-        shell: bash
-        run: |
-          set -euo pipefail
-          CURRENT_TAG="$GITHUB_REF_NAME"
-          PREV_TAG=$(git tag --sort=-v:refname | grep '^cloud-v' | sed -n '2p' || true)
-          if [ -z "$PREV_TAG" ]; then
-            LOGS=$(git log "$CURRENT_TAG" --pretty=format:"- %s" --no-merges -- cloud/ .github/workflows/cloud-release.yml .github/workflows/cloud-ci.yml || true)
-          else
-            LOGS=$(git log "${PREV_TAG}..${CURRENT_TAG}" --pretty=format:"- %s" --no-merges -- cloud/ .github/workflows/cloud-release.yml .github/workflows/cloud-ci.yml || true)
-          fi
-          {
-            echo "body<<CHANGELOG_EOF"
-            echo "## cloud 更新内容"
-            echo ""
-            echo "${LOGS:-- 初始版本发布}"
-            echo ""
-            echo "## 安装"
-            echo ""
-            echo '```bash'
-            echo "tar xzf ${{ steps.ver.outputs.stage }}.tar.gz"
-            echo "cd ${{ steps.ver.outputs.stage }}"
-            echo "cp config.example.toml config.toml  # 修改 webdav / api_key / timezone"
-            echo "sudo cp deploy/minitodo-cloud.service /etc/systemd/system/"
-            echo "sudo systemctl daemon-reload && sudo systemctl enable --now minitodo-cloud"
-            echo '```'
-            echo ""
-            echo "> 二进制基于 ubuntu-latest (glibc) 编译。若 VPS glibc 过旧，请使用源码自行 \`cargo build --release\`。"
-            echo ""
-            echo "CHANGELOG_EOF"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Create release
-        if: startsWith(github.ref, 'refs/tags/cloud-v')
+      - name: Attach cloud assets to release
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: minitodo-cloud ${{ github.ref_name }}
-          body: ${{ steps.changelog.outputs.body }}
           files: |
             dist/minitodo-cloud-*.tar.gz
             dist/minitodo-cloud-*.tar.gz.sha256
@@ -108,7 +69,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload artifact (non-tag runs)
-        if: ${{ !startsWith(github.ref, 'refs/tags/cloud-v') }}
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         uses: actions/upload-artifact@v4
         with:
           name: minitodo-cloud-linux-x86_64
