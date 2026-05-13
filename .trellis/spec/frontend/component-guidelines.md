@@ -8,7 +8,7 @@
 
 - Vue 3 Composition API (`<script setup lang="ts">`)
 - Element Plus as UI library, icons globally registered
-- Styles in `src/styles/main.scss` (not scoped), components use empty `<style scoped>` as placeholder
+- Styles in `pc/src/styles/main.scss` (not scoped), components use empty `<style scoped>` as placeholder
 - Props typed via `defineProps<T>()`, emits via `defineEmits<T>()`
 
 ---

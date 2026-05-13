@@ -104,9 +104,12 @@ sudo xattr -rd com.apple.quarantine /Applications/Mini\ Todo.app
 - Rust 1.70+
 - Windows 10/11 或 macOS
 
+> PC 端代码位于 `pc/` 子目录，所有开发命令都在 `pc/` 下执行。
+
 ### 安装依赖
 
 ```bash
+cd pc
 # 安装前端依赖
 npm install
 ```
@@ -114,12 +117,14 @@ npm install
 ### 开发模式
 
 ```bash
+cd pc
 npm run tauri dev
 ```
 
 ### 构建生产版本
 
 ```bash
+cd pc
 npm run tauri build
 ```
 
@@ -140,24 +145,29 @@ npm run tauri build
 
 ## 项目结构
 
+> 项目按平台拆分子目录，`pc/` 为 Windows 桌面端（Tauri），未来可平行加入 `mobile/`、`web/`。
+
 ```
 mini-todo/
-├── src/                     # Vue 前端源码
-│   ├── components/          # Vue 组件
-│   ├── stores/              # Pinia 状态管理
-│   ├── types/               # TypeScript 类型定义
-│   ├── views/               # 页面视图（含独立 WebView 窗口）
-│   ├── utils/               # 工具函数
-│   └── styles/              # 样式文件
-├── src-tauri/               # Tauri/Rust 后端源码
-│   ├── src/
-│   │   ├── commands/        # Tauri 命令（前后端桥接）
-│   │   ├── db/              # 数据库层（SQLite + 迁移）
-│   │   └── services/        # 业务服务层
-│   │       ├── agent/       # AI Agent 集成（Claude Code / Codex）
-│   │       └── scheduler/   # 任务调度引擎 + 工作流
-│   └── tauri.conf.json      # Tauri 配置
-└── docs/                    # 文档
+├── pc/                          # PC 端（Tauri 2.x + Vue 3）
+│   ├── src/                     # Vue 前端源码
+│   │   ├── components/          # Vue 组件
+│   │   ├── stores/              # Pinia 状态管理
+│   │   ├── types/               # TypeScript 类型定义
+│   │   ├── views/               # 页面视图（含独立 WebView 窗口）
+│   │   ├── utils/               # 工具函数
+│   │   └── styles/              # 样式文件
+│   ├── src-tauri/               # Tauri/Rust 后端源码
+│   │   ├── src/
+│   │   │   ├── commands/        # Tauri 命令（前后端桥接）
+│   │   │   ├── db/              # 数据库层（SQLite + 迁移）
+│   │   │   └── services/        # 业务服务层（通知 / WebDAV）
+│   │   └── tauri.conf.json      # Tauri 配置
+│   ├── public/                  # 公共静态资源
+│   ├── package.json
+│   ├── vite.config.ts
+│   └── tsconfig.json
+└── docs/                        # 共享文档
 ```
 
 ## 许可证

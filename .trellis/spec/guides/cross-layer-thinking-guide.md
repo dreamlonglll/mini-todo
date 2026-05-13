@@ -105,17 +105,17 @@ When removing a feature whose data is persisted and synchronized:
 
 - [ ] **DB migration**: write a new HEAD migration that `DROP TABLE` for owned tables and `ALTER TABLE … DROP COLUMN` for fields on retained tables
 - [ ] **Drop indices first**: SQLite refuses to drop a column that is part of an index; emit `DROP INDEX IF EXISTS` before `DROP COLUMN`
-- [ ] **Rust models** (`src-tauri/src/db/models.rs`): delete struct fields and any deleted-table types; keep the Todo/SubTask structs lean
+- [ ] **Rust models** (`pc/src-tauri/src/db/models.rs`): delete struct fields and any deleted-table types; keep the Todo/SubTask structs lean
 - [ ] **Tauri commands**: delete the command files entirely AND delete their registration in `lib.rs` `tauri::generate_handler!` (forgetting the registration produces "command not found" only at runtime)
-- [ ] **Frontend types** (`src/types/`): delete the matching TS interface fields; delete dedicated type files; remove their re-exports in `src/types/index.ts` and `src/stores/index.ts`
+- [ ] **Frontend types** (`pc/src/types/`): delete the matching TS interface fields; delete dedicated type files; remove their re-exports in `pc/src/types/index.ts` and `pc/src/stores/index.ts`
 - [ ] **Pinia stores**: delete the store files; verify no other stores import from them
 - [ ] **Vue components/views**: delete dedicated files; in mixed files, delete in place (don't refactor) — see "In-place deletion" below
-- [ ] **Router**: drop dead routes from `src/router/index.ts`
+- [ ] **Router**: drop dead routes from `pc/src/router/index.ts`
 - [ ] **WebDAV/Export DTOs**: shrink `ExportData` and `SyncData`; rely on serde leniency (see "Backward-compatible deserialization" below)
 - [ ] **Cargo.toml**: prune deps that the deleted code was the sole consumer of (e.g. `cron`, `async-trait` if only AgentRunner used it)
 - [ ] **CLAUDE.md / docs**: remove "主要数据表" rows, command lists, architecture diagrams, and event names referring to the deleted feature
 - [ ] **Spec files** (`.trellis/spec/`): grep the spec dir for store names, view names, type names you deleted — purge stale references the same commit
-- [ ] **Version bump**: app version (3 places: `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`) and export version (`src-tauri/src/commands/data.rs`)
+- [ ] **Version bump**: app version (3 places: `pc/package.json`, `pc/src-tauri/Cargo.toml`, `pc/src-tauri/tauri.conf.json`) and export version (`pc/src-tauri/src/commands/data.rs`)
 
 ### Backward-compatible deserialization for export/sync DTOs
 
