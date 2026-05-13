@@ -14,10 +14,18 @@ on:
 
 jobs:
   build:
-    name: Build & attach minitodo-cloud (Linux x86_64)
-    runs-on: ubuntu-latest
+    name: Build & attach minitodo-cloud (Linux ${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -39,6 +47,7 @@ jobs:
         shell: bash
         env:
           INPUT_TAG: ${{ github.event.inputs.release_tag }}
+          ARCH: ${{ matrix.arch }}
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             TARGET_TAG="$GITHUB_REF_NAME"
@@ -49,7 +58,7 @@ jobs:
           if [[ -z "$TARGET_TAG" ]]; then
             CLOUD_VERSION="${CLOUD_VERSION}-dev"
           fi
-          STAGE="minitodo-cloud-${CLOUD_VERSION}-linux-x86_64"
+          STAGE="minitodo-cloud-${CLOUD_VERSION}-linux-${ARCH}"
           echo "target_tag=$TARGET_TAG" >> "$GITHUB_OUTPUT"
           echo "version=$CLOUD_VERSION" >> "$GITHUB_OUTPUT"
           echo "stage=$STAGE" >> "$GITHUB_OUTPUT"
@@ -77,8 +86,8 @@ jobs:
         with:
           tag_name: ${{ steps.ver.outputs.target_tag }}
           files: |
-            dist/minitodo-cloud-*.tar.gz
-            dist/minitodo-cloud-*.tar.gz.sha256
+            dist/minitodo-cloud-*-linux-${{ matrix.arch }}.tar.gz
+            dist/minitodo-cloud-*-linux-${{ matrix.arch }}.tar.gz.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -86,8 +95,8 @@ jobs:
         if: steps.ver.outputs.target_tag == ''
         uses: actions/upload-artifact@v4
         with:
-          name: minitodo-cloud-linux-x86_64
+          name: minitodo-cloud-linux-${{ matrix.arch }}
           path: |
-            dist/minitodo-cloud-*.tar.gz
-            dist/minitodo-cloud-*.tar.gz.sha256
+            dist/minitodo-cloud-*-linux-${{ matrix.arch }}.tar.gz
+            dist/minitodo-cloud-*-linux-${{ matrix.arch }}.tar.gz.sha256
           retention-days: 14
