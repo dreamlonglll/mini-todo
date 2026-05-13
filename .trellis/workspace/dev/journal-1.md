@@ -140,3 +140,36 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 5: 移除 AI Agent 功能
+
+**Date**: 2026-05-13
+**Task**: 移除 AI Agent 功能
+**Branch**: `main`
+
+### Summary
+
+全面移除 Mini-Todo 项目的 AI Agent / 任务调度 / 工作流 / 提示词模板 / 任务依赖五大模块（约 80 个文件改动）。数据库迁移 v23 DROP 5 张表 + DROP 17 列，导出版本 3.0 → 4.0（通过 serde 默认行为兼容旧 v3.0 备份），应用版本 1.6.4 → 2.0.0。子任务退化为纯 Markdown 子项，重复提醒/通知/WebDAV 同步/四象限/日历功能不受影响。trellis-check 验证零缺陷，cargo check / vue-tsc / vite build 均通过零 warning。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `23ab651` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
