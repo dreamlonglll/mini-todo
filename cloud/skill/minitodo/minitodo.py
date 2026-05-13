@@ -188,6 +188,48 @@ def cmd_today(client: Client, args: argparse.Namespace) -> Any:
     return items
 
 
+def cmd_due_soon(client: Client, args: argparse.Namespace) -> Any:
+    """临期：未来 N 小时内到期未完成 ∪ 已逾期未完成。
+
+    给 openclaw / Claude Code cron 类调度场景用。
+    输出顺序：先 overdue（旧的在前），再 upcoming（近的在前）。
+    """
+    hours = max(1, int(args.hours or 24))
+    now = dt.datetime.now()
+    future = now + dt.timedelta(hours=hours)
+    now_str = now.strftime("%Y-%m-%dT%H:%M:%S")
+    future_str = future.strftime("%Y-%m-%dT%H:%M:%S")
+
+    upcoming = client.get(
+        "/todos",
+        params={
+            "completed": "false",
+            "dueDateAfter": now_str,
+            "dueDateBefore": future_str,
+            "sort": "+dueDate",
+        },
+    ) or []
+    overdue = client.get(
+        "/todos",
+        params={
+            "completed": "false",
+            "dueDateBefore": now_str,
+            "sort": "+dueDate",
+        },
+    ) or []
+
+    seen: set[str] = set()
+    items: list[dict[str, Any]] = []
+    for batch in (overdue, upcoming):
+        for t in batch:
+            tid = str(t.get("id"))
+            if tid in seen:
+                continue
+            seen.add(tid)
+            items.append(t)
+    return items
+
+
 def cmd_add(client: Client, args: argparse.Namespace) -> Any:
     body: dict[str, Any] = {"title": args.title}
     if args.priority:
@@ -259,7 +301,19 @@ def cmd_health(client: Client, _args: argparse.Namespace) -> Any:
 # =============================================================================
 
 
-def print_result(result: Any, as_json: bool) -> None:
+def print_result(
+    result: Any,
+    as_json: bool,
+    notify_text: bool = False,
+    notify_hours: int = 24,
+    silent_if_empty: bool = False,
+) -> None:
+    if notify_text:
+        text = format_notify_text(result, hours=notify_hours)
+        if silent_if_empty and _notify_is_empty(result):
+            return
+        sys.stdout.write(text + "\n")
+        return
     if as_json:
         json.dump(result, sys.stdout, ensure_ascii=False, indent=2, default=str)
         sys.stdout.write("\n")
@@ -275,6 +329,101 @@ def print_result(result: Any, as_json: bool) -> None:
         return
     json.dump(result, sys.stdout, ensure_ascii=False, indent=2, default=str)
     sys.stdout.write("\n")
+
+
+def _notify_is_empty(result: Any) -> bool:
+    return isinstance(result, list) and len(result) == 0
+
+
+def format_notify_text(result: Any, hours: int = 24) -> str:
+    """把 due-soon 结果拍成紧凑中文 channel 消息。"""
+    if not isinstance(result, list):
+        return str(result)
+    if not result:
+        return f"mini-todo｜未来 {hours}h 无临期事项。"
+
+    now = dt.datetime.now()
+    overdue: list[dict[str, Any]] = []
+    upcoming: list[dict[str, Any]] = []
+    for t in result:
+        due_raw = t.get("dueDate") or t.get("endTime") or ""
+        when = _parse_dt(due_raw)
+        if when is not None and when < now:
+            overdue.append(t)
+        else:
+            upcoming.append(t)
+
+    lines: list[str] = []
+    lines.append(f"mini-todo 临期提醒｜{now.strftime('%Y-%m-%d %H:%M')}")
+    if overdue:
+        lines.append(f"已逾期（{len(overdue)}）：")
+        for t in overdue:
+            lines.append("  - " + _notify_line(t, now))
+    if upcoming:
+        lines.append(f"未来 {hours}h 到期（{len(upcoming)}）：")
+        for t in upcoming:
+            lines.append("  - " + _notify_line(t, now))
+    return "\n".join(lines)
+
+
+def _notify_line(t: dict[str, Any], now: dt.datetime) -> str:
+    pri_map = {"high": "高", "medium": "中", "low": "低"}
+    pri = pri_map.get((t.get("priority") or "").lower(), "")
+    title = (t.get("title") or "(无标题)").strip()
+    due_raw = t.get("dueDate") or t.get("endTime") or ""
+    when = _parse_dt(due_raw)
+    if when is None:
+        delta_str = ""
+    else:
+        delta = when - now
+        total_min = int(delta.total_seconds() // 60)
+        if total_min >= 0:
+            if total_min < 60:
+                delta_str = f"，{total_min} 分钟后"
+            elif total_min < 60 * 24:
+                delta_str = f"，{total_min // 60} 小时后"
+            else:
+                delta_str = f"，{total_min // (60 * 24)} 天后"
+        else:
+            ago_min = -total_min
+            if ago_min < 60:
+                delta_str = f"，已逾期 {ago_min} 分钟"
+            elif ago_min < 60 * 24:
+                delta_str = f"，已逾期 {ago_min // 60} 小时"
+            else:
+                delta_str = f"，已逾期 {ago_min // (60 * 24)} 天"
+    pri_str = f"[{pri}] " if pri else ""
+    when_str = when.strftime("%m-%d %H:%M") if when else (due_raw[:16] if due_raw else "")
+    when_part = f" ({when_str}{delta_str})" if when_str else ""
+    return f"{pri_str}{title}{when_part}"
+
+
+def _parse_dt(s: str) -> dt.datetime | None:
+    """容错解析 mini-todo 时间字符串。
+
+    云端写出的是 'YYYY-MM-DD HH:MM:SS'（无时区），前端有时回传带 T 或带 Z。
+    这里都按本地墙钟解析，与 cloud/src/time.rs 的语义保持一致。
+    """
+    if not s:
+        return None
+    s = s.strip()
+    if s.endswith("Z"):
+        s = s[:-1]
+    # 截掉 +08:00 / -05:00 这种 offset 后缀（mini-todo 内部不带，外部偶发）
+    if len(s) >= 6 and s[-6] in "+-" and s[-3] == ":":
+        s = s[:-6]
+    for fmt in (
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d",
+    ):
+        try:
+            return dt.datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    return None
 
 
 def print_todo_table(items: list[dict[str, Any]]) -> None:
@@ -392,6 +541,27 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("today", help="今日相关待办")
 
+    sp = sub.add_parser(
+        "due-soon",
+        help="临期：未来 N 小时内到期 ∪ 已逾期未完成（适合 cron 推送）",
+    )
+    sp.add_argument(
+        "--hours",
+        type=int,
+        default=24,
+        help="未来多少小时内算临期，默认 24",
+    )
+    sp.add_argument(
+        "--notify-text",
+        action="store_true",
+        help="输出适合 channel 推送的中文紧凑文本（与 --json 互斥）",
+    )
+    sp.add_argument(
+        "--silent-if-empty",
+        action="store_true",
+        help="无任何条目时不输出（配合 --notify-text 使用，避免 cron 空推）",
+    )
+
     sp = sub.add_parser("add", help="新增待办")
     sp.add_argument("title")
     sp.add_argument("--priority", choices=["high", "medium", "low"])
@@ -442,6 +612,7 @@ def main(argv: list[str] | None = None) -> int:
 
     handlers = {
         "today": cmd_today,
+        "due-soon": cmd_due_soon,
         "add": cmd_add,
         "done": cmd_done,
         "list": cmd_list,
@@ -456,7 +627,16 @@ def main(argv: list[str] | None = None) -> int:
         die(f"未知子命令: {args.command}")
     assert handler is not None
     result = handler(client, args)
-    print_result(result, args.json)
+    notify_text = bool(getattr(args, "notify_text", False))
+    silent_if_empty = bool(getattr(args, "silent_if_empty", False))
+    notify_hours = int(getattr(args, "hours", 24) or 24)
+    print_result(
+        result,
+        args.json,
+        notify_text=notify_text,
+        notify_hours=notify_hours,
+        silent_if_empty=silent_if_empty,
+    )
     return 0
 
 

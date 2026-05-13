@@ -1,29 +1,66 @@
 #!/usr/bin/env bash
-# Install the minitodo skill into ~/.claude/skills/minitodo/.
+# Install the minitodo skill.
+#
+# 默认安装到 ~/.claude/skills/minitodo/（Claude Code）。
+# --target openclaw 装到 ~/.openclaw/workspace/skills/minitodo/。
+# --target both 同时安装两份（用同一份 config.toml 时需自行 symlink）。
 #
 # Linux/macOS. For Windows run install.ps1 instead.
 
 set -euo pipefail
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEST_DIR="${HOME}/.claude/skills/minitodo"
+TARGET="claude"
 
-echo ">> installing minitodo skill into ${DEST_DIR}"
-mkdir -p "${DEST_DIR}"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --target)
+            TARGET="${2:-claude}"
+            shift 2
+            ;;
+        --target=*)
+            TARGET="${1#--target=}"
+            shift
+            ;;
+        -h|--help)
+            sed -n '2,8p' "$0"
+            exit 0
+            ;;
+        *)
+            echo "未知参数: $1" >&2
+            exit 2
+            ;;
+    esac
+done
 
-cp -f "${SRC_DIR}/SKILL.md"            "${DEST_DIR}/SKILL.md"
-cp -f "${SRC_DIR}/minitodo.py"         "${DEST_DIR}/minitodo.py"
-cp -f "${SRC_DIR}/config.example.toml" "${DEST_DIR}/config.example.toml"
+case "${TARGET}" in
+    claude)  DESTS=("${HOME}/.claude/skills/minitodo") ;;
+    openclaw) DESTS=("${HOME}/.openclaw/workspace/skills/minitodo") ;;
+    both)    DESTS=("${HOME}/.claude/skills/minitodo" "${HOME}/.openclaw/workspace/skills/minitodo") ;;
+    *)
+        echo "无效 --target: ${TARGET}（可选 claude / openclaw / both）" >&2
+        exit 2
+        ;;
+esac
 
-chmod +x "${DEST_DIR}/minitodo.py" 2>/dev/null || true
+for DEST_DIR in "${DESTS[@]}"; do
+    echo ">> installing minitodo skill into ${DEST_DIR}"
+    mkdir -p "${DEST_DIR}"
 
-if [[ ! -f "${DEST_DIR}/config.toml" ]]; then
-    cp "${SRC_DIR}/config.example.toml" "${DEST_DIR}/config.toml"
-    echo "!! ${DEST_DIR}/config.toml created from example. Please edit it to fill in"
-    echo "   'endpoint' (e.g. https://minitodo.example.com) and 'api_key'."
-else
-    echo ">> ${DEST_DIR}/config.toml already exists, kept untouched."
-fi
+    cp -f "${SRC_DIR}/SKILL.md"            "${DEST_DIR}/SKILL.md"
+    cp -f "${SRC_DIR}/minitodo.py"         "${DEST_DIR}/minitodo.py"
+    cp -f "${SRC_DIR}/config.example.toml" "${DEST_DIR}/config.example.toml"
+
+    chmod +x "${DEST_DIR}/minitodo.py" 2>/dev/null || true
+
+    if [[ ! -f "${DEST_DIR}/config.toml" ]]; then
+        cp "${SRC_DIR}/config.example.toml" "${DEST_DIR}/config.toml"
+        echo "!! ${DEST_DIR}/config.toml created from example. Please edit it to fill in"
+        echo "   'endpoint' (e.g. https://minitodo.example.com) and 'api_key'."
+    else
+        echo ">> ${DEST_DIR}/config.toml already exists, kept untouched."
+    fi
+done
 
 # Sanity check: Python + requests
 if command -v python3 >/dev/null 2>&1; then
@@ -49,4 +86,4 @@ if ! "${PY}" -c 'import sys; sys.exit(0 if sys.version_info >= (3,11) else 1)' >
 fi
 
 echo ">> done. Test with:"
-echo "     ${PY} ${DEST_DIR}/minitodo.py health --json"
+echo "     ${PY} ${DESTS[0]}/minitodo.py health --json"
