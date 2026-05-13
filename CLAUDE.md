@@ -73,7 +73,7 @@ mini-todo/
 │   │   │   │   └── window.rs               # 窗口管理命令
 │   │   │   ├── db/                         # 数据库层
 │   │   │   │   ├── connection.rs           # 数据库连接管理
-│   │   │   │   ├── migrations.rs           # 数据库迁移（v1~v23）
+│   │   │   │   ├── migrations.rs           # 数据库迁移（v1~v24）
 │   │   │   │   └── models.rs               # 数据模型定义
 │   │   │   ├── services/                   # 业务服务层
 │   │   │   │   ├── notification.rs         # 通知服务（含定时调度）
@@ -177,8 +177,9 @@ mini-todo/
 ### 数据库设计
 - **数据库类型**：SQLite
 - **存储位置**：`%APPDATA%/mini-todo/data.db`
-- **迁移版本**：当前 v1~v23，通过 `pc/src-tauri/src/db/migrations.rs` 管理
+- **迁移版本**：当前 v1~v24，通过 `pc/src-tauri/src/db/migrations.rs` 管理
   - v23：移除所有 AI Agent / 任务调度 / 工作流相关表和字段（详见迁移注释）
+  - v24：新增 `webdav_last_modified` settings key，用于条件 PUT
 
 #### 主要数据表
 
@@ -274,8 +275,8 @@ SyncSettings (远端配置 + device_id + last_sync_at)
 
 ## cloud/ 子项目（云端 API）
 
-> 当前状态：**PR1 + PR2 已完成**——只读骨架、REST CRUD、dirty push worker、Skill 全在位；
-> PR3（PC 端条件 PUT + 412 重试 + per-record merge + v24 migration）仍在路上。
+> 当前状态：**PR1 + PR2 + PR3 全部完成**——只读骨架、REST CRUD、dirty push worker、Skill、
+> PC 端条件 PUT + 412 重试 + per-record merge + v24 migration 均在位。
 > 详见 `cloud/README.md`、`.trellis/tasks/05-13-cloud-api-and-skill/prd.md`。
 
 `cloud/` 是一个独立的 Rust crate（**不在** `pc/` 的 Cargo workspace 里），部署到 VPS 上为
@@ -330,9 +331,15 @@ REST API（全部需要 `Authorization: Bearer <api_key>`）：
 所有响应附 `X-Sync-Status: healthy | stale | offline` 与 `X-Last-Sync-At`；offline
 时额外加 `Warning: 110 "sync offline"`。
 
-PR3 待办：修改 `pc/src-tauri/src/services/webdav.rs` 与
-`pc/src-tauri/src/commands/sync_cmd.rs`，让 PC 端 PUT 时也走条件请求并支持
-412 重试（per-record merge 后重新 PUT）。
+PC 端 WebDAV 同步（PR3 后）：
+- `services/webdav.rs::upload_bytes` 支持可选 `If-Unmodified-Since` header，返回
+  `UploadOutcome::Ok(last_modified)` / `UploadOutcome::PreconditionFailed`
+- `services/webdav.rs::download_bytes` 返回 `(Vec<u8>, Option<String>)`，第二个值是
+  server 的 `Last-Modified`
+- `commands/sync_cmd.rs::webdav_upload_sync` 走条件 PUT；412 时拉远端 →
+  `merge_remote_into_local`（per-record LWW）→ 重新 PUT，最多 3 次重试
+- `commands/sync_cmd.rs::webdav_download_sync` / `webdav_auto_sync` 把 server 的
+  `Last-Modified` 写入 settings key `webdav_last_modified`（由 v24 migration 引入）
 
 ### 前后端通信
 

@@ -1,5 +1,5 @@
 use reqwest::blocking::Client;
-use reqwest::header::CONTENT_TYPE;
+use reqwest::header::{CONTENT_TYPE, LAST_MODIFIED};
 use std::path::Path;
 use std::time::Duration;
 
@@ -9,6 +9,19 @@ pub struct WebDavClient {
     username: String,
     password: String,
 }
+
+/// 上传响应：用于区分成功 vs 条件 PUT 失败（HTTP 412），方便调用方对 412 做重试。
+///
+/// 成功时附带 server 返回的 `Last-Modified` header（如果存在），便于下一次条件 PUT
+/// 使用最新值，避免再额外 GET 一次。
+#[derive(Debug, Clone)]
+pub enum UploadOutcome {
+    Ok(Option<String>),
+    PreconditionFailed,
+}
+
+/// `download_bytes` 的返回类型：`Some((bytes, last_modified))` 或 `None`（404）。
+pub type DownloadOutcome = Option<(Vec<u8>, Option<String>)>;
 
 impl WebDavClient {
     pub fn new(base_url: &str, username: &str, password: &str) -> Self {
@@ -87,21 +100,46 @@ impl WebDavClient {
         Ok(resp.status().is_success())
     }
 
-    pub fn upload_bytes(&self, remote_path: &str, data: &[u8], content_type: &str) -> Result<(), String> {
+    /// 上传 bytes 到远端。
+    ///
+    /// 若 `if_unmodified_since` 是 `Some`，附 `If-Unmodified-Since` HTTP header；
+    /// server 返回 412 时返回 `UploadOutcome::PreconditionFailed`，**不**作为 Err，
+    /// 由调用方决定是否重试（典型场景：拉远端 → per-record merge → 重新 PUT）。
+    /// 其它非 2xx 状态仍返回 Err。
+    pub fn upload_bytes(
+        &self,
+        remote_path: &str,
+        data: &[u8],
+        content_type: &str,
+        if_unmodified_since: Option<&str>,
+    ) -> Result<UploadOutcome, String> {
         let url = self.full_url(remote_path);
 
-        let resp = self
+        let mut req = self
             .client
             .put(&url)
             .basic_auth(&self.username, Some(&self.password))
-            .header(CONTENT_TYPE, content_type)
+            .header(CONTENT_TYPE, content_type);
+
+        if let Some(value) = if_unmodified_since {
+            req = req.header("If-Unmodified-Since", value);
+        }
+
+        let resp = req
             .body(data.to_vec())
             .send()
             .map_err(|e| format!("上传失败: {}", e))?;
 
         let status = resp.status().as_u16();
         if status == 200 || status == 201 || status == 204 {
-            Ok(())
+            let last_modified = resp
+                .headers()
+                .get(LAST_MODIFIED)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+            Ok(UploadOutcome::Ok(last_modified))
+        } else if status == 412 {
+            Ok(UploadOutcome::PreconditionFailed)
         } else {
             Err(format!("上传失败，状态码: {}", status))
         }
@@ -109,12 +147,17 @@ impl WebDavClient {
 
     #[allow(dead_code)]
     pub fn upload_text(&self, remote_path: &str, text: &str) -> Result<(), String> {
-        self.upload_bytes(remote_path, text.as_bytes(), "application/json; charset=utf-8")
+        self.upload_bytes(
+            remote_path,
+            text.as_bytes(),
+            "application/json; charset=utf-8",
+            None,
+        )
+        .map(|_| ())
     }
 
     pub fn upload_file(&self, remote_path: &str, local_path: &Path) -> Result<(), String> {
-        let data = std::fs::read(local_path)
-            .map_err(|e| format!("读取文件失败: {}", e))?;
+        let data = std::fs::read(local_path).map_err(|e| format!("读取文件失败: {}", e))?;
 
         let ext = local_path
             .extension()
@@ -130,7 +173,8 @@ impl WebDavClient {
             _ => "application/octet-stream",
         };
 
-        self.upload_bytes(remote_path, &data, content_type)
+        self.upload_bytes(remote_path, &data, content_type, None)
+            .map(|_| ())
     }
 
     #[allow(dead_code)]
@@ -156,7 +200,11 @@ impl WebDavClient {
         Ok(Some(text))
     }
 
-    pub fn download_bytes(&self, remote_path: &str) -> Result<Option<Vec<u8>>, String> {
+    /// 下载远端 bytes 并附带 server 的 `Last-Modified` header（若返回）。
+    ///
+    /// 返回值：`Option<(bytes, last_modified_string)>`。404 → `None`；其它失败 → Err。
+    /// `Last-Modified` 用于后续 PUT 时附 `If-Unmodified-Since`，避免覆盖并发写入。
+    pub fn download_bytes(&self, remote_path: &str) -> Result<DownloadOutcome, String> {
         let url = self.full_url(remote_path);
 
         let resp = self
@@ -174,8 +222,13 @@ impl WebDavClient {
             return Err(format!("下载失败，状态码: {}", status));
         }
 
+        let last_modified = resp
+            .headers()
+            .get(LAST_MODIFIED)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
         let bytes = resp.bytes().map_err(|e| format!("读取响应失败: {}", e))?;
-        Ok(Some(bytes.to_vec()))
+        Ok(Some((bytes.to_vec(), last_modified)))
     }
 
     pub fn download_file(&self, remote_path: &str, local_path: &Path) -> Result<bool, String> {
@@ -202,8 +255,7 @@ impl WebDavClient {
             std::fs::create_dir_all(parent).ok();
         }
 
-        std::fs::write(local_path, &bytes)
-            .map_err(|e| format!("写入文件失败: {}", e))?;
+        std::fs::write(local_path, &bytes).map_err(|e| format!("写入文件失败: {}", e))?;
 
         Ok(true)
     }

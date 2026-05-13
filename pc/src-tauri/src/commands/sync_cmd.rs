@@ -1,13 +1,27 @@
-use crate::db::Database;
-use crate::services::webdav::WebDavClient;
+//! WebDAV 同步命令。
+//!
+//! 自 PR3 起，PC 端上传使用条件 PUT（`If-Unmodified-Since`）：
+//! - 上传成功 → 用 server 返回的 `Last-Modified` 更新 `webdav_last_modified` setting，
+//!   作为下次条件 PUT 的依据
+//! - 412 Precondition Failed → 表示远端被另一端（cloud / 其它 PC）改过；自动拉取最新
+//!   远端，做 per-record LWW merge 到本地 SQLite，再重新 PUT，最多重试 3 次
+//!
+//! 普通"主动覆盖"语义保留在 `webdav_apply_remote`（仍走 `import_data_raw` 全量替换），
+//! per-record merge (`merge_remote_into_local`) 仅用于冲突恢复路径。
+
+use super::data::{export_data_internal, import_data_raw};
+use crate::db::{Database, SubTask, Todo};
+use crate::services::webdav::{UploadOutcome, WebDavClient};
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
+use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::io::{Read as _, Write as _};
 use std::path::PathBuf;
 use tauri::State;
-use super::data::{export_data_internal, import_data_raw};
+
+const MAX_UPLOAD_RETRY: u32 = 3;
 
 const REMOTE_DIR: &str = "/mini-todo";
 const SYNC_DATA_FILE: &str = "/mini-todo/sync-data.json.gz";
@@ -56,11 +70,9 @@ fn get_images_dir() -> PathBuf {
 }
 
 fn get_setting(conn: &rusqlite::Connection, key: &str) -> Option<String> {
-    conn.query_row(
-        "SELECT value FROM settings WHERE key = ?1",
-        [key],
-        |row| row.get(0),
-    )
+    conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| {
+        row.get(0)
+    })
     .ok()
 }
 
@@ -74,7 +86,7 @@ fn set_setting(conn: &rusqlite::Connection, key: &str, value: &str) -> rusqlite:
 
 #[tauri::command]
 pub fn get_sync_settings(db: State<Database>) -> Result<SyncSettings, String> {
-    read_sync_settings(&*db)
+    read_sync_settings(&db)
 }
 
 #[tauri::command]
@@ -83,8 +95,16 @@ pub fn save_sync_settings(db: State<Database>, settings: SyncSettings) -> Result
         set_setting(conn, "webdav_url", &settings.webdav_url)?;
         set_setting(conn, "webdav_username", &settings.webdav_username)?;
         set_setting(conn, "webdav_password", &settings.webdav_password)?;
-        set_setting(conn, "webdav_auto_sync", if settings.auto_sync { "true" } else { "false" })?;
-        set_setting(conn, "webdav_sync_interval", &settings.sync_interval.to_string())?;
+        set_setting(
+            conn,
+            "webdav_auto_sync",
+            if settings.auto_sync { "true" } else { "false" },
+        )?;
+        set_setting(
+            conn,
+            "webdav_sync_interval",
+            &settings.sync_interval.to_string(),
+        )?;
         if let Some(ref last) = settings.last_sync_at {
             set_setting(conn, "webdav_last_sync_at", last)?;
         }
@@ -95,7 +115,11 @@ pub fn save_sync_settings(db: State<Database>, settings: SyncSettings) -> Result
 }
 
 #[tauri::command]
-pub fn webdav_test_connection(url: String, username: String, password: String) -> Result<bool, String> {
+pub fn webdav_test_connection(
+    url: String,
+    username: String,
+    password: String,
+) -> Result<bool, String> {
     let client = WebDavClient::new(&url, &username, &password);
     client.test_connection()
 }
@@ -133,9 +157,7 @@ pub fn webdav_upload_sync(db: State<Database>) -> Result<String, String> {
     client.ensure_dir(REMOTE_DIR)?;
     client.ensure_dir(REMOTE_IMAGES_DIR)?;
 
-    let export_json = export_data_internal(&*db)?;
-
-    // Collect image list
+    // Collect image list once（merge 重试不影响图片列表）
     let images_dir = get_images_dir();
     let mut image_files: Vec<String> = Vec::new();
     if images_dir.exists() {
@@ -148,32 +170,101 @@ pub fn webdav_upload_sync(db: State<Database>) -> Result<String, String> {
         }
     }
 
-    // Build sync data
-    let export_data: serde_json::Value =
-        serde_json::from_str(&export_json).map_err(|e| e.to_string())?;
+    // 条件 PUT 重试循环：412 → 拉远端 → per-record merge → 重新 PUT，最多 MAX_UPLOAD_RETRY 次
+    let mut retry: u32 = 0;
+    let now;
+    loop {
+        // 每轮都重新 export 一次：merge 后 SQLite 已含远端新数据，必须重新生成 sync-data
+        let export_json = export_data_internal(&db)?;
+        let export_data: serde_json::Value =
+            serde_json::from_str(&export_json).map_err(|e| e.to_string())?;
 
-    let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%:z").to_string();
-    let sync_data = SyncData {
-        version: export_data.get("version").and_then(|v| v.as_str()).unwrap_or("4.0").to_string(),
-        device_id: sync_settings.device_id.clone(),
-        updated_at: now.clone(),
-        todos: export_data
-            .get("todos")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default(),
-        settings: export_data
-            .get("settings")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null),
-        images: image_files.clone(),
-    };
+        let attempt_now = chrono::Local::now()
+            .format("%Y-%m-%dT%H:%M:%S%:z")
+            .to_string();
+        let sync_data = SyncData {
+            version: export_data
+                .get("version")
+                .and_then(|v| v.as_str())
+                .unwrap_or("4.0")
+                .to_string(),
+            device_id: sync_settings.device_id.clone(),
+            updated_at: attempt_now.clone(),
+            todos: export_data
+                .get("todos")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default(),
+            settings: export_data
+                .get("settings")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            images: image_files.clone(),
+        };
 
-    let sync_json = serde_json::to_string(&sync_data).map_err(|e| e.to_string())?;
+        let sync_json = serde_json::to_string(&sync_data).map_err(|e| e.to_string())?;
+        let compressed = gzip_compress(sync_json.as_bytes())?;
 
-    // Compress and upload sync data
-    let compressed = gzip_compress(sync_json.as_bytes())?;
-    client.upload_bytes(SYNC_DATA_FILE, &compressed, "application/gzip")?;
+        // 读取最新 webdav_last_modified（merge 路径会刷新这个值）
+        let last_modified = db
+            .with_connection(|conn| Ok(get_setting(conn, "webdav_last_modified")))
+            .map_err(|e: rusqlite::Error| e.to_string())?
+            .filter(|s: &String| !s.is_empty());
+
+        match client.upload_bytes(
+            SYNC_DATA_FILE,
+            &compressed,
+            "application/gzip",
+            last_modified.as_deref(),
+        )? {
+            UploadOutcome::Ok(new_last_modified) => {
+                // 成功；用 PUT response 的 Last-Modified 更新 setting，下次 PUT 用最新值
+                if let Some(ref lm) = new_last_modified {
+                    db.with_connection(|conn| {
+                        set_setting(conn, "webdav_last_modified", lm)?;
+                        Ok(())
+                    })
+                    .map_err(|e| e.to_string())?;
+                }
+                now = attempt_now;
+                break;
+            }
+            UploadOutcome::PreconditionFailed => {
+                if retry >= MAX_UPLOAD_RETRY {
+                    return Err(format!(
+                        "WebDAV 同步冲突，{} 次重试后仍失败",
+                        MAX_UPLOAD_RETRY
+                    ));
+                }
+                retry += 1;
+
+                // 拉远端，把 Last-Modified 更新到 setting；并 per-record merge 进本地 SQLite
+                let remote_bytes_opt = client.download_bytes(SYNC_DATA_FILE)?;
+                if let Some((compressed, remote_last_modified)) = remote_bytes_opt {
+                    let remote_json = gzip_decompress(&compressed)?;
+                    let remote_data: SyncData = serde_json::from_str(&remote_json)
+                        .map_err(|e| format!("解析远程数据失败: {}", e))?;
+
+                    db.with_connection(|conn| {
+                        let lm = remote_last_modified.unwrap_or_default();
+                        set_setting(conn, "webdav_last_modified", &lm)?;
+                        Ok(())
+                    })
+                    .map_err(|e| e.to_string())?;
+
+                    merge_remote_into_local(&db, &remote_data)?;
+                } else {
+                    // 412 但又下载不到？理论上不应该发生；清空 Last-Modified 让下一轮裸 PUT
+                    db.with_connection(|conn| {
+                        set_setting(conn, "webdav_last_modified", "")?;
+                        Ok(())
+                    })
+                    .map_err(|e| e.to_string())?;
+                }
+                // 循环继续，下一轮重新 export + PUT
+            }
+        }
+    }
 
     // Upload images (skip if already exists on remote)
     for img_name in &image_files {
@@ -223,6 +314,12 @@ pub fn webdav_download_sync(db: State<Database>) -> Result<SyncDownloadResult, S
     let remote_bytes = client.download_bytes(SYNC_DATA_FILE)?;
 
     if remote_bytes.is_none() {
+        // 远端没有 sync-data → 清空 webdav_last_modified
+        db.with_connection(|conn| {
+            set_setting(conn, "webdav_last_modified", "")?;
+            Ok(())
+        })
+        .map_err(|e| e.to_string())?;
         return Ok(SyncDownloadResult {
             has_remote: false,
             remote_data: None,
@@ -232,7 +329,16 @@ pub fn webdav_download_sync(db: State<Database>) -> Result<SyncDownloadResult, S
         });
     }
 
-    let compressed = remote_bytes.unwrap();
+    let (compressed, remote_last_modified) = remote_bytes.unwrap();
+
+    // 记录 Last-Modified，用于下次条件 PUT
+    db.with_connection(|conn| {
+        let lm = remote_last_modified.unwrap_or_default();
+        set_setting(conn, "webdav_last_modified", &lm)?;
+        Ok(())
+    })
+    .map_err(|e| e.to_string())?;
+
     let remote_json = gzip_decompress(&compressed)?;
     let remote_data: SyncData =
         serde_json::from_str(&remote_json).map_err(|e| format!("解析远程数据失败: {}", e))?;
@@ -264,7 +370,7 @@ pub fn webdav_apply_remote(db: State<Database>, sync_data_json: String) -> Resul
     });
 
     let import_str = serde_json::to_string(&import_json).map_err(|e| e.to_string())?;
-    import_data_raw(&*db, &import_str)?;
+    import_data_raw(&db, &import_str)?;
 
     // Download images
     let sync_settings = get_sync_settings_internal(&db)?;
@@ -286,7 +392,9 @@ pub fn webdav_apply_remote(db: State<Database>, sync_data_json: String) -> Resul
     }
 
     // Update last sync time
-    let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%:z").to_string();
+    let now = chrono::Local::now()
+        .format("%Y-%m-%dT%H:%M:%S%:z")
+        .to_string();
     db.with_connection(|conn| {
         set_setting(conn, "webdav_last_sync_at", &now)?;
         Ok(())
@@ -312,7 +420,15 @@ pub fn webdav_auto_sync(db: State<Database>) -> Result<String, String> {
     let has_local_changes = check_local_changes(&db, &sync_settings)?;
 
     let remote_bytes = client.download_bytes(SYNC_DATA_FILE).ok().flatten();
-    if let Some(compressed) = remote_bytes {
+    if let Some((compressed, remote_last_modified)) = remote_bytes {
+        // 记录 Last-Modified（无论是否要 apply 远端，都更新这个值；下一次 PUT 用它）
+        let lm = remote_last_modified.unwrap_or_default();
+        db.with_connection(|conn| {
+            set_setting(conn, "webdav_last_modified", &lm)?;
+            Ok(())
+        })
+        .map_err(|e| e.to_string())?;
+
         if let Ok(remote_json) = gzip_decompress(&compressed) {
             if let Ok(remote_data) = serde_json::from_str::<SyncData>(&remote_json) {
                 let remote_is_newer = is_remote_newer(&sync_settings, &remote_data.updated_at);
@@ -324,8 +440,9 @@ pub fn webdav_auto_sync(db: State<Database>) -> Result<String, String> {
                         "todos": remote_data.todos,
                         "settings": remote_data.settings,
                     });
-                    let import_str = serde_json::to_string(&import_json).map_err(|e| e.to_string())?;
-                    import_data_raw(&*db, &import_str)?;
+                    let import_str =
+                        serde_json::to_string(&import_json).map_err(|e| e.to_string())?;
+                    import_data_raw(&db, &import_str)?;
 
                     let images_dir = get_images_dir();
                     std::fs::create_dir_all(&images_dir).ok();
@@ -337,11 +454,14 @@ pub fn webdav_auto_sync(db: State<Database>) -> Result<String, String> {
                         }
                     }
 
-                    let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%:z").to_string();
+                    let now = chrono::Local::now()
+                        .format("%Y-%m-%dT%H:%M:%S%:z")
+                        .to_string();
                     db.with_connection(|conn| {
                         set_setting(conn, "webdav_last_sync_at", &now)?;
                         Ok(())
-                    }).map_err(|e| e.to_string())?;
+                    })
+                    .map_err(|e| e.to_string())?;
                     return Ok(now);
                 }
 
@@ -360,7 +480,7 @@ pub fn webdav_auto_sync(db: State<Database>) -> Result<String, String> {
 }
 
 fn get_sync_settings_internal(db: &State<Database>) -> Result<SyncSettings, String> {
-    read_sync_settings(&**db)
+    read_sync_settings(db)
 }
 
 fn read_sync_settings(db: &Database) -> Result<SyncSettings, String> {
@@ -376,8 +496,7 @@ fn read_sync_settings(db: &Database) -> Result<SyncSettings, String> {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(15),
             last_sync_at: get_setting(conn, "webdav_last_sync_at"),
-            device_id: get_setting(conn, "webdav_device_id")
-                .unwrap_or_else(generate_device_id),
+            device_id: get_setting(conn, "webdav_device_id").unwrap_or_else(generate_device_id),
         };
         Ok(settings)
     })
@@ -420,13 +539,240 @@ fn is_remote_newer(settings: &SyncSettings, remote_updated_at: &str) -> bool {
 
 fn gzip_compress(data: &[u8]) -> Result<Vec<u8>, String> {
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-    encoder.write_all(data).map_err(|e| format!("压缩失败: {}", e))?;
+    encoder
+        .write_all(data)
+        .map_err(|e| format!("压缩失败: {}", e))?;
     encoder.finish().map_err(|e| format!("压缩完成失败: {}", e))
 }
 
 fn gzip_decompress(data: &[u8]) -> Result<String, String> {
     let mut decoder = GzDecoder::new(data);
     let mut result = String::new();
-    decoder.read_to_string(&mut result).map_err(|e| format!("解压失败: {}", e))?;
+    decoder
+        .read_to_string(&mut result)
+        .map_err(|e| format!("解压失败: {}", e))?;
     Ok(result)
+}
+
+/// 单次 merge 的统计，便于调用方日志（目前仅供调试，未上抛到前端）。
+#[allow(dead_code)]
+#[derive(Debug, Default)]
+pub struct MergeStats {
+    pub todos_updated: u32,
+    pub todos_inserted: u32,
+    pub subtasks_updated: u32,
+    pub subtasks_inserted: u32,
+}
+
+/// per-record LWW merge：把远端 `SyncData` 合并进本地 SQLite。
+///
+/// 仅用于 PUT 412 冲突恢复路径，**不替代** `webdav_apply_remote` 的整包替换语义
+/// （`import_data_raw`）。语义：
+///
+/// - 远端 todo / subtask 的 `updatedAt` ≥ 本地 → upsert 远端字段
+/// - 本地 `updatedAt` > 远端 → 保留本地（不动）
+/// - 远端有、本地无 → 直接 INSERT（用远端 id；因为云端把整张表的 record 都写进
+///   sync-data，远端 id 视为权威）
+/// - 本地有、远端无 → **保留本地**（不删；LWW 单用户场景下视为本地新增）
+/// - settings：本函数**不动 settings**（PC 端 settings 由用户主动修改，冲突极少）
+///
+/// 时间字符串直接做字符串比较，依赖 PC SQLite `datetime('now', 'localtime')` 与
+/// cloud `time.rs` 的 FixedOffset 输出格式一致（`YYYY-MM-DD HH:MM:SS`）。
+///
+/// 整个 merge 包在单事务里；中间任何一步失败回滚。
+pub fn merge_remote_into_local(db: &Database, remote: &SyncData) -> Result<MergeStats, String> {
+    // 把远端 Vec<serde_json::Value> 反序列化为 Vec<Todo>；Todo 自带 subtasks 嵌套
+    let remote_todos: Vec<Todo> = remote
+        .todos
+        .iter()
+        .filter_map(|v| serde_json::from_value::<Todo>(v.clone()).ok())
+        .collect();
+
+    let stats = db
+        .with_connection(|conn| {
+            // 单事务封装：savepoint 在 with_connection 内不暴露，直接用 immediate transaction
+            conn.execute("BEGIN IMMEDIATE", [])?;
+            let result = merge_todos_inner(conn, &remote_todos);
+            match result {
+                Ok(stats) => {
+                    conn.execute("COMMIT", [])?;
+                    Ok(stats)
+                }
+                Err(e) => {
+                    let _ = conn.execute("ROLLBACK", []);
+                    Err(e)
+                }
+            }
+        })
+        .map_err(|e| e.to_string())?;
+
+    Ok(stats)
+}
+
+/// `merge_remote_into_local` 的实际实现，假设外部已经包了事务。
+fn merge_todos_inner(
+    conn: &rusqlite::Connection,
+    remote_todos: &[Todo],
+) -> rusqlite::Result<MergeStats> {
+    let mut stats = MergeStats::default();
+
+    for remote_todo in remote_todos {
+        let todo_id = remote_todo.id;
+        let local_updated_at: Option<String> = conn
+            .query_row(
+                "SELECT updated_at FROM todos WHERE id = ?1",
+                [todo_id],
+                |row| row.get::<_, String>(0),
+            )
+            .ok();
+
+        let should_apply = match &local_updated_at {
+            Some(local) => remote_todo.updated_at.as_str() >= local.as_str(),
+            None => true,
+        };
+
+        if should_apply {
+            let notified_i = if remote_todo.notified { 1i32 } else { 0 };
+            let completed_i = if remote_todo.completed { 1i32 } else { 0 };
+            let repeat_enabled_i = if remote_todo.repeat_enabled { 1i32 } else { 0 };
+
+            if local_updated_at.is_some() {
+                conn.execute(
+                    "UPDATE todos SET
+                        title = ?1, description = ?2, color = ?3, quadrant = ?4,
+                        notify_at = ?5, notify_before = ?6, notified = ?7,
+                        completed = ?8, sort_order = ?9, start_time = ?10, end_time = ?11,
+                        created_at = ?12, updated_at = ?13,
+                        repeat_enabled = ?14, repeat_type = ?15, repeat_interval = ?16,
+                        repeat_weekdays = ?17, repeat_month_day = ?18
+                     WHERE id = ?19",
+                    params![
+                        remote_todo.title,
+                        remote_todo.description,
+                        remote_todo.color,
+                        remote_todo.quadrant,
+                        remote_todo.notify_at,
+                        remote_todo.notify_before,
+                        notified_i,
+                        completed_i,
+                        remote_todo.sort_order,
+                        remote_todo.start_time,
+                        remote_todo.end_time,
+                        remote_todo.created_at,
+                        remote_todo.updated_at,
+                        repeat_enabled_i,
+                        remote_todo.repeat_type,
+                        remote_todo.repeat_interval,
+                        remote_todo.repeat_weekdays,
+                        remote_todo.repeat_month_day,
+                        todo_id,
+                    ],
+                )?;
+                stats.todos_updated += 1;
+            } else {
+                conn.execute(
+                    "INSERT INTO todos (id, title, description, color, quadrant,
+                                        notify_at, notify_before, notified, completed,
+                                        sort_order, start_time, end_time, created_at, updated_at,
+                                        repeat_enabled, repeat_type, repeat_interval,
+                                        repeat_weekdays, repeat_month_day)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                             ?15, ?16, ?17, ?18, ?19)",
+                    params![
+                        todo_id,
+                        remote_todo.title,
+                        remote_todo.description,
+                        remote_todo.color,
+                        remote_todo.quadrant,
+                        remote_todo.notify_at,
+                        remote_todo.notify_before,
+                        notified_i,
+                        completed_i,
+                        remote_todo.sort_order,
+                        remote_todo.start_time,
+                        remote_todo.end_time,
+                        remote_todo.created_at,
+                        remote_todo.updated_at,
+                        repeat_enabled_i,
+                        remote_todo.repeat_type,
+                        remote_todo.repeat_interval,
+                        remote_todo.repeat_weekdays,
+                        remote_todo.repeat_month_day,
+                    ],
+                )?;
+                stats.todos_inserted += 1;
+            }
+        }
+
+        // subtasks 同样 per-record LWW
+        for remote_sub in &remote_todo.subtasks {
+            merge_subtask(conn, remote_sub, &mut stats)?;
+        }
+    }
+
+    Ok(stats)
+}
+
+fn merge_subtask(
+    conn: &rusqlite::Connection,
+    remote_sub: &SubTask,
+    stats: &mut MergeStats,
+) -> rusqlite::Result<()> {
+    let local_updated_at: Option<String> = conn
+        .query_row(
+            "SELECT updated_at FROM subtasks WHERE id = ?1",
+            [remote_sub.id],
+            |row| row.get::<_, String>(0),
+        )
+        .ok();
+
+    let should_apply = match &local_updated_at {
+        Some(local) => remote_sub.updated_at.as_str() >= local.as_str(),
+        None => true,
+    };
+
+    if !should_apply {
+        return Ok(());
+    }
+
+    let completed_i = if remote_sub.completed { 1i32 } else { 0 };
+
+    if local_updated_at.is_some() {
+        conn.execute(
+            "UPDATE subtasks SET
+                parent_id = ?1, title = ?2, content = ?3, completed = ?4,
+                sort_order = ?5, created_at = ?6, updated_at = ?7
+             WHERE id = ?8",
+            params![
+                remote_sub.parent_id,
+                remote_sub.title,
+                remote_sub.content,
+                completed_i,
+                remote_sub.sort_order,
+                remote_sub.created_at,
+                remote_sub.updated_at,
+                remote_sub.id,
+            ],
+        )?;
+        stats.subtasks_updated += 1;
+    } else {
+        conn.execute(
+            "INSERT INTO subtasks (id, parent_id, title, content, completed,
+                                   sort_order, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                remote_sub.id,
+                remote_sub.parent_id,
+                remote_sub.title,
+                remote_sub.content,
+                completed_i,
+                remote_sub.sort_order,
+                remote_sub.created_at,
+                remote_sub.updated_at,
+            ],
+        )?;
+        stats.subtasks_inserted += 1;
+    }
+
+    Ok(())
 }
