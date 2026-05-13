@@ -15,3 +15,8 @@ config.toml
 .idea/
 *.swp
 *.swo
+
+# Python（skill/minitodo/）
+__pycache__/
+*.pyc
+*.pyo
