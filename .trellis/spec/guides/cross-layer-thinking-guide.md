@@ -155,3 +155,124 @@ When deleting a feature from a large mixed file (`EditorView.vue` 2086 lines, `S
 - Don't merge two `<script setup>` sections, don't re-sort props, don't rename anything
 
 If after deletion the file's structure feels wrong, file a follow-up task for refactoring; don't blend it with the removal.
+
+---
+
+## Two-Way Sync Across SQLite Replicas via HTTP Blob
+
+Pattern: two writers (e.g. PC desktop + cloud server, or two PC peers) each hold a local SQLite database, and a shared compressed JSON blob on WebDAV/S3/etc. acts as source of truth. Each writer periodically pulls + merges and pushes after local writes. The catch is **concurrent writes** — naive full-replacement PUT will silently lose data.
+
+This pattern is in `pc/src-tauri/src/commands/sync_cmd.rs` (PC) and `cloud/src/sync/{pull,push}.rs` (cloud). The same building blocks apply to any "shared remote blob + per-side local SQLite cache" setup. Below are the four cross-layer traps that **must** be aligned for the pattern to be correct.
+
+### Building blocks
+
+1. **Per-record `updated_at` for LWW merge** — every row has an `updated_at TEXT` column; merge rule = "side with newer `updated_at` wins per record".
+2. **Conditional PUT with `If-Unmodified-Since`** — push uses `If-Unmodified-Since: <last-known-Last-Modified>`. Remote 412 means another writer pushed first; download + merge + retry (max ~3).
+3. **Tombstone table** — DELETEs alone don't propagate via LWW (the side that still has the record "wins"). Keep a `tombstones(type, id, deleted_at)` table; merges drop incoming records that match a local tombstone. Expire (e.g. 7 days) after a successful push.
+4. **Preserve remote id on INSERT during per-record merge** — see "Identity preservation" below.
+
+### Trap 1: Time format alignment
+
+LWW compares `updated_at` strings. **Every writer must produce strings in the same lexicographically-comparable format**, or LWW silently picks the wrong winner.
+
+Mini-todo's PC SQLite uses `datetime('now', 'localtime')` → `"2026-05-13 12:34:56"` (no timezone suffix). The cloud Rust service has no OS-level "localtime", so it explicitly mimics via `chrono::FixedOffset` derived from `config.timezone`:
+
+```rust
+// cloud/src/time.rs
+pub fn now_local_string(offset: FixedOffset) -> String {
+    Utc::now()
+        .with_timezone(&offset)
+        .format("%Y-%m-%d %H:%M:%S")  // matches PC datetime('now','localtime') byte-for-byte
+        .to_string()
+}
+```
+
+If one writer adds a timezone suffix (`"2026-05-13T12:34:56+08:00"`) while another doesn't, `"…+08:00" > "… 12:34:56"` is false → LWW chooses wrongly.
+
+> **Outer envelope vs per-record timestamps**: a sync blob may have its own "this snapshot was created at X" metadata field, which can safely use ISO 8601 with tz (informational, not compared). The constraint applies only to per-record `updated_at` columns participating in merge.
+
+### Trap 2: `If-Unmodified-Since` is not enough on its own
+
+The conditional PUT **does not** prevent two writers that both pulled the same `Last-Modified` from racing — both pass the precondition, both PUT, the second PUT wins and silently overwrites the first. The 412 only catches the case where one writer's view of the remote is provably stale.
+
+The fix is per-record LWW merge on the 412 path, not just retry. **Retry without merge resends the same lossy snapshot.**
+
+### Trap 3: Identity preservation during per-record merge
+
+When the receiver inserts a record from the sender, it **must** preserve the sender's primary key. Otherwise SQLite AUTOINCREMENT assigns a new id, and the next sync round creates a different record on the sender — id drift, looping forever.
+
+```rust
+// pc/src-tauri/src/commands/sync_cmd.rs::merge_remote_into_local
+conn.execute(
+    "INSERT INTO todos (id, title, ...) VALUES (?1, ?2, ...)",  // id is explicit
+    params![remote_todo.id, remote_todo.title, ...],
+)?;
+```
+
+> **Contrast with full-replacement import**: `webdav_apply_remote` (the non-merge path) drops the table and lets SQLite reassign ids on re-insert. That's fine because the next push then sends those new ids back as authoritative. But the **per-record merge path** (412 retry) must NOT reassign — remote id is authoritative.
+
+### Trap 4: Tombstones for delete propagation
+
+LWW with no tombstone: A deletes record X, B still has X with a newer `updated_at` → next merge, A "loses" and re-creates X. The delete silently fails to propagate.
+
+```rust
+// cloud/src/sync/push.rs::merge_sync_data — tombstone consulted before LWW
+if todo_tombs.contains(id) {
+    continue;  // local deleted this; do not resurrect from remote
+}
+```
+
+Tombstone schema: `(type TEXT, id TEXT, deleted_at TEXT, PRIMARY KEY (type, id))`. After a successful PUT, sweep tombstones older than N days (mini-todo: 7) so the table doesn't grow forever.
+
+### Per-record conflict matrix
+
+| Local state | Remote state | Action |
+|---|---|---|
+| present, `local.updated_at >= remote.updated_at` | present | keep local |
+| present, `local.updated_at < remote.updated_at` | present | overwrite with remote (all columns, preserve remote `updated_at`) |
+| absent | present | INSERT remote (preserve remote id) |
+| present (no tombstone) | absent | keep local (treated as locally new) |
+| tombstone | present | drop remote, keep tombstone |
+
+### Wrong vs Correct
+
+**Wrong**: full-replacement PUT (works fine until two writers, then silent overwrites)
+
+```rust
+let body = export_full_data();
+client.put("/sync-data.json.gz", body);  // no precondition, no merge
+```
+
+**Correct**: conditional PUT + 412 → merge → retry
+
+```rust
+let mut retry = 0;
+loop {
+    let last_modified = get_setting("webdav_last_modified").filter(|s| !s.is_empty());
+    let body = export_full_data();
+    match client.upload_bytes(..., body, last_modified.as_deref())? {
+        UploadOutcome::Ok(new_last_modified) => {
+            if let Some(lm) = new_last_modified { set_setting("webdav_last_modified", lm); }
+            break Ok(());
+        }
+        UploadOutcome::PreconditionFailed => {
+            if retry >= MAX_RETRY { return Err("too many conflicts".into()); }
+            retry += 1;
+            let (remote_bytes, remote_lm) = client.download_bytes(...)?;
+            if let Some(lm) = remote_lm { set_setting("webdav_last_modified", lm); }
+            let remote: SyncData = decompress(remote_bytes)?;
+            merge_remote_into_local(db, &remote)?;  // per-record LWW + tombstone
+            // loop: re-export with merged state, retry PUT
+        }
+    }
+}
+```
+
+### Tests required (assertion points)
+
+- `merge_keeps_newer`: remote.updated_at > local → local row overwritten
+- `merge_keeps_local_when_newer`: local.updated_at > remote → local row untouched
+- `merge_tombstone_suppresses_remote`: local tombstone present → remote record dropped, not resurrected
+- `merge_inserts_remote_with_explicit_id`: remote-only record → INSERT with remote id, not AUTOINCREMENT
+- `merge_runs_in_single_transaction`: any mid-merge SQL error → entire batch rolls back
+- `time_format_byte_for_byte_match`: cloud `now_local_string` output matches PC `datetime('now','localtime')` shape exactly (`YYYY-MM-DD HH:MM:SS`, no `T`, no tz suffix)
