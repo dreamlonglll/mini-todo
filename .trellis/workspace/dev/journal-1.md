@@ -173,3 +173,42 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 6: cloud-api-and-skill: 3-PR cloud REST + Skill + PC race fix
+
+**Date**: 2026-05-13
+**Task**: cloud-api-and-skill: 3-PR cloud REST + Skill + PC race fix
+**Branch**: `main`
+
+### Summary
+
+新增 cloud/ 独立 Rust crate（axum + rusqlite + reqwest + WebDAV 客户端），实现：(1) PR1 只读骨架——/health + Bearer auth + 60s pull worker + 启动镜像图片；(2) PR2 REST CRUD 全套（/todos /subtasks /images）+ 1s tick push worker（CAS dirty + per-record LWW + tombstone 抑制 + 412 重试 + 7 天 tombstone GC）+ Claude Code skill（SKILL.md + Python CLI 9 子命令 + 跨平台 install 脚本）；(3) PR3 PC 端 race 修复——webdav.rs upload_bytes 加 if_unmodified_since + 返回 UploadOutcome；sync_cmd.rs 改条件 PUT + 412 重试循环 + merge_remote_into_local 单事务 per-record LWW；db v24 加 webdav_last_modified setting；app 版本 2.0.0 → 2.1.0。spec 沉淀：cross-layer-thinking-guide.md 新增'两端 SQLite 副本 + HTTP blob 双向同步'章节（时间格式对齐 / 条件 PUT 局限 / id 保留 / tombstone / 冲突矩阵 / Wrong vs Correct）。3 轮 trellis-check 共抓 7 个 finding（含 SQLite IFNULL 三参 500 / cmd_today 窗口错 / settings null 让 PC 反序列化失败 / 图片扩展名白名单）已自修。验证：cloud cargo build/clippy -D warnings/fmt/28 tests + pc cargo check/clippy/fmt/npm run build 全绿。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `87639f4` | (see git log) |
+| `605f3e2` | (see git log) |
+| `64e3d88` | (see git log) |
+| `2a13fa9` | (see git log) |
+| `efca93c` | (see git log) |
+| `e75cd7a` | (see git log) |
+| `d0d56af` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
