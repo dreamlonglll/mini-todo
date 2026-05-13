@@ -189,6 +189,9 @@ push worker 会在 WebDAV 恢复后自动回写。
 [openclaw](https://github.com/openclaw/openclaw) 的 workspace 让 cron 调度器
 定时检查临期待办、自动推到 default channel。
 
+> **给 openclaw agent**：完整的安装/配置/故障排查指南见
+> [`openclaw.md`](openclaw.md)（带前置检查、验证命令、卸载步骤）。
+
 最小落地步骤（前提：`config.toml` 已填好 `endpoint` + `api_key`）：
 
 ```bash
