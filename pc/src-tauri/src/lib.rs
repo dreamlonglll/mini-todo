@@ -15,55 +15,18 @@ use tauri_plugin_autostart::ManagerExt;
 static LAST_CLICK_TIME: AtomicU64 = AtomicU64::new(0);
 const DOUBLE_CLICK_THRESHOLD_MS: u64 = 500;
 use commands::{
-    close_all_notification_windows,
-    close_notification_window,
-    create_subtask,
-    create_todo,
-    delete_screen_config,
-    delete_subtask,
-    delete_todo,
-    export_data,
-    export_data_to_file,
-    get_images_dir,
-    get_subtask,
-    get_sync_settings,
-    fetch_holidays,
-    get_auto_hide_enabled,
-    get_notification_type,
-    get_screen_config,
-    get_settings,
-    get_show_calendar,
-    get_system_fonts,
-    get_todo_font_family,
-    get_todo_font_size,
-    get_todos,
-    get_window_persist_state,
-    import_data,
-    import_data_from_file,
-    import_subtasks_from_paths,
-    is_fixed_mode,
-    list_screen_configs,
-    reorder_todos,
-    reset_window,
-    save_screen_config,
-    save_settings,
-    save_subtask_image,
-    save_sync_settings,
-    set_auto_hide_cursor_inside,
-    set_auto_hide_enabled,
-    set_notification_type,
-    set_show_calendar,
-    set_todo_font_family,
-    set_todo_font_size,
-    set_window_fixed_mode,
-    update_screen_config_name,
-    update_subtask,
-    update_todo,
-    webdav_apply_remote,
-    webdav_auto_sync,
-    webdav_download_sync,
-    webdav_test_connection,
-    webdav_upload_sync,
+    close_all_notification_windows, close_notification_window, create_subtask, create_todo,
+    delete_screen_config, delete_subtask, delete_todo, export_data, export_data_to_file,
+    fetch_holidays, get_auto_hide_enabled, get_images_dir, get_notification_type,
+    get_screen_config, get_settings, get_show_calendar, get_subtask, get_sync_settings,
+    get_system_fonts, get_todo_font_family, get_todo_font_size, get_todos,
+    get_window_persist_state, import_data, import_data_from_file, import_subtasks_from_paths,
+    is_fixed_mode, list_screen_configs, reorder_todos, reset_window, save_screen_config,
+    save_settings, save_subtask_image, save_sync_settings, set_auto_hide_cursor_inside,
+    set_auto_hide_enabled, set_notification_type, set_show_calendar, set_todo_font_family,
+    set_todo_font_size, set_window_fixed_mode, update_screen_config_name, update_subtask,
+    update_todo, webdav_apply_remote, webdav_auto_sync, webdav_download_sync,
+    webdav_test_connection, webdav_upload_sync,
 };
 
 #[cfg(target_os = "windows")]
@@ -96,7 +59,10 @@ fn setup_macos_transparent_webview(window: &tauri::WebviewWindow) {
 
     // 把 WKWebView 底色置空，让 CSS 控制最终显示：深色模式透明透出桌面，浅色模式由 .app-container 填白。
     if let Err(e) = window.set_background_color(Some(Color(0, 0, 0, 0))) {
-        eprintln!("Failed to set macOS webview background transparent: {:?}", e);
+        eprintln!(
+            "Failed to set macOS webview background transparent: {:?}",
+            e
+        );
     }
 }
 

@@ -4,8 +4,7 @@ use serde::{Deserialize, Serialize};
 pub const SUBTASK_COLUMNS: &str =
     "id, parent_id, title, content, completed, sort_order, created_at, updated_at";
 
-pub const TODO_COLUMNS: &str =
-    "id, title, description, color, quadrant, notify_at, notify_before,
+pub const TODO_COLUMNS: &str = "id, title, description, color, quadrant, notify_at, notify_before,
      notified, completed, sort_order, start_time, end_time, created_at, updated_at,
      repeat_enabled, repeat_type, repeat_interval, repeat_weekdays, repeat_month_day";
 

@@ -8,9 +8,8 @@ pub fn get_system_fonts() -> Result<Vec<String>, String> {
         use windows::Win32::Graphics::DirectWrite::*;
 
         unsafe {
-            let factory: IDWriteFactory =
-                DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)
-                    .map_err(|e| format!("DWrite factory: {e}"))?;
+            let factory: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)
+                .map_err(|e| format!("DWrite factory: {e}"))?;
 
             let mut collection = None;
             factory

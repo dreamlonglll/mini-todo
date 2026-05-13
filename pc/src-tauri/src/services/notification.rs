@@ -315,7 +315,9 @@ impl NotificationService {
         for _ in 0..366 * 5 {
             candidate = match repeat_type {
                 "daily" => candidate + chrono::Duration::days(interval as i64),
-                "weekly" => Self::next_weekly(candidate, interval, todo.repeat_weekdays.as_deref(), time)?,
+                "weekly" => {
+                    Self::next_weekly(candidate, interval, todo.repeat_weekdays.as_deref(), time)?
+                }
                 "monthly" => Self::next_monthly(candidate, interval, todo.repeat_month_day, time)?,
                 _ => return None,
             };
@@ -337,7 +339,7 @@ impl NotificationService {
             .unwrap_or("1,2,3,4,5,6,7")
             .split(',')
             .filter_map(|s| s.trim().parse::<u32>().ok())
-            .filter(|&d| d >= 1 && d <= 7)
+            .filter(|&d| (1..=7).contains(&d))
             .collect();
         weekdays.sort_unstable();
 
@@ -356,7 +358,8 @@ impl NotificationService {
         }
         // 跳到 interval 周后的第一个匹配日
         let days_to_monday = 7 - current_iso + 1;
-        let base_date = current.date() + chrono::Duration::days(days_to_monday as i64)
+        let base_date = current.date()
+            + chrono::Duration::days(days_to_monday as i64)
             + chrono::Duration::weeks((interval - 1) as i64);
         let first_wd = weekdays.iter().min().copied().unwrap_or(1);
         let date = base_date + chrono::Duration::days((first_wd - 1) as i64);
@@ -370,7 +373,7 @@ impl NotificationService {
         month_day: Option<i32>,
         time: NaiveTime,
     ) -> Option<NaiveDateTime> {
-        let target_day = month_day.unwrap_or(current.day() as i32).max(1).min(31) as u32;
+        let target_day = month_day.unwrap_or(current.day() as i32).clamp(1, 31) as u32;
         let mut month = current.month() as i32 + interval;
         let mut year = current.year();
 
@@ -394,9 +397,10 @@ impl NotificationService {
         let db = app_handle.state::<Database>();
         let notification_type = Self::get_notification_type(&db);
 
-        let overdue = db.with_connection(|conn| {
-            let mut stmt = conn.prepare(
-                r#"
+        let overdue = db
+            .with_connection(|conn| {
+                let mut stmt = conn.prepare(
+                    r#"
                 SELECT id, title, description, repeat_enabled, repeat_type, repeat_interval,
                        repeat_weekdays, repeat_month_day, notify_at
                 FROM todos
@@ -405,27 +409,29 @@ impl NotificationService {
                   AND notified = 0
                   AND notify_at IS NOT NULL
                   AND datetime(notify_at) <= datetime('now', 'localtime')
-                "#
-            )?;
+                "#,
+                )?;
 
-            let todos: Vec<PendingNotification> = stmt.query_map([], |row| {
-                Ok(PendingNotification {
-                    id: row.get(0)?,
-                    title: row.get(1)?,
-                    description: row.get::<_, Option<String>>(2)?,
-                    repeat_enabled: row.get::<_, i32>(3).unwrap_or(0) != 0,
-                    repeat_type: row.get(4).unwrap_or(None),
-                    repeat_interval: row.get(5).unwrap_or(1),
-                    repeat_weekdays: row.get(6).unwrap_or(None),
-                    repeat_month_day: row.get(7).unwrap_or(None),
-                    notify_at: row.get(8).unwrap_or(None),
-                })
-            })?
-            .filter_map(|r| r.ok())
-            .collect();
+                let todos: Vec<PendingNotification> = stmt
+                    .query_map([], |row| {
+                        Ok(PendingNotification {
+                            id: row.get(0)?,
+                            title: row.get(1)?,
+                            description: row.get::<_, Option<String>>(2)?,
+                            repeat_enabled: row.get::<_, i32>(3).unwrap_or(0) != 0,
+                            repeat_type: row.get(4).unwrap_or(None),
+                            repeat_interval: row.get(5).unwrap_or(1),
+                            repeat_weekdays: row.get(6).unwrap_or(None),
+                            repeat_month_day: row.get(7).unwrap_or(None),
+                            notify_at: row.get(8).unwrap_or(None),
+                        })
+                    })?
+                    .filter_map(|r| r.ok())
+                    .collect();
 
-            Ok(todos)
-        }).map_err(|e| e.to_string())?;
+                Ok(todos)
+            })
+            .map_err(|e| e.to_string())?;
 
         for todo in &overdue {
             match notification_type.as_str() {
@@ -433,7 +439,8 @@ impl NotificationService {
                     let _ = Self::send_app_notification(app_handle, &todo.title, &todo.description);
                 }
                 _ => {
-                    let _ = Self::send_system_notification(app_handle, &todo.title, &todo.description);
+                    let _ =
+                        Self::send_system_notification(app_handle, &todo.title, &todo.description);
                 }
             }
             Self::advance_repeat(&db, todo)?;

@@ -1,6 +1,6 @@
 use crate::db::{
-    AppSettings, Database, ExportData, Todo, WindowPosition, WindowSize,
-    subtask_from_row, todo_from_row, SUBTASK_COLUMNS, TODO_COLUMNS,
+    subtask_from_row, todo_from_row, AppSettings, Database, ExportData, Todo, WindowPosition,
+    WindowSize, SUBTASK_COLUMNS, TODO_COLUMNS,
 };
 use chrono::Local;
 use rusqlite::params;
@@ -27,16 +27,24 @@ fn get_setting_bool(conn: &rusqlite::Connection, key: &str, default: bool) -> bo
 fn read_app_settings(conn: &rusqlite::Connection) -> AppSettings {
     let is_fixed = get_setting_bool(conn, "is_fixed", false);
     let window_position: Option<WindowPosition> = conn
-        .query_row("SELECT value FROM settings WHERE key = 'window_position'", [], |row| {
-            let val: String = row.get(0)?;
-            Ok(serde_json::from_str(&val).ok())
-        })
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'window_position'",
+            [],
+            |row| {
+                let val: String = row.get(0)?;
+                Ok(serde_json::from_str(&val).ok())
+            },
+        )
         .unwrap_or(None);
     let window_size: Option<WindowSize> = conn
-        .query_row("SELECT value FROM settings WHERE key = 'window_size'", [], |row| {
-            let val: String = row.get(0)?;
-            Ok(serde_json::from_str(&val).ok())
-        })
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'window_size'",
+            [],
+            |row| {
+                let val: String = row.get(0)?;
+                Ok(serde_json::from_str(&val).ok())
+            },
+        )
         .unwrap_or(None);
     let text_theme = get_setting_string(conn, "text_theme", "dark");
     let auto_hide_enabled = get_setting_bool(conn, "auto_hide_enabled", true);
@@ -102,7 +110,7 @@ pub fn export_data_internal(db: &Database) -> Result<String, String> {
     let result = db.with_connection(|conn| {
         let todo_sql = format!("SELECT {} FROM todos ORDER BY sort_order ASC", TODO_COLUMNS);
         let mut stmt = conn.prepare(&todo_sql)?;
-        let todo_iter = stmt.query_map([], |row| todo_from_row(row))?;
+        let todo_iter = stmt.query_map([], todo_from_row)?;
 
         let mut todos: Vec<Todo> = todo_iter.filter_map(|t| t.ok()).collect();
 
@@ -112,7 +120,7 @@ pub fn export_data_internal(db: &Database) -> Result<String, String> {
                 SUBTASK_COLUMNS
             );
             let mut subtask_stmt = conn.prepare(&subtask_sql)?;
-            let subtask_iter = subtask_stmt.query_map([todo.id], |row| subtask_from_row(row))?;
+            let subtask_iter = subtask_stmt.query_map([todo.id], subtask_from_row)?;
 
             todo.subtasks = subtask_iter.filter_map(|s| s.ok()).collect();
         }
@@ -197,20 +205,19 @@ pub fn import_data_raw(db: &Database, json_data: &str) -> Result<(), String> {
 
 #[tauri::command]
 pub fn export_data(db: State<Database>) -> Result<String, String> {
-    export_data_internal(&*db)
+    export_data_internal(&db)
 }
 
 #[tauri::command]
 pub fn import_data(db: State<Database>, json_data: String) -> Result<(), String> {
-    import_data_raw(&*db, &json_data)
+    import_data_raw(&db, &json_data)
 }
 
 #[tauri::command]
 pub fn export_data_to_file(db: State<Database>, file_path: String) -> Result<(), String> {
-    let json_data = export_data_internal(&*db)?;
+    let json_data = export_data_internal(&db)?;
 
-    let file = std::fs::File::create(&file_path)
-        .map_err(|e| format!("创建文件失败: {}", e))?;
+    let file = std::fs::File::create(&file_path).map_err(|e| format!("创建文件失败: {}", e))?;
     let mut zip = zip::ZipWriter::new(file);
 
     let options = zip::write::SimpleFileOptions::default()
@@ -227,27 +234,28 @@ pub fn export_data_to_file(db: State<Database>, file_path: String) -> Result<(),
 
 #[tauri::command]
 pub fn import_data_from_file(db: State<Database>, file_path: String) -> Result<(), String> {
-    let file_bytes = std::fs::read(&file_path)
-        .map_err(|e| format!("读取文件失败: {}", e))?;
+    let file_bytes = std::fs::read(&file_path).map_err(|e| format!("读取文件失败: {}", e))?;
 
     // ZIP magic bytes: PK (0x50, 0x4B)
     let is_zip = file_bytes.len() >= 2 && file_bytes[0] == 0x50 && file_bytes[1] == 0x4B;
 
     if is_zip {
         let cursor = std::io::Cursor::new(&file_bytes);
-        let mut archive = zip::ZipArchive::new(cursor)
-            .map_err(|e| format!("解析 ZIP 失败: {}", e))?;
+        let mut archive =
+            zip::ZipArchive::new(cursor).map_err(|e| format!("解析 ZIP 失败: {}", e))?;
 
         let mut json_data = String::new();
-        let mut data_file = archive.by_name("data.json")
+        let mut data_file = archive
+            .by_name("data.json")
             .map_err(|e| format!("ZIP 中未找到 data.json: {}", e))?;
-        data_file.read_to_string(&mut json_data)
+        data_file
+            .read_to_string(&mut json_data)
             .map_err(|e| format!("读取 data.json 失败: {}", e))?;
 
-        import_data_raw(&*db, &json_data)
+        import_data_raw(&db, &json_data)
     } else {
-        let json_data = String::from_utf8(file_bytes)
-            .map_err(|e| format!("文件编码错误: {}", e))?;
-        import_data_raw(&*db, &json_data)
+        let json_data =
+            String::from_utf8(file_bytes).map_err(|e| format!("文件编码错误: {}", e))?;
+        import_data_raw(&db, &json_data)
     }
 }

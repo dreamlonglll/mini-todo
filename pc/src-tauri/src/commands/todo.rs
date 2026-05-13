@@ -1,8 +1,8 @@
-use base64::{engine::general_purpose, Engine};
 use crate::db::{
-    CreateSubTaskRequest, CreateTodoRequest, Database, SubTask, Todo, UpdateSubTaskRequest,
-    UpdateTodoRequest, subtask_from_row, todo_from_row, SUBTASK_COLUMNS, TODO_COLUMNS,
+    subtask_from_row, todo_from_row, CreateSubTaskRequest, CreateTodoRequest, Database, SubTask,
+    Todo, UpdateSubTaskRequest, UpdateTodoRequest, SUBTASK_COLUMNS, TODO_COLUMNS,
 };
+use base64::{engine::general_purpose, Engine};
 use std::path::{Path, PathBuf};
 use tauri::State;
 
@@ -16,7 +16,7 @@ pub fn get_todos(db: State<Database>) -> Result<Vec<Todo>, String> {
         );
         let mut stmt = conn.prepare(&sql)?;
 
-        let todo_iter = stmt.query_map([], |row| todo_from_row(row))?;
+        let todo_iter = stmt.query_map([], todo_from_row)?;
 
         let mut todos: Vec<Todo> = todo_iter.filter_map(|t| t.ok()).collect();
 
@@ -28,7 +28,7 @@ pub fn get_todos(db: State<Database>) -> Result<Vec<Todo>, String> {
             );
             let mut subtask_stmt = conn.prepare(&subtask_sql)?;
 
-            let subtask_iter = subtask_stmt.query_map([todo.id], |row| subtask_from_row(row))?;
+            let subtask_iter = subtask_stmt.query_map([todo.id], subtask_from_row)?;
 
             todo.subtasks = subtask_iter.filter_map(|s| s.ok()).collect();
         }
@@ -69,7 +69,7 @@ pub fn create_todo(db: State<Database>, data: CreateTodoRequest) -> Result<Todo,
         let id = conn.last_insert_rowid();
 
         let sql = format!("SELECT {} FROM todos WHERE id = ?", TODO_COLUMNS);
-        conn.query_row(&sql, [id], |row| todo_from_row(row))
+        conn.query_row(&sql, [id], todo_from_row)
     })
     .map_err(|e| e.to_string())
 }
@@ -181,14 +181,14 @@ pub fn update_todo(db: State<Database>, id: i64, data: UpdateTodoRequest) -> Res
         conn.execute(&sql, params_refs.as_slice())?;
 
         let todo_sql = format!("SELECT {} FROM todos WHERE id = ?", TODO_COLUMNS);
-        let mut todo = conn.query_row(&todo_sql, [id], |row| todo_from_row(row))?;
+        let mut todo = conn.query_row(&todo_sql, [id], todo_from_row)?;
 
         let subtask_sql = format!(
             "SELECT {} FROM subtasks WHERE parent_id = ? ORDER BY sort_order ASC",
             SUBTASK_COLUMNS
         );
         let mut subtask_stmt = conn.prepare(&subtask_sql)?;
-        let subtask_iter = subtask_stmt.query_map([id], |row| subtask_from_row(row))?;
+        let subtask_iter = subtask_stmt.query_map([id], subtask_from_row)?;
         todo.subtasks = subtask_iter.filter_map(|s| s.ok()).collect();
 
         Ok(todo)
@@ -239,7 +239,7 @@ pub fn create_subtask(db: State<Database>, data: CreateSubTaskRequest) -> Result
         let id = conn.last_insert_rowid();
 
         let sql = format!("SELECT {} FROM subtasks WHERE id = ?", SUBTASK_COLUMNS);
-        conn.query_row(&sql, [id], |row| subtask_from_row(row))
+        conn.query_row(&sql, [id], subtask_from_row)
     })
     .map_err(|e| e.to_string())
 }
@@ -286,7 +286,7 @@ pub fn update_subtask(
         conn.execute(&sql, params_refs.as_slice())?;
 
         let sql = format!("SELECT {} FROM subtasks WHERE id = ?", SUBTASK_COLUMNS);
-        conn.query_row(&sql, [id], |row| subtask_from_row(row))
+        conn.query_row(&sql, [id], subtask_from_row)
     })
     .map_err(|e| e.to_string())
 }
@@ -295,7 +295,7 @@ pub fn update_subtask(
 pub fn get_subtask(db: State<Database>, id: i64) -> Result<SubTask, String> {
     db.with_connection(|conn| {
         let sql = format!("SELECT {} FROM subtasks WHERE id = ?", SUBTASK_COLUMNS);
-        conn.query_row(&sql, [id], |row| subtask_from_row(row))
+        conn.query_row(&sql, [id], subtask_from_row)
     })
     .map_err(|e| e.to_string())
 }
@@ -333,7 +333,10 @@ pub fn save_subtask_image(image_data: String, file_name: String) -> Result<Strin
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
     let raw = if image_data.contains(',') {
-        image_data.splitn(2, ',').nth(1).unwrap_or("").to_string()
+        image_data
+            .split_once(',')
+            .map(|x| x.1.to_string())
+            .unwrap_or_default()
     } else {
         image_data
     };
@@ -409,7 +412,7 @@ pub fn import_subtasks_from_paths(
 
             let id = conn.last_insert_rowid();
             let sql = format!("SELECT {} FROM subtasks WHERE id = ?", SUBTASK_COLUMNS);
-            let subtask = conn.query_row(&sql, [id], |row| subtask_from_row(row))?;
+            let subtask = conn.query_row(&sql, [id], subtask_from_row)?;
             created.push(subtask);
         }
 
