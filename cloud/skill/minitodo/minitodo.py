@@ -194,6 +194,12 @@ def cmd_due_soon(client: Client, args: argparse.Namespace) -> Any:
     给 openclaw / Claude Code cron 类调度场景用。
     输出顺序：先 overdue（旧的在前），再 upcoming（近的在前）。
     过滤：同时缺 notifyAt 与 dueDate/endTime 的 todo 不展示（避免噪音）。
+
+    数据源（重要）：
+    - 服务端 query 只支持 dueDateBefore/After，**不支持** notifyAt 过滤。
+    - mini-todo 的重复提醒（每周/每月几号）只 UPDATE notify_at，**不动** due_date，
+      所以仅靠 dueDate 窗口会漏掉所有"靠 notifyAt 触发"的重复任务。
+    - 因此这里额外拉一次 "completed=false" 全量，客户端再按 notifyAt 自己筛。
     """
     hours = max(1, int(args.hours or 24))
     now = dt.datetime.now()
@@ -201,7 +207,8 @@ def cmd_due_soon(client: Client, args: argparse.Namespace) -> Any:
     now_str = now.strftime("%Y-%m-%dT%H:%M:%S")
     future_str = future.strftime("%Y-%m-%dT%H:%M:%S")
 
-    upcoming = client.get(
+    # 1) dueDate 窗口（服务端筛，效率高）
+    upcoming_due = client.get(
         "/todos",
         params={
             "completed": "false",
@@ -210,7 +217,7 @@ def cmd_due_soon(client: Client, args: argparse.Namespace) -> Any:
             "sort": "+dueDate",
         },
     ) or []
-    overdue = client.get(
+    overdue_due = client.get(
         "/todos",
         params={
             "completed": "false",
@@ -219,9 +226,32 @@ def cmd_due_soon(client: Client, args: argparse.Namespace) -> Any:
         },
     ) or []
 
+    # 2) notifyAt 窗口（服务端不支持，全量拉再客户端筛）
+    all_pending = client.get(
+        "/todos",
+        params={"completed": "false"},
+    ) or []
+    overdue_notify: list[dict[str, Any]] = []
+    upcoming_notify: list[dict[str, Any]] = []
+    for t in all_pending:
+        notify_raw = (t.get("notifyAt") or "").strip()
+        if not notify_raw:
+            continue
+        when = _parse_dt(notify_raw)
+        if when is None:
+            continue
+        if when < now:
+            overdue_notify.append(t)
+        elif when <= future:
+            upcoming_notify.append(t)
+    # notifyAt 子集内部按时间排序，更易读
+    overdue_notify.sort(key=lambda t: t.get("notifyAt") or "")
+    upcoming_notify.sort(key=lambda t: t.get("notifyAt") or "")
+
+    # 3) 合并去重：overdue（dueDate→notifyAt）→ upcoming（dueDate→notifyAt）
     seen: set[str] = set()
     items: list[dict[str, Any]] = []
-    for batch in (overdue, upcoming):
+    for batch in (overdue_due, overdue_notify, upcoming_due, upcoming_notify):
         for t in batch:
             tid = str(t.get("id"))
             if tid in seen:
@@ -362,7 +392,11 @@ def format_notify_text(result: Any, hours: int = 24) -> str:
     overdue: list[dict[str, Any]] = []
     upcoming: list[dict[str, Any]] = []
     for t in result:
-        due_raw = t.get("dueDate") or t.get("endTime") or ""
+        # 与 _notify_line 保持同样的字段优先级：dueDate / endTime / notifyAt
+        # 否则纯靠 notifyAt 触发的重复任务（dueDate 空）会被错放到 upcoming
+        due_raw = (
+            t.get("dueDate") or t.get("endTime") or t.get("notifyAt") or ""
+        )
         when = _parse_dt(due_raw)
         if when is not None and when < now:
             overdue.append(t)
