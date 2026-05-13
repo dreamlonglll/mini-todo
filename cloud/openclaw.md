@@ -157,7 +157,50 @@ python ~/.openclaw/workspace/skills/minitodo/minitodo.py due-soon --hours 24 --n
 
 可能是空列表（"未来 24h 无临期事项。"），也可能是若干行 markdown 列表——都算正常。
 
-## 6. 注册 cron：每天 8 点检查临期
+## 6. 询问用户提醒偏好（不要替用户做主）
+
+在执行 §7 注册 cron **之前**，必须先用日常语言问用户三件事，然后用回答构造
+`--cron` / `--tz` / `--hours`。**不要直接套用默认值就发出去**。
+
+按下面这套问题问用户（一次性问完，或者根据用户语境拆开问，都行）：
+
+| 要问的 | 默认值（仅当用户说"随便/默认"时用） | 取值示例 |
+|---|---|---|
+| **时区**（IANA） | `Asia/Shanghai` | `Asia/Shanghai` / `America/Los_Angeles` / `Europe/London` |
+| **触发时间**（每天几点 / 工作日还是天天 / 几次） | 每天 1 次，08:00 | "每天早 8 点" / "工作日早 9 晚 6" / "每 2 小时" |
+| **临期窗口**（往前看多少小时） | 24 小时 | "24" / "12" / "48" |
+
+> 触发时间和临期窗口要"对齐"：每 2 小时跑一次就应该 `--hours 2`，否则同一条
+> 临期会被推 12 遍。问完用户后顺手提醒一句。
+
+把用户回答翻译成 cron 表达式。常见映射：
+
+| 用户说的话 | `--cron` | `--hours` 推荐 |
+|---|---|---|
+| 每天早 8 点 | `"0 8 * * *"` | 24 |
+| 每天早 9 点 + 晚 6 点 | `"0 9,18 * * *"` | 12 |
+| 工作日早 9 点 | `"0 9 * * 1-5"` | 24（周末顺延） |
+| 每 2 小时一次 | `"0 */2 * * *"` | 2 |
+| 每小时一次 | `"0 * * * *"` | 1 |
+
+如果用户给的描述模糊（比如"早上"），追问具体时分；不要自己猜测。
+
+## 7. 注册 cron
+
+把 §6 得到的三个值（`<USER_CRON>` / `<USER_TZ>` / `<USER_HOURS>`）填到下面的
+命令里再执行：
+
+```bash
+openclaw cron add \
+  --name minitodo-due-soon \
+  --cron "<USER_CRON>" \
+  --tz "<USER_TZ>" \
+  --session isolated \
+  --message "调用 minitodo skill 的 due-soon 子命令检查未来 <USER_HOURS> 小时内的临期和已逾期待办。命令：python ~/.openclaw/workspace/skills/minitodo/minitodo.py due-soon --hours <USER_HOURS> --notify-text --silent-if-empty。把命令 stdout 的内容直接作为回复发出来（每条任务前已经带了 #{id}，不要去掉）；如果 stdout 为空就只回复'<USER_HOURS>h 内无临期事项'。不要追加解释。" \
+  --announce
+```
+
+例：用户选了「每天早 8 点 / Asia/Shanghai / 24 小时」，最终命令是：
 
 ```bash
 openclaw cron add \
@@ -165,7 +208,7 @@ openclaw cron add \
   --cron "0 8 * * *" \
   --tz "Asia/Shanghai" \
   --session isolated \
-  --message "调用 minitodo skill 的 due-soon 子命令检查未来 24 小时内的临期和已逾期待办。命令：python ~/.openclaw/workspace/skills/minitodo/minitodo.py due-soon --hours 24 --notify-text --silent-if-empty。把命令 stdout 的内容直接作为回复发出来；如果 stdout 为空就只回复'今日无临期事项'。不要追加解释。" \
+  --message "调用 minitodo skill 的 due-soon 子命令检查未来 24 小时内的临期和已逾期待办。命令：python ~/.openclaw/workspace/skills/minitodo/minitodo.py due-soon --hours 24 --notify-text --silent-if-empty。把命令 stdout 的内容直接作为回复发出来（每条任务前已经带了 #{id}，不要去掉）；如果 stdout 为空就只回复'24h 内无临期事项'。不要追加解释。" \
   --announce
 ```
 
@@ -174,26 +217,26 @@ openclaw cron add \
 | 参数 | 作用 | 改它的代价 |
 |---|---|---|
 | `--name minitodo-due-soon` | 唯一标识，后续管理用 | 改了的话下面所有 `cron run/remove` 命令也要跟着改 |
-| `--cron "0 8 * * *"` | 每天 08:00 | 见 §8 调整频率 |
-| `--tz "Asia/Shanghai"` | 时区 | 必须与用户实际生活时区一致，否则会在凌晨推 |
+| `--cron "<USER_CRON>"` | 触发时机 | 见 §9.A 的事后调整方法 |
+| `--tz "<USER_TZ>"` | 时区 | 必须与用户实际生活时区一致，否则会在凌晨推 |
 | `--session isolated` | 干净 agent turn | 改 `main` 会污染主对话历史；改 `current` 会跑在当前 session（不推荐） |
 | `--message ...` | 触发提示词 | 必须提到 `due-soon` + `--notify-text` + `--silent-if-empty`，否则输出格式不对 |
 | `--announce` | 把回复推到 channel | 缺这个就只在 cron history 里能看到 |
 
 **不带 `--channel` / `--to`** 时，openclaw 用 session history 中最近用过的 channel
 作为 default channel（参考 openclaw 文档 `docs/automation/cron-jobs.md` 中
-`channel: "last"`）。如果用户希望固定推到某个 IM channel，跳到 §8.B。
+`channel: "last"`）。如果用户希望固定推到某个 IM channel，跳到 §9.B。
 
-## 7. 验证 cron
+## 8. 验证 cron
 
-### 7.1 列出 cron 看注册成功
+### 8.1 列出 cron 看注册成功
 
 ```bash
 openclaw cron list
 # 应包含一行 minitodo-due-soon
 ```
 
-### 7.2 立刻强制跑一次（不等到明早 8 点）
+### 8.2 立刻强制跑一次（不等下一次触发）
 
 ```bash
 openclaw cron run minitodo-due-soon
@@ -205,15 +248,20 @@ openclaw cron run minitodo-due-soon
 ```
 mini-todo 临期提醒｜2026-05-13 08:00
 已逾期（1）：
-  - [高] 写报告 (05-12 18:00，已逾期 14 小时)
+  - #1734567890123456 [高] 写报告 (05-12 18:00，已逾期 14 小时)
 未来 24h 到期（2）：
-  - [中] 买菜 (05-13 10:00，2 小时后)
-  - [低] 开会 (05-13 19:00，11 小时后)
+  - #1734567890123457 [中] 买菜 (05-13 10:00，2 小时后)
+  - #1734567890123458 [低] 开会 (05-13 19:00，11 小时后)
 ```
 
-或者，如果没有任何临期事项：`今日无临期事项`。
+每条任务前的 `#{id}` 是 mini-todo 的内部 ID，用户反馈 / 二次操作时可直接用它定位。
 
-### 7.3 看执行历史
+或者，如果没有任何临期事项：`<USER_HOURS>h 内无临期事项`。
+
+> skill 只展示有 `notifyAt` 或 `dueDate`/`endTime` 任一时间锚点的 todo；
+> 纯文本备忘类（没有任何时间）不会出现在 channel 推送里。
+
+### 8.3 看执行历史
 
 ```bash
 openclaw cron runs --id minitodo-due-soon
@@ -221,22 +269,24 @@ openclaw cron runs --id minitodo-due-soon
 
 成功的 run 会标记 `status: ok`；失败的会有 error 信息，按里面的提示回到 §5 排查。
 
-## 8. 可选自定义
+## 9. 事后调整
 
-### 8.A 调整频率
+### 9.A 改时间 / 频率 / 临期窗口
 
-替换 §6 中的 `--cron` 表达式即可（修改方式用 `openclaw cron edit minitodo-due-soon --cron "..."`）：
+用 `openclaw cron edit`，新 cron 表达式参考 §6 的映射表：
 
-| 需求 | cron 表达式 |
-|---|---|
-| 每天 8 点 | `"0 8 * * *"` |
-| 早晚各一次（8 / 18 点） | `"0 8,18 * * *"` |
-| 每 2 小时 | `"0 */2 * * *"` |
-| 工作日早 9 点 | `"0 9 * * 1-5"` |
+```bash
+# 改时间
+openclaw cron edit minitodo-due-soon --cron "0 9,18 * * *" --tz "Asia/Shanghai"
 
-`--hours` 也可同步调整（写在 message 里的命令上）。每 2 小时跑的话推荐 `--hours 2`，避免重复推送同一条临期。
+# 改临期窗口（必须同步改 message 里的 --hours，否则不对齐）
+openclaw cron edit minitodo-due-soon \
+  --message "调用 minitodo skill 的 due-soon 子命令检查未来 12 小时内的临期和已逾期待办。命令：python ~/.openclaw/workspace/skills/minitodo/minitodo.py due-soon --hours 12 --notify-text --silent-if-empty。把命令 stdout 的内容直接作为回复发出来（每条任务前已经带了 #{id}，不要去掉）；如果 stdout 为空就只回复'12h 内无临期事项'。不要追加解释。"
+```
 
-### 8.B 显式指定 channel（推荐生产场景）
+> 频率与 `--hours` 要对齐：每 2 小时跑就用 `--hours 2`，否则同一临期会被反复推送。
+
+### 9.B 显式指定 channel（推荐生产场景）
 
 不依赖 "session last channel"，固定推到一个 IM channel：
 
@@ -256,7 +306,7 @@ openclaw cron edit minitodo-due-soon \
 
 具体 id 怎么拿，参考 openclaw `docs/channels/<provider>.md`。
 
-### 8.C 用 standing order 简化 cron message
+### 9.C 用 standing order 简化 cron message
 
 如果用户在 `~/.openclaw/workspace/AGENTS.md` 里写了 standing order：
 
@@ -284,7 +334,7 @@ openclaw cron edit minitodo-due-soon \
 --message "执行 mini-todo 临期提醒 per standing orders"
 ```
 
-## 9. 卸载
+## 10. 卸载
 
 ```bash
 openclaw cron remove minitodo-due-soon
@@ -298,8 +348,9 @@ rm -rf ~/.openclaw/workspace/skills/minitodo
 
 | 症状 | 排查 |
 |---|---|
-| `openclaw cron run` 跑完 channel 没收到 | 1) `--announce` 是否带了？`openclaw cron get minitodo-due-soon` 看 JSON；2) 该 session 之前是否用过 channel？没用过就用 §8.B 显式指定 |
-| 推送的是空 / 没有"今日无临期事项" | message 里 `--silent-if-empty` 不该和"如果 stdout 为空就回复 X"配套时同时使用，二选一即可 |
+| `openclaw cron run` 跑完 channel 没收到 | 1) `--announce` 是否带了？`openclaw cron get minitodo-due-soon` 看 JSON；2) 该 session 之前是否用过 channel？没用过就用 §9.B 显式指定 |
+| 推送的是空 / 没有"Xh 内无临期事项" | message 里 `--silent-if-empty` 与 "stdout 为空时回复 X" 的兜底语只能保留一个，否则会冲突 |
+| 推送内容里少了 `#{id}` 前缀 | 老版本 skill 未带 ID，请确认 `~/.openclaw/workspace/skills/minitodo/minitodo.py` 已经是当前仓库版本（重跑 `install.sh --target openclaw`） |
 | 推送内容里有多余的解释文字 | message 末尾追加更强的"只输出 stdout，不要任何补充"指令 |
 | 时间显示比实际晚 / 早 | `--tz` 与服务端 `timezone` 不一致，统一改成用户所在时区 |
 | skill `health` 返回 `sync: stale` | minitodo-cloud 已经超过 5×pull_interval 没成功拉过 WebDAV；服务端日志查 WebDAV 401/403 |

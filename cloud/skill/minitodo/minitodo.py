@@ -193,6 +193,7 @@ def cmd_due_soon(client: Client, args: argparse.Namespace) -> Any:
 
     给 openclaw / Claude Code cron 类调度场景用。
     输出顺序：先 overdue（旧的在前），再 upcoming（近的在前）。
+    过滤：同时缺 notifyAt 与 dueDate/endTime 的 todo 不展示（避免噪音）。
     """
     hours = max(1, int(args.hours or 24))
     now = dt.datetime.now()
@@ -225,9 +226,24 @@ def cmd_due_soon(client: Client, args: argparse.Namespace) -> Any:
             tid = str(t.get("id"))
             if tid in seen:
                 continue
+            if not _has_reminder_window(t):
+                continue
             seen.add(tid)
             items.append(t)
     return items
+
+
+def _has_reminder_window(t: dict[str, Any]) -> bool:
+    """要求至少有一个时间字段：notifyAt 或 dueDate/endTime。
+
+    没有任何时间锚点的 todo 不应出现在临期提醒里——既无法判断"几小时后"，
+    也容易让 channel 推送出现一堆"无时间"条目造成噪音。
+    """
+    return bool(
+        (t.get("notifyAt") or "").strip()
+        or (t.get("dueDate") or "").strip()
+        or (t.get("endTime") or "").strip()
+    )
 
 
 def cmd_add(client: Client, args: argparse.Namespace) -> Any:
@@ -370,7 +386,12 @@ def _notify_line(t: dict[str, Any], now: dt.datetime) -> str:
     pri_map = {"high": "高", "medium": "中", "low": "低"}
     pri = pri_map.get((t.get("priority") or "").lower(), "")
     title = (t.get("title") or "(无标题)").strip()
-    due_raw = t.get("dueDate") or t.get("endTime") or ""
+    tid = str(t.get("id") or "").strip()
+    # 排序时优先用 dueDate/endTime（这是 cmd_due_soon 查询所基于的字段），
+    # 缺这俩才退到 notifyAt（仅提醒时间、无截止时间的场景）
+    due_raw = (
+        t.get("dueDate") or t.get("endTime") or t.get("notifyAt") or ""
+    )
     when = _parse_dt(due_raw)
     if when is None:
         delta_str = ""
@@ -392,10 +413,11 @@ def _notify_line(t: dict[str, Any], now: dt.datetime) -> str:
                 delta_str = f"，已逾期 {ago_min // 60} 小时"
             else:
                 delta_str = f"，已逾期 {ago_min // (60 * 24)} 天"
+    id_str = f"#{tid} " if tid else ""
     pri_str = f"[{pri}] " if pri else ""
     when_str = when.strftime("%m-%d %H:%M") if when else (due_raw[:16] if due_raw else "")
     when_part = f" ({when_str}{delta_str})" if when_str else ""
-    return f"{pri_str}{title}{when_part}"
+    return f"{id_str}{pri_str}{title}{when_part}"
 
 
 def _parse_dt(s: str) -> dt.datetime | None:
