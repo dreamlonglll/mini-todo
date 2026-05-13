@@ -5,6 +5,12 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: '附加到的 release tag（如 v2.1.0）；留空则只上传 artifact'
+        required: false
+        type: string
+        default: ''
 
 jobs:
   build:
@@ -28,15 +34,23 @@ jobs:
         working-directory: cloud
         run: cargo build --release --locked
 
-      - name: Resolve version
+      - name: Resolve target tag and version
         id: ver
         shell: bash
+        env:
+          INPUT_TAG: ${{ github.event.inputs.release_tag }}
         run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            TARGET_TAG="$GITHUB_REF_NAME"
+          else
+            TARGET_TAG="$INPUT_TAG"
+          fi
           CLOUD_VERSION="$(awk -F\" '/^version/ {print $2; exit}' cloud/Cargo.toml)"
-          if [[ "$GITHUB_REF" != refs/tags/v* ]]; then
+          if [[ -z "$TARGET_TAG" ]]; then
             CLOUD_VERSION="${CLOUD_VERSION}-dev"
           fi
           STAGE="minitodo-cloud-${CLOUD_VERSION}-linux-x86_64"
+          echo "target_tag=$TARGET_TAG" >> "$GITHUB_OUTPUT"
           echo "version=$CLOUD_VERSION" >> "$GITHUB_OUTPUT"
           echo "stage=$STAGE" >> "$GITHUB_OUTPUT"
 
@@ -58,18 +72,18 @@ jobs:
           ls -lah "$STAGE.tar.gz"*
 
       - name: Attach cloud assets to release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: steps.ver.outputs.target_tag != ''
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ steps.ver.outputs.target_tag }}
           files: |
             dist/minitodo-cloud-*.tar.gz
             dist/minitodo-cloud-*.tar.gz.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Upload artifact (non-tag runs)
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+      - name: Upload artifact (no target tag)
+        if: steps.ver.outputs.target_tag == ''
         uses: actions/upload-artifact@v4
         with:
           name: minitodo-cloud-linux-x86_64
