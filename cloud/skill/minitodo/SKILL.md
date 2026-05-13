@@ -104,6 +104,44 @@ CLI 不可用时，AI 可直接用 curl。所有请求都要 `Authorization: Bea
 排序字段白名单：`dueDate` / `startTime` / `priority` / `quadrant` / `sortOrder` /
 `updatedAt` / `createdAt` / `title`。前缀 `-` 倒序、`+` 或省略正序。
 
+### todo JSON 字段速查
+
+`GET /todos` / `GET /todos/:id` 返回的对象是 PC 端 todo 原样透传（KV-style，
+PC 加新字段云端自动透传，不需要发版）。下面是临期提醒最常用到的一组字段：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `id` | 字符串（数字时间戳） | 用户反馈用 `#{id}` 引用，**不要截断** |
+| `title` | 字符串 | 任务名称 |
+| `priority` | `"high"` / `"medium"` / `"low"` / null | 优先级 |
+| `completed` | bool | 完成态；`list --pending` 已筛 false |
+| `startTime` | `YYYY-MM-DD HH:MM:SS` / 空 | 开始时间 |
+| `endTime` 或 `dueDate` | `YYYY-MM-DD HH:MM:SS` / 空 | 结束 / 截止时间。新版用 `endTime`，老数据可能用 `dueDate` |
+| `notifyAt` | `YYYY-MM-DD HH:MM:SS` / 空 | 下一次提醒时间。**重复任务每次触发后只更新这个字段**，`endTime` 不变 |
+| `repeatEnabled` | bool | 是否开启重复 |
+| `repeatType` | `"daily"` / `"weekly"` / `"monthly"` / null | 重复类型 |
+| `repeatInterval` | int，缺省 1 | 间隔；`weekly` + `interval=2` = 每两周 |
+| `repeatWeekdays` | `"1,3,5"` / null | 仅 `weekly`：星期几（1=周一 … 7=周日） |
+| `repeatMonthDay` | int / null | 仅 `monthly`：每月几号 |
+| `description` | 字符串 | 备注 / 富文本说明 |
+| `quadrant` | 1-4 / null | 四象限分类 |
+| `subtaskCount` | int | 子任务数量（`withSubtasks=false` 时附带） |
+
+**重复任务的人话描述**（用于 channel 推送）：
+
+| 字段组合 | 描述 |
+|---|---|
+| `repeatType=daily, interval=1` | 每天 |
+| `repeatType=daily, interval=N` | 每 N 天 |
+| `repeatType=weekly, interval=1, weekdays="1,3,5"` | 每周的周一、周三、周五 |
+| `repeatType=weekly, interval=2` | 每 2 周 |
+| `repeatType=monthly, interval=1, monthDay=14` | 每月 14 号 |
+| `repeatType=monthly, interval=3, monthDay=1` | 每 3 月 1 号 |
+
+> 别用 `repeatEnabled=true` 但 `notifyAt` 在过去推断"该任务已逾期"——PC 端
+> 启动时会 catch up missed repeats，把 `notifyAt` 推进到下一次。判断临期
+> 只看当前 JSON 里的 `notifyAt` / `endTime`，不要做额外推算。
+
 curl 示例：
 
 ```bash
@@ -171,25 +209,47 @@ openclaw cron add \
 
 1. 跑 `python ~/.openclaw/workspace/skills/minitodo/minitodo.py list --pending --json`
    拿到所有未完成 todo 的原始 JSON。
-2. 对每条 todo，取 `notifyAt` / `dueDate` / `endTime` **任一**作为时间锚（优先 `dueDate`，
-   缺失才用 `notifyAt`）。完全没有任何时间字段的 → 跳过。
+
+2. **取时间锚**——这是判断"是否临期"的唯一依据：
+   - 若 `repeatEnabled == true` 且 `notifyAt` 非空 → 用 `notifyAt`
+     （重复任务的下次触发时间始终在这个字段，`endTime` 通常不变甚至为空）
+   - 否则按 `endTime` → `dueDate` → `notifyAt` 的顺序取第一个非空值
+   - 全空则**跳过**该 todo
+
 3. 用 `now`（cron `--tz` 指定的时区）和 cron message 里给的临期窗口 `H` 小时判断：
-   - 时间锚 < `now` → 归入"已逾期"
-   - `now` ≤ 时间锚 ≤ `now + H` → 归入"未来 H 小时到期"
-   - 时间锚 > `now + H` → 跳过
-4. 输出格式（保持稳定，便于用户长期阅读）：
+   - 时间锚 < `now`                 → "已逾期"
+   - `now` ≤ 时间锚 ≤ `now + H`     → "未来 H 小时到期"
+   - 时间锚 > `now + H`             → 跳过
+
+4. **把 `repeat*` 字段翻译成人话**（仅当 `repeatEnabled == true` 才追加）：
+
+   | 条件 | 描述 |
+   |---|---|
+   | `repeatType=daily, interval=1` | 每天 |
+   | `repeatType=daily, interval=N` | 每 N 天 |
+   | `repeatType=weekly, interval=1, weekdays="1,3,5"` | 每周的周一、周三、周五 |
+   | `repeatType=weekly, interval=2, weekdays="6,7"` | 每 2 周的周六、周日 |
+   | `repeatType=monthly, monthDay=14` | 每月 14 号 |
+
+   weekdays 数字到中文映射：1→周一、2→周二、3→周三、4→周四、5→周五、6→周六、7→周日。
+
+5. 输出格式（保持稳定，便于用户长期阅读）：
 
    ```
    mini-todo 临期提醒｜YYYY-MM-DD HH:MM
    已逾期（N）：
-     - #{id} [优先级] 标题 (MM-DD HH:MM，已逾期 X 小时)
+     - #{id} [优先级] 标题 (MM-DD HH:MM，已逾期 X 小时｜重复描述)
    未来 Hh 到期（M）：
-     - #{id} [优先级] 标题 (MM-DD HH:MM，X 小时后)
+     - #{id} [优先级] 标题 (MM-DD HH:MM，X 小时后｜重复描述)
    ```
    - 优先级映射：high → 高、medium → 中、low → 低，没有就省略 `[...]`
    - `#{id}` 必须保留完整 ID（用户用它反馈"#1234567890 这条不对"）
-5. 如果两组都为空，只回复 `Hh 内无临期事项`，不要补充任何解释。
-6. **不要二次加工**（不要翻译、不要建议、不要排序成自然语言段落）；输出就是一段
+   - 非重复任务省略 `｜重复描述`
+   - 示例：`- #1734567890 [中] 月度回顾 (05-14 09:00，14 小时后｜每月 14 号)`
+
+6. 如果两组都为空，只回复 `Hh 内无临期事项`，不要补充任何解释。
+
+7. **不要二次加工**（不要翻译标题、不要建议、不要排序成自然语言段落）；输出就是一段
    可复制的纯文本。
 
 ## 已知限制

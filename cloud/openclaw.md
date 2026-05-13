@@ -161,8 +161,29 @@ python ~/.openclaw/workspace/skills/minitodo/minitodo.py list --pending --json
 skill 端硬编码筛选逻辑。
 
 > **为什么不内置 due-soon 子命令？** mini-todo 的重复提醒只更新 `notifyAt`、
-> 不动 `dueDate`；服务端 query 又只能按 `dueDate` 筛——客户端硬编码规则永远
+> 不动 `endTime`；服务端 query 又只能按 `dueDate` 筛——客户端硬编码规则永远
 > 有漏推/误推。让你（agent）看到原始 JSON、自己判断更稳。
+
+### 5.A todos JSON 字段速查（临期提醒只看这几个字段）
+
+返回 JSON 是 PC 端 todo 原样透传（KV-style，PC 加字段云端自动透传）。
+临期提醒判断只用到下面这一组：
+
+| 字段 | 类型 | 用途 |
+|---|---|---|
+| `id` | 字符串 | 用户反馈用 `#{id}` 引用，**不要截断** |
+| `title` | 字符串 | 任务名称 |
+| `priority` | `"high"`/`"medium"`/`"low"`/null | 映射 高/中/低 |
+| `startTime` | `YYYY-MM-DD HH:MM:SS`/空 | 开始时间（仅展示，不参与临期判断） |
+| `endTime` 或 `dueDate` | `YYYY-MM-DD HH:MM:SS`/空 | 结束/截止时间；非重复任务的临期依据 |
+| `notifyAt` | `YYYY-MM-DD HH:MM:SS`/空 | 下一次提醒时间；**重复任务的临期依据**（PC 触发后只更新它） |
+| `repeatEnabled` | bool | 是否开启重复 |
+| `repeatType` | `"daily"`/`"weekly"`/`"monthly"`/null | 重复类型 |
+| `repeatInterval` | int，缺省 1 | 间隔（每 N 天 / N 周 / N 月） |
+| `repeatWeekdays` | `"1,3,5"`/null | 仅 `weekly`：1=周一 … 7=周日 |
+| `repeatMonthDay` | int/null | 仅 `monthly`：每月几号 |
+
+完整字段表见 [`skill/minitodo/SKILL.md`](skill/minitodo/SKILL.md)（"todo JSON 字段速查"节）。
 
 ## 6. 询问用户提醒偏好（不要替用户做主）
 
@@ -206,7 +227,7 @@ openclaw cron add \
   --cron "<USER_CRON>" \
   --tz "<USER_TZ>" \
   --session isolated \
-  --message $'你被 cron 唤起做 mini-todo 临期提醒。严格按下面流程：\n\n1) 跑命令拿原始 JSON：\n   python ~/.openclaw/workspace/skills/minitodo/minitodo.py list --pending --json\n\n2) 对每条 todo，取时间锚（优先级 dueDate > endTime > notifyAt）。完全没有任何时间字段的 → 跳过。\n\n3) 用当前墙钟时间（cron --tz 已是 <USER_TZ>）和窗口 H=<USER_HOURS> 小时判断：\n   - 时间锚 < now              → "已逾期"\n   - now ≤ 时间锚 ≤ now + H    → "未来 H 小时到期"\n   - 时间锚 > now + H          → 跳过\n\n4) 严格按下面格式输出，不要任何解释/翻译/建议/总结：\n\n   mini-todo 临期提醒｜YYYY-MM-DD HH:MM\n   已逾期（N）：\n     - #{id} [优先级中文] 标题 (MM-DD HH:MM，已逾期 X 小时)\n   未来 <USER_HOURS>h 到期（M）：\n     - #{id} [优先级中文] 标题 (MM-DD HH:MM，X 小时后)\n\n   - 优先级映射：high→高、medium→中、low→低；没有就省略 [..]\n   - #{id} 必须是完整 ID，不要截断\n   - X 小时后：差 < 60 分钟用 "X 分钟后"，> 24 小时用 "X 天后"\n\n5) 如果两组都为空，只输出一行 "<USER_HOURS>h 内无临期事项"，不要再加任何字。' \
+  --message $'你被 cron 唤起做 mini-todo 临期提醒。严格按下面流程，不要做任何步骤外的事：\n\n1) 跑命令拿原始 JSON：\n   python ~/.openclaw/workspace/skills/minitodo/minitodo.py list --pending --json\n\n2) 对每条 todo，按下面规则取"时间锚"——这是判断临期的唯一依据：\n   - 若 repeatEnabled == true 且 notifyAt 非空 → 用 notifyAt（重复任务下次触发时间就在这里）\n   - 否则按 endTime → dueDate → notifyAt 顺序取第一个非空值\n   - 全空则跳过该 todo\n\n3) 用当前墙钟时间 now（cron --tz 已是 <USER_TZ>）和窗口 H=<USER_HOURS> 小时判断：\n   - 时间锚 < now              → "已逾期"\n   - now ≤ 时间锚 ≤ now + H    → "未来 H 小时到期"\n   - 时间锚 > now + H          → 跳过\n\n4) 仅当 repeatEnabled == true 时，按下表把 repeat_* 字段翻译成中文短语（"重复描述"）：\n   - repeatType=daily,   interval=1                          → 每天\n   - repeatType=daily,   interval=N                          → 每 N 天\n   - repeatType=weekly,  interval=1, weekdays="1,3,5"        → 每周的周一、周三、周五\n   - repeatType=weekly,  interval=N                          → 每 N 周（有 weekdays 则附加 "的周X、周Y"）\n   - repeatType=monthly, monthDay=14                         → 每月 14 号\n   - repeatType=monthly, interval=N, monthDay=D              → 每 N 月 D 号\n   weekdays 数字：1→周一、2→周二、3→周三、4→周四、5→周五、6→周六、7→周日。\n\n5) 严格按下面格式输出，不要任何解释/翻译/建议/总结：\n\n   mini-todo 临期提醒｜YYYY-MM-DD HH:MM\n   已逾期（N）：\n     - #{id} [优先级中文] 标题 (MM-DD HH:MM，已逾期 X 小时｜重复描述)\n   未来 <USER_HOURS>h 到期（M）：\n     - #{id} [优先级中文] 标题 (MM-DD HH:MM，X 小时后｜重复描述)\n\n   - 优先级映射：high→高、medium→中、low→低；没有就省略 [..]\n   - #{id} 必须是完整 ID，不要截断\n   - 非重复任务（repeatEnabled != true）省略"｜重复描述"部分，括号里只有时间\n   - 时间差描述：< 60 分钟用 "X 分钟后"，60-1439 分钟用 "X 小时后"，≥ 24 小时用 "X 天后"；逾期同理（"已逾期 X 分钟/小时/天"）\n   - 示例：- #1734567890 [中] 月度回顾 (05-14 09:00，14 小时后｜每月 14 号)\n\n6) 如果两组都为空，只输出一行 "<USER_HOURS>h 内无临期事项"，不要再加任何字。' \
   --announce
 ```
 
@@ -254,17 +275,20 @@ openclaw cron run minitodo-due-soon
 mini-todo 临期提醒｜2026-05-13 08:00
 已逾期（1）：
   - #1734567890123456 [高] 写报告 (05-12 18:00，已逾期 14 小时)
-未来 24h 到期（2）：
+未来 24h 到期（3）：
   - #1734567890123457 [中] 买菜 (05-13 10:00，2 小时后)
-  - #1734567890123458 [低] 开会 (05-13 19:00，11 小时后)
+  - #1734567890123458 [低] 周例会 (05-13 14:00，6 小时后｜每周的周三)
+  - #1734567890123459 [中] 月度回顾 (05-14 09:00，25 小时后｜每月 14 号)
 ```
 
-每条任务前的 `#{id}` 是 mini-todo 的内部 ID，用户反馈 / 二次操作时可直接用它定位。
+- 每条任务前的 `#{id}` 是 mini-todo 的内部 ID，用户反馈 / 二次操作时直接用它定位
+- 末尾 `｜重复描述` 仅当 `repeatEnabled == true` 时出现（agent 按 §7 第 4 步翻译）
+- 非重复任务的括号里只有时间，看起来更紧凑
 
 或者，如果没有任何临期事项：`<USER_HOURS>h 内无临期事项`。
 
-> agent 在 §7 流程的第 2 步会自行跳过没有任何时间字段（`notifyAt` / `dueDate` /
-> `endTime` 全空）的 todo；纯文本备忘类不会出现在 channel 推送里。
+> agent 在 §7 流程的第 2 步会自行跳过没有任何时间字段（`notifyAt` / `endTime` /
+> `dueDate` 全空）的 todo；纯文本备忘类不会出现在 channel 推送里。
 
 ### 8.3 看执行历史
 
@@ -325,14 +349,16 @@ openclaw cron edit minitodo-due-soon \
 
 ### Execution steps
 1. 跑 `python ~/.openclaw/workspace/skills/minitodo/minitodo.py list --pending --json`
-2. 按字段优先级 dueDate > endTime > notifyAt 取时间锚，无时间字段则跳过
+2. 取时间锚：repeatEnabled=true 且有 notifyAt → notifyAt；否则 endTime → dueDate → notifyAt 依次取第一个非空；全空则跳过
 3. 把 [now, now+24h] 内的归入"未来 24h 到期"，时间锚 < now 的归入"已逾期"
-4. 按 §7 prompt 第 4 步给出的格式输出（含 #{id} 前缀），两组均空时回复"24h 内无临期事项"
+4. 仅 repeatEnabled=true 时把 repeat_* 翻译成"每天 / 每周的周一三五 / 每月 14 号"等短语
+5. 按 §7 prompt 第 5 步给出的格式输出（含 #{id} 前缀、重复描述放在｜后），两组均空时回复"24h 内无临期事项"
 
 ### What NOT to do
 - 不要补充推理 / 翻译 / 解释
 - 不要并行调用其他 skill
 - 不要截断或省略 #{id}
+- 不要在没有 repeatEnabled 的任务后面强加"重复描述"
 ```
 
 写好后 cron message 可简化为：
@@ -356,9 +382,11 @@ rm -rf ~/.openclaw/workspace/skills/minitodo
 | 症状 | 排查 |
 |---|---|
 | `openclaw cron run` 跑完 channel 没收到 | 1) `--announce` 是否带了？`openclaw cron get minitodo-due-soon` 看 JSON；2) 该 session 之前是否用过 channel？没用过就用 §9.B 显式指定 |
-| 推送的是空（既没列表也没"Xh 内无临期事项"） | agent 没按 §7 第 5 步执行；用 `openclaw cron get minitodo-due-soon` 看 message 是否完整 |
+| 推送的是空（既没列表也没"Xh 内无临期事项"） | agent 没按 §7 第 6 步执行；用 `openclaw cron get minitodo-due-soon` 看 message 是否完整 |
 | 推送内容里少了 `#{id}` 前缀 | agent 偷懒把 ID 去掉了；在 message 末尾追加"严禁省略 #{id}" |
 | 推送格式不像 §7 模板 | agent 自作主张改写；增强 message 措辞，强调"严格按格式、不要总结/翻译" |
+| 每月/每周触发的任务没出现 | agent 用 endTime 而不是 notifyAt 当时间锚——重复任务的下次触发只在 notifyAt 里。检查 message §7 第 2 步是否完整保留了"repeatEnabled 优先用 notifyAt"那条 |
+| "重复描述"出现在非重复任务后 | agent 没检查 repeatEnabled；message §7 第 5 步的"非重复任务省略｜重复描述"要保留 |
 | 推送内容里有多余的解释文字 | message 末尾追加更强的"只输出 stdout，不要任何补充"指令 |
 | 时间显示比实际晚 / 早 | `--tz` 与服务端 `timezone` 不一致，统一改成用户所在时区 |
 | skill `health` 返回 `sync: stale` | minitodo-cloud 已经超过 5×pull_interval 没成功拉过 WebDAV；服务端日志查 WebDAV 401/403 |

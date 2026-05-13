@@ -311,6 +311,7 @@ def print_todo_detail(t: dict[str, Any]) -> None:
         ("Start", t.get("startTime") or t.get("startDate")),
         ("Due", t.get("endTime") or t.get("dueDate")),
         ("Notify", t.get("notifyAt")),
+        ("Repeat", _describe_repeat(t)),
         ("Created", t.get("createdAt")),
         ("Updated", t.get("updatedAt")),
     ]
@@ -336,6 +337,47 @@ def _format_row(cols: list[str], widths: list[int]) -> str:
 # =============================================================================
 # 辅助
 # =============================================================================
+
+
+_WEEKDAY_CN = {1: "周一", 2: "周二", 3: "周三", 4: "周四", 5: "周五", 6: "周六", 7: "周日"}
+
+
+def _describe_repeat(t: dict[str, Any]) -> str | None:
+    """把 repeat_* 字段拍成中文描述，便于人和 AI 直接读懂。
+
+    None 表示该 todo 不是重复任务（或字段缺失）。规则与 PC 端
+    notification.rs::advance_repeat 的语义对齐：
+    - daily：间隔 N 天
+    - weekly：间隔 N 周 + repeat_weekdays（"1,3,5" → 周一/三/五）
+    - monthly：间隔 N 月 + repeat_month_day（每月第几天）
+    """
+    if not t.get("repeatEnabled"):
+        return None
+    rtype = (t.get("repeatType") or "").lower()
+    interval = int(t.get("repeatInterval") or 1)
+    if rtype == "daily":
+        return "每天" if interval == 1 else f"每 {interval} 天"
+    if rtype == "weekly":
+        base = "每周" if interval == 1 else f"每 {interval} 周"
+        raw = (t.get("repeatWeekdays") or "").strip()
+        if raw:
+            days: list[str] = []
+            for piece in raw.split(","):
+                piece = piece.strip()
+                if piece.isdigit():
+                    days.append(_WEEKDAY_CN.get(int(piece), piece))
+            if days:
+                return f"{base}的{'、'.join(days)}"
+        return base
+    if rtype == "monthly":
+        day = t.get("repeatMonthDay")
+        base = "每月" if interval == 1 else f"每 {interval} 月"
+        if day is not None:
+            return f"{base} {day} 号"
+        return base
+    if rtype:
+        return f"重复（{rtype}，间隔 {interval}）"
+    return "重复（未指定类型）"
 
 
 def _priority_rank(p: str | None) -> int:
