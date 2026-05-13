@@ -175,8 +175,22 @@ mini-todo/
 ## 云端 API（可选）
 
 如需在 PC 之外通过 AI（如 Claude Code Skill）读写自己的待办，可在 VPS 上部署 `cloud/`
-子项目。它通过 WebDAV 与 PC 端共用 `sync-data.json.gz` 通道，因此不要求 PC 在线。详见
-[`cloud/README.md`](cloud/README.md)。
+子项目。它通过 WebDAV 与 PC 端共用 `sync-data.json.gz` 通道，因此不要求 PC 在线。
+
+部署后建议安装配套的 Claude Code Skill：
+
+```bash
+# Linux/macOS
+bash cloud/skill/minitodo/install.sh
+# Windows PowerShell
+.\cloud\skill\minitodo\install.ps1
+```
+
+脚本会把 `SKILL.md` / `minitodo.py` / `config.example.toml` 拷贝到
+`~/.claude/skills/minitodo/`，并提示编辑 `config.toml` 填入云端 `endpoint` 与 `api_key`。
+完成后即可让 Claude Code 通过 `python ~/.claude/skills/minitodo/minitodo.py today --json` 等
+命令查看/创建/更新待办。详见 [`cloud/README.md`](cloud/README.md) 与
+[`cloud/skill/minitodo/SKILL.md`](cloud/skill/minitodo/SKILL.md)。
 
 ## 许可证
 

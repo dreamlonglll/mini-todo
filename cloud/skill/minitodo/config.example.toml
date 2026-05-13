@@ -1,0 +1,12 @@
+# minitodo skill 配置示例
+# 复制为 ~/.claude/skills/minitodo/config.toml 并填入实际值。
+
+# 云端 API 的根 URL（不要带尾部 /todos 等路径，CLI 会自动拼）
+# 通常是 Caddy / nginx 反代的对外地址
+endpoint = "https://minitodo.example.com"
+
+# 与 minitodo-cloud `config.toml` 中的 api_key 必须完全一致
+api_key = "REPLACE_ME_WITH_SAME_BEARER_AS_CLOUD"
+
+# 可选：HTTP 超时（秒），默认 10
+timeout = 10

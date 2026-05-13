@@ -14,7 +14,7 @@ path = "src/main.rs"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
 
 # HTTP server
-axum = { version = "0.7", features = ["macros"] }
+axum = { version = "0.7", features = ["macros", "multipart"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace"] }
 
@@ -46,3 +46,6 @@ thiserror = "1"
 
 # URL encoding for WebDAV paths
 urlencoding = "2"
+
+# Random suffix for id generation
+rand = "0.8"

@@ -190,18 +190,8 @@ fn merge_into_sqlite(db: &Db, data: &SyncData) -> anyhow::Result<(usize, usize)>
 }
 
 /// PC 端 todo / subtask 的 `id` 是 i64；这里统一转字符串便于 PK 处理。
-fn extract_id(v: &serde_json::Value) -> Option<String> {
-    let raw = v.get("id")?;
-    if let Some(n) = raw.as_i64() {
-        return Some(n.to_string());
-    }
-    if let Some(s) = raw.as_str() {
-        if !s.is_empty() {
-            return Some(s.to_string());
-        }
-    }
-    None
-}
+/// 复用 `crate::util::id_string`（同一份逻辑也在 push / api 用）。
+use crate::util::id_string as extract_id;
 
 fn gunzip(data: &[u8]) -> anyhow::Result<String> {
     let mut dec = GzDecoder::new(data);

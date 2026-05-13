@@ -1,11 +1,11 @@
 //! minitodo-cloud：mini-todo 的云端 HTTP API。
 //!
-//! 启动顺序（PR1 范围）：
+//! 启动顺序：
 //! 1. 加载 `config.toml`（缺字段直接 panic 出来）
 //! 2. 打开 SQLite + 建表
 //! 3. 启动时同步执行一次 `pull_once`，把 WebDAV 上现有数据灌进本地
-//! 4. spawn 后台 `start_pull_loop`（60s 轮询）+ `spawn_bootstrap`（一次性
-//!    图片镜像）
+//! 4. spawn 后台 `start_pull_loop`（60s 轮询） + `start_push_loop`（1s 检查
+//!    dirty 并条件 PUT 回 WebDAV） + `spawn_bootstrap`（一次性图片镜像）
 //! 5. 启动 axum，监听 `config.bind`
 
 use std::env;
@@ -20,6 +20,7 @@ mod config;
 mod db;
 mod sync;
 mod time;
+mod util;
 
 use crate::api::AppState;
 use crate::config::Config;
@@ -47,6 +48,7 @@ async fn main() -> anyhow::Result<()> {
 
     // 后台 worker
     sync::pull::start_pull_loop(cfg.clone(), db.clone());
+    sync::push::start_push_loop(cfg.clone(), db.clone());
     sync::images::spawn_bootstrap(cfg.clone());
 
     // axum
