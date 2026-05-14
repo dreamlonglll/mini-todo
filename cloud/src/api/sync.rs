@@ -31,7 +31,12 @@ pub async fn post_sync(State(state): State<AppState>) -> (StatusCode, Json<SyncR
         (p, s)
     })
     .await
-    .unwrap_or_else(|e| (Err(anyhow::anyhow!("panic: {}", e)), Err(anyhow::anyhow!("panic: {}", e))));
+    .unwrap_or_else(|e| {
+        (
+            Err(anyhow::anyhow!("panic: {}", e)),
+            Err(anyhow::anyhow!("panic: {}", e)),
+        )
+    });
 
     let pull_ok = pull_res.is_ok();
     let push_ok = push_res.is_ok();
@@ -52,7 +57,9 @@ pub async fn post_sync(State(state): State<AppState>) -> (StatusCode, Json<SyncR
     )
 }
 
-pub async fn post_sync_pull(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
+pub async fn post_sync_pull(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
     let cfg = state.config.clone();
     let db = state.db.clone();
 
@@ -64,7 +71,9 @@ pub async fn post_sync_pull(State(state): State<AppState>) -> Result<Json<serde_
     Ok(Json(json!({"status": "ok"})))
 }
 
-pub async fn post_sync_push(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
+pub async fn post_sync_push(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
     let cfg = state.config.clone();
     let db = state.db.clone();
 

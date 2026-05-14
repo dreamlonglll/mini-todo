@@ -675,7 +675,11 @@ mod tests {
         )
         .expect("query must succeed");
         // 只应命中真正过期那条
-        assert_eq!(rows.len(), 1, "should only match the genuinely overdue todo");
+        assert_eq!(
+            rows.len(),
+            1,
+            "should only match the genuinely overdue todo"
+        );
         assert_eq!(rows[0].id, "1");
     }
 

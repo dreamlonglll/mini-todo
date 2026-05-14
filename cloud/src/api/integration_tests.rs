@@ -215,7 +215,10 @@ async fn create_todo_minimal_succeeds_with_defaults() {
     assert_eq!(v["notified"], false);
     assert!(v["createdAt"].is_string());
     assert!(v["updatedAt"].is_string());
-    assert!(v["id"].is_number(), "id should be a number (i64 stringified -> parsed back)");
+    assert!(
+        v["id"].is_number(),
+        "id should be a number (i64 stringified -> parsed back)"
+    );
 }
 
 #[tokio::test]
@@ -355,8 +358,11 @@ async fn list_todos_with_subtasks_inlines_array() {
     )
     .await;
 
-    let (status, _, raw) =
-        send(&fx.router, req(Method::GET, "/todos?withSubtasks=true", None)).await;
+    let (status, _, raw) = send(
+        &fx.router,
+        req(Method::GET, "/todos?withSubtasks=true", None),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let v = json_body(&raw);
     assert!(v[0]["subtasks"].is_array());
@@ -448,11 +454,9 @@ async fn list_todos_quadrant_numeric_and_alias() {
 #[tokio::test]
 async fn list_todos_quadrant_invalid_returns_400() {
     let fx = fixture();
-    let (status, _, _) =
-        send(&fx.router, req(Method::GET, "/todos?quadrant=foo", None)).await;
+    let (status, _, _) = send(&fx.router, req(Method::GET, "/todos?quadrant=foo", None)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    let (status, _, _) =
-        send(&fx.router, req(Method::GET, "/todos?quadrant=5", None)).await;
+    let (status, _, _) = send(&fx.router, req(Method::GET, "/todos?quadrant=5", None)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
@@ -504,7 +508,11 @@ async fn list_todos_due_date_before_skips_todos_without_anchor() {
     assert_eq!(status, StatusCode::OK);
     let v = json_body(&raw);
     let arr = v.as_array().unwrap();
-    assert_eq!(arr.len(), 1, "only 'overdue' should match, no-anchor must be excluded");
+    assert_eq!(
+        arr.len(),
+        1,
+        "only 'overdue' should match, no-anchor must be excluded"
+    );
     assert_eq!(arr[0]["title"], "overdue");
 }
 
@@ -540,11 +548,7 @@ async fn list_todos_sort_by_priority_desc() {
 async fn list_todos_limit_offset() {
     let fx = fixture();
     for i in 0..5 {
-        let _ = create_todo(
-            &fx,
-            json!({"title": format!("t{}", i), "sortOrder": i}),
-        )
-        .await;
+        let _ = create_todo(&fx, json!({"title": format!("t{}", i), "sortOrder": i})).await;
     }
     let (_, _, raw) = send(
         &fx.router,
@@ -608,7 +612,10 @@ async fn get_todo_with_subtasks_false_uses_count() {
     .await;
     assert_eq!(status, StatusCode::OK);
     let v = json_body(&raw);
-    assert!(v.get("subtasks").is_none(), "subtasks should be absent when false");
+    assert!(
+        v.get("subtasks").is_none(),
+        "subtasks should be absent when false"
+    );
     assert_eq!(v["subtaskCount"], 1);
 }
 
@@ -628,8 +635,11 @@ async fn get_todo_not_found_returns_404() {
 #[tokio::test]
 async fn patch_todo_merges_fields_and_updates_updated_at() {
     let fx = fixture();
-    let t = create_todo(&fx, json!({"title": "old", "priority": "low", "color": "#000000"}))
-        .await;
+    let t = create_todo(
+        &fx,
+        json!({"title": "old", "priority": "low", "color": "#000000"}),
+    )
+    .await;
     let id = todo_id_path(&t);
     let old_updated = t["updatedAt"].as_str().unwrap().to_string();
 
@@ -704,11 +714,7 @@ async fn patch_todo_not_found_returns_404() {
     let fx = fixture();
     let (status, _, _) = send(
         &fx.router,
-        req(
-            Method::PATCH,
-            "/todos/999999",
-            Some(json!({"title": "x"})),
-        ),
+        req(Method::PATCH, "/todos/999999", Some(json!({"title": "x"}))),
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -721,7 +727,11 @@ async fn patch_todo_non_object_body_returns_400() {
     let id = todo_id_path(&t);
     let (status, _, _) = send(
         &fx.router,
-        req(Method::PATCH, &format!("/todos/{}", id), Some(json!("oops"))),
+        req(
+            Method::PATCH,
+            &format!("/todos/{}", id),
+            Some(json!("oops")),
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -763,12 +773,11 @@ async fn delete_todo_cascades_and_writes_tombstones() {
     assert_eq!(s, StatusCode::NOT_FOUND);
 
     // tombstones：todo + subtask 都该写入
-    let stones = fx
-        .state
-        .db
-        .with_conn(|c| repo::list_tombstones(c).unwrap());
-    let kinds: Vec<(String, String)> =
-        stones.iter().map(|(t, i, _)| (t.clone(), i.clone())).collect();
+    let stones = fx.state.db.with_conn(|c| repo::list_tombstones(c).unwrap());
+    let kinds: Vec<(String, String)> = stones
+        .iter()
+        .map(|(t, i, _)| (t.clone(), i.clone()))
+        .collect();
     assert!(
         kinds.contains(&("todo".to_string(), id.clone())),
         "todo tombstone missing"
@@ -919,20 +928,14 @@ async fn delete_subtask_writes_tombstone() {
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
-    let stones = fx
-        .state
-        .db
-        .with_conn(|c| repo::list_tombstones(c).unwrap());
-    assert!(stones
-        .iter()
-        .any(|(t, i, _)| t == "subtask" && i == &sid));
+    let stones = fx.state.db.with_conn(|c| repo::list_tombstones(c).unwrap());
+    assert!(stones.iter().any(|(t, i, _)| t == "subtask" && i == &sid));
 }
 
 #[tokio::test]
 async fn delete_subtask_not_found_returns_404() {
     let fx = fixture();
-    let (status, _, _) =
-        send(&fx.router, req(Method::DELETE, "/subtasks/999999", None)).await;
+    let (status, _, _) = send(&fx.router, req(Method::DELETE, "/subtasks/999999", None)).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -991,12 +994,8 @@ async fn upload_image_then_fetch_roundtrip() {
     assert_eq!(got.as_slice(), payload);
 
     // dirty_images meta 也要记录
-    let dirty_images = fx
-        .state
-        .db
-        .with_conn(|c| repo::get_meta(c, "dirty_images"));
-    let arr: Vec<String> =
-        serde_json::from_str(dirty_images.as_deref().unwrap_or("[]")).unwrap();
+    let dirty_images = fx.state.db.with_conn(|c| repo::get_meta(c, "dirty_images"));
+    let arr: Vec<String> = serde_json::from_str(dirty_images.as_deref().unwrap_or("[]")).unwrap();
     assert!(arr.contains(&name));
 }
 
@@ -1048,8 +1047,7 @@ async fn upload_image_missing_file_part_returns_400() {
 #[tokio::test]
 async fn get_image_not_found_returns_404() {
     let fx = fixture();
-    let (status, _, body) =
-        send(&fx.router, req(Method::GET, "/images/nope.png", None)).await;
+    let (status, _, body) = send(&fx.router, req(Method::GET, "/images/nope.png", None)).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     let v = json_body(&body);
     assert_eq!(v["error"], "not_found");
@@ -1060,11 +1058,7 @@ async fn get_image_rejects_path_traversal() {
     let fx = fixture();
     // axum 把 `..` 在 router 层就归一化，所以这里测一个明显非法字符串
     // 走到 handler 的情况：包含 backslash 的 percent-encoded 名字
-    let (status, _, _) = send(
-        &fx.router,
-        req(Method::GET, "/images/%2e%2e", None),
-    )
-    .await;
+    let (status, _, _) = send(&fx.router, req(Method::GET, "/images/%2e%2e", None)).await;
     // 解码出来是 ".."，sanitize_filename 拒绝
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
@@ -1198,7 +1192,7 @@ async fn seq_does_not_recycle_after_delete() {
     let fx = fixture();
     let _ = create_todo(&fx, json!({"title": "a"})).await; // seq=1
     let _ = create_todo(&fx, json!({"title": "b"})).await; // seq=2
-    // 删 seq=1
+                                                           // 删 seq=1
     let (status, _, _) = send(&fx.router, req(Method::DELETE, "/todos/C1", None)).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     // 新建：seq 应该是 3，不复用 1
@@ -1233,13 +1227,7 @@ async fn pull_backfill_assigns_seq_to_pc_origin_todo() {
     let fx = fixture();
     let now = now_local_string(fx.state.config.timezone_offset);
     fx.state.db.with_conn(|conn| {
-        repo::upsert_todo(
-            conn,
-            "42",
-            r#"{"id":42,"title":"from PC"}"#,
-            &now,
-        )
-        .unwrap();
+        repo::upsert_todo(conn, "42", r#"{"id":42,"title":"from PC"}"#, &now).unwrap();
     });
     // 现在没有 seq
     let before = fx.state.db.with_conn(|c| repo::get_seq(c, "42").unwrap());
@@ -1264,7 +1252,7 @@ async fn pull_backfill_assigns_seq_to_pc_origin_todo() {
 async fn pull_backfill_is_idempotent() {
     let fx = fixture();
     let _ = create_todo(&fx, json!({"title": "a"})).await; // 已分配 seq=1
-    // 第二次回填什么也不应该改
+                                                           // 第二次回填什么也不应该改
     let n = crate::sync::pull::backfill_missing_seq(&fx.state.db).unwrap();
     assert_eq!(n, 0);
 }
@@ -1339,8 +1327,11 @@ async fn demo_print_todos_responses() {
     );
 
     // 5) GET /todos?withSubtasks=true
-    let (_, _, raw) =
-        send(&fx.router, req(Method::GET, "/todos?withSubtasks=true", None)).await;
+    let (_, _, raw) = send(
+        &fx.router,
+        req(Method::GET, "/todos?withSubtasks=true", None),
+    )
+    .await;
     let v: Value = json_body(&raw);
     println!(
         "\n==== GET /todos?withSubtasks=true ====\n{}",
@@ -1381,11 +1372,7 @@ async fn demo_print_todos_responses() {
     // 9) PATCH /todos/C2 完成
     let (status, _, raw) = send(
         &fx.router,
-        req(
-            Method::PATCH,
-            "/todos/C2",
-            Some(json!({"completed": true})),
-        ),
+        req(Method::PATCH, "/todos/C2", Some(json!({"completed": true}))),
     )
     .await;
     let v: Value = json_body(&raw);
