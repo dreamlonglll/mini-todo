@@ -17,27 +17,6 @@
 - 列表/四象限模式都拖拽排序
 - 系统提醒
 
-### AI Agent 集成
-- 支持接入 **Claude Code CLI** 和 **OpenAI Codex CLI** 作为 AI Agent
-- 子任务可配置 Agent，手动或自动触发 AI 执行
-- 执行日志通过独立窗口展示，支持实时流式输出和历史记录查看
-- 运行中的任务可终止，已完成/失败/取消的任务支持重新执行
-- 自动统计 Token 用量和执行耗时
-
-### 简易工作流编排
-- 可为待办事项配置多步骤工作流
-- 步骤类型：执行子任务、执行提示词
-- 支持步骤间 **上下文传递**（带入上一步 Agent 会话结果，实现连续对话）
-- 内置提示词库，快速复用常用指令
-- 工作流控制：启动、停止、继续、重置
-
-### 任务调度
-- 支持手动执行和定时执行（Cron 表达式）两种调度策略
-- 调度状态机管理任务全生命周期
-- 优先级队列 + 并发控制
-- 任务依赖关系配置
-- 失败自动重试
-
 ### 云同步（WebDAV）
 - 支持通过 WebDAV 协议进行云端数据同步（兼容坚果云、NextCloud 等）
 - 同步数据包含待办事项、子任务及图片
@@ -141,7 +120,7 @@ npm run tauri build
 | 异步运行时 | Tokio | 异步任务调度和进程管理 |
 | 数据库 | SQLite | 轻量级本地数据库 |
 | 云同步协议 | WebDAV | 兼容坚果云、NextCloud 等 |
-| AI Agent | Claude Code / Codex CLI | AI 编程助手集成 |
+| 云端 API | Rust + Axum | 独立 HTTP 服务，供 AI Skill / cron 读写待办 |
 
 ## 项目结构
 
@@ -177,7 +156,11 @@ mini-todo/
 如需在 PC 之外通过 AI（如 Claude Code Skill）读写自己的待办，可在 VPS 上部署 `cloud/`
 子项目。它通过 WebDAV 与 PC 端共用 `sync-data.json.gz` 通道，因此不要求 PC 在线。
 
-部署后建议安装配套的 Claude Code Skill：
+部署与 REST API 详情见 [`cloud/README.md`](cloud/README.md)。
+
+### Claude Code Skill
+
+安装配套 Skill 后，Claude Code 可直接查看/创建/更新待办：
 
 ```bash
 # Linux/macOS
@@ -188,9 +171,54 @@ bash cloud/skill/minitodo/install.sh
 
 脚本会把 `SKILL.md` / `minitodo.py` / `config.example.toml` 拷贝到
 `~/.claude/skills/minitodo/`，并提示编辑 `config.toml` 填入云端 `endpoint` 与 `api_key`。
-完成后即可让 Claude Code 通过 `python ~/.claude/skills/minitodo/minitodo.py today --json` 等
-命令查看/创建/更新待办。详见 [`cloud/README.md`](cloud/README.md) 与
-[`cloud/skill/minitodo/SKILL.md`](cloud/skill/minitodo/SKILL.md)。
+
+完成后即可使用：
+
+```bash
+python ~/.claude/skills/minitodo/minitodo.py today --json    # 今日待办
+python ~/.claude/skills/minitodo/minitodo.py add "买菜"       # 新增
+python ~/.claude/skills/minitodo/minitodo.py done C3          # 标记完成
+python ~/.claude/skills/minitodo/minitodo.py sync             # 手动同步
+```
+
+Skill 使用规则见 [`cloud/skill/minitodo/SKILL.md`](cloud/skill/minitodo/SKILL.md)。
+
+### openclaw 临期提醒
+
+通过 [openclaw](https://github.com/anthropics/openclaw) 的 cron 机制，可以让 AI agent
+定时检查临期待办并推送到 Slack / Telegram / Discord 等 IM channel：
+
+```bash
+# 1. 安装 skill 到 openclaw workspace
+bash cloud/skill/minitodo/install.sh --target openclaw
+
+# 2. 编辑 config.toml 填入 endpoint + api_key
+nano ~/.openclaw/workspace/skills/minitodo/config.toml
+
+# 3. 注册 cron（每天早 8 点检查临期，推送到 default channel）
+openclaw cron add \
+  --name minitodo-due-soon \
+  --cron "0 8 * * *" \
+  --tz "Asia/Shanghai" \
+  --session isolated \
+  --message "<见 openclaw.md §7 的完整 prompt>" \
+  --announce
+```
+
+cron 唤起的 agent 会自行拉取所有未完成 todo、按时间锚判断哪些临期/逾期、
+组织格式后推送。推送效果示例：
+
+```
+mini-todo 临期提醒｜2026-05-14 08:00
+已逾期（1）：
+  - #C5 [高] 写报告 (05-12 18:00，已逾期 14 小时)
+未来 24h 到期（2）：
+  - #C7 [中] 买菜 (05-14 10:00，2 小时后)
+  - #C2 [低] 周例会 (05-14 14:00，6 小时后｜每周的周三)
+```
+
+完整安装步骤、cron message 模板、偏好配置和故障排查见
+[`cloud/openclaw.md`](cloud/openclaw.md)。
 
 ## 许可证
 
