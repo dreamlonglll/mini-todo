@@ -171,7 +171,8 @@ skill 端硬编码筛选逻辑。
 
 | 字段 | 类型 | 用途 |
 |---|---|---|
-| `id` | 字符串 | 用户反馈用 `#{id}` 引用，**不要截断** |
+| `seq` | int（≥ 1） | **cloud-only 短码**。推送 / 用户反馈用 `#C{seq}` 引用，简短易读 |
+| `id` | int（i64） | 跨设备唯一稳定的内部 id；推送优先用 `#C{seq}`，缺时降级 `#{id}` |
 | `title` | 字符串 | 任务名称 |
 | `priority` | `"high"`/`"medium"`/`"low"`/null | 映射 高/中/低 |
 | `startTime` | `YYYY-MM-DD HH:MM:SS`/空 | 开始时间（仅展示，不参与临期判断） |
@@ -227,7 +228,7 @@ openclaw cron add \
   --cron "<USER_CRON>" \
   --tz "<USER_TZ>" \
   --session isolated \
-  --message $'你被 cron 唤起做 mini-todo 临期提醒。严格按下面流程，不要做任何步骤外的事：\n\n1) 跑命令拿原始 JSON：\n   python ~/.openclaw/workspace/skills/minitodo/minitodo.py list --pending --json\n\n2) 对每条 todo，按下面规则取"时间锚"——这是判断临期的唯一依据：\n   - 若 repeatEnabled == true 且 notifyAt 非空 → 用 notifyAt（重复任务下次触发时间就在这里）\n   - 否则按 endTime → dueDate → notifyAt 顺序取第一个非空值\n   - 全空则跳过该 todo\n\n3) 用当前墙钟时间 now（cron --tz 已是 <USER_TZ>）和窗口 H=<USER_HOURS> 小时判断：\n   - 时间锚 < now              → "已逾期"\n   - now ≤ 时间锚 ≤ now + H    → "未来 H 小时到期"\n   - 时间锚 > now + H          → 跳过\n\n4) 仅当 repeatEnabled == true 时，按下表把 repeat_* 字段翻译成中文短语（"重复描述"）：\n   - repeatType=daily,   interval=1                          → 每天\n   - repeatType=daily,   interval=N                          → 每 N 天\n   - repeatType=weekly,  interval=1, weekdays="1,3,5"        → 每周的周一、周三、周五\n   - repeatType=weekly,  interval=N                          → 每 N 周（有 weekdays 则附加 "的周X、周Y"）\n   - repeatType=monthly, monthDay=14                         → 每月 14 号\n   - repeatType=monthly, interval=N, monthDay=D              → 每 N 月 D 号\n   weekdays 数字：1→周一、2→周二、3→周三、4→周四、5→周五、6→周六、7→周日。\n\n5) 严格按下面格式输出，不要任何解释/翻译/建议/总结：\n\n   mini-todo 临期提醒｜YYYY-MM-DD HH:MM\n   已逾期（N）：\n     - #{id} [优先级中文] 标题 (MM-DD HH:MM，已逾期 X 小时｜重复描述)\n   未来 <USER_HOURS>h 到期（M）：\n     - #{id} [优先级中文] 标题 (MM-DD HH:MM，X 小时后｜重复描述)\n\n   - 优先级映射：high→高、medium→中、low→低；没有就省略 [..]\n   - #{id} 必须是完整 ID，不要截断\n   - 非重复任务（repeatEnabled != true）省略"｜重复描述"部分，括号里只有时间\n   - 时间差描述：< 60 分钟用 "X 分钟后"，60-1439 分钟用 "X 小时后"，≥ 24 小时用 "X 天后"；逾期同理（"已逾期 X 分钟/小时/天"）\n   - 示例：- #1734567890 [中] 月度回顾 (05-14 09:00，14 小时后｜每月 14 号)\n\n6) 如果两组都为空，只输出一行 "<USER_HOURS>h 内无临期事项"，不要再加任何字。' \
+  --message $'你被 cron 唤起做 mini-todo 临期提醒。严格按下面流程，不要做任何步骤外的事：\n\n1) 跑命令拿原始 JSON：\n   python ~/.openclaw/workspace/skills/minitodo/minitodo.py list --pending --json\n\n2) 对每条 todo，按下面规则取"时间锚"——这是判断临期的唯一依据：\n   - 若 repeatEnabled == true 且 notifyAt 非空 → 用 notifyAt（重复任务下次触发时间就在这里）\n   - 否则按 endTime → dueDate → notifyAt 顺序取第一个非空值\n   - 全空则跳过该 todo\n\n3) 用当前墙钟时间 now（cron --tz 已是 <USER_TZ>）和窗口 H=<USER_HOURS> 小时判断：\n   - 时间锚 < now              → "已逾期"\n   - now ≤ 时间锚 ≤ now + H    → "未来 H 小时到期"\n   - 时间锚 > now + H          → 跳过\n\n4) 仅当 repeatEnabled == true 时，按下表把 repeat_* 字段翻译成中文短语（"重复描述"）：\n   - repeatType=daily,   interval=1                          → 每天\n   - repeatType=daily,   interval=N                          → 每 N 天\n   - repeatType=weekly,  interval=1, weekdays="1,3,5"        → 每周的周一、周三、周五\n   - repeatType=weekly,  interval=N                          → 每 N 周（有 weekdays 则附加 "的周X、周Y"）\n   - repeatType=monthly, monthDay=14                         → 每月 14 号\n   - repeatType=monthly, interval=N, monthDay=D              → 每 N 月 D 号\n   weekdays 数字：1→周一、2→周二、3→周三、4→周四、5→周五、6→周六、7→周日。\n\n5) 严格按下面格式输出，不要任何解释/翻译/建议/总结：\n\n   mini-todo 临期提醒｜YYYY-MM-DD HH:MM\n   已逾期（N）：\n     - #C{seq} [优先级中文] 标题 (MM-DD HH:MM，已逾期 X 小时｜重复描述)\n   未来 <USER_HOURS>h 到期（M）：\n     - #C{seq} [优先级中文] 标题 (MM-DD HH:MM，X 小时后｜重复描述)\n\n   - 优先级映射：high→高、medium→中、low→低；没有就省略 [..]\n   - 前缀优先用 #C{seq}（cloud 短码，1-3 位数字，用户回复"完成 C3"更顺手）；若该 todo 的 JSON 缺少 seq 字段，降级用 #{id} 完整 i64 id（不要截断）\n   - 非重复任务（repeatEnabled != true）省略"｜重复描述"部分，括号里只有时间\n   - 时间差描述：< 60 分钟用 "X 分钟后"，60-1439 分钟用 "X 小时后"，≥ 24 小时用 "X 天后"；逾期同理（"已逾期 X 分钟/小时/天"）\n   - 示例：- #C3 [中] 月度回顾 (05-14 09:00，14 小时后｜每月 14 号)\n\n6) 如果两组都为空，只输出一行 "<USER_HOURS>h 内无临期事项"，不要再加任何字。' \
   --announce
 ```
 
@@ -274,14 +275,18 @@ openclaw cron run minitodo-due-soon
 ```
 mini-todo 临期提醒｜2026-05-13 08:00
 已逾期（1）：
-  - #1734567890123456 [高] 写报告 (05-12 18:00，已逾期 14 小时)
+  - #C5 [高] 写报告 (05-12 18:00，已逾期 14 小时)
 未来 24h 到期（3）：
-  - #1734567890123457 [中] 买菜 (05-13 10:00，2 小时后)
-  - #1734567890123458 [低] 周例会 (05-13 14:00，6 小时后｜每周的周三)
-  - #1734567890123459 [中] 月度回顾 (05-14 09:00，25 小时后｜每月 14 号)
+  - #C7 [中] 买菜 (05-13 10:00，2 小时后)
+  - #C2 [低] 周例会 (05-13 14:00，6 小时后｜每周的周三)
+  - #C3 [中] 月度回顾 (05-14 09:00，25 小时后｜每月 14 号)
 ```
 
-- 每条任务前的 `#{id}` 是 mini-todo 的内部 ID，用户反馈 / 二次操作时直接用它定位
+- 每条任务前的 `#C{seq}` 是 cloud 给该 todo 分配的短码，用户反馈"完成 C3"或
+  "把 C7 截止日改到下周"时直接定位；skill CLI 的 `done/show/update/delete` 路径
+  参数都接受 `C{seq}`（大小写不敏感）
+- 仅当 todo 的 JSON 没有 `seq` 字段（极少数：cloud 刚 pull 进来还没回填）才降级
+  用完整 `#{id}` 长串
 - 末尾 `｜重复描述` 仅当 `repeatEnabled == true` 时出现（agent 按 §7 第 4 步翻译）
 - 非重复任务的括号里只有时间，看起来更紧凑
 
@@ -352,12 +357,12 @@ openclaw cron edit minitodo-due-soon \
 2. 取时间锚：repeatEnabled=true 且有 notifyAt → notifyAt；否则 endTime → dueDate → notifyAt 依次取第一个非空；全空则跳过
 3. 把 [now, now+24h] 内的归入"未来 24h 到期"，时间锚 < now 的归入"已逾期"
 4. 仅 repeatEnabled=true 时把 repeat_* 翻译成"每天 / 每周的周一三五 / 每月 14 号"等短语
-5. 按 §7 prompt 第 5 步给出的格式输出（含 #{id} 前缀、重复描述放在｜后），两组均空时回复"24h 内无临期事项"
+5. 按 §7 prompt 第 5 步给出的格式输出（前缀优先 #C{seq}、缺 seq 时降级 #{id}；重复描述放在｜后），两组均空时回复"24h 内无临期事项"
 
 ### What NOT to do
 - 不要补充推理 / 翻译 / 解释
 - 不要并行调用其他 skill
-- 不要截断或省略 #{id}
+- 不要截断或省略 #C{seq} / #{id}
 - 不要在没有 repeatEnabled 的任务后面强加"重复描述"
 ```
 
@@ -383,7 +388,7 @@ rm -rf ~/.openclaw/workspace/skills/minitodo
 |---|---|
 | `openclaw cron run` 跑完 channel 没收到 | 1) `--announce` 是否带了？`openclaw cron get minitodo-due-soon` 看 JSON；2) 该 session 之前是否用过 channel？没用过就用 §9.B 显式指定 |
 | 推送的是空（既没列表也没"Xh 内无临期事项"） | agent 没按 §7 第 6 步执行；用 `openclaw cron get minitodo-due-soon` 看 message 是否完整 |
-| 推送内容里少了 `#{id}` 前缀 | agent 偷懒把 ID 去掉了；在 message 末尾追加"严禁省略 #{id}" |
+| 推送内容里少了 `#C{seq}` / `#{id}` 前缀 | agent 偷懒把短码 / ID 去掉了；在 message 末尾追加"严禁省略 #C{seq} / #{id}" |
 | 推送格式不像 §7 模板 | agent 自作主张改写；增强 message 措辞，强调"严格按格式、不要总结/翻译" |
 | 每月/每周触发的任务没出现 | agent 用 endTime 而不是 notifyAt 当时间锚——重复任务的下次触发只在 notifyAt 里。检查 message §7 第 2 步是否完整保留了"repeatEnabled 优先用 notifyAt"那条 |
 | "重复描述"出现在非重复任务后 | agent 没检查 repeatEnabled；message §7 第 5 步的"非重复任务省略｜重复描述"要保留 |

@@ -283,7 +283,7 @@ def print_todo_table(items: list[dict[str, Any]]) -> None:
         return
     rows = [
         (
-            str(t.get("id", "?"))[:18],
+            _ref_short(t),
             "[x]" if t.get("completed") else "[ ]",
             (t.get("priority") or "")[:6],
             (t.get("dueDate") or t.get("endTime") or "")[:16],
@@ -291,17 +291,28 @@ def print_todo_table(items: list[dict[str, Any]]) -> None:
         )
         for t in items
     ]
-    widths = [max(len(r[i]) for r in rows + [("ID", "✓", "PRI", "DUE", "TITLE")])
+    headers = ["REF", "✓", "PRI", "DUE", "TITLE"]
+    widths = [max(len(r[i]) for r in rows + [tuple(headers)])
               for i in range(5)]
-    headers = ["ID", "✓", "PRI", "DUE", "TITLE"]
     sys.stdout.write(_format_row(headers, widths) + "\n")
     sys.stdout.write("-" * (sum(widths) + len(widths) * 2) + "\n")
     for r in rows:
         sys.stdout.write(_format_row(list(r), widths) + "\n")
 
 
+def _ref_short(t: dict[str, Any]) -> str:
+    """优先展示 cloud 短码 `C{seq}`；缺 seq 时降级为完整 i64 id（截断）。"""
+    seq = t.get("seq")
+    if isinstance(seq, int) and seq >= 1:
+        return f"C{seq}"
+    return str(t.get("id", "?"))[:18]
+
+
 def print_todo_detail(t: dict[str, Any]) -> None:
+    seq = t.get("seq")
+    seq_display = f"C{seq}" if isinstance(seq, int) and seq >= 1 else None
     fields = [
+        ("Ref", seq_display),
         ("ID", t.get("id")),
         ("Title", t.get("title")),
         ("Completed", t.get("completed")),
@@ -442,7 +453,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--color", help="HEX 颜色 (e.g. #EF4444)")
 
     sp = sub.add_parser("done", help="标记完成")
-    sp.add_argument("id")
+    sp.add_argument("id", help="完整 i64 id 或 C{seq} 短码（cloud 端反查），大小写不敏感")
 
     sp = sub.add_parser("list", help="列表")
     sp.add_argument("--completed", action="store_true", help="仅显示已完成")
@@ -456,15 +467,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("keyword")
 
     sp = sub.add_parser("show", help="查看详情")
-    sp.add_argument("id")
+    sp.add_argument("id", help="完整 i64 id 或 C{seq} 短码")
     sp.add_argument("--with-subtasks", action="store_true", default=True)
 
     sp = sub.add_parser("update", help="更新字段")
-    sp.add_argument("id")
+    sp.add_argument("id", help="完整 i64 id 或 C{seq} 短码")
     sp.add_argument("fields", nargs="+", help="key=value，可多个")
 
     sp = sub.add_parser("delete", help="删除")
-    sp.add_argument("id")
+    sp.add_argument("id", help="完整 i64 id 或 C{seq} 短码")
 
     sp = sub.add_parser("health", help="health check")
 
