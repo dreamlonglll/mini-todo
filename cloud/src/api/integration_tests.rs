@@ -480,6 +480,34 @@ async fn list_todos_due_date_before_after() {
     assert_eq!(v[0]["title"], "b");
 }
 
+/// Regression: GET /todos?dueDateBefore=... 时无截止时间的 todo 不该出现在结果里。
+/// 这是 cmd_today 的 overdue 分支用同样 query 时把"买洗内裤的"误判为过期的根因。
+#[tokio::test]
+async fn list_todos_due_date_before_skips_todos_without_anchor() {
+    let fx = fixture();
+    // A: 真正过期
+    let _ = create_todo(&fx, json!({"title": "overdue", "dueDate": "2026-05-10"})).await;
+    // B: 无任何时间锚（典型场景：用户只填了标题）
+    let _ = create_todo(&fx, json!({"title": "no anchor"})).await;
+    // C: 未来到期，不该被 before 命中
+    let _ = create_todo(&fx, json!({"title": "future", "dueDate": "2026-05-30"})).await;
+
+    let (status, _, raw) = send(
+        &fx.router,
+        req(
+            Method::GET,
+            "/todos?dueDateBefore=2026-05-14T00:00:00",
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v = json_body(&raw);
+    let arr = v.as_array().unwrap();
+    assert_eq!(arr.len(), 1, "only 'overdue' should match, no-anchor must be excluded");
+    assert_eq!(arr[0]["title"], "overdue");
+}
+
 #[tokio::test]
 async fn list_todos_search_q_matches_title_and_notes() {
     let fx = fixture();

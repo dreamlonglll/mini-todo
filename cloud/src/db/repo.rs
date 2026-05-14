@@ -242,13 +242,14 @@ pub fn list_todos_filtered(
         args.push(Box::new(q));
     }
     if let Some(ref before) = filter.due_date_before {
-        // 用 COALESCE（支持 N 参数）替代 IFNULL（仅 2 参）；
-        // SQLite 的 IFNULL 严格只接受 2 参，3 参会直接 prepare 报错。
-        sql.push_str(" AND COALESCE(json_extract(data_json, '$.dueDate'), json_extract(data_json, '$.endTime'), '') <= ?");
+        // 用 NULLIF(..., '') 把"空字符串"也当作 NULL，COALESCE 不再用空串兜底——
+        // 否则无 dueDate/endTime 的 todo 在 SQL 比较时 `'' <= '<任何日期>'` 是 TRUE，
+        // 会被错误地纳入"过期"分类（详见 due_date_before_excludes_todos_without_anchor 用例）。
+        sql.push_str(" AND COALESCE(NULLIF(json_extract(data_json, '$.dueDate'), ''), NULLIF(json_extract(data_json, '$.endTime'), '')) <= ?");
         args.push(Box::new(before.clone()));
     }
     if let Some(ref after) = filter.due_date_after {
-        sql.push_str(" AND COALESCE(json_extract(data_json, '$.dueDate'), json_extract(data_json, '$.endTime'), '') >= ?");
+        sql.push_str(" AND COALESCE(NULLIF(json_extract(data_json, '$.dueDate'), ''), NULLIF(json_extract(data_json, '$.endTime'), '')) >= ?");
         args.push(Box::new(after.clone()));
     }
     if let Some(ref sd) = filter.start_date {
@@ -591,6 +592,48 @@ mod tests {
     /// Regression test: 早期版本写成 `IFNULL(a, b, '')` 三参，SQLite 在 prepare
     /// 阶段就报 "wrong number of arguments to function IFNULL()"。改成 COALESCE
     /// 后此类 query 必须能正常返回数据。
+    /// Regression: 无 dueDate / endTime 的 todo **不应**被 dueDateBefore 命中。
+    /// 早期版本 COALESCE(..., ..., '') 拿空串兜底，导致 `'' <= '2026-...'` 在 SQL
+    /// 字典序里恒为 TRUE，所有"未设截止时间"的未完成 todo 被误判为过期，
+    /// `today` 子命令的 overdue 分支因此把"买洗内裤的"这种纯任务也卷进去推送。
+    #[test]
+    fn due_date_before_excludes_todos_without_anchor() {
+        let c = fresh();
+        // 一条真正过期
+        insert_todo(
+            &c,
+            "1",
+            r#"{"id":1,"title":"overdue","dueDate":"2026-05-10","completed":false}"#,
+            "2026-05-10 10:00:00",
+        );
+        // 一条无任何时间锚，仅 quadrant=4
+        insert_todo(
+            &c,
+            "2",
+            r#"{"id":2,"title":"no time","quadrant":4,"completed":false}"#,
+            "2026-05-14 10:00:00",
+        );
+        // 一条 dueDate 是空字符串（用户改过后清空）—— 也应被排除
+        insert_todo(
+            &c,
+            "3",
+            r#"{"id":3,"title":"empty dueDate","dueDate":"","endTime":"","completed":false}"#,
+            "2026-05-14 11:00:00",
+        );
+
+        let rows = list_todos_filtered(
+            &c,
+            &ListTodosFilter {
+                due_date_before: Some("2026-05-14T00:00:00".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("query must succeed");
+        // 只应命中真正过期那条
+        assert_eq!(rows.len(), 1, "should only match the genuinely overdue todo");
+        assert_eq!(rows[0].id, "1");
+    }
+
     #[test]
     fn filter_by_due_date_before_uses_coalesce() {
         let c = fresh();
