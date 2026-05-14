@@ -323,6 +323,9 @@ REST API（全部需要 `Authorization: Bearer <api_key>`）：
 | DELETE | `/subtasks/:id` | 删除子任务 |
 | GET | `/images/:name` | 返回图片 bytes |
 | POST | `/images` | multipart 上传，`file` 字段；返回 `{name}` |
+| POST | `/sync` | 手动触发 pull + push；返回 `{pull, push, pullError?, pushError?}` |
+| POST | `/sync/pull` | 仅从 WebDAV 拉取 |
+| POST | `/sync/push` | 仅推送到 WebDAV |
 
 排序字段白名单：`dueDate` / `startTime` / `priority` / `quadrant` / `sortOrder` /
 `updatedAt` / `createdAt` / `title`，前缀 `-` 倒序、`+` 或无前缀正序。`quadrant`

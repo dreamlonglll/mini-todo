@@ -149,9 +149,13 @@ python ~/.openclaw/workspace/skills/minitodo/minitodo.py health --json
 | `ERROR: 缺少 requests 库` | Python 环境缺 requests | `pip install requests` |
 | `sync: offline` | 服务能连上但 WebDAV 拉不到 | 服务端 logs 检查 WebDAV 凭据，临期提醒仍可工作（读本地缓存） |
 
-**通过后跑一次 list 看看：**
+**通过后先手动同步一次确保数据最新，再跑 list 验证：**
 
 ```bash
+# 触发 pull + push，确保 cloud 缓存与 WebDAV 一致
+python ~/.openclaw/workspace/skills/minitodo/minitodo.py sync --json
+
+# 列表验证
 python ~/.openclaw/workspace/skills/minitodo/minitodo.py list --pending --json
 ```
 

@@ -73,6 +73,9 @@ pip install requests         # 必装
 | `update <ref> <key=val>...` | 修改字段，支持多个 | `python minitodo.py update C3 dueDate=2026-06-01 priority=medium` |
 | `delete <ref>` | 删除（连带 subtasks） | `python minitodo.py delete C3` |
 | `health` | 健康检查 | `python minitodo.py health --json` |
+| `sync` | 手动触发 WebDAV 同步（pull + push） | `python minitodo.py sync --json` |
+| `sync pull` | 仅从 WebDAV 拉取最新数据 | `python minitodo.py sync pull --json` |
+| `sync push` | 仅推送本地变更到 WebDAV | `python minitodo.py sync push --json` |
 
 `<ref>` = `C{seq}` 短码（cloud 端 1, 2, 3... 自增）或完整 i64 id。`C` 大小写不敏感。
 
@@ -88,6 +91,7 @@ pip install requests         # 必装
 | 完成 C3 | `python ~/.claude/skills/minitodo/minitodo.py done C3 --json` |
 | 把 C3 的截止日改到下周 | `python ~/.claude/skills/minitodo/minitodo.py update C3 dueDate=2026-05-20 --json` |
 | 删掉一周前完成的所有 | 先 `list --completed --sort -updatedAt --json`，再分别 `delete C{seq}` |
+| 确保数据是最新的 | `python ~/.claude/skills/minitodo/minitodo.py sync --json` |
 
 ## 直接调用 HTTP API（fallback）
 
@@ -106,6 +110,9 @@ CLI 不可用时，AI 可直接用 curl。所有请求都要 `Authorization: Bea
 | `DELETE /subtasks/:id` | 删除子任务 |
 | `GET /images/:name` | 取图片 bytes |
 | `POST /images` | multipart 上传，`file` 字段；返回 `{name}` |
+| `POST /sync` | 手动触发 pull + push；返回 `{pull, push, pullError?, pushError?}` |
+| `POST /sync/pull` | 仅 pull；返回 `{status: "ok"}` |
+| `POST /sync/push` | 仅 push；返回 `{status: "ok"}` |
 
 排序字段白名单：`dueDate` / `startTime` / `priority` / `quadrant` / `sortOrder` /
 `updatedAt` / `createdAt` / `title`。前缀 `-` 倒序、`+` 或省略正序。

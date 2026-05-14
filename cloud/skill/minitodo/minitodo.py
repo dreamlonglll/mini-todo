@@ -254,6 +254,16 @@ def cmd_health(client: Client, _args: argparse.Namespace) -> Any:
     return client.get("/health")
 
 
+def cmd_sync(client: Client, args: argparse.Namespace) -> Any:
+    mode = getattr(args, "mode", None)
+    if mode == "pull":
+        return client.post("/sync/pull")
+    elif mode == "push":
+        return client.post("/sync/push")
+    else:
+        return client.post("/sync")
+
+
 # =============================================================================
 # 输出
 # =============================================================================
@@ -479,6 +489,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("health", help="health check")
 
+    sp = sub.add_parser("sync", help="手动触发 WebDAV 同步")
+    sp.add_argument("mode", nargs="?", choices=["pull", "push"], help="仅 pull 或仅 push；省略则两者都做")
+
     return p
 
 
@@ -503,6 +516,7 @@ def main(argv: list[str] | None = None) -> int:
         "update": cmd_update,
         "delete": cmd_delete,
         "health": cmd_health,
+        "sync": cmd_sync,
     }
     handler = handlers.get(args.command)
     if not handler:
