@@ -498,6 +498,51 @@ pub fn all_subtasks(conn: &Connection) -> rusqlite::Result<Vec<SubtaskRow>> {
     rows.collect()
 }
 
+/// 删除 id 不在 `keep` 集合内的 todos + 对应 subtasks + todo_seq。
+/// 供 pull 孤儿清理使用。
+pub fn delete_todos_not_in(
+    conn: &Connection,
+    keep: &std::collections::HashSet<String>,
+) -> rusqlite::Result<usize> {
+    let mut stmt = conn.prepare("SELECT id FROM todos")?;
+    let local_ids: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let mut n = 0usize;
+    for id in &local_ids {
+        if !keep.contains(id) {
+            conn.execute("DELETE FROM subtasks WHERE todo_id = ?1", [id])?;
+            conn.execute("DELETE FROM todo_seq WHERE todo_id = ?1", [id])?;
+            conn.execute("DELETE FROM todos WHERE id = ?1", [id])?;
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
+/// 删除 id 不在 `keep` 集合内的 subtasks。
+pub fn delete_subtasks_not_in(
+    conn: &Connection,
+    keep: &std::collections::HashSet<String>,
+) -> rusqlite::Result<usize> {
+    let mut stmt = conn.prepare("SELECT id FROM subtasks")?;
+    let local_ids: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let mut n = 0usize;
+    for id in &local_ids {
+        if !keep.contains(id) {
+            conn.execute("DELETE FROM subtasks WHERE id = ?1", [id])?;
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
 // =============================================================================
 // Tombstones（软删除标记，push worker merge 用）
 // =============================================================================

@@ -64,7 +64,7 @@ fn read_app_settings(conn: &rusqlite::Connection) -> AppSettings {
     }
 }
 
-fn write_app_settings(conn: &rusqlite::Connection, settings: &AppSettings) -> rusqlite::Result<()> {
+pub(crate) fn write_app_settings(conn: &rusqlite::Connection, settings: &AppSettings) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('is_fixed', ?1, datetime('now', 'localtime'))",
         [if settings.is_fixed { "true" } else { "false" }],

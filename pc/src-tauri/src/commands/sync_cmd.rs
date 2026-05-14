@@ -6,10 +6,11 @@
 //! - 412 Precondition Failed → 表示远端被另一端（cloud / 其它 PC）改过；自动拉取最新
 //!   远端，做 per-record LWW merge 到本地 SQLite，再重新 PUT，最多重试 3 次
 //!
-//! 普通"主动覆盖"语义保留在 `webdav_apply_remote`（仍走 `import_data_raw` 全量替换），
-//! per-record merge (`merge_remote_into_local`) 仅用于冲突恢复路径。
+//! sync 下载路径（`webdav_apply_remote`、`webdav_auto_sync`）使用 per-record merge +
+//! 孤儿清理：先 LWW 合并远端 todos/subtasks，再删除"本地有但远端没有"的记录，
+//! 最后写入远端 settings。`import_data_raw` 仅供手动文件导入使用。
 
-use super::data::{export_data_internal, import_data_raw};
+use super::data::{export_data_internal, write_app_settings};
 use crate::db::{Database, SubTask, Todo};
 use crate::services::webdav::{UploadOutcome, WebDavClient};
 use flate2::read::GzDecoder;
@@ -362,15 +363,7 @@ pub fn webdav_apply_remote(db: State<Database>, sync_data_json: String) -> Resul
     let sync_data: SyncData =
         serde_json::from_str(&sync_data_json).map_err(|e| format!("解析数据失败: {}", e))?;
 
-    let import_json = serde_json::json!({
-        "version": sync_data.version,
-        "exportedAt": sync_data.updated_at,
-        "todos": sync_data.todos,
-        "settings": sync_data.settings,
-    });
-
-    let import_str = serde_json::to_string(&import_json).map_err(|e| e.to_string())?;
-    import_data_raw(&db, &import_str)?;
+    sync_apply_remote(&db, &sync_data)?;
 
     // Download images
     let sync_settings = get_sync_settings_internal(&db)?;
@@ -434,15 +427,7 @@ pub fn webdav_auto_sync(db: State<Database>) -> Result<String, String> {
                 let remote_is_newer = is_remote_newer(&sync_settings, &remote_data.updated_at);
 
                 if remote_is_newer && !has_local_changes {
-                    let import_json = serde_json::json!({
-                        "version": remote_data.version,
-                        "exportedAt": remote_data.updated_at,
-                        "todos": remote_data.todos,
-                        "settings": remote_data.settings,
-                    });
-                    let import_str =
-                        serde_json::to_string(&import_json).map_err(|e| e.to_string())?;
-                    import_data_raw(&db, &import_str)?;
+                    sync_apply_remote(&db, &remote_data)?;
 
                     let images_dir = get_images_dir();
                     std::fs::create_dir_all(&images_dir).ok();
@@ -560,24 +545,23 @@ fn gzip_decompress(data: &[u8]) -> Result<String, String> {
 pub struct MergeStats {
     pub todos_updated: u32,
     pub todos_inserted: u32,
+    pub todos_deleted: u32,
     pub subtasks_updated: u32,
     pub subtasks_inserted: u32,
+    pub subtasks_deleted: u32,
 }
 
 /// per-record LWW merge：把远端 `SyncData` 合并进本地 SQLite。
 ///
-/// 仅用于 PUT 412 冲突恢复路径，**不替代** `webdav_apply_remote` 的整包替换语义
-/// （`import_data_raw`）。语义：
-///
+/// 语义：
 /// - 远端 todo / subtask 的 `updatedAt` ≥ 本地 → upsert 远端字段
 /// - 本地 `updatedAt` > 远端 → 保留本地（不动）
-/// - 远端有、本地无 → 直接 INSERT（用远端 id；因为云端把整张表的 record 都写进
-///   sync-data，远端 id 视为权威）
-/// - 本地有、远端无 → **保留本地**（不删；LWW 单用户场景下视为本地新增）
-/// - settings：本函数**不动 settings**（PC 端 settings 由用户主动修改，冲突极少）
+/// - 远端有、本地无 → 直接 INSERT（用远端 id）
+/// - 本地有、远端无 → **保留本地**（不删；412 冲突路径需保留本地新增）
+/// - settings：本函数**不动 settings**
 ///
-/// 时间字符串直接做字符串比较，依赖 PC SQLite `datetime('now', 'localtime')` 与
-/// cloud `time.rs` 的 FixedOffset 输出格式一致（`YYYY-MM-DD HH:MM:SS`）。
+/// 孤儿清理和 settings 写入由上层 `sync_apply_remote` 负责（sync 下载路径），
+/// 412 冲突路径直接调本函数不做清理。
 ///
 /// 整个 merge 包在单事务里；中间任何一步失败回滚。
 pub fn merge_remote_into_local(db: &Database, remote: &SyncData) -> Result<MergeStats, String> {
@@ -775,4 +759,86 @@ fn merge_subtask(
     }
 
     Ok(())
+}
+
+/// sync 下载统一入口：per-record merge + 孤儿清理 + settings 写入。
+///
+/// 供 `webdav_apply_remote` 和 `webdav_auto_sync` 共用。与 `merge_remote_into_local`
+/// 的区别：本函数在 merge 后会删除"本地有但远端没有"的 todo/subtask（远端权威），
+/// 并写入远端 settings。412 冲突路径仍直接调 `merge_remote_into_local`（不删孤儿）。
+fn sync_apply_remote(db: &Database, remote: &SyncData) -> Result<(), String> {
+    merge_remote_into_local(db, remote)?;
+    delete_orphan_todos(db, remote)?;
+
+    // settings：从远端 SyncData 解析并写入
+    if !remote.settings.is_null() {
+        if let Ok(settings) =
+            serde_json::from_value::<crate::db::AppSettings>(remote.settings.clone())
+        {
+            db.with_connection(|conn| write_app_settings(conn, &settings))
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+/// 删除"本地有但远端没有"的 todos + 对应 subtasks。
+///
+/// 从 `serde_json::Value` 直接提取 id，不依赖完整 `Todo` 反序列化——
+/// 如果某条远端 todo 格式异常无法反序列化为 `Todo`，仍能保住其 id，
+/// 避免本地正常记录被误判为孤儿。
+fn delete_orphan_todos(db: &Database, remote: &SyncData) -> Result<(), String> {
+    fn extract_i64_id(v: &serde_json::Value) -> Option<i64> {
+        let raw = v.get("id")?;
+        raw.as_i64()
+    }
+
+    let mut remote_todo_ids = std::collections::HashSet::new();
+    let mut remote_subtask_ids = std::collections::HashSet::new();
+
+    for todo in &remote.todos {
+        if let Some(id) = extract_i64_id(todo) {
+            remote_todo_ids.insert(id);
+        }
+        if let Some(subs) = todo.get("subtasks").and_then(|v| v.as_array()) {
+            for sub in subs {
+                if let Some(sid) = extract_i64_id(sub) {
+                    remote_subtask_ids.insert(sid);
+                }
+            }
+        }
+    }
+
+    db.with_connection(|conn| {
+        conn.execute("BEGIN IMMEDIATE", [])?;
+
+        let mut stmt = conn.prepare("SELECT id FROM todos")?;
+        let local_todo_ids: Vec<i64> = stmt
+            .query_map([], |row| row.get::<_, i64>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        for id in local_todo_ids {
+            if !remote_todo_ids.contains(&id) {
+                conn.execute("DELETE FROM subtasks WHERE parent_id = ?1", [id])?;
+                conn.execute("DELETE FROM todos WHERE id = ?1", [id])?;
+            }
+        }
+
+        let mut sub_stmt = conn.prepare("SELECT id FROM subtasks")?;
+        let local_sub_ids: Vec<i64> = sub_stmt
+            .query_map([], |row| row.get::<_, i64>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        for id in local_sub_ids {
+            if !remote_subtask_ids.contains(&id) {
+                conn.execute("DELETE FROM subtasks WHERE id = ?1", [id])?;
+            }
+        }
+
+        conn.execute("COMMIT", [])?;
+        Ok(())
+    })
+    .map_err(|e| e.to_string())
 }

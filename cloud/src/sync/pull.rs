@@ -162,32 +162,48 @@ pub fn start_pull_loop(cfg: Arc<Config>, db: Db) {
     });
 }
 
-/// per-record LWW merge：远端 record.updated_at ≥ 本地 → upsert；
-/// 反之保留本地。删除（远端缺失 = 远端被删）目前**不处理**，PR2 push 完成
-/// 后再做软删除/tombstone。
+/// per-record LWW merge + 孤儿清理。
+///
+/// 1. 远端 record.updated_at ≥ 本地 → upsert；反之保留本地
+/// 2. merge 完毕后，删除"本地有但远端没有"的 todos/subtasks（孤儿清理）
+///    — 当 `meta.dirty == "true"` 时跳过清理，保护 cloud API 本地新建还没 push 的记录
 fn merge_into_sqlite(db: &Db, data: &SyncData) -> anyhow::Result<(usize, usize)> {
     db.with_conn(|conn| -> rusqlite::Result<(usize, usize)> {
         let tx = conn.transaction()?;
+
+        // dirty flag 必须在事务内读，防止事务开始后 API handler 新建 todo
+        // 设 dirty=true 但清理逻辑仍按旧的 dirty=false 执行。
+        let is_dirty = repo::get_meta(&tx, "dirty");
+        let skip_cleanup = is_dirty.as_deref() == Some("true");
+
         let mut todo_n = 0usize;
         let mut sub_n = 0usize;
+
+        let mut remote_todo_ids: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let mut remote_subtask_ids: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+
         for todo in &data.todos {
             let id = match extract_id(todo) {
                 Some(v) => v,
                 None => continue,
             };
+            remote_todo_ids.insert(id.clone());
+
             let updated_at = todo
                 .get("updatedAt")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
 
-            // 把嵌套 subtasks 拆出来，单独 upsert
             if let Some(subtasks) = todo.get("subtasks").and_then(|v| v.as_array()) {
                 for sub in subtasks {
                     let sid = match extract_id(sub) {
                         Some(v) => v,
                         None => continue,
                     };
+                    remote_subtask_ids.insert(sid.clone());
                     let sub_updated = sub
                         .get("updatedAt")
                         .and_then(|v| v.as_str())
@@ -200,13 +216,17 @@ fn merge_into_sqlite(db: &Db, data: &SyncData) -> anyhow::Result<(usize, usize)>
                 }
             }
 
-            // todo 本身落到 todos 表（保留 subtasks 字段在 data_json 里 — 列表端
-            // 可直接返回；写时也仍按嵌套形态原样存。）
             let body = todo.to_string();
             if repo::upsert_todo_if_newer(&tx, &id, &body, &updated_at)? {
                 todo_n += 1;
             }
         }
+
+        if !skip_cleanup {
+            repo::delete_todos_not_in(&tx, &remote_todo_ids)?;
+            repo::delete_subtasks_not_in(&tx, &remote_subtask_ids)?;
+        }
+
         tx.commit()?;
         Ok((todo_n, sub_n))
     })
