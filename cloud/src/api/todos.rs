@@ -239,16 +239,18 @@ pub async fn delete_todo(
     let now = now_local_string(state.config.timezone_offset);
     let removed = state.db.with_conn(|conn| -> rusqlite::Result<bool> {
         let tx = conn.transaction()?;
+        // 先收集子任务 id：`delete_todo_cascade` 会把 subtasks 一起删掉，
+        // 若放在 cascade 之后再 query 就拿不到任何 id，导致 subtask tombstones 漏写。
+        let sub_ids: Vec<String> = tx
+            .prepare("SELECT id FROM subtasks WHERE todo_id = ?1")?
+            .query_map([&id], |r| r.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+
         let existed = repo::delete_todo_cascade(&tx, &id)?;
         if existed {
             repo::add_tombstone(&tx, TOMBSTONE_TODO, &id, &now)?;
-            // 子任务也写墓碑
-            for sid in tx
-                .prepare("SELECT id FROM subtasks WHERE todo_id = ?1")?
-                .query_map([&id], |r| r.get::<_, String>(0))?
-                .filter_map(|r| r.ok())
-                .collect::<Vec<_>>()
-            {
+            for sid in sub_ids {
                 repo::add_tombstone(&tx, "subtask", &sid, &now)?;
             }
             repo::set_meta(&tx, "dirty", "true")?;

@@ -113,4 +113,25 @@ impl Config {
             images_dir: raw.images_dir,
         })
     }
+
+    /// 测试用构造器：跳过 `config.toml` 读盘，直接拼一个最小可用的 `Config`。
+    /// `images_dir` / `data_dir` 由调用方传入（通常是 `tempfile::TempDir`），
+    /// 时区固定 `Asia/Shanghai`、`pull_interval` 60s。
+    #[cfg(test)]
+    pub fn for_tests(api_key: &str, data_dir: PathBuf, images_dir: PathBuf) -> Self {
+        let tz: Tz = "Asia/Shanghai".parse().unwrap();
+        let timezone_offset = crate::time::offset_for_tz_now(tz);
+        Config {
+            webdav_url: "http://127.0.0.1:0/dav".to_string(),
+            webdav_username: "u".to_string(),
+            webdav_password: "p".to_string(),
+            api_key: api_key.to_string(),
+            bind: "127.0.0.1:0".to_string(),
+            timezone: tz,
+            timezone_offset,
+            pull_interval_secs: 60,
+            data_dir,
+            images_dir,
+        }
+    }
 }

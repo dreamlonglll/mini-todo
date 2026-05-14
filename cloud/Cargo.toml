@@ -49,3 +49,11 @@ urlencoding = "2"
 
 # Random suffix for id generation
 rand = "0.8"
+
+[dev-dependencies]
+# tower::ServiceExt::oneshot 用来在测试里直接打 axum Router，绕过 TCP 监听
+tower = { version = "0.5", features = ["util"] }
+# 读 axum/hyper Response::Body 到字节
+http-body-util = "0.1"
+# 临时 data_dir / images_dir，测试自清理
+tempfile = "3"

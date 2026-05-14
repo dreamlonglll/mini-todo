@@ -18,6 +18,9 @@ pub mod images;
 pub mod subtasks;
 pub mod todos;
 
+#[cfg(test)]
+mod integration_tests;
+
 use std::sync::Arc;
 
 use axum::extract::DefaultBodyLimit;
