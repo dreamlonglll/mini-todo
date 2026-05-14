@@ -21,7 +21,7 @@ const TOMBSTONE_SUBTASK: &str = "subtask";
 
 pub async fn create_subtask(
     State(state): State<AppState>,
-    Path(todo_id): Path<String>,
+    Path(raw_todo_ref): Path<String>,
     Json(body): Json<Value>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     if !body.is_object() {
@@ -37,27 +37,29 @@ pub async fn create_subtask(
     let now = now_local_string(state.config.timezone_offset);
     let id_str = new_id_string();
 
-    let mut obj = body.as_object().cloned().unwrap_or_default();
-    obj.insert("id".into(), json!(id_str.parse::<i64>().unwrap_or(0)));
-    obj.insert(
-        "parentId".into(),
-        json!(todo_id.parse::<i64>().unwrap_or(0)),
-    );
-    obj.insert("title".into(), json!(title));
-    obj.entry("createdAt").or_insert(json!(now.clone()));
-    obj.insert("updatedAt".into(), json!(now.clone()));
-    obj.entry("completed").or_insert(json!(false));
-    obj.entry("sortOrder").or_insert(json!(0));
-    obj.entry("content").or_insert(json!(null));
+    // 同一事务内解析父 todo ref（支持 C 短码）+ 写 subtask。
+    let v = state.db.with_conn(|conn| -> Result<Value, ApiError> {
+        let parent_id = ensure_todo_exists(conn, &raw_todo_ref)?;
 
-    let v = Value::Object(obj);
-    let body_str = v.to_string();
+        let mut obj = body.as_object().cloned().unwrap_or_default();
+        obj.insert("id".into(), json!(id_str.parse::<i64>().unwrap_or(0)));
+        obj.insert(
+            "parentId".into(),
+            json!(parent_id.parse::<i64>().unwrap_or(0)),
+        );
+        obj.insert("title".into(), json!(title));
+        obj.entry("createdAt").or_insert(json!(now.clone()));
+        obj.insert("updatedAt".into(), json!(now.clone()));
+        obj.entry("completed").or_insert(json!(false));
+        obj.entry("sortOrder").or_insert(json!(0));
+        obj.entry("content").or_insert(json!(null));
 
-    state.db.with_conn(|conn| -> Result<(), ApiError> {
-        ensure_todo_exists(conn, &todo_id)?;
-        repo::upsert_subtask(conn, &id_str, &todo_id, &body_str, &now)?;
+        let v = Value::Object(obj);
+        let body_str = v.to_string();
+
+        repo::upsert_subtask(conn, &id_str, &parent_id, &body_str, &now)?;
         repo::set_meta(conn, "dirty", "true")?;
-        Ok(())
+        Ok(v)
     })?;
 
     Ok((StatusCode::CREATED, Json(v)))

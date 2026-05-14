@@ -49,6 +49,97 @@ pub fn set_meta(conn: &Connection, key: &str, value: &str) -> rusqlite::Result<(
     Ok(())
 }
 
+/// 给 `todo_id` 分配 / 取得 cloud-only 短码 `seq`。
+///
+/// - 已分配 → 返回现有 seq（幂等，多次调用不重复分配）。
+/// - 未分配 → 取 `MAX(seq)+1` 作为新 seq（首条为 1），写入 `todo_seq` 表。
+///
+/// 详见 `schema.rs` 中 `todo_seq` 注释：seq 不进 data_json，cloud 独立维护。
+pub fn assign_seq(conn: &Connection, todo_id: &str) -> rusqlite::Result<i64> {
+    if let Some(seq) = get_seq(conn, todo_id)? {
+        return Ok(seq);
+    }
+    let next: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(seq), 0) + 1 FROM todo_seq",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(1);
+    conn.execute(
+        "INSERT INTO todo_seq (todo_id, seq) VALUES (?1, ?2)",
+        params![todo_id, next],
+    )?;
+    Ok(next)
+}
+
+/// 查 `todo_id` 对应的 seq；未分配返回 None。
+pub fn get_seq(conn: &Connection, todo_id: &str) -> rusqlite::Result<Option<i64>> {
+    conn.query_row(
+        "SELECT seq FROM todo_seq WHERE todo_id = ?1",
+        [todo_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .optional()
+}
+
+/// 反查：按 seq 找 todo_id；找不到返回 None。
+pub fn get_todo_id_by_seq(conn: &Connection, seq: i64) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT todo_id FROM todo_seq WHERE seq = ?1",
+        [seq],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+}
+
+/// 删除 todo 时连带清理 `todo_seq`。seq 不复用——后续新 todo 仍是 max+1。
+pub fn delete_seq(conn: &Connection, todo_id: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM todo_seq WHERE todo_id = ?1", [todo_id])?;
+    Ok(())
+}
+
+/// 列出所有"在 todos 表里但 todo_seq 没分配"的 todo_id，供 pull 后回填用。
+pub fn todo_ids_without_seq(conn: &Connection) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT t.id FROM todos t
+         LEFT JOIN todo_seq s ON s.todo_id = t.id
+         WHERE s.seq IS NULL",
+    )?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    rows.collect()
+}
+
+/// 批量取 (todo_id → seq) 映射；list_todos 拼响应时一次性 join。
+pub fn seq_map_for_todos(
+    conn: &Connection,
+    ids: &[String],
+) -> rusqlite::Result<std::collections::HashMap<String, i64>> {
+    let mut map = std::collections::HashMap::new();
+    if ids.is_empty() {
+        return Ok(map);
+    }
+    // SQLite 没有数组绑定，用 IN (?,?,...) 拼。
+    let placeholders = std::iter::repeat_n("?", ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT todo_id, seq FROM todo_seq WHERE todo_id IN ({})",
+        placeholders
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let id_refs: Vec<&dyn rusqlite::ToSql> =
+        ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+    let rows = stmt.query_map(rusqlite::params_from_iter(id_refs), |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    for r in rows {
+        let (id, seq) = r?;
+        map.insert(id, seq);
+    }
+    Ok(map)
+}
+
 // =============================================================================
 // settings KV（与 SyncData.settings JSON 字段对应）
 // =============================================================================

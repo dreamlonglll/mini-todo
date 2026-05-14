@@ -59,11 +59,19 @@ pub async fn list_todos(
 
     let todos = state.db.with_conn(|conn| -> rusqlite::Result<Value> {
         let rows = repo::list_todos_filtered(conn, &filter)?;
+        // 一次性 join 出 seq 表，避免逐条查询。
+        let ids: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
+        let seqs = repo::seq_map_for_todos(conn, &ids)?;
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
             let mut v: Value = serde_json::from_str(&row.data_json)
                 .unwrap_or_else(|_| json!({"id": row.id, "raw": row.data_json}));
             let id_str = id_field_as_string(&v).unwrap_or_else(|| row.id.clone());
+            if let Some(seq) = seqs.get(&row.id) {
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("seq".into(), json!(seq));
+                }
+            }
 
             if with_subtasks {
                 let subs = repo::list_subtasks_for_todo(conn, &id_str)?;
@@ -99,7 +107,7 @@ pub async fn list_todos(
 
 pub async fn get_todo(
     State(state): State<AppState>,
-    Path(id): Path<String>,
+    Path(raw_id): Path<String>,
     Query(q): Query<GetTodoQuery>,
 ) -> Result<Json<Value>, ApiError> {
     // 默认 detail 是嵌套；显式 ?withSubtasks=false 才扁平
@@ -112,11 +120,15 @@ pub async fn get_todo(
     let res = state
         .db
         .with_conn(|conn| -> rusqlite::Result<Option<Value>> {
+            let Some(id) = resolve_todo_ref(conn, &raw_id)? else {
+                return Ok(None);
+            };
             let Some(row) = repo::get_todo(conn, &id)? else {
                 return Ok(None);
             };
             let mut v: Value =
                 serde_json::from_str(&row.data_json).unwrap_or_else(|_| json!({"id": row.id}));
+            attach_seq(conn, &id, &mut v);
             if with_subtasks {
                 let subs = repo::list_subtasks_for_todo(conn, &id)?;
                 let subs_vals: Vec<Value> = subs
@@ -137,7 +149,7 @@ pub async fn get_todo(
 
     match res {
         Some(v) => Ok(Json(v)),
-        None => Err(ApiError::not_found(format!("todo {} not found", id))),
+        None => Err(ApiError::not_found(format!("todo {} not found", raw_id))),
     }
 }
 
@@ -178,11 +190,20 @@ pub async fn create_todo(
     let v = Value::Object(obj);
     let body_str = v.to_string();
 
-    state.db.with_conn(|conn| -> rusqlite::Result<()> {
+    // 写 todo + 分配 seq 在同一事务里。seq 是 cloud-only 字段，存独立的
+    // `todo_seq` 表，不进 data_json（避免 PC↔cloud 同步循环把 seq 丢光）。
+    let seq = state.db.with_conn(|conn| -> rusqlite::Result<i64> {
         repo::upsert_todo(conn, &id_str, &body_str, &now)?;
+        let seq = repo::assign_seq(conn, &id_str)?;
         repo::set_meta(conn, "dirty", "true")?;
-        Ok(())
+        Ok(seq)
     })?;
+
+    // 响应里把 seq 注入到 todo JSON（API 视角的 todo 字段）
+    let mut v = v;
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("seq".into(), json!(seq));
+    }
 
     Ok((StatusCode::CREATED, Json(v)))
 }
@@ -193,7 +214,7 @@ pub async fn create_todo(
 
 pub async fn patch_todo(
     State(state): State<AppState>,
-    Path(id): Path<String>,
+    Path(raw_id): Path<String>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     if !body.is_object() {
@@ -205,6 +226,9 @@ pub async fn patch_todo(
     let updated: Option<Value> = state
         .db
         .with_conn(|conn| -> rusqlite::Result<Option<Value>> {
+            let Some(id) = resolve_todo_ref(conn, &raw_id)? else {
+                return Ok(None);
+            };
             let Some(row) = repo::get_todo(conn, &id)? else {
                 return Ok(None);
             };
@@ -219,12 +243,13 @@ pub async fn patch_todo(
             let body_str = current.to_string();
             repo::upsert_todo(conn, &id, &body_str, &now)?;
             repo::set_meta(conn, "dirty", "true")?;
+            attach_seq(conn, &id, &mut current);
             Ok(Some(current))
         })?;
 
     match updated {
         Some(v) => Ok(Json(v)),
-        None => Err(ApiError::not_found(format!("todo {} not found", id))),
+        None => Err(ApiError::not_found(format!("todo {} not found", raw_id))),
     }
 }
 
@@ -234,11 +259,18 @@ pub async fn patch_todo(
 
 pub async fn delete_todo(
     State(state): State<AppState>,
-    Path(id): Path<String>,
+    Path(raw_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     let now = now_local_string(state.config.timezone_offset);
     let removed = state.db.with_conn(|conn| -> rusqlite::Result<bool> {
         let tx = conn.transaction()?;
+        let id = match resolve_todo_ref(&tx, &raw_id)? {
+            Some(id) => id,
+            None => {
+                tx.commit()?;
+                return Ok(false);
+            }
+        };
         // 先收集子任务 id：`delete_todo_cascade` 会把 subtasks 一起删掉，
         // 若放在 cascade 之后再 query 就拿不到任何 id，导致 subtask tombstones 漏写。
         let sub_ids: Vec<String> = tx
@@ -253,6 +285,7 @@ pub async fn delete_todo(
             for sid in sub_ids {
                 repo::add_tombstone(&tx, "subtask", &sid, &now)?;
             }
+            repo::delete_seq(&tx, &id)?;
             repo::set_meta(&tx, "dirty", "true")?;
         }
         tx.commit()?;
@@ -261,7 +294,7 @@ pub async fn delete_todo(
     if removed {
         Ok(StatusCode::NO_CONTENT)
     } else {
-        Err(ApiError::not_found(format!("todo {} not found", id)))
+        Err(ApiError::not_found(format!("todo {} not found", raw_id)))
     }
 }
 
@@ -357,11 +390,44 @@ fn merge_json_shallow(target: &mut Value, patch: &Value) {
 // 复用 util 模块实现（push / pull 也用同一份）。
 use crate::util::id_string as id_field_as_string;
 
-/// 子任务嵌套创建工具：供 subtasks 模块共用。
-pub(crate) fn ensure_todo_exists(conn: &Connection, id: &str) -> Result<(), ApiError> {
-    match repo::get_todo(conn, id) {
-        Ok(Some(_)) => Ok(()),
-        Ok(None) => Err(ApiError::not_found(format!("todo {} not found", id))),
+/// 解析 path 里的 `:id`。**只有两种语义**：
+/// - `C{n}` / `c{n}`：把 n 当 cloud 短码 seq，反查内部 todo_id
+/// - 纯字符串：当 i64 id 直查；查到才返回（否则 None → 上层 404）
+///
+/// 不做"裸数字先 try id 再 try seq"的兜底——PC 端来的 todo id 数值小（1..），
+/// cloud seq 也从 1 起，二者会撞，必须靠 `C` 前缀消歧。
+pub(crate) fn resolve_todo_ref(conn: &Connection, raw: &str) -> rusqlite::Result<Option<String>> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if let Some(rest) = trimmed.strip_prefix(|c| c == 'C' || c == 'c') {
+        return match rest.parse::<i64>() {
+            Ok(seq) => repo::get_todo_id_by_seq(conn, seq),
+            Err(_) => Ok(None),
+        };
+    }
+    if repo::get_todo(conn, trimmed)?.is_some() {
+        return Ok(Some(trimmed.to_string()));
+    }
+    Ok(None)
+}
+
+/// 把 cloud-only 的 `seq` 字段注入到 todo JSON 响应里。
+/// `internal_id` 是内部 todo_id（i64 字符串），与 `todo_seq` 表 PK 对齐。
+pub(crate) fn attach_seq(conn: &Connection, internal_id: &str, todo_json: &mut Value) {
+    if let Ok(Some(seq)) = repo::get_seq(conn, internal_id) {
+        if let Some(obj) = todo_json.as_object_mut() {
+            obj.insert("seq".into(), json!(seq));
+        }
+    }
+}
+
+/// 子任务嵌套创建工具：供 subtasks 模块共用。返回**内部 todo_id**（解析过 ref）。
+pub(crate) fn ensure_todo_exists(conn: &Connection, raw: &str) -> Result<String, ApiError> {
+    match resolve_todo_ref(conn, raw) {
+        Ok(Some(id)) => Ok(id),
+        Ok(None) => Err(ApiError::not_found(format!("todo {} not found", raw))),
         Err(e) => Err(e.into()),
     }
 }

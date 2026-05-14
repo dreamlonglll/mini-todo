@@ -1045,6 +1045,375 @@ async fn get_image_rejects_path_traversal() {
 // 通用错误体格式
 // =============================================================================
 
+// =============================================================================
+// seq 短码（cloud-only `C{seq}` 引用）
+// =============================================================================
+
+#[tokio::test]
+async fn create_todo_response_contains_seq_starting_from_1() {
+    let fx = fixture();
+    let a = create_todo(&fx, json!({"title": "a"})).await;
+    let b = create_todo(&fx, json!({"title": "b"})).await;
+    let c = create_todo(&fx, json!({"title": "c"})).await;
+    assert_eq!(a["seq"], 1);
+    assert_eq!(b["seq"], 2);
+    assert_eq!(c["seq"], 3);
+}
+
+#[tokio::test]
+async fn list_todos_response_carries_seq_for_each_item() {
+    let fx = fixture();
+    let _ = create_todo(&fx, json!({"title": "a"})).await;
+    let _ = create_todo(&fx, json!({"title": "b"})).await;
+    let (_, _, raw) = send(&fx.router, req(Method::GET, "/todos", None)).await;
+    let v = json_body(&raw);
+    let arr = v.as_array().unwrap();
+    assert_eq!(arr.len(), 2);
+    assert!(arr[0]["seq"].is_number());
+    assert!(arr[1]["seq"].is_number());
+    let seqs: Vec<i64> = arr.iter().map(|x| x["seq"].as_i64().unwrap()).collect();
+    let mut sorted = seqs.clone();
+    sorted.sort();
+    assert_eq!(sorted, vec![1, 2]);
+}
+
+#[tokio::test]
+async fn get_todo_by_c_prefix_seq() {
+    let fx = fixture();
+    let t = create_todo(&fx, json!({"title": "first"})).await;
+    assert_eq!(t["seq"], 1);
+    let (status, _, raw) = send(&fx.router, req(Method::GET, "/todos/C1", None)).await;
+    assert_eq!(status, StatusCode::OK);
+    let v = json_body(&raw);
+    assert_eq!(v["title"], "first");
+    assert_eq!(v["seq"], 1);
+    assert_eq!(v["id"], t["id"]);
+}
+
+#[tokio::test]
+async fn get_todo_by_c_prefix_is_case_insensitive() {
+    let fx = fixture();
+    let _ = create_todo(&fx, json!({"title": "first"})).await;
+    let (status, _, raw) = send(&fx.router, req(Method::GET, "/todos/c1", None)).await;
+    assert_eq!(status, StatusCode::OK);
+    let v = json_body(&raw);
+    assert_eq!(v["title"], "first");
+}
+
+#[tokio::test]
+async fn get_todo_by_internal_id_still_works() {
+    let fx = fixture();
+    let t = create_todo(&fx, json!({"title": "x"})).await;
+    let id = todo_id_path(&t);
+    let (status, _, raw) = send(
+        &fx.router,
+        req(Method::GET, &format!("/todos/{}", id), None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v = json_body(&raw);
+    assert_eq!(v["seq"], 1);
+}
+
+#[tokio::test]
+async fn get_todo_unknown_seq_returns_404() {
+    let fx = fixture();
+    let _ = create_todo(&fx, json!({"title": "x"})).await;
+    let (status, _, _) = send(&fx.router, req(Method::GET, "/todos/C999", None)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn get_todo_malformed_seq_returns_404() {
+    let fx = fixture();
+    let _ = create_todo(&fx, json!({"title": "x"})).await;
+    let (status, _, _) = send(&fx.router, req(Method::GET, "/todos/Cfoo", None)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn patch_todo_by_c_prefix() {
+    let fx = fixture();
+    let _ = create_todo(&fx, json!({"title": "old"})).await;
+    let (status, _, raw) = send(
+        &fx.router,
+        req(Method::PATCH, "/todos/C1", Some(json!({"title": "new"}))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v = json_body(&raw);
+    assert_eq!(v["title"], "new");
+    assert_eq!(v["seq"], 1);
+}
+
+#[tokio::test]
+async fn delete_todo_by_c_prefix_removes_seq() {
+    let fx = fixture();
+    let _ = create_todo(&fx, json!({"title": "x"})).await;
+    let (status, _, _) = send(&fx.router, req(Method::DELETE, "/todos/C1", None)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    // 再 GET /todos/C1 → 404，且 todo_seq 表里这条 row 也已清理
+    let (status, _, _) = send(&fx.router, req(Method::GET, "/todos/C1", None)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let leftover = fx
+        .state
+        .db
+        .with_conn(|c| repo::get_todo_id_by_seq(c, 1).unwrap());
+    assert!(
+        leftover.is_none(),
+        "todo_seq row should be cleaned up on delete"
+    );
+}
+
+#[tokio::test]
+async fn seq_does_not_recycle_after_delete() {
+    let fx = fixture();
+    let _ = create_todo(&fx, json!({"title": "a"})).await; // seq=1
+    let _ = create_todo(&fx, json!({"title": "b"})).await; // seq=2
+    // 删 seq=1
+    let (status, _, _) = send(&fx.router, req(Method::DELETE, "/todos/C1", None)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    // 新建：seq 应该是 3，不复用 1
+    let c = create_todo(&fx, json!({"title": "c"})).await;
+    assert_eq!(c["seq"], 3, "seq must NOT recycle deleted numbers");
+}
+
+#[tokio::test]
+async fn create_subtask_under_c_prefix_parent() {
+    let fx = fixture();
+    let t = create_todo(&fx, json!({"title": "p"})).await;
+    let parent_id = todo_id_path(&t);
+    let (status, _, raw) = send(
+        &fx.router,
+        req(
+            Method::POST,
+            "/todos/C1/subtasks",
+            Some(json!({"title": "child"})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let v = json_body(&raw);
+    assert_eq!(v["title"], "child");
+    assert_eq!(v["parentId"].as_i64().unwrap().to_string(), parent_id);
+}
+
+#[tokio::test]
+async fn pull_backfill_assigns_seq_to_pc_origin_todo() {
+    // 模拟"PC 端创建的 todo 通过 pull 进入 cloud SQLite"：直接 upsert_todo，
+    // 不走 API（API 才会 assign_seq）。然后调 backfill 验证它能被分配 seq。
+    let fx = fixture();
+    let now = now_local_string(fx.state.config.timezone_offset);
+    fx.state.db.with_conn(|conn| {
+        repo::upsert_todo(
+            conn,
+            "42",
+            r#"{"id":42,"title":"from PC"}"#,
+            &now,
+        )
+        .unwrap();
+    });
+    // 现在没有 seq
+    let before = fx.state.db.with_conn(|c| repo::get_seq(c, "42").unwrap());
+    assert!(before.is_none());
+
+    // 调回填
+    let n = crate::sync::pull::backfill_missing_seq(&fx.state.db).unwrap();
+    assert_eq!(n, 1);
+
+    let after = fx.state.db.with_conn(|c| repo::get_seq(c, "42").unwrap());
+    assert_eq!(after, Some(1));
+
+    // 用 C1 也能查得到
+    let (status, _, raw) = send(&fx.router, req(Method::GET, "/todos/C1", None)).await;
+    assert_eq!(status, StatusCode::OK);
+    let v = json_body(&raw);
+    assert_eq!(v["title"], "from PC");
+    assert_eq!(v["seq"], 1);
+}
+
+#[tokio::test]
+async fn pull_backfill_is_idempotent() {
+    let fx = fixture();
+    let _ = create_todo(&fx, json!({"title": "a"})).await; // 已分配 seq=1
+    // 第二次回填什么也不应该改
+    let n = crate::sync::pull::backfill_missing_seq(&fx.state.db).unwrap();
+    assert_eq!(n, 0);
+}
+
+// =============================================================================
+// 示例：打印 /todos 真实响应 shape（cargo test demo_ -- --ignored --nocapture）
+// =============================================================================
+
+#[tokio::test]
+#[ignore]
+async fn demo_print_todos_responses() {
+    let fx = fixture();
+
+    // 1) POST /todos 最小创建
+    let (_, _, raw) = send(
+        &fx.router,
+        req(Method::POST, "/todos", Some(json!({"title": "买菜"}))),
+    )
+    .await;
+    let v: Value = json_body(&raw);
+    println!(
+        "\n==== POST /todos 最小创建响应 ====\n{}",
+        serde_json::to_string_pretty(&v).unwrap()
+    );
+
+    // 2) POST /todos 富字段
+    let (_, _, raw) = send(
+        &fx.router,
+        req(
+            Method::POST,
+            "/todos",
+            Some(json!({
+                "title": "写周报",
+                "priority": "high",
+                "quadrant": 1,
+                "color": "#EF4444",
+                "dueDate": "2026-05-20 18:00:00",
+                "startTime": "2026-05-20 09:00:00",
+                "notifyBefore": 30,
+                "notes": "重点：本月 KPI"
+            })),
+        ),
+    )
+    .await;
+    let with_extras: Value = json_body(&raw);
+    let parent_id = with_extras["id"].as_i64().unwrap().to_string();
+    println!(
+        "\n==== POST /todos 富字段响应 ====\n{}",
+        serde_json::to_string_pretty(&with_extras).unwrap()
+    );
+
+    // 3) 加两个子任务
+    for (i, title) in ["收集数据", "写文档"].iter().enumerate() {
+        let _ = send(
+            &fx.router,
+            req(
+                Method::POST,
+                &format!("/todos/{}/subtasks", parent_id),
+                Some(json!({"title": title, "sortOrder": i})),
+            ),
+        )
+        .await;
+    }
+
+    // 4) GET /todos 默认（不嵌套，含 subtaskCount）
+    let (_, headers, raw) = send(&fx.router, req(Method::GET, "/todos", None)).await;
+    let v: Value = json_body(&raw);
+    println!(
+        "\n==== GET /todos （默认，subtaskCount）====\nheaders: x-sync-status={:?}\n{}",
+        headers.get("x-sync-status").map(|h| h.to_str().unwrap()),
+        serde_json::to_string_pretty(&v).unwrap()
+    );
+
+    // 5) GET /todos?withSubtasks=true
+    let (_, _, raw) =
+        send(&fx.router, req(Method::GET, "/todos?withSubtasks=true", None)).await;
+    let v: Value = json_body(&raw);
+    println!(
+        "\n==== GET /todos?withSubtasks=true ====\n{}",
+        serde_json::to_string_pretty(&v).unwrap()
+    );
+
+    // 6) GET /todos/:id 默认嵌套
+    let (_, _, raw) = send(
+        &fx.router,
+        req(Method::GET, &format!("/todos/{}", parent_id), None),
+    )
+    .await;
+    let v: Value = json_body(&raw);
+    println!(
+        "\n==== GET /todos/{} 默认（嵌套）====\n{}",
+        parent_id,
+        serde_json::to_string_pretty(&v).unwrap()
+    );
+
+    // 7) GET /todos/C2 通过短码反查
+    let (status, _, raw) = send(&fx.router, req(Method::GET, "/todos/C2", None)).await;
+    let v: Value = json_body(&raw);
+    println!(
+        "\n==== GET /todos/C2（短码反查）status={} ====\n{}",
+        status,
+        serde_json::to_string_pretty(&v).unwrap()
+    );
+
+    // 8) GET /todos/c2 大小写不敏感
+    let (status, _, raw) = send(&fx.router, req(Method::GET, "/todos/c2", None)).await;
+    let v: Value = json_body(&raw);
+    println!(
+        "\n==== GET /todos/c2（小写）status={} ====\n{}",
+        status,
+        serde_json::to_string_pretty(&v).unwrap()
+    );
+
+    // 9) PATCH /todos/C2 完成
+    let (status, _, raw) = send(
+        &fx.router,
+        req(
+            Method::PATCH,
+            "/todos/C2",
+            Some(json!({"completed": true})),
+        ),
+    )
+    .await;
+    let v: Value = json_body(&raw);
+    println!(
+        "\n==== PATCH /todos/C2 完成 status={} ====\n{}",
+        status,
+        serde_json::to_string_pretty(&v).unwrap()
+    );
+
+    // 10) POST /todos/C2/subtasks 用短码引用父
+    let (status, _, raw) = send(
+        &fx.router,
+        req(
+            Method::POST,
+            "/todos/C2/subtasks",
+            Some(json!({"title": "通过 C2 引用父级"})),
+        ),
+    )
+    .await;
+    let v: Value = json_body(&raw);
+    println!(
+        "\n==== POST /todos/C2/subtasks status={} ====\n{}",
+        status,
+        serde_json::to_string_pretty(&v).unwrap()
+    );
+
+    // 11) GET /todos/C999 不存在
+    let (status, _, raw) = send(&fx.router, req(Method::GET, "/todos/C999", None)).await;
+    let v: Value = json_body(&raw);
+    println!(
+        "\n==== GET /todos/C999（不存在）status={} ====\n{}",
+        status,
+        serde_json::to_string_pretty(&v).unwrap()
+    );
+
+    // 12) DELETE /todos/C1
+    let (status, _, _) = send(&fx.router, req(Method::DELETE, "/todos/C1", None)).await;
+    println!("\n==== DELETE /todos/C1 status={} ====", status);
+
+    // 13) 删除后再新建：seq 不复用（应该是 C3）
+    let (_, _, raw) = send(
+        &fx.router,
+        req(
+            Method::POST,
+            "/todos",
+            Some(json!({"title": "删除后新建（验证 seq 不复用）"})),
+        ),
+    )
+    .await;
+    let v: Value = json_body(&raw);
+    println!(
+        "\n==== POST 删除后新建（验证 seq 不复用）====\n{}",
+        serde_json::to_string_pretty(&v).unwrap()
+    );
+}
+
 #[tokio::test]
 async fn error_body_shape_is_consistent() {
     let fx = fixture();

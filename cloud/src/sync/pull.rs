@@ -55,6 +55,18 @@ pub struct SyncData {
 /// 304 → 视为成功但跳过解码；调用方读 `meta.last_pull_at` 已被更新即可。
 /// 404 → 远端还没有 sync-data，返回成功但 `data` 为空；进程继续工作。
 pub fn pull_once(cfg: &Config, db: &Db) -> anyhow::Result<()> {
+    pull_once_inner(cfg, db)?;
+    // 不管远端是否变化，本地都可能有从 PC 端同步来的、还没分配 cloud 短码
+    // `seq` 的 todo。每次 pull tick 末尾扫一遍 `todo_seq` LEFT JOIN 缺失行，
+    // 给它们补 seq。开销 O(N) 且只命中没 seq 的，N 一般 < 1000，可忽略。
+    let backfilled = backfill_missing_seq(db).map_err(|e| anyhow::anyhow!("回填 seq: {}", e))?;
+    if backfilled > 0 {
+        info!(target: "minitodo_cloud::pull", "backfilled {} todo seq(s)", backfilled);
+    }
+    Ok(())
+}
+
+fn pull_once_inner(cfg: &Config, db: &Db) -> anyhow::Result<()> {
     let client = WebDavClient::new(&cfg.webdav_url, &cfg.webdav_username, &cfg.webdav_password)?;
     let _ = client.ensure_dir(REMOTE_DIR);
 
@@ -116,6 +128,18 @@ pub fn pull_once(cfg: &Config, db: &Db) -> anyhow::Result<()> {
         todo_n, sub_n, res.last_modified
     );
     Ok(())
+}
+
+/// 扫 todos 表，给在 `todo_seq` 中无对应行的 todo 分配 seq。
+/// 不修改 data_json / updated_at（避免触发不必要的 dirty 同步），seq 仅本地表持有。
+pub(crate) fn backfill_missing_seq(db: &Db) -> rusqlite::Result<usize> {
+    db.with_conn(|conn| -> rusqlite::Result<usize> {
+        let ids = repo::todo_ids_without_seq(conn)?;
+        for id in &ids {
+            repo::assign_seq(conn, id)?;
+        }
+        Ok(ids.len())
+    })
 }
 
 /// 后台 spawn 的轮询循环。
