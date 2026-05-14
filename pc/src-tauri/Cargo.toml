@@ -1,6 +1,6 @@
 [package]
 name = "mini-todo"
-version = "2.1.1"
+version = "2.1.2"
 description = "A minimal todo desktop app with Windows pinning support"
 authors = ["you"]
 edition = "2021"
