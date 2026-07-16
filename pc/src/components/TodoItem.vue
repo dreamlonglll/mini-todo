@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import { useTodoStore } from '@/stores'
+import { computed, ref, watch } from 'vue'
+import { useTodoStore, useAppStore } from '@/stores'
 import { ElMessageBox } from 'element-plus'
 import dayjs from 'dayjs'
 import type { Todo } from '@/types'
@@ -16,6 +16,7 @@ const emit = defineEmits<{
 }>()
 
 const todoStore = useTodoStore()
+const appStore = useAppStore()
 
 // 是否已完成
 const isCompleted = computed(() => props.todo.completed)
@@ -106,8 +107,13 @@ const sortedSubtasks = computed(() =>
   [...props.todo.subtasks].sort((a, b) => Number(a.completed) - Number(b.completed))
 )
 
-// 子任务列表展开状态
-const subtaskExpanded = ref(false)
+// 子任务列表展开状态（初值跟随全局“一键展开”）
+const subtaskExpanded = ref(appStore.subtaskExpandAll)
+
+// 全局一键展开/收起时同步本地状态（之后仍可单项点击覆盖）
+watch(() => appStore.subtaskExpandAll, (val) => {
+  subtaskExpanded.value = val
+})
 
 function toggleSubtaskExpand(e: Event) {
   e.stopPropagation()

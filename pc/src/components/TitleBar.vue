@@ -46,6 +46,14 @@ const isDarkTheme = computed(() => appStore.isDarkTheme)
 // 当前视图模式
 const viewMode = computed(() => todoStore.viewMode)
 
+// 子任务全局展开状态
+const subtaskExpandAll = computed(() => appStore.subtaskExpandAll)
+
+// 一键展开/收起全部子任务
+function toggleSubtaskExpandAll() {
+  appStore.toggleSubtaskExpandAll()
+}
+
 // 切换视图模式
 async function toggleViewMode() {
   const newMode: ViewMode = viewMode.value === 'list' ? 'quadrant' : 'list'
@@ -116,6 +124,20 @@ async function handleVersionClick() {
           <span v-if="hasUpdate" class="update-dot"></span>
         </span>
       </span>
+
+      <!-- 一键展开/收起全部子任务 -->
+      <button
+        class="title-btn subtask-toggle-btn"
+        :class="{ active: subtaskExpandAll }"
+        :title="subtaskExpandAll ? '收起全部子任务' : '展开全部子任务'"
+        data-tauri-drag-region="false"
+        @click="toggleSubtaskExpandAll"
+      >
+        <el-icon :size="16">
+          <Fold v-if="subtaskExpandAll" />
+          <Expand v-else />
+        </el-icon>
+      </button>
     </div>
 
     <!-- 日历控制区域（居中显示） -->
@@ -144,8 +166,8 @@ async function handleVersionClick() {
       </button>
 
       <!-- 视图切换按钮 -->
-      <button 
-        class="title-btn view-toggle-btn" 
+      <button
+        class="title-btn view-toggle-btn"
         :class="{ active: viewMode === 'quadrant' }"
         :title="viewMode === 'list' ? '切换到四象限视图' : '切换到列表视图'"
         @click="toggleViewMode"
@@ -372,5 +394,32 @@ async function handleVersionClick() {
 @keyframes spin {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
+}
+
+/* 一键展开/收起全部子任务按钮（位于标题左侧区块，靠右缘） */
+.subtask-toggle-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  margin-left: auto;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-base);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  -webkit-app-region: no-drag;
+}
+
+.subtask-toggle-btn:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.subtask-toggle-btn.active {
+  color: var(--primary);
 }
 </style>

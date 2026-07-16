@@ -48,6 +48,28 @@ export const useAppStore = defineStore('app', () => {
   // 是否启用贴边自动隐藏
   const autoHideEnabled = ref(true)
 
+  // 子任务全局展开状态（一键展开/收起全部子任务）
+  // 仅前端状态，用 localStorage 持久化，无需数据库迁移与云同步
+  const SUBTASK_EXPAND_ALL_KEY = 'subtask-expand-all'
+  function loadSubtaskExpandAll(): boolean {
+    try {
+      return localStorage.getItem(SUBTASK_EXPAND_ALL_KEY) === '1'
+    } catch {
+      return false
+    }
+  }
+  const subtaskExpandAll = ref<boolean>(loadSubtaskExpandAll())
+
+  // 切换全局展开状态（并持久化到 localStorage）
+  function toggleSubtaskExpandAll() {
+    subtaskExpandAll.value = !subtaskExpandAll.value
+    try {
+      localStorage.setItem(SUBTASK_EXPAND_ALL_KEY, subtaskExpandAll.value ? '1' : '0')
+    } catch (e) {
+      console.error('Failed to persist subtask expand all:', e)
+    }
+  }
+
   // 待办字体设置
   const todoFontFamily = ref('')
   const todoFontSize = ref(14)
@@ -532,6 +554,9 @@ export const useAppStore = defineStore('app', () => {
     // 日历状态
     showCalendar,
     autoHideEnabled,
+    // 子任务全局展开状态
+    subtaskExpandAll,
+    toggleSubtaskExpandAll,
     // 方法
     initSettings,
     toggleFixedMode,
