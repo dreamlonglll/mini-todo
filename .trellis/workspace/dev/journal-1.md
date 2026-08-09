@@ -212,3 +212,37 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 7: 待办描述 Markdown 化 + 只读详情模式 + 发布 2.2.0
+
+**Date**: 2026-08-09
+**Task**: 待办描述 Markdown 化 + 只读详情模式 + 发布 2.2.0
+**Branch**: `main`
+
+### Summary
+
+抽取可复用 MarkdownEditor 组件（Milkdown+GFM+clipboard），待办描述支持 MD 编辑与图片上传；新增只读详情模式（四入口统一默认进入，可原地切换编辑）；新增源码/预览分栏放大编辑弹窗（联动窗口最大化）；修复粘贴 MD 被转义与围栏代码块样式污染两个缺陷；沉淀 2 条 Common Mistake 到 component-guidelines；版本升至 2.2.0 并打 tag 发布
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `9b7b56c` | (see git log) |
+| `1c68436` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

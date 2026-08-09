@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 6
-- **Last Active**: 2026-05-13
+- **Total Sessions**: 7
+- **Last Active**: 2026-08-09
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~214 | Active |
+| `journal-1.md` | ~248 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 7 | 2026-08-09 | 待办描述 Markdown 化 + 只读详情模式 + 发布 2.2.0 | `9b7b56c`, `1c68436` | `main` |
 | 6 | 2026-05-13 | cloud-api-and-skill: 3-PR cloud REST + Skill + PC race fix | `87639f4`, `605f3e2`, `64e3d88`, `2a13fa9`, `efca93c`, `e75cd7a`, `d0d56af` | `main` |
 | 5 | 2026-05-13 | 移除 AI Agent 功能 | `23ab651` | `main` |
 | 4 | 2026-05-09 | feat: 重复提醒功能实现 | `7dde72f`, `9c56618` | `main` |
