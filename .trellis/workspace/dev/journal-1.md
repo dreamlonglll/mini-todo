@@ -246,3 +246,34 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 8: 任务台账清理：归档全部 8 个历史任务
+
+**Date**: 2026-08-09
+**Task**: 任务台账清理：归档全部 8 个历史任务
+**Branch**: `main`
+
+### Summary
+
+按用户指令归档所有任务：6 个已完成（05-14 系列 5 个 + 08-09-health-fixes）、bootstrap 占位任务与 cloud-api 规划任务一并入 archive/2026-08/，台账清零
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+(No commits - planning session)
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
