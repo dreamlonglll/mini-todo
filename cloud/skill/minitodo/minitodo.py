@@ -152,23 +152,28 @@ class Client:
 def cmd_today(client: Client, args: argparse.Namespace) -> Any:
     """今日相关：dueDate=today + startDate=today + 已 overdue 未完成。"""
     today_str = dt.date.today().isoformat()
+    yesterday_str = (dt.date.today() - dt.timedelta(days=1)).isoformat()
 
-    # 今天到期：[今天 00:00, 今天 23:59:59]
+    # 服务端按字符串字典序比较（含 <=/>=），存储格式是 "YYYY-MM-DD HH:MM:SS"（空格
+    # 分隔）或纯日期 "YYYY-MM-DD"。不能用 ISO 的 "T" 分隔符：' '(0x20) < 'T'(0x54)，
+    # 会把今天的待办排除在"今天到期"外、又全部卷进 overdue。
+    # 边界取值同时兼容纯日期锚：下界用纯日期（前缀序 <= 任何当天带时刻的值），
+    # 上界补 " 23:59:59"。
     due_today = client.get(
         "/todos",
         params={
-            "dueDateAfter": today_str + "T00:00:00",
-            "dueDateBefore": today_str + "T23:59:59",
+            "dueDateAfter": today_str,
+            "dueDateBefore": today_str + " 23:59:59",
         },
     )
     # 今天开始
     start_today = client.get("/todos", params={"startDate": today_str})
-    # 已 overdue 未完成（截止日期 < 今天 00:00 且未完成）
+    # 已 overdue 未完成（截止时间在昨天 23:59:59 及以前，且未完成）
     overdue = client.get(
         "/todos",
         params={
             "completed": "false",
-            "dueDateBefore": today_str + "T00:00:00",
+            "dueDateBefore": yesterday_str + " 23:59:59",
         },
     )
 
@@ -448,24 +453,44 @@ def _coerce_value(raw: str) -> Any:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    # --json / --config 同时挂在顶层和每个子命令上：argparse 要求选项紧跟其所属
+    # parser，只挂顶层时 `minitodo.py today --json` 会直接报 unrecognized arguments。
+    # 子命令侧默认值必须用 SUPPRESS：子命令解析走独立 namespace 再整体拷回，普通
+    # 默认值（False/None）会把前置写法 `--json today` 已解析出的 True 覆盖掉；
+    # SUPPRESS 让子 parser 只在 flag 真出现时才写值。顶层则用普通默认值兜底。
+    # 注意顶层不能与子命令共享 action 对象（parents= 是引用共享），否则改一处
+    # default 两处都变。
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
+        "--config",
+        default=argparse.SUPPRESS,
+        help="config.toml 路径（默认 ~/.claude/skills/minitodo/config.toml）",
+    )
+    common.add_argument(
+        "--json",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="输出原始 JSON 而非表格",
+    )
+
     p = argparse.ArgumentParser(prog="minitodo", description="mini-todo CLI")
     p.add_argument("--config", help="config.toml 路径（默认 ~/.claude/skills/minitodo/config.toml）")
     p.add_argument("--json", action="store_true", help="输出原始 JSON 而非表格")
     sub = p.add_subparsers(dest="command", required=True)
 
-    sp = sub.add_parser("today", help="今日相关待办")
+    sp = sub.add_parser("today", help="今日相关待办", parents=[common])
 
-    sp = sub.add_parser("add", help="新增待办")
+    sp = sub.add_parser("add", help="新增待办", parents=[common])
     sp.add_argument("title")
     sp.add_argument("--priority", choices=["high", "medium", "low"])
     sp.add_argument("--due", help="dueDate (ISO 8601)")
     sp.add_argument("--quadrant", help="1-4 或 urgent_important 等别名")
     sp.add_argument("--color", help="HEX 颜色 (e.g. #EF4444)")
 
-    sp = sub.add_parser("done", help="标记完成")
+    sp = sub.add_parser("done", help="标记完成", parents=[common])
     sp.add_argument("id", help="完整 i64 id 或 C{seq} 短码（cloud 端反查），大小写不敏感")
 
-    sp = sub.add_parser("list", help="列表")
+    sp = sub.add_parser("list", help="列表", parents=[common])
     sp.add_argument("--completed", action="store_true", help="仅显示已完成")
     sp.add_argument("--pending", action="store_true", help="仅显示未完成")
     sp.add_argument("--priority", choices=["high", "medium", "low"])
@@ -473,23 +498,23 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--limit", type=int)
     sp.add_argument("--sort", help="例如 -dueDate / +priority")
 
-    sp = sub.add_parser("search", help="关键词搜索")
+    sp = sub.add_parser("search", help="关键词搜索", parents=[common])
     sp.add_argument("keyword")
 
-    sp = sub.add_parser("show", help="查看详情")
+    sp = sub.add_parser("show", help="查看详情", parents=[common])
     sp.add_argument("id", help="完整 i64 id 或 C{seq} 短码")
     sp.add_argument("--with-subtasks", action="store_true", default=True)
 
-    sp = sub.add_parser("update", help="更新字段")
+    sp = sub.add_parser("update", help="更新字段", parents=[common])
     sp.add_argument("id", help="完整 i64 id 或 C{seq} 短码")
     sp.add_argument("fields", nargs="+", help="key=value，可多个")
 
-    sp = sub.add_parser("delete", help="删除")
+    sp = sub.add_parser("delete", help="删除", parents=[common])
     sp.add_argument("id", help="完整 i64 id 或 C{seq} 短码")
 
-    sp = sub.add_parser("health", help="health check")
+    sp = sub.add_parser("health", help="health check", parents=[common])
 
-    sp = sub.add_parser("sync", help="手动触发 WebDAV 同步")
+    sp = sub.add_parser("sync", help="手动触发 WebDAV 同步", parents=[common])
     sp.add_argument("mode", nargs="?", choices=["pull", "push"], help="仅 pull 或仅 push；省略则两者都做")
 
     return p

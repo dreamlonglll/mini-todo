@@ -153,16 +153,6 @@ pub fn set_setting(conn: &Connection, key: &str, value: &str) -> rusqlite::Resul
     Ok(())
 }
 
-#[allow(dead_code)]
-pub fn get_setting(conn: &Connection, key: &str) -> Option<String> {
-    conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| {
-        row.get::<_, String>(0)
-    })
-    .optional()
-    .ok()
-    .flatten()
-}
-
 // =============================================================================
 // todos / subtasks
 // =============================================================================
@@ -180,22 +170,6 @@ pub fn get_todo(conn: &Connection, id: &str) -> rusqlite::Result<Option<TodoRow>
         },
     )
     .optional()
-}
-
-#[allow(dead_code)]
-pub fn list_todos(conn: &Connection) -> rusqlite::Result<Vec<TodoRow>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, data_json, updated_at FROM todos
-         ORDER BY CAST(json_extract(data_json, '$.sortOrder') AS INTEGER) ASC, id ASC",
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(TodoRow {
-            id: row.get(0)?,
-            data_json: row.get(1)?,
-            updated_at: row.get(2)?,
-        })
-    })?;
-    rows.collect()
 }
 
 /// 列表查询的过滤参数。所有字段为 `Option`；`None` 表示不过滤。
@@ -334,11 +308,6 @@ fn sort_expr(field: &str) -> String {
         "title" => "IFNULL(json_extract(data_json, '$.title'), '')".to_string(),
         _ => "CAST(IFNULL(json_extract(data_json, '$.sortOrder'), 0) AS INTEGER)".to_string(),
     }
-}
-
-#[allow(dead_code)]
-pub fn count_todos(conn: &Connection) -> rusqlite::Result<i64> {
-    conn.query_row("SELECT COUNT(*) FROM todos", [], |row| row.get(0))
 }
 
 /// 直接 upsert（无 LWW）。CRUD 写路径用。

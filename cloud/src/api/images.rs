@@ -46,9 +46,16 @@ pub async fn get_image(
     };
 
     let ct = content_type_for(&safe);
-    Response::builder()
+    // nosniff：阻止浏览器把响应嗅探成 HTML/SVG 执行脚本（存储型 XSS 防线）。
+    // 存量 .svg（历史上传/PC 同步）额外强制 attachment，只允许下载不允许内联渲染。
+    let mut builder = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, ct)
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff");
+    if extension_of(&safe).as_deref() == Some("svg") {
+        builder = builder.header(header::CONTENT_DISPOSITION, "attachment");
+    }
+    builder
         .body(Body::from(bytes))
         .map_err(|e| ApiError::internal(format!("build response: {}", e)))
 }
@@ -165,10 +172,14 @@ fn extension_of(name: &str) -> Option<String> {
 /// 把可能不可信的 ext 收紧成图片白名单；非白名单一律 fallback "bin"。
 /// 这是 upload 路径的最后一道防线：保证最终文件名不会含非 ASCII 字符 / 路径分隔符
 /// / 通配符等。
+///
+/// svg 故意不在白名单内：SVG 可内嵌脚本，配合 `image/svg+xml` 内联渲染是
+/// 存储型 XSS 向量；新上传一律降级 "bin"。
 fn sanitize_ext(ext: Option<String>) -> String {
     match ext.as_deref() {
-        Some("png") | Some("jpg") | Some("jpeg") | Some("webp") | Some("gif") | Some("bmp")
-        | Some("svg") => ext.unwrap_or_else(|| "bin".to_string()),
+        Some("png") | Some("jpg") | Some("jpeg") | Some("webp") | Some("gif") | Some("bmp") => {
+            ext.unwrap_or_else(|| "bin".to_string())
+        }
         _ => "bin".to_string(),
     }
 }
@@ -191,7 +202,7 @@ fn content_type_for(name: &str) -> &'static str {
         Some("webp") => "image/webp",
         Some("gif") => "image/gif",
         Some("bmp") => "image/bmp",
-        Some("svg") => "image/svg+xml",
+        // svg 不返回 image/svg+xml：可执行脚本，统一按二进制下发（见 get_image 的 attachment）
         _ => "application/octet-stream",
     }
 }
@@ -235,11 +246,17 @@ mod tests {
     fn sanitize_ext_whitelists_images() {
         assert_eq!(sanitize_ext(Some("png".into())), "png");
         assert_eq!(sanitize_ext(Some("jpeg".into())), "jpeg");
-        assert_eq!(sanitize_ext(Some("svg".into())), "svg");
+        // svg 可内嵌脚本，不允许进白名单
+        assert_eq!(sanitize_ext(Some("svg".into())), "bin");
         // 非图片：fallback bin
         assert_eq!(sanitize_ext(Some("exe".into())), "bin");
         assert_eq!(sanitize_ext(Some("中文".into())), "bin");
         assert_eq!(sanitize_ext(Some("..".into())), "bin");
         assert_eq!(sanitize_ext(None), "bin");
+    }
+
+    #[test]
+    fn content_type_svg_is_not_inline_renderable() {
+        assert_eq!(content_type_for("a.svg"), "application/octet-stream");
     }
 }

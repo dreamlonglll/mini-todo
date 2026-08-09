@@ -1,0 +1,62 @@
+name: PC CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'pc/**'
+      - '.github/workflows/pc-ci.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'pc/**'
+      - '.github/workflows/pc-ci.yml'
+  workflow_dispatch:
+
+jobs:
+  rust:
+    name: Rust tests (pc)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: pc/src-tauri
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './pc/src-tauri -> target'
+
+      - name: Tests
+        run: cargo test --locked --no-fail-fast
+
+  frontend:
+    name: Frontend type check & lint (pc)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: pc
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+          cache: 'npm'
+          cache-dependency-path: pc/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint

@@ -51,7 +51,7 @@ async function handleClose() {
       
       <div class="notification-content">
         <h3 class="notification-title">{{ title }}</h3>
-        <p class="notification-desc" v-if="description">{{ description }}</p>
+        <p v-if="description" class="notification-desc">{{ description }}</p>
       </div>
       
       <div class="notification-footer">

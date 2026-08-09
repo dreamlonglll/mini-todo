@@ -1258,6 +1258,64 @@ async fn pull_backfill_is_idempotent() {
 }
 
 // =============================================================================
+// POST /sync 系列
+//
+// 测试 Config 的 webdav_url 指向不可达地址（127.0.0.1:0），pull 必然失败；
+// push 在 meta.dirty 未置位时是 no-op 不触网。借此覆盖路由注册、鉴权、
+// 部分失败的 207 语义和响应 shape，全程无真实网络。
+// =============================================================================
+
+#[tokio::test]
+async fn sync_route_requires_auth() {
+    let fx = fixture();
+    let (status, _, _) = send(&fx.router, req_no_auth(Method::POST, "/sync")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn sync_route_reports_partial_failure_as_207() {
+    let fx = fixture();
+    let (status, _, body) = send(&fx.router, req(Method::POST, "/sync", None)).await;
+    assert_eq!(status, StatusCode::MULTI_STATUS);
+    let v = json_body(&body);
+    assert_eq!(v["pull"], "error");
+    assert!(v["pullError"].is_string(), "pull 失败必须带 pullError 详情");
+    // db 干净（dirty 未置位）→ push 是 no-op，成功
+    assert_eq!(v["push"], "ok");
+    assert!(v.get("pushError").is_none() || v["pushError"].is_null());
+}
+
+#[tokio::test]
+async fn sync_pull_route_returns_500_when_webdav_unreachable() {
+    let fx = fixture();
+    let (status, _, body) = send(&fx.router, req(Method::POST, "/sync/pull", None)).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let v = json_body(&body);
+    assert!(v.get("error").is_some());
+}
+
+#[tokio::test]
+async fn sync_push_route_ok_when_not_dirty() {
+    let fx = fixture();
+    let (status, _, body) = send(&fx.router, req(Method::POST, "/sync/push", None)).await;
+    assert_eq!(status, StatusCode::OK);
+    let v = json_body(&body);
+    assert_eq!(v["status"], "ok");
+}
+
+#[tokio::test]
+async fn sync_push_route_fails_when_dirty_and_webdav_unreachable() {
+    let fx = fixture();
+    // 通过 API 创建 todo 会置 dirty=true，push 将真正尝试连 WebDAV → 失败
+    let _ = create_todo(&fx, json!({"title": "trigger dirty"})).await;
+    let (status, _, _) = send(&fx.router, req(Method::POST, "/sync/push", None)).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    // 失败后 dirty 必须复位回 true，等下一轮重试
+    let dirty = fx.state.db.with_conn(|c| repo::get_meta(c, "dirty"));
+    assert_eq!(dirty.as_deref(), Some("true"));
+}
+
+// =============================================================================
 // 示例：打印 /todos 真实响应 shape（cargo test demo_ -- --ignored --nocapture）
 // =============================================================================
 

@@ -41,11 +41,18 @@ impl Db {
     }
 
     /// 在 lock 内同步执行一段逻辑。所有数据库操作都走这里。
+    ///
+    /// 拿锁时忽略中毒标记：持锁闭包 panic 只影响那一次请求，SQLite 连接本身
+    /// 仍然可用；若沿用 `expect()`，一次 panic 会让之后所有请求和 sync tick
+    /// 永久 panic（服务不退出但全 500，不可恢复）。
     pub fn with_conn<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&mut Connection) -> R,
     {
-        let mut guard = self.inner.lock().expect("db mutex poisoned");
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         f(&mut guard)
     }
 }

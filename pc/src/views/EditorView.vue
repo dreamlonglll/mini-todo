@@ -496,7 +496,7 @@ async function toggleSubtask(subtaskId: number) {
 // 删除子任务
 async function deleteSubtask(subtaskId: number) {
   // 获取子任务标题用于确认
-  let subtaskTitle = ''
+  let subtaskTitle: string
   if (isEdit.value) {
     const subtask = subtasks.value.find(s => s.id === subtaskId)
     subtaskTitle = subtask?.title || ''
@@ -845,8 +845,8 @@ function onHeaderMouseDown(e: MouseEvent) {
           <el-form-item v-if="form.notifyAt && !repeatEnabled" label="提前提醒">
             <el-select
               :model-value="isCustomNotifyBefore ? -1 : form.notifyBefore"
-              @change="handleNotifyBeforeChange"
               style="width: 100%"
+              @change="handleNotifyBeforeChange"
             >
               <el-option
                 v-for="opt in notifyBeforeOptions"
@@ -1051,23 +1051,23 @@ function onHeaderMouseDown(e: MouseEvent) {
                 <div v-if="inlineEditingSubtaskId !== subtask.id" class="subtask-actions">
                   <button
                     class="action-btn view-btn"
-                    @click="openSubtaskWindow(subtask.id, 'view')"
                     title="查看子任务"
+                    @click="openSubtaskWindow(subtask.id, 'view')"
                   >
                     <el-icon><View /></el-icon>
                   </button>
                   <button 
                     v-if="isEdit"
                     class="action-btn edit-btn"
-                    @click="openSubtaskWindow(subtask.id, 'edit')"
                     title="编辑子任务"
+                    @click="openSubtaskWindow(subtask.id, 'edit')"
                   >
                     <el-icon><Edit /></el-icon>
                   </button>
                   <button 
                     class="action-btn delete-btn"
-                    @click="deleteSubtask(subtask.id)"
                     title="删除子任务"
+                    @click="deleteSubtask(subtask.id)"
                   >
                     <el-icon><Delete /></el-icon>
                   </button>

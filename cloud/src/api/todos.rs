@@ -318,8 +318,8 @@ fn parse_list_filter(q: &ListTodosQuery) -> Result<ListTodosFilter, ApiError> {
         ),
     };
     let sort = q.sort.as_deref().map(parse_sort);
-    let limit = q.limit.and_then(|l| if l > 0 { Some(l) } else { None });
-    let offset = q.offset.and_then(|o| if o >= 0 { Some(o) } else { None });
+    let limit = q.limit.filter(|&l| l > 0);
+    let offset = q.offset.filter(|&o| o >= 0);
 
     Ok(ListTodosFilter {
         completed,

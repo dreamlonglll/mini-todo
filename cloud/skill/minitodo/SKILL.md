@@ -40,7 +40,8 @@ bash install.sh --target openclaw # ~/.openclaw/workspace/skills/minitodo/
 bash install.sh --target both     # 两者都装
 ```
 
-Windows 用户在 Git Bash / WSL / MSYS2 里执行同样的命令即可。脚本做三件事：
+Windows 用户用 PowerShell 执行 `.\install.ps1`（参数相同：`-Target claude/openclaw/both`），
+或在 Git Bash / WSL / MSYS2 里执行上面的 bash 命令。脚本做三件事：
 
 1. 把 `SKILL.md` / `minitodo.py` / `config.example.toml` 复制到目标 skill 目录
 2. 如果 `config.toml` 不存在，把 `config.example.toml` 复制为 `config.toml`
@@ -242,11 +243,12 @@ openclaw cron add \
 
    d. 全空则**跳过**该 todo（纯备忘类不推送）
 
-3. **判断临期**——用当前墙钟时间 `now`（Asia/Shanghai）和窗口 **H = 12 小时**：
+3. **判断临期**——用当前墙钟时间 `now`（Asia/Shanghai）和窗口 **H = 24 小时**
+   （与 `openclaw.md` 的默认窗口一致；用户在 cron message 里另有指定时以其为准）：
 
    - 时间锚 < `now`                → "已逾期"（显示逾期多久）
-   - `now` ≤ 时间锚 ≤ `now + 12h`  → "未来 12h 到期"（显示还有多久）
-   - 时间锚 > `now + 12h`          → 跳过
+   - `now` ≤ 时间锚 ≤ `now + 24h`  → "未来 24h 到期"（显示还有多久）
+   - 时间锚 > `now + 24h`          → 跳过
 
 4. **仅当 `repeatEnabled == true` 时**，把 `repeat*` 字段翻译成中文：
 
@@ -265,7 +267,7 @@ openclaw cron add \
    mini-todo 临期提醒｜YYYY-MM-DD HH:MM
    已逾期（N）：
    - #C{seq} [优先级] 标题 (MM-DD HH:MM，已逾期 X 小时｜重复描述)
-   未来 12h 到期（M）：
+   未来 24h 到期（M）：
    - #C{seq} [优先级] 标题 (MM-DD HH:MM，X 小时后｜重复描述)
    ```
 
@@ -276,7 +278,7 @@ openclaw cron add \
    - 时间差显示规则：< 60 分钟用 "X 分钟后"，< 24h 用 "X 小时后"，≥ 24h 用 "X 天后"；逾期同理
    - 示例：`- #C3 [中] 月度回顾 (05-14 09:00，已逾期 3 小时｜每月 14 号)`
 
-6. 如果两组都为空，只输出一行 `12h 内无临期事项`，**不要再加任何字**。
+6. 如果两组都为空，只输出一行 `24h 内无临期事项`，**不要再加任何字**。
 
 ## 已知限制
 

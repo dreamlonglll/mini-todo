@@ -58,13 +58,16 @@ pub fn build_router(state: AppState) -> Router {
         .route("/todos/:id/subtasks", post(subtasks::create_subtask))
         .route("/subtasks/:id", patch(subtasks::patch_subtask))
         .route("/subtasks/:id", delete(subtasks::delete_subtask))
-        .route("/images", post(images::upload_image))
+        .route(
+            "/images",
+            // multipart 最大 32 MiB；只放宽图片上传这一条路由，
+            // 其余路由（含 POST /todos 的 JSON body）维持 axum 默认 2 MB 上限
+            post(images::upload_image).layer(DefaultBodyLimit::max(32 * 1024 * 1024)),
+        )
         .route("/images/:name", get(images::get_image))
         .route("/sync", post(sync::post_sync))
         .route("/sync/pull", post(sync::post_sync_pull))
         .route("/sync/push", post(sync::post_sync_push))
-        // multipart 最大 32 MiB
-        .layer(DefaultBodyLimit::max(32 * 1024 * 1024))
         // 内层：先校验 token
         .layer(middleware::from_fn_with_state(
             state.clone(),

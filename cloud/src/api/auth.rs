@@ -20,7 +20,11 @@ pub async fn require_bearer(
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
+        .and_then(|s| {
+            // RFC 7235: auth-scheme 大小写不敏感
+            let (scheme, rest) = s.split_once(' ')?;
+            scheme.eq_ignore_ascii_case("bearer").then_some(rest)
+        })
         .map(|s| s.trim().to_string());
 
     let supplied = match token {
@@ -28,11 +32,24 @@ pub async fn require_bearer(
         _ => return Err(unauthorized("missing bearer token")),
     };
 
-    if supplied != state.config.api_key {
+    if !constant_time_eq(supplied.as_bytes(), state.config.api_key.as_bytes()) {
         return Err(unauthorized("invalid api key"));
     }
 
     Ok(next.run(req).await)
+}
+
+/// 常数时间字节比较，防止通过响应时延逐字节猜 api_key。
+/// 长度不同时提前返回只泄露长度信息，与 `subtle::ConstantTimeEq` 的约束一致。
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 fn unauthorized(detail: &str) -> Response {

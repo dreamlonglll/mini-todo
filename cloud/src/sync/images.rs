@@ -1,8 +1,6 @@
 //! 图片 bootstrap：启动时把 WebDAV `/mini-todo/images/` 里有、本地没有的
-//! 图片下到 `config.images_dir`。
-//!
-//! PR1 范围：bootstrap 只跑一次；启动时 spawn 一个 blocking task 异步完成。
-//! PR2 才加 dirty image 队列 + 双向 PUT。
+//! 图片下到 `config.images_dir`。只跑一次；启动时 spawn 一个 blocking task
+//! 异步完成。上传方向（dirty image 队列 + PUT）在 `push.rs`。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -36,6 +34,12 @@ pub fn bootstrap_images(cfg: &Config) -> anyhow::Result<usize> {
 
     let mut downloaded = 0usize;
     for name in remote_names {
+        // 远端文件名来自 PROPFIND 响应，不可信：拒绝路径分隔符 / `..`，
+        // 防止恶意（或被劫持的）WebDAV 服务端把文件写出 images_dir。
+        if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+            warn!(target: "minitodo_cloud::images", "skip suspicious remote image name: {:?}", name);
+            continue;
+        }
         let local_path: PathBuf = cfg.images_dir.join(&name);
         if local_path.exists() {
             continue;

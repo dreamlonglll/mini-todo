@@ -398,8 +398,8 @@ rm -rf ~/.openclaw/workspace/skills/minitodo
 | "重复描述"出现在非重复任务后 | agent 没检查 repeatEnabled；message §7 第 5 步的"非重复任务省略｜重复描述"要保留 |
 | 推送内容里有多余的解释文字 | message 末尾追加更强的"只输出 stdout，不要任何补充"指令 |
 | 时间显示比实际晚 / 早 | `--tz` 与服务端 `timezone` 不一致，统一改成用户所在时区 |
-| skill `health` 返回 `sync: stale` | minitodo-cloud 已经超过 5×pull_interval 没成功拉过 WebDAV；服务端日志查 WebDAV 401/403 |
-| skill `health` 返回 `sync: offline` | 同上，但仍能读写本地缓存；提醒仍能正常发出，只是数据可能过时 |
+| skill `health` 返回 `sync: stale` | minitodo-cloud 已经超过 2×pull_interval 没成功拉过 WebDAV；服务端日志查 WebDAV 401/403 |
+| skill `health` 返回 `sync: offline` | 超过 5 分钟没成功拉过（固定阈值，与 pull_interval 无关）；仍能读写本地缓存，提醒仍能正常发出，只是数据可能过时 |
 
 ## 设计要点（供 agent 理解，不必复述给用户）
 

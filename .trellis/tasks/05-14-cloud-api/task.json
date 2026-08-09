@@ -21,6 +21,6 @@
   "children": [],
   "parent": null,
   "relatedFiles": [],
-  "notes": "",
+  "notes": "2026-08-09 进度：/sync 三路由（5 用例）与 pull 孤儿清理/LWW（5 用例）测试已由 08-09-08-09-health-fixes 补齐，cloud 总测试数 92→102。剩余缺口：config::load、headers stale 分支、sync/images bootstrap、webdav HTTP 层。",
   "meta": {}
 }

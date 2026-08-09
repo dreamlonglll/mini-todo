@@ -17,8 +17,9 @@ pub struct Config {
     pub webdav_password: String,
     pub api_key: String,
     pub bind: String,
-    /// IANA 时区，例如 `Asia/Shanghai`。保留 `Tz` 是为了让 PR2 push worker
-    /// 在 DST 切换时能重新计算 offset（PR1 还用不到，先 allow）。
+    /// IANA 时区，例如 `Asia/Shanghai`。保留原始 `Tz`（而不只存换算后的
+    /// offset）是为了未来支持 DST 时区时能随时重新计算 offset；当前运行时
+    /// 只读 `timezone_offset`，故 allow。
     #[allow(dead_code)]
     pub timezone: Tz,
     /// `timezone` 当前时刻对应的 `FixedOffset`，用于生成与 PC SQLite

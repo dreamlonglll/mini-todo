@@ -154,7 +154,8 @@ PC 端协同（PR3）：
 Skill / AI 集成：
 
 - [x] Claude Code Skill（`cloud/skill/minitodo/`，含 Python CLI、install 脚本、SKILL.md）
-- [x] CLI 覆盖 today / list / add / done / search / show / update / delete / health
+- [x] CLI 覆盖 today / list / add / done / search / show / update / delete / health / sync
+- [x] cloud 端 `C{seq}` 短码：每个 todo 分配自增短码（`todo_seq` 表），CLI 与 API 均可用 `C3` 代替 19 位 i64 id
 - [x] 同一份 skill 可装到 openclaw workspace（`install.sh --target openclaw`）
 - [x] openclaw cron 临期提醒：cron 唤起 agent 后由 **agent 自己**拉 `list --pending --json` + 判断哪些该推 + 组织格式，`--announce` 推到 default channel
 
@@ -174,7 +175,13 @@ Skill / AI 集成：
 | PATCH | `/subtasks/:id` | merge 更新子任务 |
 | DELETE | `/subtasks/:id` | 删除子任务 |
 | GET | `/images/:name` | 返回图片 bytes，按扩展名识别 Content-Type |
-| POST | `/images` | multipart/form-data 上传（字段 `file`），返回 `{name}` |
+| POST | `/images` | multipart/form-data 上传（字段 `file`），返回 `{name}`；body 上限 32 MiB |
+| POST | `/sync` | 手动触发 pull + push；全部成功 200，部分失败 207，返回 `{pull, push, pullError?, pushError?}` |
+| POST | `/sync/pull` | 仅从 WebDAV 拉取 |
+| POST | `/sync/push` | 仅推送到 WebDAV（`meta.dirty` 未置位时为 no-op） |
+
+todo 相关路径中的 `:id` 既接受完整 i64 id，也接受 `C{seq}` 短码（如 `/todos/C3`），
+短码大小写不敏感；todo 响应会附 `seq` 字段。
 
 排序字段白名单：`dueDate`/`startTime`/`priority`/`quadrant`/`sortOrder`/`updatedAt`/`createdAt`/`title`，
 其他字段 fallback 到 `sortOrder asc`。
@@ -196,15 +203,16 @@ push worker 会在 WebDAV 恢复后自动回写。
 > **给 openclaw agent**：完整的安装/配置/cron message 模板/故障排查指南见
 > [`openclaw.md`](openclaw.md)（带前置检查、§6 询问用户偏好、§7 cron prompt 模板、卸载步骤）。
 
-输出形如（由 agent 按 prompt 自己组织、每条带 `#{id}` 便于反馈）：
+输出形如（由 agent 按 prompt 自己组织、每条带 `#C{seq}` 短码便于反馈，
+缺 seq 时降级用完整 `#{id}`）：
 
 ```
 mini-todo 临期提醒｜2026-05-13 08:00
 已逾期（1）：
-  - #1734567890123456 [高] 写报告 (05-12 18:00，已逾期 14 小时)
+  - #C5 [高] 写报告 (05-12 18:00，已逾期 14 小时)
 未来 24h 到期（2）：
-  - #1734567890123457 [中] 买菜 (05-13 10:00，2 小时后)
-  - #1734567890123458 [低] 开会 (05-13 19:00，11 小时后)
+  - #C7 [中] 买菜 (05-13 10:00，2 小时后)
+  - #C2 [低] 开会 (05-13 19:00，11 小时后)
 ```
 
 要手动复现这一查询：

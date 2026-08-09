@@ -253,7 +253,7 @@ onBeforeUnmount(() => {
           <el-icon><Close /></el-icon>
           {{ isViewMode ? '关闭' : '取消' }}
         </el-button>
-        <el-button v-if="!isViewMode" type="primary" @click="handleSave" :disabled="!title.trim()">
+        <el-button v-if="!isViewMode" type="primary" :disabled="!title.trim()" @click="handleSave">
           <el-icon><Check /></el-icon>
           保存
         </el-button>

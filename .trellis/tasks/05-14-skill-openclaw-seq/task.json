@@ -3,7 +3,7 @@
   "name": "skill-openclaw-seq",
   "title": "Skill/openclaw 文档更新 seq 短码",
   "description": "把 cloud seq 短码（C{seq}）传导到用户面：minitodo.py CLI 输出加 seq 列；SKILL.md / openclaw.md 字段速查表加 seq；cron message 模板里 #{id} 改 #C{seq}；CLI 帮助说明 id 参数同时接受 C{seq}。",
-  "status": "planning",
+  "status": "completed",
   "dev_type": null,
   "scope": null,
   "package": null,
@@ -11,7 +11,7 @@
   "creator": "dev",
   "assignee": "dev",
   "createdAt": "2026-05-14",
-  "completedAt": null,
+  "completedAt": "2026-08-09",
   "branch": null,
   "base_branch": "main",
   "worktree_path": null,
@@ -21,6 +21,6 @@
   "children": [],
   "parent": null,
   "relatedFiles": [],
-  "notes": "",
+  "notes": "SKILL.md/openclaw.md 的 #C{seq} 说明早已在位；遗留的 cloud/README.md seq 短码补录与示例更新由 08-09-08-09-health-fixes 完成，就此关闭。",
   "meta": {}
 }

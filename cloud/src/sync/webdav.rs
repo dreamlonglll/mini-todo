@@ -4,11 +4,9 @@
 //! 条件请求需要的 header：
 //!
 //! * GET 时附 `If-None-Match`（带 ETag），304 → 不变；同时回读 `ETag` 与
-//!   `Last-Modified`，作为后续条件 PUT 的依据
-//! * PUT 时附 `If-Unmodified-Since`，远端被别人改过会回 412
-//!
-//! PR1 只用到 GET / PROPFIND / GET file；PUT 的 `if_unmodified_since` 参数留给
-//! PR2 push worker。
+//!   `Last-Modified`，作为后续条件 PUT 的依据（pull worker 用）
+//! * PUT 时附 `If-Unmodified-Since`，远端被别人改过会回 412（push worker 用，
+//!   412 时走 per-record merge 后重试）
 
 use std::path::Path;
 use std::time::Duration;
@@ -29,7 +27,6 @@ pub struct WebDavGetResult {
 /// PUT 调用的返回值。412 (Precondition Failed) 不算 error，调用方根据
 /// `status_code` 决定是否触发冲突恢复。
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct WebDavPutResult {
     pub status_code: u16,
 }
@@ -145,9 +142,8 @@ impl WebDavClient {
         })
     }
 
-    /// 条件 PUT。`if_unmodified_since` 非空 → 远端被改过会返回 412。PR2 才会
-    /// 真正用到此函数，PR1 保留接口（保持 module surface 稳定）。
-    #[allow(dead_code)]
+    /// 条件 PUT。`if_unmodified_since` 非空 → 远端被改过会返回 412。
+    /// push worker 上传 sync-data 与 dirty images 都走这里。
     pub fn put(
         &self,
         remote_path: &str,

@@ -539,8 +539,8 @@ fn gzip_decompress(data: &[u8]) -> Result<String, String> {
     Ok(result)
 }
 
-/// 单次 merge 的统计，便于调用方日志（目前仅供调试，未上抛到前端）。
-#[allow(dead_code)]
+/// 单次 merge 的统计。`sync_apply_remote` 会把它连同孤儿删除数一起打进日志，
+/// 让"远端权威删除"这条静默数据删除路径有迹可查。
 #[derive(Debug, Default)]
 pub struct MergeStats {
     pub todos_updated: u32,
@@ -767,8 +767,19 @@ fn merge_subtask(
 /// 的区别：本函数在 merge 后会删除"本地有但远端没有"的 todo/subtask（远端权威），
 /// 并写入远端 settings。412 冲突路径仍直接调 `merge_remote_into_local`（不删孤儿）。
 fn sync_apply_remote(db: &Database, remote: &SyncData) -> Result<(), String> {
-    merge_remote_into_local(db, remote)?;
-    delete_orphan_todos(db, remote)?;
+    let mut stats = merge_remote_into_local(db, remote)?;
+    let (todos_deleted, subtasks_deleted) = delete_orphan_todos(db, remote)?;
+    stats.todos_deleted = todos_deleted;
+    stats.subtasks_deleted = subtasks_deleted;
+    eprintln!(
+        "[sync] 应用远端完成: todos 新增 {} / 更新 {} / 删除 {}, subtasks 新增 {} / 更新 {} / 删除 {}",
+        stats.todos_inserted,
+        stats.todos_updated,
+        stats.todos_deleted,
+        stats.subtasks_inserted,
+        stats.subtasks_updated,
+        stats.subtasks_deleted
+    );
 
     // settings：从远端 SyncData 解析并写入
     if !remote.settings.is_null() {
@@ -782,12 +793,12 @@ fn sync_apply_remote(db: &Database, remote: &SyncData) -> Result<(), String> {
     Ok(())
 }
 
-/// 删除"本地有但远端没有"的 todos + 对应 subtasks。
+/// 删除"本地有但远端没有"的 todos + 对应 subtasks，返回 `(todos_deleted, subtasks_deleted)`。
 ///
 /// 从 `serde_json::Value` 直接提取 id，不依赖完整 `Todo` 反序列化——
 /// 如果某条远端 todo 格式异常无法反序列化为 `Todo`，仍能保住其 id，
 /// 避免本地正常记录被误判为孤儿。
-fn delete_orphan_todos(db: &Database, remote: &SyncData) -> Result<(), String> {
+fn delete_orphan_todos(db: &Database, remote: &SyncData) -> Result<(u32, u32), String> {
     fn extract_i64_id(v: &serde_json::Value) -> Option<i64> {
         let raw = v.get("id")?;
         raw.as_i64()
@@ -818,10 +829,14 @@ fn delete_orphan_todos(db: &Database, remote: &SyncData) -> Result<(), String> {
             .filter_map(|r| r.ok())
             .collect();
 
+        let mut todos_deleted = 0u32;
+        let mut subtasks_deleted = 0u32;
+
         for id in local_todo_ids {
             if !remote_todo_ids.contains(&id) {
-                conn.execute("DELETE FROM subtasks WHERE parent_id = ?1", [id])?;
-                conn.execute("DELETE FROM todos WHERE id = ?1", [id])?;
+                subtasks_deleted +=
+                    conn.execute("DELETE FROM subtasks WHERE parent_id = ?1", [id])? as u32;
+                todos_deleted += conn.execute("DELETE FROM todos WHERE id = ?1", [id])? as u32;
             }
         }
 
@@ -833,12 +848,234 @@ fn delete_orphan_todos(db: &Database, remote: &SyncData) -> Result<(), String> {
 
         for id in local_sub_ids {
             if !remote_subtask_ids.contains(&id) {
-                conn.execute("DELETE FROM subtasks WHERE id = ?1", [id])?;
+                subtasks_deleted +=
+                    conn.execute("DELETE FROM subtasks WHERE id = ?1", [id])? as u32;
             }
         }
 
         conn.execute("COMMIT", [])?;
-        Ok(())
+        Ok((todos_deleted, subtasks_deleted))
     })
     .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::{Database, SubTask, Todo};
+
+    fn test_db() -> Database {
+        Database::new_in_memory().expect("打开内存库失败")
+    }
+
+    fn make_todo(id: i64, title: &str, updated_at: &str) -> Todo {
+        Todo {
+            id,
+            title: title.to_string(),
+            description: None,
+            color: "#EF4444".to_string(),
+            quadrant: 4,
+            notify_at: None,
+            notify_before: 0,
+            notified: false,
+            completed: false,
+            sort_order: 0,
+            start_time: None,
+            end_time: None,
+            created_at: "2026-01-01 00:00:00".to_string(),
+            updated_at: updated_at.to_string(),
+            repeat_enabled: false,
+            repeat_type: None,
+            repeat_interval: 1,
+            repeat_weekdays: None,
+            repeat_month_day: None,
+            subtasks: Vec::new(),
+        }
+    }
+
+    fn make_subtask(id: i64, parent_id: i64, title: &str, updated_at: &str) -> SubTask {
+        SubTask {
+            id,
+            parent_id,
+            title: title.to_string(),
+            content: None,
+            completed: false,
+            sort_order: 0,
+            created_at: "2026-01-01 00:00:00".to_string(),
+            updated_at: updated_at.to_string(),
+        }
+    }
+
+    fn sync_data(todos: Vec<Todo>) -> SyncData {
+        SyncData {
+            version: "4.0".to_string(),
+            device_id: "test-dev".to_string(),
+            updated_at: "2026-01-02 00:00:00".to_string(),
+            todos: todos
+                .iter()
+                .map(|t| serde_json::to_value(t).expect("序列化 Todo 失败"))
+                .collect(),
+            settings: serde_json::Value::Null,
+            images: Vec::new(),
+        }
+    }
+
+    fn todo_title(db: &Database, id: i64) -> Option<String> {
+        db.with_connection(|conn| {
+            Ok(conn
+                .query_row("SELECT title FROM todos WHERE id = ?1", [id], |r| {
+                    r.get::<_, String>(0)
+                })
+                .ok())
+        })
+        .unwrap()
+    }
+
+    fn count_subtasks(db: &Database) -> i64 {
+        db.with_connection(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM subtasks", [], |r| r.get(0))
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn merge_inserts_new_remote_todo_and_subtask() {
+        let db = test_db();
+        let mut t = make_todo(1, "远端新增", "2026-01-02 10:00:00");
+        t.subtasks
+            .push(make_subtask(11, 1, "子任务", "2026-01-02 10:00:00"));
+
+        let stats = merge_remote_into_local(&db, &sync_data(vec![t])).unwrap();
+
+        assert_eq!(stats.todos_inserted, 1);
+        assert_eq!(stats.subtasks_inserted, 1);
+        assert_eq!(todo_title(&db, 1).as_deref(), Some("远端新增"));
+        assert_eq!(count_subtasks(&db), 1);
+    }
+
+    #[test]
+    fn merge_remote_newer_overwrites_local() {
+        let db = test_db();
+        merge_remote_into_local(&db, &sync_data(vec![make_todo(1, "旧标题", "2026-01-01 10:00:00")]))
+            .unwrap();
+
+        let stats = merge_remote_into_local(
+            &db,
+            &sync_data(vec![make_todo(1, "新标题", "2026-01-03 10:00:00")]),
+        )
+        .unwrap();
+
+        assert_eq!(stats.todos_updated, 1);
+        assert_eq!(todo_title(&db, 1).as_deref(), Some("新标题"));
+    }
+
+    #[test]
+    fn merge_local_newer_is_kept() {
+        let db = test_db();
+        merge_remote_into_local(
+            &db,
+            &sync_data(vec![make_todo(1, "本地较新", "2026-01-05 10:00:00")]),
+        )
+        .unwrap();
+
+        let stats = merge_remote_into_local(
+            &db,
+            &sync_data(vec![make_todo(1, "远端较旧", "2026-01-02 10:00:00")]),
+        )
+        .unwrap();
+
+        assert_eq!(stats.todos_updated, 0);
+        assert_eq!(todo_title(&db, 1).as_deref(), Some("本地较新"));
+    }
+
+    /// 412 冲突路径语义：merge 本身不删"本地有远端无"的记录。
+    #[test]
+    fn merge_keeps_local_only_records() {
+        let db = test_db();
+        merge_remote_into_local(
+            &db,
+            &sync_data(vec![make_todo(1, "本地独有", "2026-01-01 10:00:00")]),
+        )
+        .unwrap();
+
+        merge_remote_into_local(&db, &sync_data(vec![make_todo(2, "远端", "2026-01-01 10:00:00")]))
+            .unwrap();
+
+        assert!(todo_title(&db, 1).is_some());
+        assert!(todo_title(&db, 2).is_some());
+    }
+
+    /// sync 下载路径语义：远端权威，本地孤儿（连带子任务）被删除。
+    #[test]
+    fn apply_remote_deletes_local_orphans() {
+        let db = test_db();
+        let mut t1 = make_todo(1, "会被删", "2026-01-01 10:00:00");
+        t1.subtasks
+            .push(make_subtask(11, 1, "随父删", "2026-01-01 10:00:00"));
+        merge_remote_into_local(
+            &db,
+            &sync_data(vec![t1, make_todo(2, "保留", "2026-01-01 10:00:00")]),
+        )
+        .unwrap();
+
+        sync_apply_remote(&db, &sync_data(vec![make_todo(2, "保留", "2026-01-01 10:00:00")]))
+            .unwrap();
+
+        assert!(todo_title(&db, 1).is_none());
+        assert!(todo_title(&db, 2).is_some());
+        assert_eq!(count_subtasks(&db), 0);
+    }
+
+    #[test]
+    fn orphan_cleanup_returns_deletion_counts() {
+        let db = test_db();
+        let mut t1 = make_todo(1, "删", "2026-01-01 10:00:00");
+        t1.subtasks
+            .push(make_subtask(11, 1, "子", "2026-01-01 10:00:00"));
+        merge_remote_into_local(&db, &sync_data(vec![t1])).unwrap();
+
+        let (todos_deleted, subtasks_deleted) =
+            delete_orphan_todos(&db, &sync_data(vec![])).unwrap();
+
+        assert_eq!(todos_deleted, 1);
+        assert_eq!(subtasks_deleted, 1);
+    }
+
+    /// 远端某条 todo 格式异常（无法反序列化为 Todo）但带 id 时，
+    /// 该 id 仍参与孤儿判定，对应本地记录不能被误删。
+    #[test]
+    fn orphan_cleanup_spares_undeserializable_remote_todo() {
+        let db = test_db();
+        merge_remote_into_local(
+            &db,
+            &sync_data(vec![make_todo(42, "格式异常保护", "2026-01-01 10:00:00")]),
+        )
+        .unwrap();
+
+        let mut data = sync_data(vec![]);
+        data.todos
+            .push(serde_json::json!({"id": 42, "malformed": true}));
+        sync_apply_remote(&db, &data).unwrap();
+
+        assert!(todo_title(&db, 42).is_some());
+    }
+
+    /// 父 todo 保留、但远端不再包含其中某个 subtask 时，该 subtask 单独被删。
+    #[test]
+    fn apply_remote_deletes_orphan_subtask_of_kept_todo() {
+        let db = test_db();
+        let mut t = make_todo(1, "父", "2026-01-01 10:00:00");
+        t.subtasks
+            .push(make_subtask(11, 1, "留", "2026-01-01 10:00:00"));
+        t.subtasks
+            .push(make_subtask(12, 1, "删", "2026-01-01 10:00:00"));
+        merge_remote_into_local(&db, &sync_data(vec![t])).unwrap();
+
+        let mut t2 = make_todo(1, "父", "2026-01-01 10:00:00");
+        t2.subtasks
+            .push(make_subtask(11, 1, "留", "2026-01-01 10:00:00"));
+        sync_apply_remote(&db, &sync_data(vec![t2])).unwrap();
+
+        assert_eq!(count_subtasks(&db), 1);
+    }
 }

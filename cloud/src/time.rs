@@ -12,8 +12,8 @@ use chrono_tz::Tz;
 ///
 /// 由于 DST 切换时 offset 会变，理论上每次都应当用 `Tz` 重新算；但 mini-todo
 /// 当前唯一支持时区是 Asia/Shanghai（无 DST），其他用户场景也基本都是无 DST
-/// 时区，所以服务启动时取一次即可。后续如需精确支持 DST，可改用
-/// `now_local_string_in_tz` 直接传 `Tz`。
+/// 时区，所以服务启动时取一次即可。后续如需精确支持 DST，可在取时间时
+/// 直接用 `Tz` 重新计算，而非缓存的 offset。
 pub fn offset_for_tz_now(tz: Tz) -> FixedOffset {
     let now_utc = Utc::now();
     tz.from_utc_datetime(&now_utc.naive_utc()).offset().fix()
@@ -25,16 +25,6 @@ pub fn offset_for_tz_now(tz: Tz) -> FixedOffset {
 pub fn now_local_string(offset: FixedOffset) -> String {
     Utc::now()
         .with_timezone(&offset)
-        .format("%Y-%m-%d %H:%M:%S")
-        .to_string()
-}
-
-/// 同 `now_local_string`，但直接接受 IANA 时区。仅用于希望 DST 自动跟随的
-/// 场景；目前未使用，留作未来扩展。
-#[allow(dead_code)]
-pub fn now_local_string_in_tz(tz: Tz) -> String {
-    Utc::now()
-        .with_timezone(&tz)
         .format("%Y-%m-%d %H:%M:%S")
         .to_string()
 }
