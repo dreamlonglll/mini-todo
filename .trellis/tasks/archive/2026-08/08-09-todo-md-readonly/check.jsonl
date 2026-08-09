@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "验收前的 lint/typecheck/build 质量门槛"}
+{"file": ".trellis/spec/frontend/component-guidelines.md", "reason": "核对新组件与双模式排版是否符合组件规范"}
