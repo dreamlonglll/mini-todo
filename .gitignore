@@ -23,3 +23,6 @@ dist-ssr
 *.sln
 *.sw?
 
+# mini-term SSH MCP（本机相关配置，勿提交）
+.mcp.json
+.codex/
