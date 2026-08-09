@@ -36,6 +36,7 @@ mini-todo/
 │   │   ├── assets/                         # 静态资源
 │   │   ├── components/                     # Vue 组件
 │   │   │   ├── CalendarView.vue            # 日历视图
+│   │   │   ├── MarkdownEditor.vue          # 可复用 Milkdown 编辑器（编辑/只读、图片上传）
 │   │   │   ├── QuadrantView.vue            # 四象限视图
 │   │   │   ├── SettingsPanel.vue           # 设置面板
 │   │   │   ├── TitleBar.vue                # 标题栏
@@ -110,6 +111,10 @@ mini-todo/
 
 ### 待办管理
 - 创建、编辑、删除待办事项
+- 描述字段支持 Markdown（Milkdown 编辑器，支持图片粘贴/拖入上传，存于 `description` 字段）；
+  支持粘贴 MD 源码自动解析（clipboard 插件）、GFM 表格/任务清单/删除线，编辑模式提供源码/预览分栏的放大编辑弹窗（联动窗口最大化）
+- 只读详情模式：从列表/四象限/日历/已完成视图点击待办默认进入（`#/editor?id=x&mode=view`），
+  左侧简化展示标题、Markdown 渲染描述、通知状态、优先级，右侧子任务面板功能照常，[编辑] 按钮原地切换
 - 支持一级子任务（含 Markdown 详情、图片上传）
 - 四象限分类（重要紧急 / 重要不紧急 / 紧急不重要 / 不紧急不重要）
 - 自定义颜色标识
@@ -253,13 +258,22 @@ NotificationService::start_scheduler() (后台线程，每分钟 tick)
   └── 非重复：notified = 1
 ```
 
+### 待办编辑/详情流程
+
+```
+TodoList / QuadrantView / CalendarView / CompletedView
+  └── 点击待办 → 打开独立 WebView：/editor?id={todoId}&mode=view（新建时无 id，直接编辑模式）
+       └── EditorView 双排版：只读详情（标题 + MD 渲染 + 通知状态 + 优先级）⇄ [编辑] 原地切换表单排版
+            └── 描述字段使用 MarkdownEditor 组件（Milkdown）
+```
+
 ### 子任务编辑流程
 
 ```
 TodoItem / EditorView
   └── 点击编辑/查看
        └── 打开独立 WebView：/subtask-editor?id={subtaskId}&mode={view|edit}
-            └── SubtaskEditorView 使用 Milkdown 加载 Markdown
+            └── SubtaskEditorView 使用 MarkdownEditor 组件（Milkdown）加载 Markdown
                  └── 图片粘贴 → save_subtask_image → 本地 images 目录
 ```
 

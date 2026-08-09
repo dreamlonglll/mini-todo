@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed, watch, nextTick } from 'vue'
+import { ref, onMounted, onBeforeUnmount, computed, watch, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -9,10 +9,14 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import type { Todo, CreateTodoRequest, UpdateTodoRequest, CreateSubTaskRequest, QuadrantType } from '@/types'
 import { DEFAULT_COLOR, PRESET_COLORS, QUADRANT_INFO, DEFAULT_QUADRANT } from '@/types'
+import MarkdownEditor from '@/components/MarkdownEditor.vue'
 
 const route = useRoute()
 const todoId = computed(() => route.query.id ? parseInt(route.query.id as string) : null)
 const appWindow = getCurrentWindow()
+
+// 只读模式（仅编辑已有待办时有效，点击 [编辑] 原地切换到编辑排版）
+const isViewMode = ref(route.query.mode === 'view' && !!route.query.id)
 
 // 表单数据
 const form = ref({
@@ -202,6 +206,44 @@ function getQuadrantColor(quadrantId: QuadrantType): string {
   return quadrant ? quadrant.color : DEFAULT_COLOR
 }
 
+// 只读模式：当前象限（优先级）信息
+const quadrantInfo = computed(() => QUADRANT_INFO.find(q => q.id === form.value.quadrant))
+
+// 只读模式：格式化 "YYYY-MM-DDTHH:MM:SS" 为 "YYYY-MM-DD HH:MM"
+function formatDateTime(value: string | null): string {
+  if (!value) return ''
+  return value.replace('T', ' ').substring(0, 16)
+}
+
+// 只读模式：通知状态描述
+const notifyStatusText = computed(() => {
+  if (repeatEnabled.value) {
+    const unit = { daily: '天', weekly: '周', monthly: '月' }[repeatType.value] || '天'
+    let text = `每 ${repeatInterval.value} ${unit}重复`
+    if (repeatType.value === 'weekly' && repeatWeekdays.value.length > 0) {
+      const names = weekdayOptions
+        .filter(o => repeatWeekdays.value.includes(o.value))
+        .map(o => o.label)
+        .join('、')
+      text += `（${names}）`
+    } else if (repeatType.value === 'monthly') {
+      text += `（每月 ${repeatMonthDay.value} 号）`
+    }
+    if (form.value.notifyAt) {
+      text += `，下次 ${formatDateTime(form.value.notifyAt)}`
+    }
+    return text
+  }
+  if (form.value.notifyAt) {
+    let text = `提醒 ${formatDateTime(form.value.notifyAt)}`
+    if (form.value.notifyBefore > 0) {
+      text += `（提前 ${form.value.notifyBefore} 分钟）`
+    }
+    return text
+  }
+  return ''
+})
+
 // 选择象限时自动同步颜色（仅新建模式）
 function handleQuadrantSelect(quadrantId: QuadrantType) {
   form.value.quadrant = quadrantId
@@ -209,6 +251,82 @@ function handleQuadrantSelect(quadrantId: QuadrantType) {
     form.value.color = getQuadrantColor(quadrantId)
   }
 }
+
+// ===== 描述放大编辑弹窗（源码 / 预览分栏）=====
+const descDialogVisible = ref(false)
+const descDialogMaximized = ref(false)
+const descDraft = ref('')
+const descPreview = ref('')
+// 进入弹窗最大化前，编辑窗口是否本就最大化（还原时避免误还原）
+let wasWindowMaximized = false
+let descPreviewTimer: ReturnType<typeof setTimeout> | null = null
+
+function openDescDialog() {
+  descDraft.value = form.value.description
+  descPreview.value = descDraft.value
+  descDialogVisible.value = true
+}
+
+// 源码变更 → 300ms 防抖同步到预览（readonly MarkdownEditor 内部 watch 会 replaceAll 更新渲染）
+watch(descDraft, (value) => {
+  if (descPreviewTimer) clearTimeout(descPreviewTimer)
+  descPreviewTimer = setTimeout(() => {
+    descPreviewTimer = null
+    descPreview.value = value
+  }, 300)
+})
+
+// 弹窗最大化 ↔ 还原（联动编辑窗口本体的最大化状态）
+async function toggleDescDialogMaximize() {
+  try {
+    if (!descDialogMaximized.value) {
+      wasWindowMaximized = await appWindow.isMaximized()
+      if (!wasWindowMaximized) {
+        await appWindow.maximize()
+      }
+      descDialogMaximized.value = true
+    } else {
+      await restoreDescDialogMaximize()
+    }
+  } catch (e) {
+    console.error('Failed to toggle window maximize:', e)
+  }
+}
+
+async function restoreDescDialogMaximize() {
+  descDialogMaximized.value = false
+  if (!wasWindowMaximized) {
+    await appWindow.unmaximize()
+  }
+}
+
+function confirmDescDialog() {
+  // 写回后，内联 MarkdownEditor 经 modelValue watch 自动同步渲染
+  form.value.description = descDraft.value
+  descDialogVisible.value = false
+}
+
+// 弹窗关闭统一收口（确定 / 取消 / X 都会走到）：清防抖 + 还原窗口最大化状态
+async function onDescDialogClosed() {
+  if (descPreviewTimer) {
+    clearTimeout(descPreviewTimer)
+    descPreviewTimer = null
+  }
+  if (descDialogMaximized.value) {
+    try {
+      await restoreDescDialogMaximize()
+    } catch (e) {
+      console.error('Failed to restore window state:', e)
+    }
+  }
+}
+
+onBeforeUnmount(() => {
+  if (descPreviewTimer) {
+    clearTimeout(descPreviewTimer)
+    descPreviewTimer = null
+  }
+})
 
 // 初始化
 onMounted(async () => {
@@ -677,13 +795,47 @@ function onHeaderMouseDown(e: MouseEvent) {
     <!-- 主内容区域 -->
     <div class="main-area">
       <div class="window-header" data-tauri-drag-region="deep" @mousedown="onHeaderMouseDown">
-        <h2>{{ isEdit ? '编辑待办' : '新建待办' }}</h2>
-        <el-button text data-tauri-drag-region="false" @click="handleClose">
-          <el-icon><Close /></el-icon>
-        </el-button>
+        <h2>{{ isViewMode ? '待办详情' : (isEdit ? '编辑待办' : '新建待办') }}</h2>
+        <div class="header-actions" data-tauri-drag-region="false">
+          <el-button v-if="isViewMode" text type="primary" @click="isViewMode = false">
+            <el-icon><Edit /></el-icon>
+            <span>编辑</span>
+          </el-button>
+          <el-button text @click="handleClose">
+            <el-icon><Close /></el-icon>
+          </el-button>
+        </div>
       </div>
 
-      <div class="editor-content">
+      <!-- 只读模式：简化排版，突出内容 -->
+      <div v-if="isViewMode" class="view-content">
+        <h1 class="view-title" :class="{ completed: todo?.completed }">{{ form.title }}</h1>
+
+        <div class="view-meta">
+          <span
+            v-if="quadrantInfo"
+            class="meta-badge"
+            :style="{ color: quadrantInfo.color, backgroundColor: quadrantInfo.bgColor }"
+          >
+            <span class="badge-dot" :style="{ backgroundColor: quadrantInfo.color }"></span>
+            {{ quadrantInfo.name }}
+          </span>
+          <span v-if="notifyStatusText" class="meta-badge notify-badge">
+            <el-icon :size="13"><Bell /></el-icon>
+            {{ notifyStatusText }}
+          </span>
+        </div>
+
+        <MarkdownEditor
+          v-if="form.description"
+          :model-value="form.description"
+          readonly
+          class="view-markdown"
+        />
+        <div v-else class="view-empty-desc">暂无描述</div>
+      </div>
+
+      <div v-else class="editor-content">
         <el-form label-position="top" :model="form">
           <!-- 标题 -->
           <el-form-item label="标题" required>
@@ -694,15 +846,22 @@ function onHeaderMouseDown(e: MouseEvent) {
             />
           </el-form-item>
 
-          <!-- 描述 -->
-          <el-form-item label="描述">
-            <el-input 
-              v-model="form.description" 
-              type="textarea"
-              :rows="3"
-              placeholder="添加详细描述..."
-              maxlength="500"
-            />
+          <!-- 描述（Markdown） -->
+          <el-form-item>
+            <template #label>
+              <div class="desc-label">
+                <span>描述</span>
+                <button
+                  class="desc-expand-btn"
+                  type="button"
+                  title="放大编辑"
+                  @click="openDescDialog"
+                >
+                  <el-icon :size="14"><FullScreen /></el-icon>
+                </button>
+              </div>
+            </template>
+            <MarkdownEditor v-model="form.description" class="description-editor" />
           </el-form-item>
 
           <!-- 颜色 -->
@@ -916,7 +1075,7 @@ function onHeaderMouseDown(e: MouseEvent) {
         </el-form>
       </div>
 
-      <div class="window-footer">
+      <div v-if="!isViewMode" class="window-footer">
         <div class="footer-right">
           <el-button
             v-if="isEdit && todo && !todo.completed"
@@ -1086,6 +1245,46 @@ function onHeaderMouseDown(e: MouseEvent) {
 
     <!-- 模态遮罩：子任务编辑窗口打开时阻止操作 -->
     <div v-if="isSubtaskEditorOpen" class="modal-overlay"></div>
+
+    <!-- 描述放大编辑弹窗：左侧 Markdown 源码，右侧实时预览 -->
+    <el-dialog
+      v-model="descDialogVisible"
+      :fullscreen="descDialogMaximized"
+      width="88%"
+      :close-on-click-modal="false"
+      append-to-body
+      @closed="onDescDialogClosed"
+    >
+      <template #header>
+        <div class="desc-dialog-header">
+          <span class="desc-dialog-title">编辑描述</span>
+          <button
+            class="desc-dialog-max-btn"
+            type="button"
+            :title="descDialogMaximized ? '还原' : '最大化'"
+            @click="toggleDescDialogMaximize"
+          >
+            <el-icon :size="14"><FullScreen /></el-icon>
+          </button>
+        </div>
+      </template>
+
+      <div class="desc-dialog-body" :class="{ 'is-fullscreen': descDialogMaximized }">
+        <textarea
+          v-model="descDraft"
+          class="desc-source"
+          placeholder="输入 Markdown 源码..."
+          spellcheck="false"
+        ></textarea>
+        <div class="desc-divider"></div>
+        <MarkdownEditor :model-value="descPreview" readonly class="desc-preview" />
+      </div>
+
+      <template #footer>
+        <el-button size="small" @click="descDialogVisible = false">取消</el-button>
+        <el-button type="primary" size="small" @click="confirmDescDialog">确定</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -1125,10 +1324,211 @@ function onHeaderMouseDown(e: MouseEvent) {
   }
 }
 
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  -webkit-app-region: no-drag;
+
+  .el-button + .el-button {
+    margin-left: 0;
+  }
+}
+
 .editor-content {
   flex: 1;
   padding: 16px;
   overflow-y: auto;
+}
+
+/* 只读模式：简化排版 */
+.view-content {
+  flex: 1;
+  padding: 24px 28px;
+  overflow-y: auto;
+}
+
+.view-title {
+  margin: 0 0 14px;
+  font-size: 22px;
+  font-weight: 650;
+  line-height: 1.35;
+  color: #1e293b;
+  word-break: break-word;
+
+  &.completed {
+    color: #94a3b8;
+    text-decoration: line-through;
+  }
+}
+
+.view-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 18px;
+}
+
+.meta-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.6;
+
+  .badge-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  &.notify-badge {
+    color: #64748b;
+    background: #f1f5f9;
+  }
+}
+
+.view-markdown :deep(.milkdown) {
+  padding: 0;
+}
+
+.view-empty-desc {
+  color: #94a3b8;
+  font-size: 13px;
+}
+
+/* 描述 Markdown 编辑器 */
+.description-editor {
+  width: 100%;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  min-height: 120px;
+  max-height: 280px;
+  overflow-y: auto;
+  background: #ffffff;
+  transition: border-color 0.15s ease;
+
+  &:focus-within {
+    border-color: #3b82f6;
+  }
+}
+
+.description-editor :deep(.milkdown) {
+  padding: 8px 12px;
+  min-height: 110px;
+}
+
+.description-editor :deep(.ProseMirror) {
+  min-height: 100px;
+}
+
+/* 描述 label：文本 + 放大编辑按钮 */
+.desc-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.desc-expand-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  color: #94a3b8;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+
+  &:hover {
+    color: #3b82f6;
+    background: #eff6ff;
+  }
+}
+
+/* 描述放大编辑弹窗 */
+.desc-dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  /* 给 el-dialog 自带的关闭 X 留出位置 */
+  padding-right: 32px;
+}
+
+.desc-dialog-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #1e293b;
+}
+
+.desc-dialog-max-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  color: #94a3b8;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+
+  &:hover {
+    color: #3b82f6;
+    background: #eff6ff;
+  }
+}
+
+.desc-dialog-body {
+  display: flex;
+  height: 60vh;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  overflow: hidden;
+
+  &.is-fullscreen {
+    /* fullscreen 态撑满：约减去 dialog 的 header / footer / 内边距 */
+    height: calc(100vh - 150px);
+  }
+}
+
+.desc-source {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 12px 14px;
+  box-sizing: border-box;
+  border: none;
+  outline: none;
+  resize: none;
+  font-family: Consolas, 'Courier New', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #334155;
+  background: #f8fafc;
+}
+
+.desc-divider {
+  width: 1px;
+  background: #e2e8f0;
+  flex-shrink: 0;
+}
+
+.desc-preview {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  background: #ffffff;
 }
 
 .window-footer {

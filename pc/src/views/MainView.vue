@@ -330,7 +330,8 @@ async function openEditor(todo?: Todo, centerOnScreen = false) {
   // 如果已有弹窗打开，直接返回
   if (isModalOpen.value) return
   
-  const url = todo ? `#/editor?id=${todo.id}` : '#/editor'
+  // 已有待办默认进入只读详情，新建直接进入编辑
+  const url = todo ? `#/editor?id=${todo.id}&mode=view` : '#/editor'
   const label = `editor-${Date.now()}`
   
   try {
@@ -365,7 +366,7 @@ async function openEditor(todo?: Todo, centerOnScreen = false) {
     
     const webview = new WebviewWindow(label, {
       url,
-      title: todo ? '编辑待办' : '新建待办',
+      title: todo ? '待办详情' : '新建待办',
       width: editorWidth,
       height: editorHeight,
       x,

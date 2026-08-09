@@ -1,20 +1,9 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { ref, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { invoke } from '@tauri-apps/api/core'
-import { convertFileSrc } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { Editor, rootCtx, defaultValueCtx, editorViewOptionsCtx } from '@milkdown/kit/core'
-import { commonmark } from '@milkdown/kit/preset/commonmark'
-import { listener, listenerCtx } from '@milkdown/kit/plugin/listener'
-import { upload, uploadConfig } from '@milkdown/kit/plugin/upload'
-import { Decoration } from '@milkdown/kit/prose/view'
-import { nord } from '@milkdown/theme-nord'
-import type { Node } from '@milkdown/kit/prose/model'
-import type { Uploader, UploadOptions } from '@milkdown/kit/plugin/upload'
-import '@milkdown/theme-nord/style.css'
-import { handleFileLinkClick } from '@/utils/fileLink'
-import { revealItemInDir } from '@tauri-apps/plugin-opener'
+import MarkdownEditor from '@/components/MarkdownEditor.vue'
 
 const route = useRoute()
 const subtaskId = parseInt(route.query.id as string)
@@ -23,135 +12,6 @@ const appWindow = getCurrentWindow()
 
 const title = ref('')
 const markdownContent = ref('')
-const editorContainer = ref<HTMLDivElement | null>(null)
-let editorInstance: Editor | null = null
-
-// 图片预览
-const previewVisible = ref(false)
-const previewUrls = ref<string[]>([])
-const previewInitialIndex = ref(0)
-
-function handleImageClick(e: MouseEvent) {
-  const target = e.target as HTMLElement
-  if (target.tagName !== 'IMG') return
-
-  const imgSrc = (target as HTMLImageElement).src
-  if (!imgSrc) return
-
-  e.preventDefault()
-  e.stopPropagation()
-
-  const container = editorContainer.value
-  if (!container) return
-
-  const allImages = Array.from(container.querySelectorAll('.ProseMirror img'))
-  const urls = allImages.map(img => (img as HTMLImageElement).src).filter(Boolean)
-
-  if (urls.length === 0) return
-
-  previewUrls.value = urls
-  previewInitialIndex.value = Math.max(0, urls.indexOf(imgSrc))
-  previewVisible.value = true
-}
-
-async function imageUploader(files: FileList, schema: any): Promise<Node[]> {
-  const images: File[] = []
-  for (let i = 0; i < files.length; i++) {
-    const file = files.item(i)
-    if (file && file.type.includes('image')) {
-      images.push(file)
-    }
-  }
-
-  const nodes: Node[] = await Promise.all(
-    images.map(async (image) => {
-      const arrayBuffer = await image.arrayBuffer()
-      const uint8 = new Uint8Array(arrayBuffer)
-      let binary = ''
-      for (let i = 0; i < uint8.length; i++) {
-        binary += String.fromCharCode(uint8[i])
-      }
-      const base64 = btoa(binary)
-
-      const ext = image.name.split('.').pop() || 'png'
-      const fileName = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${ext}`
-
-      const filePath = await invoke<string>('save_subtask_image', {
-        imageData: base64,
-        fileName,
-      })
-
-      const src = convertFileSrc(filePath)
-      return schema.nodes.image.createAndFill({
-        src,
-        alt: image.name,
-      }) as Node
-    })
-  )
-
-  return nodes
-}
-
-async function initEditor() {
-  if (!editorContainer.value) return
-
-  const builder = Editor.make()
-    .config(nord)
-    .config((ctx) => {
-      ctx.set(rootCtx, editorContainer.value!)
-      ctx.set(defaultValueCtx, markdownContent.value || '')
-
-      const fileLinkDOMHandler = {
-        click: (_view: unknown, event: Event) => {
-          const target = (event.target as HTMLElement)?.closest('a') as HTMLAnchorElement | null
-          if (!target) return false
-          const href = target.getAttribute('href') || ''
-          if (!href.startsWith('file:///')) return false
-          event.preventDefault()
-          let path = decodeURIComponent(href.slice(8)).split('#')[0].replace(/\//g, '\\')
-          if (path) revealItemInDir(path).catch(console.error)
-          return true
-        },
-      }
-
-      if (isViewMode) {
-        ctx.update(editorViewOptionsCtx, (prev) => ({
-          ...prev,
-          editable: () => false,
-          handleDOMEvents: { ...prev.handleDOMEvents, ...fileLinkDOMHandler },
-        }))
-      } else {
-        ctx.update(editorViewOptionsCtx, (prev) => ({
-          ...prev,
-          handleDOMEvents: { ...prev.handleDOMEvents, ...fileLinkDOMHandler },
-        }))
-        ctx.get(listenerCtx).markdownUpdated((_ctx, markdown, prevMarkdown) => {
-          if (markdown !== prevMarkdown) {
-            markdownContent.value = markdown
-          }
-        })
-        ctx.set(uploadConfig.key, {
-          uploader: imageUploader as Uploader,
-          enableHtmlFileUploader: true,
-          uploadWidgetFactory: (pos, spec) => Decoration.widget(pos, document.createElement('span'), spec),
-        } satisfies UploadOptions)
-      }
-    })
-    .use(commonmark)
-
-  if (!isViewMode) {
-    builder.use(listener).use(upload)
-  }
-
-  editorInstance = await builder.create()
-}
-
-function destroyEditor() {
-  if (editorInstance) {
-    editorInstance.destroy()
-    editorInstance = null
-  }
-}
 
 async function loadSubtask() {
   try {
@@ -203,16 +63,6 @@ function onHeaderMouseDown(e: MouseEvent) {
 
 onMounted(async () => {
   await loadSubtask()
-  await nextTick()
-  await initEditor()
-  editorContainer.value?.addEventListener('click', handleImageClick)
-  editorContainer.value?.addEventListener('click', handleFileLinkClick)
-})
-
-onBeforeUnmount(() => {
-  editorContainer.value?.removeEventListener('click', handleImageClick)
-  editorContainer.value?.removeEventListener('click', handleFileLinkClick)
-  destroyEditor()
 })
 </script>
 
@@ -243,7 +93,11 @@ onBeforeUnmount(() => {
 
       <div class="form-field editor-field">
         <label class="field-label">内容 (Markdown)</label>
-        <div ref="editorContainer" class="milkdown-editor-wrapper"></div>
+        <MarkdownEditor
+          v-model="markdownContent"
+          :readonly="isViewMode"
+          class="milkdown-editor-wrapper"
+        />
       </div>
     </div>
 
@@ -259,15 +113,6 @@ onBeforeUnmount(() => {
         </el-button>
       </div>
     </div>
-
-    <!-- 图片预览 -->
-    <el-image-viewer
-      v-if="previewVisible"
-      :url-list="previewUrls"
-      :initial-index="previewInitialIndex"
-      :z-index="10000"
-      @close="previewVisible = false"
-    />
   </div>
 </template>
 
@@ -378,76 +223,10 @@ onBeforeUnmount(() => {
 }
 
 .milkdown-editor-wrapper :deep(.milkdown) {
-  padding: 12px 16px;
   min-height: 290px;
 }
 
-.milkdown-editor-wrapper :deep(.editor) {
-  outline: none;
-}
-
 .milkdown-editor-wrapper :deep(.ProseMirror) {
-  outline: none;
   min-height: 280px;
 }
-
-.milkdown-editor-wrapper :deep(.ProseMirror p) {
-  margin: 0.4em 0;
-  line-height: 1.6;
-}
-
-.milkdown-editor-wrapper :deep(.ProseMirror h1),
-.milkdown-editor-wrapper :deep(.ProseMirror h2),
-.milkdown-editor-wrapper :deep(.ProseMirror h3) {
-  margin: 0.6em 0 0.3em;
-}
-
-.milkdown-editor-wrapper :deep(.ProseMirror img) {
-  max-width: 100%;
-  height: auto;
-  border-radius: 6px;
-  margin: 8px 0;
-  cursor: pointer;
-  transition: opacity 0.15s ease;
-
-  &:hover {
-    opacity: 0.85;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
-  }
-}
-
-.milkdown-editor-wrapper :deep(.ProseMirror code) {
-  background: #f1f5f9;
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-size: 0.9em;
-}
-
-.milkdown-editor-wrapper :deep(.ProseMirror pre) {
-  background: #1e293b;
-  color: #e2e8f0;
-  padding: 12px 16px;
-  border-radius: 8px;
-  overflow-x: auto;
-}
-
-.milkdown-editor-wrapper :deep(.ProseMirror blockquote) {
-  border-left: 3px solid #3b82f6;
-  padding-left: 12px;
-  color: #64748b;
-  margin: 0.5em 0;
-}
-
-.milkdown-editor-wrapper :deep(.ProseMirror ul),
-.milkdown-editor-wrapper :deep(.ProseMirror ol) {
-  padding-left: 24px;
-  margin: 0.4em 0;
-}
-
-.milkdown-editor-wrapper :deep(.ProseMirror hr) {
-  border: none;
-  border-top: 1px solid #e2e8f0;
-  margin: 1em 0;
-}
-
 </style>

@@ -60,7 +60,8 @@ async function handleDelete(todo: Todo) {
 }
 
 async function openEditor(todo: Todo) {
-  const url = `#/editor?id=${todo.id}`
+  // 与主视图一致：点击已有待办默认进入只读详情
+  const url = `#/editor?id=${todo.id}&mode=view`
   const label = `editor-${Date.now()}`
 
   try {
@@ -87,7 +88,7 @@ async function openEditor(todo: Todo) {
 
     const webview = new WebviewWindow(label, {
       url,
-      title: '编辑待办',
+      title: '待办详情',
       width: editorWidth,
       height: editorHeight,
       x,
