@@ -1141,8 +1141,8 @@ function onHeaderMouseDown(e: MouseEvent) {
             </div>
           </div>
 
-          <!-- 添加子任务 -->
-          <div class="add-subtask">
+          <!-- 添加子任务（只读模式隐藏，它是写入口） -->
+          <div v-if="!isViewMode" class="add-subtask">
             <div class="add-subtask-input">
               <el-icon class="input-icon"><Plus /></el-icon>
               <input
@@ -1184,20 +1184,21 @@ function onHeaderMouseDown(e: MouseEvent) {
               ghost-class="dragging"
               :animation="200"
               :force-fallback="true"
+              :disabled="isViewMode"
               @end="onSubtaskDragEnd"
             >
               <template #item="{ element: subtask }">
               <div
                 class="subtask-item-editor"
-                :class="{ completed: subtask.completed }"
+                :class="{ completed: subtask.completed, readonly: isViewMode }"
               >
-                <el-icon class="subtask-drag-handle" :size="14" title="拖拽排序">
+                <el-icon v-if="!isViewMode" class="subtask-drag-handle" :size="14" title="拖拽排序">
                   <Rank />
                 </el-icon>
                 <div
                   class="custom-checkbox"
                   :class="{ checked: subtask.completed }"
-                  @click="isEdit ? toggleSubtask(subtask.id) : togglePendingSubtask(subtask.id)"
+                  @click="isViewMode ? null : (isEdit ? toggleSubtask(subtask.id) : togglePendingSubtask(subtask.id))"
                 >
                   <el-icon v-if="subtask.completed" class="check-icon"><Check /></el-icon>
                 </div>
@@ -1208,10 +1209,10 @@ function onHeaderMouseDown(e: MouseEvent) {
                   @blur="saveInlineEdit(subtask.id)"
                   @keydown="handleInlineEditKeydown($event, subtask.id)"
                 />
-                <span 
+                <span
                   v-else
                   class="subtask-title"
-                  @dblclick="isEdit && startInlineEdit(subtask)"
+                  @dblclick="isEdit && !isViewMode && startInlineEdit(subtask)"
                 >
                   {{ subtask.title }}
                 </span>
@@ -1231,8 +1232,8 @@ function onHeaderMouseDown(e: MouseEvent) {
                   >
                     <el-icon><View /></el-icon>
                   </button>
-                  <button 
-                    v-if="isEdit"
+                  <button
+                    v-if="isEdit && !isViewMode"
                     class="action-btn edit-btn"
                     title="编辑子任务"
                     @click="openSubtaskWindow(subtask.id, 'edit')"
@@ -1240,6 +1241,7 @@ function onHeaderMouseDown(e: MouseEvent) {
                     <el-icon><Edit /></el-icon>
                   </button>
                   <button
+                    v-if="!isViewMode"
                     class="action-btn delete-btn"
                     title="删除子任务"
                     @click="deleteSubtask(subtask.id)"
@@ -1907,6 +1909,19 @@ function onHeaderMouseDown(e: MouseEvent) {
         color: #ffffff;
         font-size: 12px;
       }
+    }
+  }
+
+  /* 只读模式：复选框只表示状态，不该显得可点 */
+  &.readonly .custom-checkbox {
+    cursor: default;
+
+    &:hover {
+      border-color: #cbd5e1;
+    }
+
+    &.checked:hover {
+      border-color: transparent;
     }
   }
 
