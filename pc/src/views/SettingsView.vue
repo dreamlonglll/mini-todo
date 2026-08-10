@@ -9,7 +9,7 @@ import { openUrl } from '@tauri-apps/plugin-opener'
 import { enable, disable, isEnabled } from '@tauri-apps/plugin-autostart'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAppStore, APP_VERSION } from '@/stores'
-import type { ScreenConfig, SyncSettings, SyncDownloadResult } from '@/types'
+import type { AppSettingKey, ScreenConfig, SyncSettings, SyncDownloadResult } from '@/types'
 
 const appWindow = getCurrentWindow()
 const appStore = useAppStore()
@@ -70,6 +70,7 @@ onMounted(async () => {
   await appStore.loadScreenConfigs()
   await appStore.loadShowCalendar()
   await appStore.loadAutoHideEnabled()
+  await appStore.loadDarkTheme()
   await loadSyncSettings()
 
   // 加载字体设置
@@ -81,6 +82,31 @@ onMounted(async () => {
     console.error('Failed to load font settings:', e)
   }
 })
+
+// 设置窗口是独立 WebView，与主窗口不共享 Pinia 状态。
+// 任何改动都要发事件，让主窗口重新从数据库加载对应设置
+async function notifyAppSettingChanged(key: AppSettingKey) {
+  try {
+    await emit('app-settings-changed', { key })
+  } catch (e) {
+    console.error('Failed to notify app setting change:', e)
+  }
+}
+
+async function handleShowCalendarChange(val: boolean) {
+  await appStore.setShowCalendar(val)
+  await notifyAppSettingChanged('showCalendar')
+}
+
+async function handleAutoHideChange(val: boolean) {
+  await appStore.setAutoHideEnabled(val)
+  await notifyAppSettingChanged('autoHide')
+}
+
+async function handleDarkThemeChange(val: boolean) {
+  await appStore.setDarkTheme(val)
+  await notifyAppSettingChanged('theme')
+}
 
 // 字体变更
 async function handleFontFamilyChange(val: string) {
@@ -300,6 +326,8 @@ async function saveSyncSettings() {
   try {
     await invoke('save_sync_settings', { settings: syncSettings })
     ElMessage.success('同步设置已保存')
+    // 主窗口持有自动同步定时器，需按新的开关/间隔重建
+    await notifyAppSettingChanged('sync')
   } catch (e) {
     console.error('Failed to save sync settings:', e)
     ElMessage.error('保存失败: ' + String(e))
@@ -423,6 +451,8 @@ async function handleCheckUpdate() {
     await appStore.checkForUpdates()
 
     if (hasUpdate.value) {
+      // 主窗口标题栏的更新红点由它自己的 store 驱动，需要它也刷新一次
+      await notifyAppSettingChanged('update')
       await ElMessageBox.confirm(
         `发现新版本 ${latestVersion.value}，是否前往下载？`,
         '版本更新',
@@ -500,7 +530,7 @@ async function handleCheckUpdate() {
             </div>
             <el-switch
               :model-value="showCalendar"
-              @change="(val: boolean) => appStore.setShowCalendar(val)"
+              @change="(val: boolean) => handleShowCalendarChange(val)"
             />
           </div>
 
@@ -514,7 +544,7 @@ async function handleCheckUpdate() {
             </div>
             <el-switch
               :model-value="autoHideEnabled"
-              @change="(val: boolean) => appStore.setAutoHideEnabled(val)"
+              @change="(val: boolean) => handleAutoHideChange(val)"
             />
           </div>
 
@@ -528,7 +558,7 @@ async function handleCheckUpdate() {
             </div>
             <el-switch
               :model-value="appStore.isDarkTheme"
-              @change="() => appStore.toggleDarkTheme()"
+              @change="(val: boolean) => handleDarkThemeChange(val)"
             />
           </div>
 

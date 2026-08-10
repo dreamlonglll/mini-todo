@@ -54,6 +54,18 @@ fn get_auto_hide_enabled_value(db: &State<Database>) -> bool {
     .unwrap_or(true)
 }
 
+/// 读取 settings 表的 text_theme
+///
+/// 注意该键描述的是文字颜色："light" 表示浅色文字，即前端的「深色主题开启」
+fn get_text_theme_value(conn: &rusqlite::Connection) -> String {
+    conn.query_row(
+        "SELECT value FROM settings WHERE key = 'text_theme'",
+        [],
+        |row| row.get(0),
+    )
+    .unwrap_or_else(|_| "dark".to_string())
+}
+
 const EDGE_SNAP_THRESHOLD_PX: i32 = 10;
 const EDGE_HIDE_DELAY: Duration = Duration::from_millis(420);
 const HIDDEN_VISIBLE_STRIP_PX: i32 = 4;
@@ -523,13 +535,7 @@ pub fn get_settings(db: State<Database>) -> Result<AppSettings, String> {
             )
             .unwrap_or(true);
 
-        let text_theme: String = conn
-            .query_row(
-                "SELECT value FROM settings WHERE key = 'text_theme'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap_or_else(|_| "dark".to_string());
+        let text_theme = get_text_theme_value(conn);
 
         let show_calendar: bool = conn
             .query_row(
@@ -616,12 +622,42 @@ pub fn save_settings(db: State<Database>, settings: AppSettings) -> Result<(), S
     .map_err(|e| e.to_string())
 }
 
+/// 单独保存文本主题
+///
+/// 供设置窗口调用：仅写 text_theme 键，不触碰窗口位置/尺寸/固定模式
+#[tauri::command]
+pub fn set_text_theme(db: State<Database>, theme: String) -> Result<(), String> {
+    db.with_connection(|conn| {
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('text_theme', ?, datetime('now', 'localtime'))",
+            [&theme],
+        )?;
+        Ok(())
+    })
+    .map_err(|e| e.to_string())
+}
+
+/// 读取文本主题（默认 "dark"，注意该值语义与深色主题开关相反，见 appStore.loadDarkTheme）
+#[tauri::command]
+pub fn get_text_theme(db: State<Database>) -> Result<String, String> {
+    db.with_connection(|conn| Ok(get_text_theme_value(conn)))
+        .map_err(|e| e.to_string())
+}
+
+/// 切换主窗口的固定模式
+///
+/// 同样固定取主窗口：固定模式的位置锁定与 WS_EX_TOOLWINDOW 样式只对主窗口有意义，
+/// 按调用方窗口取值会在其他 WebView 触发时改错窗口
 #[tauri::command]
 pub fn set_window_fixed_mode(
-    window: Window,
+    app_handle: tauri::AppHandle,
     db: State<Database>,
     fixed: bool,
 ) -> Result<(), String> {
+    let window = app_handle
+        .get_webview_window("main")
+        .ok_or_else(|| "主窗口不存在".to_string())?;
+
     // 更新全局固定模式状态
     IS_FIXED_MODE.store(fixed, Ordering::SeqCst);
     let auto_hide_enabled = get_auto_hide_enabled_value(&db);
@@ -744,8 +780,15 @@ pub fn set_auto_hide_enabled(
     Ok(())
 }
 
+/// 读取主窗口的位置与尺寸
+///
+/// 必须固定取 label 为 "main" 的窗口：设置、编辑器等独立 WebView 也会间接调用此命令，
+/// 若按调用方窗口取值，会把它们的几何信息误存成主窗口状态
 #[tauri::command]
-pub fn get_window_persist_state(window: Window) -> Result<WindowPersistState, String> {
+pub fn get_window_persist_state(app_handle: tauri::AppHandle) -> Result<WindowPersistState, String> {
+    let window = app_handle
+        .get_webview_window("main")
+        .ok_or_else(|| "主窗口不存在".to_string())?;
     let pos = window.outer_position().map_err(|e| e.to_string())?;
     let size = window.outer_size().map_err(|e| e.to_string())?;
 

@@ -269,11 +269,14 @@ export const useAppStore = defineStore('app', () => {
 
   // 设置日历显示
   async function setShowCalendar(show: boolean) {
+    const oldValue = showCalendar.value
     try {
       showCalendar.value = show
       await invoke('set_show_calendar', { show })
     } catch (e) {
+      // 写库失败时回滚，避免开关显示与数据库不一致
       console.error('Failed to set show calendar:', e)
+      showCalendar.value = oldValue
     }
   }
 
@@ -312,12 +315,14 @@ export const useAppStore = defineStore('app', () => {
   }
 
   // 设置贴边自动隐藏
+  // 注意：不要在这里调 saveWindowState()。set_auto_hide_enabled 命令自身已落库同一个
+  // settings 键，而 saveWindowState 会连带写入调用方窗口的几何信息与 isFixed，
+  // 在设置窗口里调用时会污染主窗口的位置/尺寸/固定模式
   async function setAutoHideEnabled(enabled: boolean) {
     const oldValue = autoHideEnabled.value
     try {
       autoHideEnabled.value = enabled
       await invoke('set_auto_hide_enabled', { enabled })
-      await saveWindowState()
     } catch (e) {
       console.error('Failed to set auto hide enabled:', e)
       autoHideEnabled.value = oldValue
@@ -365,10 +370,11 @@ export const useAppStore = defineStore('app', () => {
   }
 
   // 加载深色主题设置
+  // 注意：settings 表的 text_theme 描述的是文字颜色，'light' 才代表"深色主题开启"
   async function loadDarkTheme() {
     try {
-      const settings = await invoke<{ textTheme: string }>('get_settings')
-      isDarkTheme.value = settings.textTheme === 'light'
+      const theme = await invoke<string>('get_text_theme')
+      isDarkTheme.value = theme === 'light'
       applyThemeClass()
     } catch (e) {
       console.error('Failed to load dark theme setting:', e)
@@ -376,15 +382,31 @@ export const useAppStore = defineStore('app', () => {
     }
   }
 
+  // 设置深色主题
+  // 只写 text_theme 键，不走 saveWindowState，避免设置窗口连带覆盖主窗口几何状态
+  async function setDarkTheme(enabled: boolean) {
+    const oldValue = isDarkTheme.value
+    try {
+      isDarkTheme.value = enabled
+      applyThemeClass()
+      await invoke('set_text_theme', { theme: enabled ? 'light' : 'dark' })
+    } catch (e) {
+      console.error('Failed to set dark theme:', e)
+      isDarkTheme.value = oldValue
+      applyThemeClass()
+    }
+  }
+
   // 切换深色主题
   async function toggleDarkTheme() {
-    isDarkTheme.value = !isDarkTheme.value
-    applyThemeClass()
-    await saveWindowState()
+    await setDarkTheme(!isDarkTheme.value)
   }
 
   // 应用主题 CSS class
+  // 仅作用于主窗口：设置/编辑器等独立 WebView 有各自的配色，
+  // 误加 dark-theme 会把它们的文字变白而背景仍是浅色
   function applyThemeClass() {
+    if (appWindow.label !== 'main') return
     document.body.classList.toggle('dark-theme', isDarkTheme.value)
   }
 
@@ -560,6 +582,8 @@ export const useAppStore = defineStore('app', () => {
     // 方法
     initSettings,
     toggleFixedMode,
+    loadDarkTheme,
+    setDarkTheme,
     toggleDarkTheme,
     saveWindowState,
     exportData,

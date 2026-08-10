@@ -26,6 +26,25 @@ export interface AppSettings {
 // 窗口模式
 export type WindowMode = 'normal' | 'fixed'
 
+/**
+ * 跨窗口设置变更事件 `app-settings-changed` 的 key
+ *
+ * 设置窗口是独立 WebView，与主窗口不共享 Pinia 状态。
+ * 改动设置后需带上对应 key 发事件，主窗口据此重新从数据库加载。
+ * 新增设置项时，这里、SettingsView 的发送处、MainView 的处理分支要同步补齐。
+ */
+export type AppSettingKey =
+  | 'showCalendar'
+  | 'autoHide'
+  | 'theme'
+  | 'sync'
+  | 'update'
+
+/** `app-settings-changed` 事件的负载 */
+export interface AppSettingChangedPayload {
+  key: AppSettingKey
+}
+
 // 屏幕配置记录，用于存储不同屏幕组合下的窗口状态
 export interface ScreenConfig {
   id: number

@@ -10,7 +10,7 @@ import TitleBar from '@/components/TitleBar.vue'
 import TodoList from '@/components/TodoList.vue'
 import QuadrantView from '@/components/QuadrantView.vue'
 import CalendarView from '@/components/CalendarView.vue'
-import type { Todo, SyncSettings, SyncDownloadResult } from '@/types'
+import type { AppSettingChangedPayload, Todo, SyncSettings, SyncDownloadResult } from '@/types'
 
 const todoStore = useTodoStore()
 const appStore = useAppStore()
@@ -68,6 +68,7 @@ let unlistenDataImported: (() => void) | null = null
 let unlistenFocus: (() => void) | null = null
 let unlistenSyncCompleted: (() => void) | null = null
 let unlistenFontChanged: (() => void) | null = null
+let unlistenAppSettings: (() => void) | null = null
 
 // 自动同步定时器
 let autoSyncTimer: ReturnType<typeof setInterval> | null = null
@@ -156,6 +157,15 @@ watch(showCalendar, async (show) => {
   }
 })
 
+// 重新加载会被外部改动（设置窗口 / 数据导入 / 云同步）影响的应用设置
+async function reloadAppSettings() {
+  await todoStore.loadViewMode()
+  await appStore.loadShowCalendar()
+  await appStore.loadAutoHideEnabled()
+  await appStore.loadDarkTheme()
+  await appStore.loadTodoFontSettings()
+}
+
 // 初始化
 onMounted(async () => {
   await appStore.initSettings()
@@ -204,12 +214,36 @@ onMounted(async () => {
     openSettings()
   })
 
-  unlistenDataImported = await listen('data-imported', () => {
+  unlistenDataImported = await listen('data-imported', async () => {
+    // 导入 / 应用云端数据会覆盖 settings 表，待办和应用设置都要重载
+    await todoStore.fetchTodos()
+    await reloadAppSettings()
     ElMessage.success('数据导入成功')
   })
 
   unlistenFontChanged = await listen('todo-font-changed', async () => {
     await appStore.loadTodoFontSettings()
+  })
+
+  // 设置窗口改动了应用设置：它有独立的 store 副本，主窗口需要自己重新加载
+  unlistenAppSettings = await listen<AppSettingChangedPayload>('app-settings-changed', async (event) => {
+    switch (event.payload?.key) {
+      case 'showCalendar':
+        await appStore.loadShowCalendar()
+        break
+      case 'autoHide':
+        await appStore.loadAutoHideEnabled()
+        break
+      case 'theme':
+        await appStore.loadDarkTheme()
+        break
+      case 'sync':
+        startAutoSync()
+        break
+      case 'update':
+        await appStore.checkForUpdates()
+        break
+    }
   })
 
   unlistenFocus = await appWindow.onFocusChanged(async ({ payload: focused }) => {
@@ -252,6 +286,7 @@ onUnmounted(() => {
   if (unlistenTrayOpenSettings) unlistenTrayOpenSettings()
   if (unlistenDataImported) unlistenDataImported()
   if (unlistenFontChanged) unlistenFontChanged()
+  if (unlistenAppSettings) unlistenAppSettings()
   if (unlistenFocus) unlistenFocus()
   if (unlistenSyncCompleted) unlistenSyncCompleted()
   stopAutoSync()
@@ -447,9 +482,7 @@ async function openSettings() {
       isModalOpen.value = false
       activeModalWindow = null
       await todoStore.fetchTodos()
-      await todoStore.loadViewMode()
-      await appStore.loadShowCalendar()
-      await appStore.loadTodoFontSettings()
+      await reloadAppSettings()
       startAutoSync()
     })
     
@@ -494,6 +527,7 @@ async function handleSync() {
             syncDataJson: JSON.stringify(result.remoteData),
           })
           await todoStore.fetchTodos()
+          await reloadAppSettings()
           ElMessage.success('已同步云端数据到本地')
         } else {
           await invoke<string>('webdav_upload_sync')
@@ -515,6 +549,7 @@ async function handleSync() {
           syncDataJson: JSON.stringify(result.remoteData),
         })
         await todoStore.fetchTodos()
+        await reloadAppSettings()
       }
       await invoke<string>('webdav_upload_sync')
       ElMessage.success('同步完成')
@@ -542,6 +577,8 @@ async function startAutoSync() {
             console.log('Auto sync: conflict detected, skipping')
           } else if (result !== 'no_changes') {
             await todoStore.fetchTodos()
+            // 自动同步可能应用了云端的 settings，需要跟着重载
+            await reloadAppSettings()
           }
         } catch (e) {
           console.warn('Auto sync failed:', e)
