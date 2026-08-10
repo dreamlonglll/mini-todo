@@ -138,6 +138,46 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute("INSERT INTO migrations (version) VALUES (24)", [])?;
     }
 
+    if current_version < 25 {
+        migration_v25(conn)?;
+        conn.execute("INSERT INTO migrations (version) VALUES (25)", [])?;
+    }
+
+    if current_version < 26 {
+        migration_v26(conn)?;
+        conn.execute("INSERT INTO migrations (version) VALUES (26)", [])?;
+    }
+
+    Ok(())
+}
+
+/// 迁移 v26：新增 `window_bg_color` / `window_bg_alpha` settings key。
+///
+/// 窗口底色与背景透明度（issue #9 第 4 点）。默认值取自 `models.rs` 的常量，
+/// 等价于改为可配置之前深色主题多层半透明黑的合成观感，保证老用户升级后外观不变。
+/// 仅深色主题下生效，浅色主题是不透明白底。
+fn migration_v26(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES ('window_bg_color', ?1, datetime('now', 'localtime'))",
+        [crate::db::models::DEFAULT_WINDOW_BG_COLOR],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES ('window_bg_alpha', ?1, datetime('now', 'localtime'))",
+        [crate::db::models::DEFAULT_WINDOW_BG_ALPHA.to_string()],
+    )?;
+    Ok(())
+}
+
+/// 迁移 v25：新增 `top_on_wake` settings key。
+///
+/// 贴边自动隐藏唤起窗口时是否临时置顶。默认开启——不置顶时窗口只是移回锚点，
+/// Z 序不变，会被最大化/无边框全屏窗口完全遮住（issue #9 第 5 点）。
+/// 允许关闭是为了照顾全屏游戏等不希望被打断的场景。
+fn migration_v25(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES ('top_on_wake', 'true', datetime('now', 'localtime'))",
+        [],
+    )?;
     Ok(())
 }
 

@@ -129,9 +129,9 @@ export const useTodoStore = defineStore('todo', () => {
     }
   }
 
-  // 更新待办的象限
-  async function updateTodoQuadrant(id: number, quadrant: QuadrantType): Promise<boolean> {
-    return updateTodo(id, { quadrant })
+  // 更新待办的象限（color 传入时一并更新，用于颜色跟随象限）
+  async function updateTodoQuadrant(id: number, quadrant: QuadrantType, color?: string): Promise<boolean> {
+    return updateTodo(id, color ? { quadrant, color } : { quadrant })
   }
 
   // 设置视图模式

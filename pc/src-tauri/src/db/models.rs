@@ -201,6 +201,15 @@ pub struct AppSettings {
     /// 是否启用贴边自动隐藏
     #[serde(default = "default_auto_hide_enabled")]
     pub auto_hide_enabled: bool,
+    /// 贴边唤起时是否临时置顶（关闭后窗口会被全屏窗口遮挡）
+    #[serde(default = "default_top_on_wake")]
+    pub top_on_wake: bool,
+    /// 窗口底色（HEX），仅深色主题下生效
+    #[serde(default = "default_window_bg_color")]
+    pub window_bg_color: String,
+    /// 窗口背景透明度 0~1，仅深色主题下生效
+    #[serde(default = "default_window_bg_alpha")]
+    pub window_bg_alpha: f64,
     /// 文本主题：light（浅色文字，适配深色背景）或 dark（深色文字，适配浅色背景）
     #[serde(default = "default_text_theme")]
     pub text_theme: String,
@@ -221,6 +230,27 @@ fn default_text_theme() -> String {
 
 fn default_auto_hide_enabled() -> bool {
     true
+}
+
+fn default_top_on_wake() -> bool {
+    true
+}
+
+/// 窗口底色默认值
+pub const DEFAULT_WINDOW_BG_COLOR: &str = "#000000";
+
+/// 窗口背景透明度默认值
+///
+/// 抽成可配置之前，深色主题是 html/body/#app/.app-container/.main-content 多层
+/// 半透明黑叠加，合成不透明度约 0.45；重构成单层后要用这个值才能维持原有观感。
+pub const DEFAULT_WINDOW_BG_ALPHA: f64 = 0.45;
+
+fn default_window_bg_color() -> String {
+    DEFAULT_WINDOW_BG_COLOR.to_string()
+}
+
+fn default_window_bg_alpha() -> f64 {
+    DEFAULT_WINDOW_BG_ALPHA
 }
 
 fn default_view_mode() -> String {

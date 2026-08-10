@@ -4,6 +4,8 @@ import { getVersion } from '@tauri-apps/api/app'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow, PhysicalPosition, PhysicalSize, availableMonitors, primaryMonitor } from '@tauri-apps/api/window'
 import type { WindowPosition, WindowSize, WindowMode, ScreenConfig, SaveScreenConfigRequest, MonitorInfo } from '@/types'
+import { DEFAULT_BG_COLOR, DEFAULT_BG_ALPHA } from '@/types'
+import { hexToRgbChannels } from '@/utils/color'
 
 // 当前应用版本（从系统读取）
 export const APP_VERSION = ref<string>('')
@@ -47,6 +49,11 @@ export const useAppStore = defineStore('app', () => {
   const showCalendar = ref(false)
   // 是否启用贴边自动隐藏
   const autoHideEnabled = ref(true)
+  // 贴边唤起时是否临时置顶
+  const topOnWake = ref(true)
+  // 窗口底色与背景透明度（仅深色主题下生效）
+  const windowBgColor = ref(DEFAULT_BG_COLOR)
+  const windowBgAlpha = ref(DEFAULT_BG_ALPHA)
 
   // 子任务全局展开状态（一键展开/收起全部子任务）
   // 仅前端状态，用 localStorage 持久化，无需数据库迁移与云同步
@@ -147,6 +154,9 @@ export const useAppStore = defineStore('app', () => {
 
       // 加载贴边自动隐藏设置（需在固定模式应用前准备）
       await loadAutoHideEnabled()
+      // saveWindowState 会连带写回 topOnWake，不先加载真值就会把用户的关闭状态刷成默认 true
+      await loadTopOnWake()
+      await loadWindowBackground()
 
       // 加载深色主题设置
       await loadDarkTheme()
@@ -256,6 +266,16 @@ export const useAppStore = defineStore('app', () => {
     }
   }
 
+  // 加载唤起置顶设置
+  async function loadTopOnWake() {
+    try {
+      topOnWake.value = await invoke<boolean>('get_top_on_wake')
+    } catch (e) {
+      console.error('Failed to load top on wake setting:', e)
+      topOnWake.value = true
+    }
+  }
+
   // 切换日历显示
   async function toggleShowCalendar() {
     try {
@@ -326,6 +346,18 @@ export const useAppStore = defineStore('app', () => {
     } catch (e) {
       console.error('Failed to set auto hide enabled:', e)
       autoHideEnabled.value = oldValue
+    }
+  }
+
+  // 设置唤起置顶（同 setAutoHideEnabled，不要在这里调 saveWindowState）
+  async function setTopOnWake(enabled: boolean) {
+    const oldValue = topOnWake.value
+    try {
+      topOnWake.value = enabled
+      await invoke('set_top_on_wake', { enabled })
+    } catch (e) {
+      console.error('Failed to set top on wake:', e)
+      topOnWake.value = oldValue
     }
   }
 
@@ -402,6 +434,48 @@ export const useAppStore = defineStore('app', () => {
     await setDarkTheme(!isDarkTheme.value)
   }
 
+  // 加载窗口底色与透明度
+  async function loadWindowBackground() {
+    try {
+      const bg = await invoke<{ color: string; alpha: number }>('get_window_background')
+      windowBgColor.value = bg.color
+      windowBgAlpha.value = bg.alpha
+    } catch (e) {
+      console.error('Failed to load window background:', e)
+      windowBgColor.value = DEFAULT_BG_COLOR
+      windowBgAlpha.value = DEFAULT_BG_ALPHA
+    }
+    applyWindowBackground()
+  }
+
+  // 设置窗口底色与透明度（只写这两个键，不走 saveWindowState）
+  async function setWindowBackground(color: string, alpha: number) {
+    const oldColor = windowBgColor.value
+    const oldAlpha = windowBgAlpha.value
+    try {
+      windowBgColor.value = color
+      windowBgAlpha.value = alpha
+      applyWindowBackground()
+      await invoke('set_window_background', { color, alpha })
+    } catch (e) {
+      console.error('Failed to set window background:', e)
+      windowBgColor.value = oldColor
+      windowBgAlpha.value = oldAlpha
+      applyWindowBackground()
+    }
+  }
+
+  // 写入 CSS 变量
+  //
+  // 与 applyThemeClass 同理只作用于主窗口：设置/编辑器等独立 WebView 有各自的浅色配色，
+  // 给它们改底色只会让自己的界面变花
+  function applyWindowBackground() {
+    if (appWindow.label !== 'main') return
+    const root = document.documentElement
+    root.style.setProperty('--app-bg-rgb', hexToRgbChannels(windowBgColor.value))
+    root.style.setProperty('--app-bg-alpha', String(windowBgAlpha.value))
+  }
+
   // 应用主题 CSS class
   // 仅作用于主窗口：设置/编辑器等独立 WebView 有各自的配色，
   // 误加 dark-theme 会把它们的文字变白而背景仍是浅色
@@ -443,6 +517,9 @@ export const useAppStore = defineStore('app', () => {
           windowPosition: windowPosition.value,
           windowSize: windowSize.value,
           autoHideEnabled: autoHideEnabled.value,
+          topOnWake: topOnWake.value,
+          windowBgColor: windowBgColor.value,
+          windowBgAlpha: windowBgAlpha.value,
           textTheme: isDarkTheme.value ? 'light' : 'dark'
         }
       })
@@ -603,6 +680,15 @@ export const useAppStore = defineStore('app', () => {
     // 自动隐藏方法
     loadAutoHideEnabled,
     setAutoHideEnabled,
+    // 唤起置顶
+    topOnWake,
+    loadTopOnWake,
+    setTopOnWake,
+    // 窗口底色与透明度
+    windowBgColor,
+    windowBgAlpha,
+    loadWindowBackground,
+    setWindowBackground,
     // 待办字体方法
     todoFontFamily,
     todoFontSize,

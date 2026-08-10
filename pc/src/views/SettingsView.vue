@@ -10,6 +10,8 @@ import { enable, disable, isEnabled } from '@tauri-apps/plugin-autostart'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAppStore, APP_VERSION } from '@/stores'
 import type { AppSettingKey, ScreenConfig, SyncSettings, SyncDownloadResult } from '@/types'
+import { PRESET_BG_COLORS, DEFAULT_BG_COLOR } from '@/types'
+import { isSameColor } from '@/utils/color'
 
 const appWindow = getCurrentWindow()
 const appStore = useAppStore()
@@ -43,6 +45,11 @@ const currentConfigId = computed(() => appStore.currentScreenConfigId)
 const showCalendar = computed(() => appStore.showCalendar)
 // 贴边自动隐藏
 const autoHideEnabled = computed(() => appStore.autoHideEnabled)
+// 贴边唤起时置顶
+const topOnWake = computed(() => appStore.topOnWake)
+// 窗口底色与背景透明度
+const windowBgColor = computed(() => appStore.windowBgColor)
+const windowBgAlpha = computed(() => appStore.windowBgAlpha)
 
 // 是否有更新
 const hasUpdate = computed(() => appStore.hasUpdate)
@@ -70,6 +77,8 @@ onMounted(async () => {
   await appStore.loadScreenConfigs()
   await appStore.loadShowCalendar()
   await appStore.loadAutoHideEnabled()
+  await appStore.loadTopOnWake()
+  await appStore.loadWindowBackground()
   await appStore.loadDarkTheme()
   await loadSyncSettings()
 
@@ -101,6 +110,26 @@ async function handleShowCalendarChange(val: boolean) {
 async function handleAutoHideChange(val: boolean) {
   await appStore.setAutoHideEnabled(val)
   await notifyAppSettingChanged('autoHide')
+}
+
+async function handleTopOnWakeChange(val: boolean) {
+  await appStore.setTopOnWake(val)
+  await notifyAppSettingChanged('topOnWake')
+}
+
+async function handleBgColorChange(color: string) {
+  await appStore.setWindowBackground(color, appStore.windowBgAlpha)
+  await notifyAppSettingChanged('windowBackground')
+}
+
+// 拖动过程中只更新本地显示，避免每一格都写一次库
+function handleBgAlphaInput(val: number) {
+  appStore.windowBgAlpha = val / 100
+}
+
+async function handleBgAlphaChange(val: number) {
+  await appStore.setWindowBackground(appStore.windowBgColor, val / 100)
+  await notifyAppSettingChanged('windowBackground')
 }
 
 async function handleDarkThemeChange(val: boolean) {
@@ -550,6 +579,21 @@ async function handleCheckUpdate() {
 
           <div class="settings-row">
             <div class="row-left">
+              <el-icon class="row-icon"><Top /></el-icon>
+              <div class="row-content">
+                <span class="settings-label">唤起时置顶</span>
+                <span class="settings-desc">贴边唤起时显示在其它窗口之上；关闭后可能被全屏窗口遮挡</span>
+              </div>
+            </div>
+            <el-switch
+              :model-value="topOnWake"
+              :disabled="!autoHideEnabled"
+              @change="(val: boolean) => handleTopOnWakeChange(val)"
+            />
+          </div>
+
+          <div class="settings-row">
+            <div class="row-left">
               <el-icon class="row-icon"><Moon /></el-icon>
               <div class="row-content">
                 <span class="settings-label">深色主题</span>
@@ -560,6 +604,57 @@ async function handleCheckUpdate() {
               :model-value="appStore.isDarkTheme"
               @change="(val: boolean) => handleDarkThemeChange(val)"
             />
+          </div>
+
+          <div class="settings-row bg-color-row">
+            <div class="row-left">
+              <el-icon class="row-icon"><Brush /></el-icon>
+              <div class="row-content">
+                <span class="settings-label">界面底色</span>
+                <span class="settings-desc">仅深色主题下生效</span>
+              </div>
+            </div>
+            <div class="bg-color-picker">
+              <button
+                v-for="preset in PRESET_BG_COLORS"
+                :key="preset.value"
+                class="bg-preset-btn"
+                :class="{ active: isSameColor(windowBgColor, preset.value) }"
+                :style="{ backgroundColor: preset.value }"
+                :title="preset.name"
+                :disabled="!appStore.isDarkTheme"
+                @click="handleBgColorChange(preset.value)"
+              />
+              <el-color-picker
+                :model-value="windowBgColor"
+                :disabled="!appStore.isDarkTheme"
+                size="small"
+                @change="(val: string | null) => handleBgColorChange(val || DEFAULT_BG_COLOR)"
+              />
+            </div>
+          </div>
+
+          <div class="settings-row bg-alpha-row">
+            <div class="row-left">
+              <el-icon class="row-icon"><Sunny /></el-icon>
+              <div class="row-content">
+                <span class="settings-label">背景透明度</span>
+                <span class="settings-desc">数值越低越透明，仅深色主题下生效</span>
+              </div>
+            </div>
+            <div class="bg-alpha-slider">
+              <el-slider
+                :model-value="Math.round(windowBgAlpha * 100)"
+                :min="5"
+                :max="100"
+                :step="5"
+                :disabled="!appStore.isDarkTheme"
+                :format-tooltip="(val: number) => `${val}%`"
+                @input="(val: number) => handleBgAlphaInput(val)"
+                @change="(val: number) => handleBgAlphaChange(val)"
+              />
+              <span class="alpha-value">{{ Math.round(windowBgAlpha * 100) }}%</span>
+            </div>
           </div>
 
           <div class="settings-row notification-type-row">
@@ -1006,6 +1101,67 @@ async function handleCheckUpdate() {
   :deep(.el-radio-button__inner) {
     padding: 6px 12px;
     font-size: 12px;
+  }
+}
+
+.bg-color-row,
+.bg-alpha-row {
+  flex-wrap: wrap;
+  gap: 8px;
+
+  .row-left {
+    flex: 1;
+    min-width: 150px;
+  }
+}
+
+.bg-color-picker {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.bg-preset-btn {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+  transition: transform 0.15s ease, border-color 0.15s ease;
+  box-shadow: 0 0 0 1px #e2e8f0;
+
+  &:hover:not(:disabled) {
+    transform: scale(1.15);
+  }
+
+  &.active {
+    border-color: var(--primary);
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.4;
+  }
+}
+
+.bg-alpha-slider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+  width: 180px;
+
+  :deep(.el-slider) {
+    flex: 1;
+  }
+
+  .alpha-value {
+    font-size: 12px;
+    color: #64748b;
+    min-width: 34px;
+    text-align: right;
   }
 }
 

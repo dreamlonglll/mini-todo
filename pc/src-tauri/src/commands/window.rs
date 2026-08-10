@@ -1,5 +1,6 @@
 use crate::db::{
     AppSettings, Database, SaveScreenConfigRequest, ScreenConfig, WindowPosition, WindowSize,
+    DEFAULT_WINDOW_BG_ALPHA, DEFAULT_WINDOW_BG_COLOR,
 };
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,6 +17,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 /// 全局固定模式状态
 pub static IS_FIXED_MODE: AtomicBool = AtomicBool::new(false);
+
+/// 贴边唤起时是否临时置顶。
+///
+/// 缓存成原子变量是因为 `tick_auto_hide` 跑在后台轮询线程里，拿不到 `State<Database>`。
+/// 写入点：应用启动（`init_top_on_wake`）、`set_top_on_wake`、`set_window_fixed_mode`。
+static TOP_ON_WAKE: AtomicBool = AtomicBool::new(true);
 
 /// 托盘"固定模式"勾选菜单项引用，用于跨模块同步状态
 static TRAY_TOGGLE_FIXED: OnceLock<tauri::menu::CheckMenuItem<tauri::Wry>> = OnceLock::new();
@@ -54,6 +61,36 @@ fn get_auto_hide_enabled_value(db: &State<Database>) -> bool {
     .unwrap_or(true)
 }
 
+fn get_top_on_wake_value(db: &State<Database>) -> bool {
+    db.with_connection(|conn| {
+        let enabled: bool = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'top_on_wake'",
+                [],
+                |row| {
+                    let val: String = row.get(0)?;
+                    Ok(val == "true")
+                },
+            )
+            .unwrap_or(true);
+        Ok(enabled)
+    })
+    .unwrap_or(true)
+}
+
+/// 应用启动时把 `top_on_wake` 灌入原子缓存（轮询线程读不到数据库）
+pub fn init_top_on_wake(db: &State<Database>) {
+    TOP_ON_WAKE.store(get_top_on_wake_value(db), Ordering::SeqCst);
+}
+
+/// 窗口当前是否应保持置顶：仅在贴边唤起且开关打开时成立。
+///
+/// 托盘双击的临时置顶用它判断"到点该不该收回置顶"，避免误取消唤起态的置顶。
+pub fn should_stay_on_top() -> bool {
+    TOP_ON_WAKE.load(Ordering::SeqCst)
+        && with_auto_hide_state(|state| state.enabled && !state.hidden && state.docked_edge.is_some())
+}
+
 /// 读取 settings 表的 text_theme
 ///
 /// 注意该键描述的是文字颜色："light" 表示浅色文字，即前端的「深色主题开启」
@@ -68,6 +105,15 @@ fn get_text_theme_value(conn: &rusqlite::Connection) -> String {
 
 const EDGE_SNAP_THRESHOLD_PX: i32 = 10;
 const EDGE_HIDE_DELAY: Duration = Duration::from_millis(420);
+/// 托盘唤起后的保持显示宽限期
+///
+/// 没有它的话，鼠标不在窗口范围内，窗口会在 `EDGE_HIDE_DELAY` 后立刻缩回去，
+/// 用户刚点完托盘就看它消失。宽限期内足够把鼠标移过去接管。
+const TRAY_WAKE_KEEP_VISIBLE: Duration = Duration::from_secs(3);
+/// 托盘唤起时临时置顶的持续时间
+///
+/// 置顶只是把窗口抬到最前的手段，到点就撤销——除非贴边唤起态本就需要保持置顶。
+const TRAY_WAKE_TOPMOST_DURATION: Duration = Duration::from_millis(600);
 const HIDDEN_VISIBLE_STRIP_PX: i32 = 4;
 const WAKE_HOTZONE_WIDTH_PX: i32 = 2;
 const WAKE_RANGE_PADDING_PX: i32 = 40;
@@ -126,6 +172,8 @@ struct AutoHideState {
     anchor_position: Option<WindowPosition>,
     anchor_size: Option<WindowSize>,
     edge_stick_started_at: Option<Instant>,
+    /// 托盘唤起后的免隐藏截止时间
+    keep_visible_until: Option<Instant>,
 }
 
 impl Default for AutoHideState {
@@ -139,6 +187,7 @@ impl Default for AutoHideState {
             anchor_position: None,
             anchor_size: None,
             edge_stick_started_at: None,
+            keep_visible_until: None,
         }
     }
 }
@@ -182,6 +231,7 @@ fn clear_auto_hide_runtime_state() {
         state.anchor_position = None;
         state.anchor_size = None;
         state.edge_stick_started_at = None;
+        state.keep_visible_until = None;
     });
 }
 
@@ -414,7 +464,17 @@ fn evaluate_auto_hide_transition(
 
     if cursor_inside {
         state.edge_stick_started_at = Some(now);
+        state.keep_visible_until = None;
         return AutoHideTransition::None;
+    }
+
+    // 托盘唤起的宽限期内不隐藏，鼠标还没来得及移过来
+    if let Some(until) = state.keep_visible_until {
+        if now < until {
+            state.edge_stick_started_at = Some(now);
+            return AutoHideTransition::None;
+        }
+        state.keep_visible_until = None;
     }
 
     if now.duration_since(started_at) < EDGE_HIDE_DELAY {
@@ -472,6 +532,9 @@ pub fn tick_auto_hide(window: &WebviewWindow) {
                     state.docked_edge = Some(edge);
                     state.monitor_bounds = Some(monitor);
                 });
+            } else {
+                // 收回时一并撤销置顶，否则藏起来的窗口会一直压在其它窗口之上
+                let _ = window.set_always_on_top(false);
             }
         }
         AutoHideTransition::Restore { anchor } => {
@@ -483,6 +546,9 @@ pub fn tick_auto_hide(window: &WebviewWindow) {
                 with_auto_hide_state(|state| {
                     state.hidden = true;
                 });
+            } else if TOP_ON_WAKE.load(Ordering::SeqCst) {
+                // 唤起时置顶：只 set_position 不改 Z 序的话，窗口会被最大化/全屏窗口整个盖住
+                let _ = window.set_always_on_top(true);
             }
         }
     }
@@ -535,6 +601,36 @@ pub fn get_settings(db: State<Database>) -> Result<AppSettings, String> {
             )
             .unwrap_or(true);
 
+        let top_on_wake: bool = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'top_on_wake'",
+                [],
+                |row| {
+                    let val: String = row.get(0)?;
+                    Ok(val == "true")
+                },
+            )
+            .unwrap_or(true);
+
+        let window_bg_color: String = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'window_bg_color'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or_else(|_| DEFAULT_WINDOW_BG_COLOR.to_string());
+
+        let window_bg_alpha: f64 = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'window_bg_alpha'",
+                [],
+                |row| {
+                    let val: String = row.get(0)?;
+                    Ok(val.parse::<f64>().unwrap_or(DEFAULT_WINDOW_BG_ALPHA))
+                },
+            )
+            .unwrap_or(DEFAULT_WINDOW_BG_ALPHA);
+
         let text_theme = get_text_theme_value(conn);
 
         let show_calendar: bool = conn
@@ -569,6 +665,9 @@ pub fn get_settings(db: State<Database>) -> Result<AppSettings, String> {
             window_position,
             window_size,
             auto_hide_enabled,
+            top_on_wake,
+            window_bg_color,
+            window_bg_alpha,
             text_theme,
             show_calendar,
             view_mode,
@@ -580,6 +679,8 @@ pub fn get_settings(db: State<Database>) -> Result<AppSettings, String> {
 
 #[tauri::command]
 pub fn save_settings(db: State<Database>, settings: AppSettings) -> Result<(), String> {
+    // 轮询线程读的是原子缓存，落库的同时要刷新，否则本次会话内改动不生效
+    TOP_ON_WAKE.store(settings.top_on_wake, Ordering::SeqCst);
     db.with_connection(|conn| {
         // 保存 is_fixed
         conn.execute(
@@ -609,6 +710,22 @@ pub fn save_settings(db: State<Database>, settings: AppSettings) -> Result<(), S
         conn.execute(
             "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('auto_hide_enabled', ?, datetime('now', 'localtime'))",
             [if settings.auto_hide_enabled { "true" } else { "false" }],
+        )?;
+
+        // 保存唤起置顶设置
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('top_on_wake', ?, datetime('now', 'localtime'))",
+            [if settings.top_on_wake { "true" } else { "false" }],
+        )?;
+
+        // 保存窗口底色与透明度
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('window_bg_color', ?, datetime('now', 'localtime'))",
+            [&settings.window_bg_color],
+        )?;
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('window_bg_alpha', ?, datetime('now', 'localtime'))",
+            [&settings.window_bg_alpha.to_string()],
         )?;
 
         // 保存文本主题
@@ -661,6 +778,12 @@ pub fn set_window_fixed_mode(
     // 更新全局固定模式状态
     IS_FIXED_MODE.store(fixed, Ordering::SeqCst);
     let auto_hide_enabled = get_auto_hide_enabled_value(&db);
+    TOP_ON_WAKE.store(get_top_on_wake_value(&db), Ordering::SeqCst);
+
+    // 退出固定模式时贴边逻辑随之停用，遗留的置顶要一并撤销
+    if !fixed {
+        let _ = window.set_always_on_top(false);
+    }
 
     let restore_position = with_auto_hide_state(|state| {
         if fixed {
@@ -777,7 +900,152 @@ pub fn set_auto_hide_enabled(
         }
     }
 
+    // 关掉贴边隐藏时，唤起态遗留的置顶必须撤销，否则窗口会一直压在其它窗口之上
+    if !enabled {
+        if let Some(main_window) = app_handle.get_webview_window("main") {
+            let _ = main_window.set_always_on_top(false);
+        }
+    }
+
     Ok(())
+}
+
+#[tauri::command]
+pub fn get_top_on_wake(db: State<Database>) -> Result<bool, String> {
+    Ok(get_top_on_wake_value(&db))
+}
+
+#[tauri::command]
+pub fn set_top_on_wake(
+    app_handle: tauri::AppHandle,
+    db: State<Database>,
+    enabled: bool,
+) -> Result<(), String> {
+    db.with_connection(|conn| {
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('top_on_wake', ?, datetime('now', 'localtime'))",
+            [if enabled { "true" } else { "false" }],
+        )?;
+        Ok(())
+    })
+    .map_err(|e| e.to_string())?;
+
+    TOP_ON_WAKE.store(enabled, Ordering::SeqCst);
+
+    // 关闭时立刻撤销当前置顶，不必等窗口下一次收回
+    if !enabled {
+        if let Some(main_window) = app_handle.get_webview_window("main") {
+            let _ = main_window.set_always_on_top(false);
+        }
+    }
+
+    Ok(())
+}
+
+/// 窗口底色与背景透明度（仅深色主题下生效）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowBackground {
+    pub color: String,
+    pub alpha: f64,
+}
+
+#[tauri::command]
+pub fn get_window_background(db: State<Database>) -> Result<WindowBackground, String> {
+    db.with_connection(|conn| {
+        let color: String = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'window_bg_color'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or_else(|_| DEFAULT_WINDOW_BG_COLOR.to_string());
+        let alpha: f64 = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'window_bg_alpha'",
+                [],
+                |row| {
+                    let val: String = row.get(0)?;
+                    Ok(val.parse::<f64>().unwrap_or(DEFAULT_WINDOW_BG_ALPHA))
+                },
+            )
+            .unwrap_or(DEFAULT_WINDOW_BG_ALPHA);
+        Ok(WindowBackground { color, alpha })
+    })
+    .map_err(|e| e.to_string())
+}
+
+/// 单独保存窗口底色与透明度
+///
+/// 供设置窗口调用：只写这两个键，不走 saveWindowState，
+/// 否则会把设置窗口的几何信息与 is_fixed 误存为主窗口状态
+#[tauri::command]
+pub fn set_window_background(
+    db: State<Database>,
+    color: String,
+    alpha: f64,
+) -> Result<(), String> {
+    let alpha = alpha.clamp(0.0, 1.0);
+    db.with_connection(|conn| {
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('window_bg_color', ?, datetime('now', 'localtime'))",
+            [&color],
+        )?;
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('window_bg_alpha', ?, datetime('now', 'localtime'))",
+            [&alpha.to_string()],
+        )?;
+        Ok(())
+    })
+    .map_err(|e| e.to_string())
+}
+
+/// 显示并置顶主窗口（托盘双击 / 单击）
+///
+/// 固定模式下窗口是 `WS_EX_TOOLWINDOW`，既不在任务栏也不参与 Alt+Tab，
+/// 单纯 `set_focus` 无法把它从全屏窗口后面拉出来，所以要过一次 topmost。
+/// 置顶只是"抬到最前"的手段，随后撤销，除非贴边唤起态本就需要保持置顶。
+pub fn bring_main_window_to_front(app: &tauri::AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+
+    // 贴边隐藏中：先拉回锚点，否则"叫回窗口"只会露出边缘那几个像素。
+    // 同时给一段免隐藏宽限期，不然鼠标还没移过去窗口就缩回去了。
+    let anchor = with_auto_hide_state(|state| {
+        if !state.enabled {
+            return None;
+        }
+        state.keep_visible_until = Some(Instant::now() + TRAY_WAKE_KEEP_VISIBLE);
+        state.edge_stick_started_at = None;
+        if state.hidden {
+            state.hidden = false;
+            state.anchor_position.clone()
+        } else {
+            None
+        }
+    });
+    if let Some(anchor) = anchor {
+        let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
+            x: anchor.x,
+            y: anchor.y,
+        }));
+    }
+
+    let _ = window.unminimize();
+    let _ = window.show();
+    let _ = window.set_always_on_top(true);
+    let _ = window.set_focus();
+
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(TRAY_WAKE_TOPMOST_DURATION);
+        if !should_stay_on_top() {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_always_on_top(false);
+            }
+        }
+    });
 }
 
 /// 读取主窗口的位置与尺寸
@@ -829,6 +1097,10 @@ pub fn reset_webview_window(window: WebviewWindow) -> Result<(), String> {
 fn reset_window_impl<T: tauri::Runtime>(window: &impl WindowExt<T>) -> Result<(), String> {
     clear_auto_hide_runtime_state();
 
+    // 置顶只在 tick_auto_hide 的 Hide 分支撤销。这里刚把 docked_edge / hidden 清空，
+    // 若窗口正处于唤起置顶态，Hide 分支再也不会触发，置顶就永久留下了。
+    let _ = window.set_always_on_top(false);
+
     // 重置到屏幕左上角（10%边距），默认大小 380x600
     let default_width = 380.0;
     let default_height = 600.0;
@@ -868,6 +1140,7 @@ trait WindowExt<R: tauri::Runtime> {
     fn set_position(&self, position: tauri::Position) -> tauri::Result<()>;
     fn set_size(&self, size: tauri::Size) -> tauri::Result<()>;
     fn set_resizable(&self, resizable: bool) -> tauri::Result<()>;
+    fn set_always_on_top(&self, always_on_top: bool) -> tauri::Result<()>;
 }
 
 impl<R: tauri::Runtime> WindowExt<R> for Window<R> {
@@ -883,6 +1156,9 @@ impl<R: tauri::Runtime> WindowExt<R> for Window<R> {
     fn set_resizable(&self, resizable: bool) -> tauri::Result<()> {
         Window::set_resizable(self, resizable)
     }
+    fn set_always_on_top(&self, always_on_top: bool) -> tauri::Result<()> {
+        Window::set_always_on_top(self, always_on_top)
+    }
 }
 
 impl<R: tauri::Runtime> WindowExt<R> for WebviewWindow<R> {
@@ -897,6 +1173,9 @@ impl<R: tauri::Runtime> WindowExt<R> for WebviewWindow<R> {
     }
     fn set_resizable(&self, resizable: bool) -> tauri::Result<()> {
         WebviewWindow::set_resizable(self, resizable)
+    }
+    fn set_always_on_top(&self, always_on_top: bool) -> tauri::Result<()> {
+        WebviewWindow::set_always_on_top(self, always_on_top)
     }
 }
 
@@ -1087,4 +1366,118 @@ pub fn set_show_calendar(db: State<Database>, show: bool) -> Result<(), String> 
         Ok(())
     })
     .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MONITOR: MonitorBounds = MonitorBounds {
+        x: 0,
+        y: 0,
+        width: 1920,
+        height: 1080,
+    };
+
+    /// 贴在屏幕顶部的窗口
+    const DOCKED_RECT: WindowRect = WindowRect {
+        x: 100,
+        y: 0,
+        width: 380,
+        height: 600,
+    };
+
+    /// 远离窗口的光标位置
+    const CURSOR_OUTSIDE: Option<(i32, i32)> = Some((1500, 900));
+
+    fn docked_state(now: Instant) -> AutoHideState {
+        AutoHideState {
+            enabled: true,
+            docked_edge: Some(DockEdge::Top),
+            // 贴边计时早已超过 EDGE_HIDE_DELAY
+            edge_stick_started_at: Some(now - EDGE_HIDE_DELAY - Duration::from_millis(100)),
+            ..AutoHideState::default()
+        }
+    }
+
+    #[test]
+    fn hides_after_edge_delay_when_cursor_is_away() {
+        let now = Instant::now();
+        let mut state = docked_state(now);
+
+        let transition =
+            evaluate_auto_hide_transition(&mut state, DOCKED_RECT, MONITOR, CURSOR_OUTSIDE, now);
+
+        assert!(matches!(transition, AutoHideTransition::Hide { .. }));
+        assert!(state.hidden);
+    }
+
+    #[test]
+    fn keep_visible_window_blocks_hiding() {
+        let now = Instant::now();
+        let mut state = docked_state(now);
+        state.keep_visible_until = Some(now + Duration::from_secs(3));
+
+        let transition =
+            evaluate_auto_hide_transition(&mut state, DOCKED_RECT, MONITOR, CURSOR_OUTSIDE, now);
+
+        assert!(matches!(transition, AutoHideTransition::None));
+        assert!(!state.hidden, "托盘唤起的宽限期内不应隐藏");
+    }
+
+    #[test]
+    fn hides_once_keep_visible_window_expires() {
+        let now = Instant::now();
+        let mut state = docked_state(now);
+        state.keep_visible_until = Some(now - Duration::from_millis(1));
+
+        let transition =
+            evaluate_auto_hide_transition(&mut state, DOCKED_RECT, MONITOR, CURSOR_OUTSIDE, now);
+
+        assert!(matches!(transition, AutoHideTransition::Hide { .. }));
+        assert!(state.hidden);
+        assert!(state.keep_visible_until.is_none(), "过期后应清掉宽限期");
+    }
+
+    #[test]
+    fn cursor_entering_window_clears_keep_visible() {
+        let now = Instant::now();
+        let mut state = docked_state(now);
+        state.keep_visible_until = Some(now + Duration::from_secs(3));
+
+        // 光标落在窗口内
+        let transition =
+            evaluate_auto_hide_transition(&mut state, DOCKED_RECT, MONITOR, Some((200, 100)), now);
+
+        assert!(matches!(transition, AutoHideTransition::None));
+        assert!(!state.hidden);
+        assert!(
+            state.keep_visible_until.is_none(),
+            "鼠标已接管，宽限期该让位给正常的 cursor_inside 逻辑"
+        );
+    }
+
+    #[test]
+    fn hidden_window_restores_when_cursor_hits_wake_hotzone() {
+        let now = Instant::now();
+        let mut state = AutoHideState {
+            enabled: true,
+            hidden: true,
+            docked_edge: Some(DockEdge::Top),
+            monitor_bounds: Some(MONITOR),
+            anchor_position: Some(WindowPosition { x: 100, y: 0 }),
+            anchor_size: Some(WindowSize {
+                width: 380,
+                height: 600,
+            }),
+            ..AutoHideState::default()
+        };
+
+        // 光标顶到屏幕上边缘、且在窗口水平范围内
+        let transition =
+            evaluate_auto_hide_transition(&mut state, DOCKED_RECT, MONITOR, Some((200, 0)), now);
+
+        assert!(matches!(transition, AutoHideTransition::Restore { .. }));
+        assert!(!state.hidden);
+    }
 }

@@ -17,15 +17,18 @@ const DOUBLE_CLICK_THRESHOLD_MS: u64 = 500;
 use commands::{
     close_all_notification_windows, close_notification_window, create_subtask, create_todo,
     delete_screen_config, delete_subtask, delete_todo, export_data, export_data_to_file,
-    fetch_holidays, get_auto_hide_enabled, get_images_dir, get_notification_type,
+    fetch_holidays, get_auto_hide_enabled, get_images_dir, get_notification_type, get_top_on_wake,
     get_screen_config, get_settings, get_show_calendar, get_subtask, get_sync_settings,
     get_system_fonts, get_text_theme, get_todo_font_family, get_todo_font_size, get_todos,
-    get_window_persist_state, import_data, import_data_from_file, import_subtasks_from_paths,
-    is_fixed_mode, list_screen_configs, reorder_todos, reset_window, save_screen_config,
+    get_window_background, get_window_persist_state, import_data, import_data_from_file,
+    import_subtasks_from_paths,
+    is_fixed_mode, list_screen_configs, reorder_subtasks, reorder_todos, reset_window,
+    save_screen_config,
     save_settings, save_subtask_image, save_sync_settings, set_auto_hide_cursor_inside,
-    set_auto_hide_enabled, set_notification_type, set_show_calendar, set_text_theme,
+    set_auto_hide_enabled, set_notification_type, set_show_calendar, set_text_theme, set_top_on_wake,
     set_todo_font_family,
-    set_todo_font_size, set_window_fixed_mode, update_screen_config_name, update_subtask,
+    set_todo_font_size, set_window_background, set_window_fixed_mode, update_screen_config_name,
+    update_subtask,
     update_todo, webdav_apply_remote, webdav_auto_sync, webdav_download_sync,
     webdav_test_connection, webdav_upload_sync,
 };
@@ -83,6 +86,9 @@ pub fn run() {
         ))
         .manage(database)
         .setup(|app| {
+            // 轮询线程拿不到 State<Database>，启动时先把 top_on_wake 灌进原子缓存
+            commands::init_top_on_wake(&app.state::<Database>());
+
             #[cfg(target_os = "windows")]
             {
                 if let Some(window) = app.get_webview_window("main") {
@@ -209,19 +215,15 @@ pub fn run() {
 
                         // 检测双击
                         if now - last_click < DOUBLE_CLICK_THRESHOLD_MS {
-                            // 双击：打开添加待办窗口
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.emit::<()>("tray-add-todo", ());
-                            }
+                            // 双击：把主窗口显示并抬到最前（issue #10）
+                            // 固定模式下窗口不在任务栏，托盘是唯一入口，"叫回窗口"比"新建待办"更常用；
+                            // 新建待办仍保留在托盘右键菜单里
+                            commands::bring_main_window_to_front(app);
                             // 重置时间避免连续触发
                             LAST_CLICK_TIME.store(0, Ordering::SeqCst);
                         } else {
                             // 单击：显示/聚焦主窗口
-                            if let Some(webview_window) = app.get_webview_window("main") {
-                                let _ = webview_window.unminimize();
-                                let _ = webview_window.show();
-                                let _ = webview_window.set_focus();
-                            }
+                            commands::bring_main_window_to_front(app);
                         }
                     }
                 })
@@ -261,6 +263,7 @@ pub fn run() {
             update_todo,
             delete_todo,
             reorder_todos,
+            reorder_subtasks,
             // 子任务命令
             create_subtask,
             update_subtask,
@@ -278,6 +281,10 @@ pub fn run() {
             set_window_fixed_mode,
             get_auto_hide_enabled,
             set_auto_hide_enabled,
+            get_top_on_wake,
+            set_top_on_wake,
+            get_window_background,
+            set_window_background,
             set_auto_hide_cursor_inside,
             get_window_persist_state,
             reset_window,

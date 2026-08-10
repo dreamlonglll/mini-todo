@@ -13,12 +13,36 @@ export interface WindowSize {
 // 文本主题类型
 export type TextTheme = 'light' | 'dark'
 
+// 窗口底色默认值
+//
+// 与 Rust 侧 db/models.rs 的 DEFAULT_WINDOW_BG_COLOR / DEFAULT_WINDOW_BG_ALPHA
+// 以及 main.scss 的 :root 回落值保持一致。alpha 取 0.45 是因为抽成可配置之前，
+// 深色主题是多层半透明黑叠加，合成不透明度约为此值。
+export const DEFAULT_BG_COLOR = '#000000'
+export const DEFAULT_BG_ALPHA = 0.45
+
+// 底色预设：深色系为主，浅色底在深色主题下会让白字不可读
+export const PRESET_BG_COLORS = [
+  { name: '黑色', value: '#000000' },
+  { name: '深灰', value: '#1E293B' },
+  { name: '深蓝', value: '#0F2942' },
+  { name: '深紫', value: '#2E1065' },
+  { name: '深绿', value: '#052E24' },
+  { name: '深棕', value: '#2B1A0F' },
+] as const
+
 // 应用设置接口
 export interface AppSettings {
   windowPosition: WindowPosition | null
   windowSize: WindowSize | null
   isFixed: boolean
   autoHideEnabled: boolean
+  /** 贴边唤起时是否临时置顶（关闭后窗口会被全屏窗口遮挡） */
+  topOnWake: boolean
+  /** 窗口底色（HEX），仅深色主题下生效 */
+  windowBgColor: string
+  /** 窗口背景透明度 0~1，仅深色主题下生效 */
+  windowBgAlpha: number
   /** 文本主题：light（浅色文字，适配深色背景）或 dark（深色文字，适配浅色背景）*/
   textTheme: TextTheme
 }
@@ -36,7 +60,9 @@ export type WindowMode = 'normal' | 'fixed'
 export type AppSettingKey =
   | 'showCalendar'
   | 'autoHide'
+  | 'topOnWake'
   | 'theme'
+  | 'windowBackground'
   | 'sync'
   | 'update'
 

@@ -219,6 +219,23 @@ pub fn reorder_todos(db: State<Database>, ids: Vec<i64>) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
+/// 按传入顺序重排子任务
+///
+/// 与 `reorder_todos` 同构：数组下标即 sort_order，查询侧统一 `ORDER BY sort_order ASC`。
+#[tauri::command]
+pub fn reorder_subtasks(db: State<Database>, ids: Vec<i64>) -> Result<(), String> {
+    db.with_connection(|conn| {
+        for (index, id) in ids.iter().enumerate() {
+            conn.execute(
+                "UPDATE subtasks SET sort_order = ?, updated_at = datetime('now', 'localtime') WHERE id = ?",
+                (index as i32, id),
+            )?;
+        }
+        Ok(())
+    })
+    .map_err(|e| e.to_string())
+}
+
 // 子任务操作
 #[tauri::command]
 pub fn create_subtask(db: State<Database>, data: CreateSubTaskRequest) -> Result<SubTask, String> {
