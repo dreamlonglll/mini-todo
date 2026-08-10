@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 8
-- **Last Active**: 2026-08-09
+- **Total Sessions**: 9
+- **Last Active**: 2026-08-10
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~279 | Active |
+| `journal-1.md` | ~312 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 9 | 2026-08-10 | 修复设置界面开关与主窗口表现不一致 | `c665551` | `main` |
 | 8 | 2026-08-09 | 任务台账清理：归档全部 8 个历史任务 | - | `main` |
 | 7 | 2026-08-09 | 待办描述 Markdown 化 + 只读详情模式 + 发布 2.2.0 | `9b7b56c`, `1c68436` | `main` |
 | 6 | 2026-05-13 | cloud-api-and-skill: 3-PR cloud REST + Skill + PC race fix | `87639f4`, `605f3e2`, `64e3d88`, `2a13fa9`, `efca93c`, `e75cd7a`, `d0d56af` | `main` |

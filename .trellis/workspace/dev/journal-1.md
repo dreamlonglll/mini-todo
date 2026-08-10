@@ -277,3 +277,36 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 9: 修复设置界面开关与主窗口表现不一致
+
+**Date**: 2026-08-10
+**Task**: 修复设置界面开关与主窗口表现不一致
+**Branch**: `main`
+
+### Summary
+
+定位根因为设置窗口作为独立 WebView 持有自己的 Pinia store 副本：读侧未加载真值、写侧不通知主窗口，且 get_window_persist_state 按调用方窗口取值导致设置窗口几何被误存为主窗口状态（连带清空 is_fixed）。修复方式：两个窗口级 Tauri 命令改为固定取 main 窗口，新增 set_text_theme 窄命令替代 saveWindowState，applyThemeClass 加主窗口守卫；新增 app-settings-changed 跨窗口事件并把 key 抽为 AppSettingKey 类型（拼错即 TS2678）。排查全部设置项后另修 3 处同类问题：自动同步定时器不重建、数据导入/云端应用后不重载设置、检查更新红点不同步。质量检查阶段自查再修 3 处：事件 key 字面量重复、setShowCalendar 缺失回滚、Rust 读取逻辑重复。spec 沉淀 2 条 Common Mistake
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `c665551` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
