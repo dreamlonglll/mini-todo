@@ -5,6 +5,11 @@
  * CSS 变量存分量而非完整颜色，alpha 才能独立调节。
  * 非法输入回落到黑色，避免写出 `rgba(, 0.5)` 这种无效值。
  */
+/** HEX 颜色比较：取色器可能写回小写，预设色是大写 */
+export function isSameColor(a: string, b: string): boolean {
+  return a.trim().toLowerCase() === b.trim().toLowerCase()
+}
+
 export function hexToRgbChannels(hex: string): string {
   const normalized = hex.trim().replace(/^#/, '')
   const full =

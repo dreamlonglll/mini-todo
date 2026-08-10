@@ -13,9 +13,10 @@
   --bg-tertiary: #F1F5F9;
 
   // 窗口底色与透明度（设置面板可调，仅深色主题下生效）
-  // 拆成 RGB 分量而非完整颜色，是为了让 alpha 能独立调节：rgba(var(--app-bg-rgb), var(--app-bg-alpha))
+  // 拆成 RGB 分量而非完整颜色，是为了让 alpha 能独立调节：rgba(var(--app-bg-rgb, 0, 0, 0), var(--app-bg-alpha, 0.45))
+  // 默认值与 db/models.rs、types/app.ts 保持一致
   --app-bg-rgb: 0, 0, 0;
-  --app-bg-alpha: 0.15;
+  --app-bg-alpha: 0.45;
 
   // 文字色
   --text-primary: #1E293B;
@@ -113,8 +114,8 @@ html, body {
 
 // 深色主题下覆盖 CSS 变量
 body.dark-theme {
-  --bg-primary: rgba(var(--app-bg-rgb), var(--app-bg-alpha));
-  --bg-secondary: rgba(var(--app-bg-rgb), var(--app-bg-alpha));
+  --bg-primary: rgba(var(--app-bg-rgb, 0, 0, 0), var(--app-bg-alpha, 0.45));
+  --bg-secondary: rgba(var(--app-bg-rgb, 0, 0, 0), var(--app-bg-alpha, 0.45));
   --bg-tertiary: rgba(255, 255, 255, 0.1);
   --shadow-sm: none;
   --shadow-base: none;
@@ -125,8 +126,8 @@ body.dark-theme {
 }
 
 body.dark-theme #app {
-  background: rgba(var(--app-bg-rgb), var(--app-bg-alpha)) !important;
-  background-color: rgba(var(--app-bg-rgb), var(--app-bg-alpha)) !important;
+  background: rgba(var(--app-bg-rgb, 0, 0, 0), var(--app-bg-alpha, 0.45)) !important;
+  background-color: rgba(var(--app-bg-rgb, 0, 0, 0), var(--app-bg-alpha, 0.45)) !important;
 }
 
 body.dark-theme #app .app-container,
@@ -223,15 +224,15 @@ body {
 
 // macOS 深色主题：对齐 Windows 的半透明灰度，在透出桌面的同时提升可读性。
 body.platform-macos.dark-theme {
-  --bg-primary: rgba(var(--app-bg-rgb), var(--app-bg-alpha));
-  --bg-secondary: rgba(var(--app-bg-rgb), var(--app-bg-alpha));
+  --bg-primary: rgba(var(--app-bg-rgb, 0, 0, 0), var(--app-bg-alpha, 0.45));
+  --bg-secondary: rgba(var(--app-bg-rgb, 0, 0, 0), var(--app-bg-alpha, 0.45));
   --bg-tertiary: rgba(255, 255, 255, 0.12);
   background: transparent !important;
 }
 
 body.platform-macos.dark-theme #app {
-  background: rgba(var(--app-bg-rgb), var(--app-bg-alpha)) !important;
-  background-color: rgba(var(--app-bg-rgb), var(--app-bg-alpha)) !important;
+  background: rgba(var(--app-bg-rgb, 0, 0, 0), var(--app-bg-alpha, 0.45)) !important;
+  background-color: rgba(var(--app-bg-rgb, 0, 0, 0), var(--app-bg-alpha, 0.45)) !important;
 }
 
 body.platform-macos.dark-theme #app .app-container,

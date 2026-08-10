@@ -153,16 +153,17 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
 
 /// 迁移 v26：新增 `window_bg_color` / `window_bg_alpha` settings key。
 ///
-/// 窗口底色与背景透明度（issue #9 第 4 点）。默认值即改动前深色主题的硬编码值
-/// （黑色 + 0.15），保证老用户升级后外观不变。仅深色主题下生效，浅色主题是不透明白底。
+/// 窗口底色与背景透明度（issue #9 第 4 点）。默认值取自 `models.rs` 的常量，
+/// 等价于改为可配置之前深色主题多层半透明黑的合成观感，保证老用户升级后外观不变。
+/// 仅深色主题下生效，浅色主题是不透明白底。
 fn migration_v26(conn: &Connection) -> Result<()> {
     conn.execute(
-        "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES ('window_bg_color', '#000000', datetime('now', 'localtime'))",
-        [],
+        "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES ('window_bg_color', ?1, datetime('now', 'localtime'))",
+        [crate::db::models::DEFAULT_WINDOW_BG_COLOR],
     )?;
     conn.execute(
-        "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES ('window_bg_alpha', '0.15', datetime('now', 'localtime'))",
-        [],
+        "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES ('window_bg_alpha', ?1, datetime('now', 'localtime'))",
+        [crate::db::models::DEFAULT_WINDOW_BG_ALPHA.to_string()],
     )?;
     Ok(())
 }

@@ -1,14 +1,10 @@
 import { QUADRANT_INFO, DEFAULT_COLOR } from '@/types'
 import type { QuadrantType } from '@/types'
+import { isSameColor } from './color'
 
 /** 象限对应的默认颜色 */
 export function getQuadrantColor(quadrant: QuadrantType): string {
   return QUADRANT_INFO.find(q => q.id === quadrant)?.color ?? DEFAULT_COLOR
-}
-
-/** HEX 颜色比较：取色器可能写回小写，预设色是大写 */
-function isSameColor(a: string, b: string): boolean {
-  return a.trim().toLowerCase() === b.trim().toLowerCase()
 }
 
 /**

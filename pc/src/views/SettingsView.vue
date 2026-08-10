@@ -11,6 +11,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAppStore, APP_VERSION } from '@/stores'
 import type { AppSettingKey, ScreenConfig, SyncSettings, SyncDownloadResult } from '@/types'
 import { PRESET_BG_COLORS, DEFAULT_BG_COLOR } from '@/types'
+import { isSameColor } from '@/utils/color'
 
 const appWindow = getCurrentWindow()
 const appStore = useAppStore()
@@ -114,10 +115,6 @@ async function handleAutoHideChange(val: boolean) {
 async function handleTopOnWakeChange(val: boolean) {
   await appStore.setTopOnWake(val)
   await notifyAppSettingChanged('topOnWake')
-}
-
-function isSameBgColor(a: string, b: string) {
-  return a.trim().toLowerCase() === b.trim().toLowerCase()
 }
 
 async function handleBgColorChange(color: string) {
@@ -622,7 +619,7 @@ async function handleCheckUpdate() {
                 v-for="preset in PRESET_BG_COLORS"
                 :key="preset.value"
                 class="bg-preset-btn"
-                :class="{ active: isSameBgColor(windowBgColor, preset.value) }"
+                :class="{ active: isSameColor(windowBgColor, preset.value) }"
                 :style="{ backgroundColor: preset.value }"
                 :title="preset.name"
                 :disabled="!appStore.isDarkTheme"

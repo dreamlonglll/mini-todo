@@ -1,6 +1,6 @@
 use crate::db::{
     subtask_from_row, todo_from_row, AppSettings, Database, ExportData, Todo, WindowPosition,
-    WindowSize, SUBTASK_COLUMNS, TODO_COLUMNS,
+    WindowSize, DEFAULT_WINDOW_BG_ALPHA, DEFAULT_WINDOW_BG_COLOR, SUBTASK_COLUMNS, TODO_COLUMNS,
 };
 use chrono::Local;
 use rusqlite::params;
@@ -49,10 +49,10 @@ fn read_app_settings(conn: &rusqlite::Connection) -> AppSettings {
     let text_theme = get_setting_string(conn, "text_theme", "dark");
     let auto_hide_enabled = get_setting_bool(conn, "auto_hide_enabled", true);
     let top_on_wake = get_setting_bool(conn, "top_on_wake", true);
-    let window_bg_color = get_setting_string(conn, "window_bg_color", "#000000");
-    let window_bg_alpha = get_setting_string(conn, "window_bg_alpha", "0.15")
+    let window_bg_color = get_setting_string(conn, "window_bg_color", DEFAULT_WINDOW_BG_COLOR);
+    let window_bg_alpha = get_setting_string(conn, "window_bg_alpha", "")
         .parse::<f64>()
-        .unwrap_or(0.15);
+        .unwrap_or(DEFAULT_WINDOW_BG_ALPHA);
     let show_calendar = get_setting_bool(conn, "show_calendar", false);
     let view_mode = get_setting_string(conn, "view_mode", "list");
     let notification_type = get_setting_string(conn, "notification_type", "system");

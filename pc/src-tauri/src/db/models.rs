@@ -236,12 +236,21 @@ fn default_top_on_wake() -> bool {
     true
 }
 
+/// 窗口底色默认值
+pub const DEFAULT_WINDOW_BG_COLOR: &str = "#000000";
+
+/// 窗口背景透明度默认值
+///
+/// 抽成可配置之前，深色主题是 html/body/#app/.app-container/.main-content 多层
+/// 半透明黑叠加，合成不透明度约 0.45；重构成单层后要用这个值才能维持原有观感。
+pub const DEFAULT_WINDOW_BG_ALPHA: f64 = 0.45;
+
 fn default_window_bg_color() -> String {
-    "#000000".to_string()
+    DEFAULT_WINDOW_BG_COLOR.to_string()
 }
 
 fn default_window_bg_alpha() -> f64 {
-    0.15
+    DEFAULT_WINDOW_BG_ALPHA
 }
 
 fn default_view_mode() -> String {

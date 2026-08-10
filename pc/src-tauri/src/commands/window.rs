@@ -1,5 +1,6 @@
 use crate::db::{
     AppSettings, Database, SaveScreenConfigRequest, ScreenConfig, WindowPosition, WindowSize,
+    DEFAULT_WINDOW_BG_ALPHA, DEFAULT_WINDOW_BG_COLOR,
 };
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -109,6 +110,10 @@ const EDGE_HIDE_DELAY: Duration = Duration::from_millis(420);
 /// 没有它的话，鼠标不在窗口范围内，窗口会在 `EDGE_HIDE_DELAY` 后立刻缩回去，
 /// 用户刚点完托盘就看它消失。宽限期内足够把鼠标移过去接管。
 const TRAY_WAKE_KEEP_VISIBLE: Duration = Duration::from_secs(3);
+/// 托盘唤起时临时置顶的持续时间
+///
+/// 置顶只是把窗口抬到最前的手段，到点就撤销——除非贴边唤起态本就需要保持置顶。
+const TRAY_WAKE_TOPMOST_DURATION: Duration = Duration::from_millis(600);
 const HIDDEN_VISIBLE_STRIP_PX: i32 = 4;
 const WAKE_HOTZONE_WIDTH_PX: i32 = 2;
 const WAKE_RANGE_PADDING_PX: i32 = 40;
@@ -613,7 +618,7 @@ pub fn get_settings(db: State<Database>) -> Result<AppSettings, String> {
                 [],
                 |row| row.get(0),
             )
-            .unwrap_or_else(|_| "#000000".to_string());
+            .unwrap_or_else(|_| DEFAULT_WINDOW_BG_COLOR.to_string());
 
         let window_bg_alpha: f64 = conn
             .query_row(
@@ -621,10 +626,10 @@ pub fn get_settings(db: State<Database>) -> Result<AppSettings, String> {
                 [],
                 |row| {
                     let val: String = row.get(0)?;
-                    Ok(val.parse::<f64>().unwrap_or(0.15))
+                    Ok(val.parse::<f64>().unwrap_or(DEFAULT_WINDOW_BG_ALPHA))
                 },
             )
-            .unwrap_or(0.15);
+            .unwrap_or(DEFAULT_WINDOW_BG_ALPHA);
 
         let text_theme = get_text_theme_value(conn);
 
@@ -954,17 +959,17 @@ pub fn get_window_background(db: State<Database>) -> Result<WindowBackground, St
                 [],
                 |row| row.get(0),
             )
-            .unwrap_or_else(|_| "#000000".to_string());
+            .unwrap_or_else(|_| DEFAULT_WINDOW_BG_COLOR.to_string());
         let alpha: f64 = conn
             .query_row(
                 "SELECT value FROM settings WHERE key = 'window_bg_alpha'",
                 [],
                 |row| {
                     let val: String = row.get(0)?;
-                    Ok(val.parse::<f64>().unwrap_or(0.15))
+                    Ok(val.parse::<f64>().unwrap_or(DEFAULT_WINDOW_BG_ALPHA))
                 },
             )
-            .unwrap_or(0.15);
+            .unwrap_or(DEFAULT_WINDOW_BG_ALPHA);
         Ok(WindowBackground { color, alpha })
     })
     .map_err(|e| e.to_string())
@@ -1034,7 +1039,7 @@ pub fn bring_main_window_to_front(app: &tauri::AppHandle) {
 
     let app = app.clone();
     std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(600));
+        std::thread::sleep(TRAY_WAKE_TOPMOST_DURATION);
         if !should_stay_on_top() {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_always_on_top(false);
@@ -1092,6 +1097,10 @@ pub fn reset_webview_window(window: WebviewWindow) -> Result<(), String> {
 fn reset_window_impl<T: tauri::Runtime>(window: &impl WindowExt<T>) -> Result<(), String> {
     clear_auto_hide_runtime_state();
 
+    // 置顶只在 tick_auto_hide 的 Hide 分支撤销。这里刚把 docked_edge / hidden 清空，
+    // 若窗口正处于唤起置顶态，Hide 分支再也不会触发，置顶就永久留下了。
+    let _ = window.set_always_on_top(false);
+
     // 重置到屏幕左上角（10%边距），默认大小 380x600
     let default_width = 380.0;
     let default_height = 600.0;
@@ -1131,6 +1140,7 @@ trait WindowExt<R: tauri::Runtime> {
     fn set_position(&self, position: tauri::Position) -> tauri::Result<()>;
     fn set_size(&self, size: tauri::Size) -> tauri::Result<()>;
     fn set_resizable(&self, resizable: bool) -> tauri::Result<()>;
+    fn set_always_on_top(&self, always_on_top: bool) -> tauri::Result<()>;
 }
 
 impl<R: tauri::Runtime> WindowExt<R> for Window<R> {
@@ -1146,6 +1156,9 @@ impl<R: tauri::Runtime> WindowExt<R> for Window<R> {
     fn set_resizable(&self, resizable: bool) -> tauri::Result<()> {
         Window::set_resizable(self, resizable)
     }
+    fn set_always_on_top(&self, always_on_top: bool) -> tauri::Result<()> {
+        Window::set_always_on_top(self, always_on_top)
+    }
 }
 
 impl<R: tauri::Runtime> WindowExt<R> for WebviewWindow<R> {
@@ -1160,6 +1173,9 @@ impl<R: tauri::Runtime> WindowExt<R> for WebviewWindow<R> {
     }
     fn set_resizable(&self, resizable: bool) -> tauri::Result<()> {
         WebviewWindow::set_resizable(self, resizable)
+    }
+    fn set_always_on_top(&self, always_on_top: bool) -> tauri::Result<()> {
+        WebviewWindow::set_always_on_top(self, always_on_top)
     }
 }
 

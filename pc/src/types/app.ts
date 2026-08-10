@@ -13,9 +13,13 @@ export interface WindowSize {
 // 文本主题类型
 export type TextTheme = 'light' | 'dark'
 
-// 窗口底色默认值（等于改为可配置前深色主题的硬编码值）
+// 窗口底色默认值
+//
+// 与 Rust 侧 db/models.rs 的 DEFAULT_WINDOW_BG_COLOR / DEFAULT_WINDOW_BG_ALPHA
+// 以及 main.scss 的 :root 回落值保持一致。alpha 取 0.45 是因为抽成可配置之前，
+// 深色主题是多层半透明黑叠加，合成不透明度约为此值。
 export const DEFAULT_BG_COLOR = '#000000'
-export const DEFAULT_BG_ALPHA = 0.15
+export const DEFAULT_BG_ALPHA = 0.45
 
 // 底色预设：深色系为主，浅色底在深色主题下会让白字不可读
 export const PRESET_BG_COLORS = [
