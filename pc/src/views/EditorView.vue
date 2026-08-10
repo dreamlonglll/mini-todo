@@ -10,6 +10,7 @@ import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import type { Todo, CreateTodoRequest, UpdateTodoRequest, CreateSubTaskRequest, QuadrantType } from '@/types'
 import { DEFAULT_COLOR, PRESET_COLORS, QUADRANT_INFO, DEFAULT_QUADRANT } from '@/types'
 import { resolveQuadrantColor } from '@/utils/quadrant'
+import draggable from 'vuedraggable'
 import MarkdownEditor from '@/components/MarkdownEditor.vue'
 
 const route = useRoute()
@@ -138,15 +139,27 @@ const isEdit = computed(() => todoId.value !== null)
 // 当前待办的子任务列表（编辑模式从服务器加载）
 const subtasks = computed(() => todo.value?.subtasks || [])
 
-// 当前显示的子任务列表（根据编辑模式决定，未完成的置顶）
-const currentSubtaskList = computed(() => {
-  const list = isEdit.value ? subtasks.value : pendingSubtasks.value
-  // 未完成的排在前面，已完成的排在后面
-  return [...list].sort((a, b) => {
-    if (a.completed === b.completed) return 0
-    return a.completed ? 1 : -1
-  })
-})
+// 当前显示的子任务列表（根据编辑模式决定）
+//
+// 纯手工顺序：不按完成状态重排，勾选完成后条目留在原位，拖拽结果即最终顺序。
+// 返回的是原数组引用而非拷贝，vuedraggable 的 :list 才能原地重排。
+const currentSubtaskList = computed(() =>
+  isEdit.value ? subtasks.value : pendingSubtasks.value
+)
+
+// 拖拽结束后落库新顺序（新建模式下顺序就是数组顺序，保存时按序创建）
+async function onSubtaskDragEnd() {
+  if (!isEdit.value) return
+  const ids = currentSubtaskList.value.map(s => s.id)
+  if (ids.length === 0) return
+  try {
+    await invoke('reorder_subtasks', { ids })
+  } catch (e) {
+    console.error('Failed to reorder subtasks:', e)
+    // 落库失败时本地顺序已经变了，重新拉一次让两边一致
+    await loadTodo()
+  }
+}
 
 // 已完成的子任务数量
 const completedSubtaskCount = computed(() => {
@@ -1164,14 +1177,24 @@ function onHeaderMouseDown(e: MouseEvent) {
 
           <!-- 子任务列表 -->
           <div v-if="currentSubtaskList.length > 0" class="subtask-list-editor">
-            <transition-group name="subtask-list" tag="div">
-              <div 
-                v-for="subtask in currentSubtaskList" 
-                :key="subtask.id" 
+            <draggable
+              :list="currentSubtaskList"
+              item-key="id"
+              handle=".subtask-drag-handle"
+              ghost-class="dragging"
+              :animation="200"
+              :force-fallback="true"
+              @end="onSubtaskDragEnd"
+            >
+              <template #item="{ element: subtask }">
+              <div
                 class="subtask-item-editor"
                 :class="{ completed: subtask.completed }"
               >
-                <div 
+                <el-icon class="subtask-drag-handle" :size="14" title="拖拽排序">
+                  <Rank />
+                </el-icon>
+                <div
                   class="custom-checkbox"
                   :class="{ checked: subtask.completed }"
                   @click="isEdit ? toggleSubtask(subtask.id) : togglePendingSubtask(subtask.id)"
@@ -1216,7 +1239,7 @@ function onHeaderMouseDown(e: MouseEvent) {
                   >
                     <el-icon><Edit /></el-icon>
                   </button>
-                  <button 
+                  <button
                     class="action-btn delete-btn"
                     title="删除子任务"
                     @click="deleteSubtask(subtask.id)"
@@ -1225,7 +1248,8 @@ function onHeaderMouseDown(e: MouseEvent) {
                   </button>
                 </div>
               </div>
-            </transition-group>
+              </template>
+            </draggable>
           </div>
 
           <!-- 空状态 -->
@@ -1825,6 +1849,27 @@ function onHeaderMouseDown(e: MouseEvent) {
     .subtask-actions {
       display: flex;
     }
+
+    .subtask-drag-handle {
+      opacity: 1;
+    }
+  }
+
+  &.dragging {
+    opacity: 0.5;
+  }
+}
+
+/* 拖拽手柄：平时淡出，hover 行时显现 */
+.subtask-drag-handle {
+  flex-shrink: 0;
+  color: #94a3b8;
+  cursor: grab;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+
+  &:active {
+    cursor: grabbing;
   }
 
   &.completed {
@@ -1988,25 +2033,6 @@ function onHeaderMouseDown(e: MouseEvent) {
   display: flex;
   flex-wrap: wrap;
   gap: 4px 0;
-}
-
-.subtask-list-enter-active,
-.subtask-list-leave-active {
-  transition: all 0.25s ease;
-}
-
-.subtask-list-enter-from {
-  opacity: 0;
-  transform: translateX(-10px);
-}
-
-.subtask-list-leave-to {
-  opacity: 0;
-  transform: translateX(10px);
-}
-
-.subtask-list-move {
-  transition: transform 0.25s ease;
 }
 
 .notify-datetime-picker {

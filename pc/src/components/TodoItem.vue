@@ -102,10 +102,11 @@ async function topTodo(e: Event) {
   await todoStore.reorderTodos([props.todo.id, ...ids])
 }
 
-// 子任务按完成状态排序：未完成在前
-const sortedSubtasks = computed(() =>
-  [...props.todo.subtasks].sort((a, b) => Number(a.completed) - Number(b.completed))
-)
+// 子任务按 sort_order 展示（后端已排好序）
+//
+// 不再按完成状态重排：编辑窗口是纯手工顺序，这里若把已完成的沉底，
+// 同一份子任务在两个界面的顺序会对不上
+const sortedSubtasks = computed(() => props.todo.subtasks)
 
 // 子任务列表展开状态（初值跟随全局“一键展开”）
 const subtaskExpanded = ref(appStore.subtaskExpandAll)

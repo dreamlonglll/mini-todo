@@ -21,7 +21,8 @@ use commands::{
     get_screen_config, get_settings, get_show_calendar, get_subtask, get_sync_settings,
     get_system_fonts, get_text_theme, get_todo_font_family, get_todo_font_size, get_todos,
     get_window_persist_state, import_data, import_data_from_file, import_subtasks_from_paths,
-    is_fixed_mode, list_screen_configs, reorder_todos, reset_window, save_screen_config,
+    is_fixed_mode, list_screen_configs, reorder_subtasks, reorder_todos, reset_window,
+    save_screen_config,
     save_settings, save_subtask_image, save_sync_settings, set_auto_hide_cursor_inside,
     set_auto_hide_enabled, set_notification_type, set_show_calendar, set_text_theme, set_top_on_wake,
     set_todo_font_family,
@@ -260,6 +261,7 @@ pub fn run() {
             update_todo,
             delete_todo,
             reorder_todos,
+            reorder_subtasks,
             // 子任务命令
             create_subtask,
             update_subtask,
