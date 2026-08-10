@@ -1860,18 +1860,18 @@ function onHeaderMouseDown(e: MouseEvent) {
   &.dragging {
     opacity: 0.5;
   }
-}
 
-/* 拖拽手柄：平时淡出，hover 行时显现 */
-.subtask-drag-handle {
-  flex-shrink: 0;
-  color: #94a3b8;
-  cursor: grab;
-  opacity: 0;
-  transition: opacity 0.15s ease;
+  /* 拖拽手柄：平时淡出，hover 行时显现 */
+  .subtask-drag-handle {
+    flex-shrink: 0;
+    color: #94a3b8;
+    cursor: grab;
+    opacity: 0;
+    transition: opacity 0.15s ease;
 
-  &:active {
-    cursor: grabbing;
+    &:active {
+      cursor: grabbing;
+    }
   }
 
   &.completed {
