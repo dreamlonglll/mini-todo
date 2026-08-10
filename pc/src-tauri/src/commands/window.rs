@@ -607,6 +607,25 @@ pub fn get_settings(db: State<Database>) -> Result<AppSettings, String> {
             )
             .unwrap_or(true);
 
+        let window_bg_color: String = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'window_bg_color'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or_else(|_| "#000000".to_string());
+
+        let window_bg_alpha: f64 = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'window_bg_alpha'",
+                [],
+                |row| {
+                    let val: String = row.get(0)?;
+                    Ok(val.parse::<f64>().unwrap_or(0.15))
+                },
+            )
+            .unwrap_or(0.15);
+
         let text_theme = get_text_theme_value(conn);
 
         let show_calendar: bool = conn
@@ -642,6 +661,8 @@ pub fn get_settings(db: State<Database>) -> Result<AppSettings, String> {
             window_size,
             auto_hide_enabled,
             top_on_wake,
+            window_bg_color,
+            window_bg_alpha,
             text_theme,
             show_calendar,
             view_mode,
@@ -690,6 +711,16 @@ pub fn save_settings(db: State<Database>, settings: AppSettings) -> Result<(), S
         conn.execute(
             "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('top_on_wake', ?, datetime('now', 'localtime'))",
             [if settings.top_on_wake { "true" } else { "false" }],
+        )?;
+
+        // 保存窗口底色与透明度
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('window_bg_color', ?, datetime('now', 'localtime'))",
+            [&settings.window_bg_color],
+        )?;
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('window_bg_alpha', ?, datetime('now', 'localtime'))",
+            [&settings.window_bg_alpha.to_string()],
         )?;
 
         // 保存文本主题
@@ -904,6 +935,64 @@ pub fn set_top_on_wake(
     }
 
     Ok(())
+}
+
+/// 窗口底色与背景透明度（仅深色主题下生效）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowBackground {
+    pub color: String,
+    pub alpha: f64,
+}
+
+#[tauri::command]
+pub fn get_window_background(db: State<Database>) -> Result<WindowBackground, String> {
+    db.with_connection(|conn| {
+        let color: String = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'window_bg_color'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or_else(|_| "#000000".to_string());
+        let alpha: f64 = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'window_bg_alpha'",
+                [],
+                |row| {
+                    let val: String = row.get(0)?;
+                    Ok(val.parse::<f64>().unwrap_or(0.15))
+                },
+            )
+            .unwrap_or(0.15);
+        Ok(WindowBackground { color, alpha })
+    })
+    .map_err(|e| e.to_string())
+}
+
+/// 单独保存窗口底色与透明度
+///
+/// 供设置窗口调用：只写这两个键，不走 saveWindowState，
+/// 否则会把设置窗口的几何信息与 is_fixed 误存为主窗口状态
+#[tauri::command]
+pub fn set_window_background(
+    db: State<Database>,
+    color: String,
+    alpha: f64,
+) -> Result<(), String> {
+    let alpha = alpha.clamp(0.0, 1.0);
+    db.with_connection(|conn| {
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('window_bg_color', ?, datetime('now', 'localtime'))",
+            [&color],
+        )?;
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('window_bg_alpha', ?, datetime('now', 'localtime'))",
+            [&alpha.to_string()],
+        )?;
+        Ok(())
+    })
+    .map_err(|e| e.to_string())
 }
 
 /// 显示并置顶主窗口（托盘双击 / 单击）

@@ -12,6 +12,11 @@
   --bg-secondary: #F8FAFC;
   --bg-tertiary: #F1F5F9;
 
+  // 窗口底色与透明度（设置面板可调，仅深色主题下生效）
+  // 拆成 RGB 分量而非完整颜色，是为了让 alpha 能独立调节：rgba(var(--app-bg-rgb), var(--app-bg-alpha))
+  --app-bg-rgb: 0, 0, 0;
+  --app-bg-alpha: 0.15;
+
   // 文字色
   --text-primary: #1E293B;
   --text-secondary: #64748B;
@@ -108,24 +113,29 @@ html, body {
 
 // 深色主题下覆盖 CSS 变量
 body.dark-theme {
-  --bg-primary: rgba(0, 0, 0, 0.1);
-  --bg-secondary: rgba(0, 0, 0, 0.1);
+  --bg-primary: rgba(var(--app-bg-rgb), var(--app-bg-alpha));
+  --bg-secondary: rgba(var(--app-bg-rgb), var(--app-bg-alpha));
   --bg-tertiary: rgba(255, 255, 255, 0.1);
   --shadow-sm: none;
   --shadow-base: none;
   --shadow-md: none;
   --shadow-lg: none;
-  background: rgba(0, 0, 0, 0.1) !important;
+  // 底色只由 #app 这一层填充，body 再填一次会叠加，用户设的透明度就不是所见即所得
+  background: transparent !important;
 }
 
-body.dark-theme #app,
+body.dark-theme #app {
+  background: rgba(var(--app-bg-rgb), var(--app-bg-alpha)) !important;
+  background-color: rgba(var(--app-bg-rgb), var(--app-bg-alpha)) !important;
+}
+
 body.dark-theme #app .app-container,
 body.dark-theme #app .app-container .title-bar,
 body.dark-theme #app .app-container .main-content,
 body.dark-theme #app .app-container .quick-add,
 body.dark-theme #app .app-container .right-panel  {
-  background: rgba(0, 0, 0, 0.15) !important;
-  background-color: rgba(0, 0, 0, 0.15) !important;
+  background: transparent !important;
+  background-color: transparent !important;
 }
 
 body.dark-theme #app .app-container .todo-item {
@@ -213,19 +223,23 @@ body {
 
 // macOS 深色主题：对齐 Windows 的半透明灰度，在透出桌面的同时提升可读性。
 body.platform-macos.dark-theme {
-  --bg-primary: rgba(0, 0, 0, 0.1);
-  --bg-secondary: rgba(0, 0, 0, 0.1);
+  --bg-primary: rgba(var(--app-bg-rgb), var(--app-bg-alpha));
+  --bg-secondary: rgba(var(--app-bg-rgb), var(--app-bg-alpha));
   --bg-tertiary: rgba(255, 255, 255, 0.12);
-  background: rgba(0, 0, 0, 0.1) !important;
+  background: transparent !important;
 }
 
-body.platform-macos.dark-theme #app,
+body.platform-macos.dark-theme #app {
+  background: rgba(var(--app-bg-rgb), var(--app-bg-alpha)) !important;
+  background-color: rgba(var(--app-bg-rgb), var(--app-bg-alpha)) !important;
+}
+
 body.platform-macos.dark-theme #app .app-container,
 body.platform-macos.dark-theme #app .app-container .title-bar,
 body.platform-macos.dark-theme #app .app-container .main-content,
 body.platform-macos.dark-theme #app .app-container .right-panel {
-  background: rgba(0, 0, 0, 0.15) !important;
-  background-color: rgba(0, 0, 0, 0.15) !important;
+  background: transparent !important;
+  background-color: transparent !important;
 }
 
 body.platform-macos.dark-theme #app .app-container .quick-add {

@@ -49,6 +49,10 @@ fn read_app_settings(conn: &rusqlite::Connection) -> AppSettings {
     let text_theme = get_setting_string(conn, "text_theme", "dark");
     let auto_hide_enabled = get_setting_bool(conn, "auto_hide_enabled", true);
     let top_on_wake = get_setting_bool(conn, "top_on_wake", true);
+    let window_bg_color = get_setting_string(conn, "window_bg_color", "#000000");
+    let window_bg_alpha = get_setting_string(conn, "window_bg_alpha", "0.15")
+        .parse::<f64>()
+        .unwrap_or(0.15);
     let show_calendar = get_setting_bool(conn, "show_calendar", false);
     let view_mode = get_setting_string(conn, "view_mode", "list");
     let notification_type = get_setting_string(conn, "notification_type", "system");
@@ -59,6 +63,8 @@ fn read_app_settings(conn: &rusqlite::Connection) -> AppSettings {
         window_size,
         auto_hide_enabled,
         top_on_wake,
+        window_bg_color,
+        window_bg_alpha,
         text_theme,
         show_calendar,
         view_mode,
@@ -92,6 +98,14 @@ pub(crate) fn write_app_settings(conn: &rusqlite::Connection, settings: &AppSett
     conn.execute(
         "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('top_on_wake', ?1, datetime('now', 'localtime'))",
         [if settings.top_on_wake { "true" } else { "false" }],
+    )?;
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('window_bg_color', ?1, datetime('now', 'localtime'))",
+        [&settings.window_bg_color],
+    )?;
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('window_bg_alpha', ?1, datetime('now', 'localtime'))",
+        [&settings.window_bg_alpha.to_string()],
     )?;
     conn.execute(
         "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('text_theme', ?1, datetime('now', 'localtime'))",
