@@ -47,6 +47,8 @@ export const useAppStore = defineStore('app', () => {
   const showCalendar = ref(false)
   // 是否启用贴边自动隐藏
   const autoHideEnabled = ref(true)
+  // 贴边唤起时是否临时置顶
+  const topOnWake = ref(true)
 
   // 子任务全局展开状态（一键展开/收起全部子任务）
   // 仅前端状态，用 localStorage 持久化，无需数据库迁移与云同步
@@ -147,6 +149,8 @@ export const useAppStore = defineStore('app', () => {
 
       // 加载贴边自动隐藏设置（需在固定模式应用前准备）
       await loadAutoHideEnabled()
+      // saveWindowState 会连带写回 topOnWake，不先加载真值就会把用户的关闭状态刷成默认 true
+      await loadTopOnWake()
 
       // 加载深色主题设置
       await loadDarkTheme()
@@ -256,6 +260,16 @@ export const useAppStore = defineStore('app', () => {
     }
   }
 
+  // 加载唤起置顶设置
+  async function loadTopOnWake() {
+    try {
+      topOnWake.value = await invoke<boolean>('get_top_on_wake')
+    } catch (e) {
+      console.error('Failed to load top on wake setting:', e)
+      topOnWake.value = true
+    }
+  }
+
   // 切换日历显示
   async function toggleShowCalendar() {
     try {
@@ -326,6 +340,18 @@ export const useAppStore = defineStore('app', () => {
     } catch (e) {
       console.error('Failed to set auto hide enabled:', e)
       autoHideEnabled.value = oldValue
+    }
+  }
+
+  // 设置唤起置顶（同 setAutoHideEnabled，不要在这里调 saveWindowState）
+  async function setTopOnWake(enabled: boolean) {
+    const oldValue = topOnWake.value
+    try {
+      topOnWake.value = enabled
+      await invoke('set_top_on_wake', { enabled })
+    } catch (e) {
+      console.error('Failed to set top on wake:', e)
+      topOnWake.value = oldValue
     }
   }
 
@@ -443,6 +469,7 @@ export const useAppStore = defineStore('app', () => {
           windowPosition: windowPosition.value,
           windowSize: windowSize.value,
           autoHideEnabled: autoHideEnabled.value,
+          topOnWake: topOnWake.value,
           textTheme: isDarkTheme.value ? 'light' : 'dark'
         }
       })
@@ -603,6 +630,10 @@ export const useAppStore = defineStore('app', () => {
     // 自动隐藏方法
     loadAutoHideEnabled,
     setAutoHideEnabled,
+    // 唤起置顶
+    topOnWake,
+    loadTopOnWake,
+    setTopOnWake,
     // 待办字体方法
     todoFontFamily,
     todoFontSize,

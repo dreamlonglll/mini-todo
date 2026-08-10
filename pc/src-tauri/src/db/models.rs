@@ -201,6 +201,9 @@ pub struct AppSettings {
     /// 是否启用贴边自动隐藏
     #[serde(default = "default_auto_hide_enabled")]
     pub auto_hide_enabled: bool,
+    /// 贴边唤起时是否临时置顶（关闭后窗口会被全屏窗口遮挡）
+    #[serde(default = "default_top_on_wake")]
+    pub top_on_wake: bool,
     /// 文本主题：light（浅色文字，适配深色背景）或 dark（深色文字，适配浅色背景）
     #[serde(default = "default_text_theme")]
     pub text_theme: String,
@@ -220,6 +223,10 @@ fn default_text_theme() -> String {
 }
 
 fn default_auto_hide_enabled() -> bool {
+    true
+}
+
+fn default_top_on_wake() -> bool {
     true
 }
 

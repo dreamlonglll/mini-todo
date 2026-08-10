@@ -48,6 +48,7 @@ fn read_app_settings(conn: &rusqlite::Connection) -> AppSettings {
         .unwrap_or(None);
     let text_theme = get_setting_string(conn, "text_theme", "dark");
     let auto_hide_enabled = get_setting_bool(conn, "auto_hide_enabled", true);
+    let top_on_wake = get_setting_bool(conn, "top_on_wake", true);
     let show_calendar = get_setting_bool(conn, "show_calendar", false);
     let view_mode = get_setting_string(conn, "view_mode", "list");
     let notification_type = get_setting_string(conn, "notification_type", "system");
@@ -57,6 +58,7 @@ fn read_app_settings(conn: &rusqlite::Connection) -> AppSettings {
         window_position,
         window_size,
         auto_hide_enabled,
+        top_on_wake,
         text_theme,
         show_calendar,
         view_mode,
@@ -86,6 +88,10 @@ pub(crate) fn write_app_settings(conn: &rusqlite::Connection, settings: &AppSett
     conn.execute(
         "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('auto_hide_enabled', ?1, datetime('now', 'localtime'))",
         [if settings.auto_hide_enabled { "true" } else { "false" }],
+    )?;
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('top_on_wake', ?1, datetime('now', 'localtime'))",
+        [if settings.top_on_wake { "true" } else { "false" }],
     )?;
     conn.execute(
         "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('text_theme', ?1, datetime('now', 'localtime'))",

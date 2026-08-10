@@ -19,6 +19,8 @@ export interface AppSettings {
   windowSize: WindowSize | null
   isFixed: boolean
   autoHideEnabled: boolean
+  /** 贴边唤起时是否临时置顶（关闭后窗口会被全屏窗口遮挡） */
+  topOnWake: boolean
   /** 文本主题：light（浅色文字，适配深色背景）或 dark（深色文字，适配浅色背景）*/
   textTheme: TextTheme
 }
@@ -36,6 +38,7 @@ export type WindowMode = 'normal' | 'fixed'
 export type AppSettingKey =
   | 'showCalendar'
   | 'autoHide'
+  | 'topOnWake'
   | 'theme'
   | 'sync'
   | 'update'

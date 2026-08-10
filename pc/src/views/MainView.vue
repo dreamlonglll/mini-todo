@@ -162,6 +162,7 @@ async function reloadAppSettings() {
   await todoStore.loadViewMode()
   await appStore.loadShowCalendar()
   await appStore.loadAutoHideEnabled()
+  await appStore.loadTopOnWake()
   await appStore.loadDarkTheme()
   await appStore.loadTodoFontSettings()
 }
@@ -233,6 +234,9 @@ onMounted(async () => {
         break
       case 'autoHide':
         await appStore.loadAutoHideEnabled()
+        break
+      case 'topOnWake':
+        await appStore.loadTopOnWake()
         break
       case 'theme':
         await appStore.loadDarkTheme()

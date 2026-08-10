@@ -43,6 +43,8 @@ const currentConfigId = computed(() => appStore.currentScreenConfigId)
 const showCalendar = computed(() => appStore.showCalendar)
 // 贴边自动隐藏
 const autoHideEnabled = computed(() => appStore.autoHideEnabled)
+// 贴边唤起时置顶
+const topOnWake = computed(() => appStore.topOnWake)
 
 // 是否有更新
 const hasUpdate = computed(() => appStore.hasUpdate)
@@ -70,6 +72,7 @@ onMounted(async () => {
   await appStore.loadScreenConfigs()
   await appStore.loadShowCalendar()
   await appStore.loadAutoHideEnabled()
+  await appStore.loadTopOnWake()
   await appStore.loadDarkTheme()
   await loadSyncSettings()
 
@@ -101,6 +104,11 @@ async function handleShowCalendarChange(val: boolean) {
 async function handleAutoHideChange(val: boolean) {
   await appStore.setAutoHideEnabled(val)
   await notifyAppSettingChanged('autoHide')
+}
+
+async function handleTopOnWakeChange(val: boolean) {
+  await appStore.setTopOnWake(val)
+  await notifyAppSettingChanged('topOnWake')
 }
 
 async function handleDarkThemeChange(val: boolean) {
@@ -545,6 +553,21 @@ async function handleCheckUpdate() {
             <el-switch
               :model-value="autoHideEnabled"
               @change="(val: boolean) => handleAutoHideChange(val)"
+            />
+          </div>
+
+          <div class="settings-row">
+            <div class="row-left">
+              <el-icon class="row-icon"><Top /></el-icon>
+              <div class="row-content">
+                <span class="settings-label">唤起时置顶</span>
+                <span class="settings-desc">贴边唤起时显示在其它窗口之上；关闭后可能被全屏窗口遮挡</span>
+              </div>
+            </div>
+            <el-switch
+              :model-value="topOnWake"
+              :disabled="!autoHideEnabled"
+              @change="(val: boolean) => handleTopOnWakeChange(val)"
             />
           </div>
 

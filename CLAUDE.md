@@ -182,9 +182,10 @@ mini-todo/
 ### 数据库设计
 - **数据库类型**：SQLite
 - **存储位置**：`%APPDATA%/mini-todo/data.db`
-- **迁移版本**：当前 v1~v24，通过 `pc/src-tauri/src/db/migrations.rs` 管理
+- **迁移版本**：当前 v1~v25，通过 `pc/src-tauri/src/db/migrations.rs` 管理
   - v23：移除所有 AI Agent / 任务调度 / 工作流相关表和字段（详见迁移注释）
   - v24：新增 `webdav_last_modified` settings key，用于条件 PUT
+  - v25：新增 `top_on_wake` settings key，贴边唤起时是否临时置顶
 
 #### 主要数据表
 
@@ -219,7 +220,7 @@ mini-todo/
 |------|---------|------|
 | `todos`（全字段） | 是 | 含重复提醒字段 |
 | `subtasks`（全字段） | 是 | 标题 + Markdown 内容 + 完成态 |
-| `settings`（部分） | 是 | 8 个应用设置项，不含 WebDAV 配置 |
+| `settings`（部分） | 是 | 9 个应用设置项，不含 WebDAV 配置 |
 | `images`（文件） | 是 | 通过 WebDAV 独立上传/下载 |
 | `screen_configs` | 否 | 设备特定的屏幕配置 |
 | `migrations` | 否 | 结构性表，应用启动自动管理 |

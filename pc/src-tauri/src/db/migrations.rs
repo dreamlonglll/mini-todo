@@ -138,6 +138,24 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute("INSERT INTO migrations (version) VALUES (24)", [])?;
     }
 
+    if current_version < 25 {
+        migration_v25(conn)?;
+        conn.execute("INSERT INTO migrations (version) VALUES (25)", [])?;
+    }
+
+    Ok(())
+}
+
+/// 迁移 v25：新增 `top_on_wake` settings key。
+///
+/// 贴边自动隐藏唤起窗口时是否临时置顶。默认开启——不置顶时窗口只是移回锚点，
+/// Z 序不变，会被最大化/无边框全屏窗口完全遮住（issue #9 第 5 点）。
+/// 允许关闭是为了照顾全屏游戏等不希望被打断的场景。
+fn migration_v25(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES ('top_on_wake', 'true', datetime('now', 'localtime'))",
+        [],
+    )?;
     Ok(())
 }
 
