@@ -1351,3 +1351,117 @@ pub fn set_show_calendar(db: State<Database>, show: bool) -> Result<(), String> 
     })
     .map_err(|e| e.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MONITOR: MonitorBounds = MonitorBounds {
+        x: 0,
+        y: 0,
+        width: 1920,
+        height: 1080,
+    };
+
+    /// 贴在屏幕顶部的窗口
+    const DOCKED_RECT: WindowRect = WindowRect {
+        x: 100,
+        y: 0,
+        width: 380,
+        height: 600,
+    };
+
+    /// 远离窗口的光标位置
+    const CURSOR_OUTSIDE: Option<(i32, i32)> = Some((1500, 900));
+
+    fn docked_state(now: Instant) -> AutoHideState {
+        AutoHideState {
+            enabled: true,
+            docked_edge: Some(DockEdge::Top),
+            // 贴边计时早已超过 EDGE_HIDE_DELAY
+            edge_stick_started_at: Some(now - EDGE_HIDE_DELAY - Duration::from_millis(100)),
+            ..AutoHideState::default()
+        }
+    }
+
+    #[test]
+    fn hides_after_edge_delay_when_cursor_is_away() {
+        let now = Instant::now();
+        let mut state = docked_state(now);
+
+        let transition =
+            evaluate_auto_hide_transition(&mut state, DOCKED_RECT, MONITOR, CURSOR_OUTSIDE, now);
+
+        assert!(matches!(transition, AutoHideTransition::Hide { .. }));
+        assert!(state.hidden);
+    }
+
+    #[test]
+    fn keep_visible_window_blocks_hiding() {
+        let now = Instant::now();
+        let mut state = docked_state(now);
+        state.keep_visible_until = Some(now + Duration::from_secs(3));
+
+        let transition =
+            evaluate_auto_hide_transition(&mut state, DOCKED_RECT, MONITOR, CURSOR_OUTSIDE, now);
+
+        assert!(matches!(transition, AutoHideTransition::None));
+        assert!(!state.hidden, "托盘唤起的宽限期内不应隐藏");
+    }
+
+    #[test]
+    fn hides_once_keep_visible_window_expires() {
+        let now = Instant::now();
+        let mut state = docked_state(now);
+        state.keep_visible_until = Some(now - Duration::from_millis(1));
+
+        let transition =
+            evaluate_auto_hide_transition(&mut state, DOCKED_RECT, MONITOR, CURSOR_OUTSIDE, now);
+
+        assert!(matches!(transition, AutoHideTransition::Hide { .. }));
+        assert!(state.hidden);
+        assert!(state.keep_visible_until.is_none(), "过期后应清掉宽限期");
+    }
+
+    #[test]
+    fn cursor_entering_window_clears_keep_visible() {
+        let now = Instant::now();
+        let mut state = docked_state(now);
+        state.keep_visible_until = Some(now + Duration::from_secs(3));
+
+        // 光标落在窗口内
+        let transition =
+            evaluate_auto_hide_transition(&mut state, DOCKED_RECT, MONITOR, Some((200, 100)), now);
+
+        assert!(matches!(transition, AutoHideTransition::None));
+        assert!(!state.hidden);
+        assert!(
+            state.keep_visible_until.is_none(),
+            "鼠标已接管，宽限期该让位给正常的 cursor_inside 逻辑"
+        );
+    }
+
+    #[test]
+    fn hidden_window_restores_when_cursor_hits_wake_hotzone() {
+        let now = Instant::now();
+        let mut state = AutoHideState {
+            enabled: true,
+            hidden: true,
+            docked_edge: Some(DockEdge::Top),
+            monitor_bounds: Some(MONITOR),
+            anchor_position: Some(WindowPosition { x: 100, y: 0 }),
+            anchor_size: Some(WindowSize {
+                width: 380,
+                height: 600,
+            }),
+            ..AutoHideState::default()
+        };
+
+        // 光标顶到屏幕上边缘、且在窗口水平范围内
+        let transition =
+            evaluate_auto_hide_transition(&mut state, DOCKED_RECT, MONITOR, Some((200, 0)), now);
+
+        assert!(matches!(transition, AutoHideTransition::Restore { .. }));
+        assert!(!state.hidden);
+    }
+}
