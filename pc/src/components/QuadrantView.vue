@@ -5,6 +5,7 @@ import { useTodoStore, useAppStore } from '@/stores'
 import TodoItem from './TodoItem.vue'
 import type { Todo, QuadrantType } from '@/types'
 import { QUADRANT_INFO, QUADRANTS } from '@/types'
+import { resolveQuadrantColor } from '@/utils/quadrant'
 
 const emit = defineEmits<{
   (e: 'edit', todo: Todo): void
@@ -52,9 +53,12 @@ async function onDragChange(quadrantId: QuadrantType, evt: any) {
   if (evt.added) {
     const todo = evt.added.element as Todo
     if (todo.quadrant !== quadrantId) {
-      await todoStore.updateTodoQuadrant(todo.id, quadrantId)
-      // 同时更新本地对象的 quadrant 属性
+      // 颜色跟随象限，除非用户手动挑过颜色（与编辑窗口同一套策略）
+      const nextColor = resolveQuadrantColor(todo.color, todo.quadrant, quadrantId)
+      await todoStore.updateTodoQuadrant(todo.id, quadrantId, nextColor)
+      // 同时更新本地对象，避免等待 store 回流
       todo.quadrant = quadrantId
+      todo.color = nextColor
     }
   }
   

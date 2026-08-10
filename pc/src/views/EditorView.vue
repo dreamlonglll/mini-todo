@@ -9,6 +9,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import type { Todo, CreateTodoRequest, UpdateTodoRequest, CreateSubTaskRequest, QuadrantType } from '@/types'
 import { DEFAULT_COLOR, PRESET_COLORS, QUADRANT_INFO, DEFAULT_QUADRANT } from '@/types'
+import { resolveQuadrantColor } from '@/utils/quadrant'
 import MarkdownEditor from '@/components/MarkdownEditor.vue'
 
 const route = useRoute()
@@ -200,12 +201,6 @@ const originalNotifyAt = ref<string | null>(null)
 const originalStartTime = ref<string | null>(null)
 const originalEndTime = ref<string | null>(null)
 
-// 根据象限ID获取对应颜色
-function getQuadrantColor(quadrantId: QuadrantType): string {
-  const quadrant = QUADRANT_INFO.find(q => q.id === quadrantId)
-  return quadrant ? quadrant.color : DEFAULT_COLOR
-}
-
 // 只读模式：当前象限（优先级）信息
 const quadrantInfo = computed(() => QUADRANT_INFO.find(q => q.id === form.value.quadrant))
 
@@ -244,12 +239,10 @@ const notifyStatusText = computed(() => {
   return ''
 })
 
-// 选择象限时自动同步颜色（仅新建模式）
+// 选择象限时自动同步颜色：仅当颜色还是旧象限的默认色（用户没手动改过）才跟随
 function handleQuadrantSelect(quadrantId: QuadrantType) {
+  form.value.color = resolveQuadrantColor(form.value.color, form.value.quadrant, quadrantId)
   form.value.quadrant = quadrantId
-  if (!isEdit.value) {
-    form.value.color = getQuadrantColor(quadrantId)
-  }
 }
 
 // ===== 描述放大编辑弹窗（源码 / 预览分栏）=====
