@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 9
-- **Last Active**: 2026-08-10
+- **Total Sessions**: 10
+- **Last Active**: 2026-08-12
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~312 | Active |
+| `journal-1.md` | ~346 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 10 | 2026-08-12 | 修复 issue #9 v2.3.0 五条新反馈并发布 2.3.1 | `5ed316e`, `0b37f43` | `main` |
 | 9 | 2026-08-10 | 修复设置界面开关与主窗口表现不一致 | `c665551` | `main` |
 | 8 | 2026-08-09 | 任务台账清理：归档全部 8 个历史任务 | - | `main` |
 | 7 | 2026-08-09 | 待办描述 Markdown 化 + 只读详情模式 + 发布 2.2.0 | `9b7b56c`, `1c68436` | `main` |

@@ -310,3 +310,37 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 10: 修复 issue #9 v2.3.0 五条新反馈并发布 2.3.1
+
+**Date**: 2026-08-12
+**Task**: 修复 issue #9 v2.3.0 五条新反馈并发布 2.3.1
+**Branch**: `main`
+
+### Summary
+
+核实并修复 KieMg 在 v2.3.0 试用后的五条反馈：窗口 1px 过渡描边+8px 圆角（固定模式除外）、列表底部避让悬浮按钮、只读详情放开子任务拖拽、自启注册表路径自愈+托盘/设置双入口勾选同步、安装包内嵌 WebView2 引导器。trellis-check 核查 13 项，修复 1 项错误处理语义反转；3 条经验写入 quality-guidelines.md。版本号升至 2.3.1。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `5ed316e` | (see git log) |
+| `0b37f43` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
