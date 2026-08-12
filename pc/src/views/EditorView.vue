@@ -1184,7 +1184,6 @@ function onHeaderMouseDown(e: MouseEvent) {
               ghost-class="dragging"
               :animation="200"
               :force-fallback="true"
-              :disabled="isViewMode"
               @end="onSubtaskDragEnd"
             >
               <template #item="{ element: subtask }">
@@ -1192,7 +1191,8 @@ function onHeaderMouseDown(e: MouseEvent) {
                 class="subtask-item-editor"
                 :class="{ completed: subtask.completed, readonly: isViewMode }"
               >
-                <el-icon v-if="!isViewMode" class="subtask-drag-handle" :size="14" title="拖拽排序">
+                <!-- 只读详情也允许拖拽排序（issue #9 反馈），其余写入口仍随只读隐藏 -->
+                <el-icon class="subtask-drag-handle" :size="14" title="拖拽排序">
                   <Rank />
                 </el-icon>
                 <div

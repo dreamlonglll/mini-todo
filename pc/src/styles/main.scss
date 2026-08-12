@@ -128,6 +128,8 @@ body.dark-theme {
 body.dark-theme #app {
   background: rgba(var(--app-bg-rgb, 0, 0, 0), var(--app-bg-alpha, 0.45)) !important;
   background-color: rgba(var(--app-bg-rgb, 0, 0, 0), var(--app-bg-alpha, 0.45)) !important;
+  // 深色底画在 #app 这一层，圆角要与 .app-container 的描边圆角对齐，否则四角露出直角底色
+  border-radius: 8px;
 }
 
 body.dark-theme #app .app-container,
@@ -161,11 +163,16 @@ body {
   flex-direction: column;
   background: #FFFFFF;
   overflow: hidden;
-  border-radius: 0;
+  // 窗口边缘 1px 过渡描边：半透明黑/白压在底色上，视觉上比底色更深/更浅，
+  // 让窗口与相近颜色的桌面背景可分辨
+  border: 1px solid rgba(0, 0, 0, 0.5);
+  // 圆角与 Win11 DWM 的 DWMWCP_ROUND 裁剪对齐，直角描边会在四角被裁断；
+  // Win10 无 DWM 裁剪，透明窗口下由 CSS 呈现同样的圆角
+  border-radius: 8px;
 
   &.dark-theme {
     background: rgba(0, 0, 0, 0.1);
-    border-radius: 0;
+    border-color: rgba(255, 255, 255, 0.5);
     margin: 0;
     height: 100%;
     box-shadow: none;
@@ -220,6 +227,13 @@ body {
       background: rgba(0, 0, 0, 0.1);
     }
   }
+}
+
+// 固定模式：贴边融入桌面的场景，去掉描边与圆角（body.fixed-mode 由 MainView 维护）
+body.fixed-mode #app,
+body.fixed-mode .app-container {
+  border: none;
+  border-radius: 0;
 }
 
 // macOS 深色主题：对齐 Windows 的半透明灰度，在透出桌面的同时提升可读性。
@@ -333,7 +347,9 @@ body.platform-macos.dark-theme #app .app-container .empty-state {
 .main-content {
   flex: 1;
   overflow-y: auto;
-  padding: 0 var(--space-4) var(--space-4);
+  // 底部预留「新建待办」悬浮按钮的占位（bottom 20px + 高 48px + 间距），
+  // 否则滚动到底时最后一两项的操作按钮会被它盖住
+  padding: 0 var(--space-4) 76px;
 
   &::-webkit-scrollbar {
     width: 6px;
@@ -351,6 +367,11 @@ body.platform-macos.dark-theme #app .app-container .empty-state {
       background: var(--text-tertiary);
     }
   }
+}
+
+// 固定模式下悬浮按钮不渲染，不需要底部避让
+body.fixed-mode .main-content {
+  padding-bottom: var(--space-4);
 }
 
 // 待办列表项

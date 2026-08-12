@@ -65,6 +65,10 @@
 ### Windows
 - 下载 `.msi` 或 `.exe` 安装包
 - 运行安装程序完成安装
+- 便携版 `mini-todo-portable-windows.zip` 解压即用，但需要系统已安装
+  [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)。
+  Win11 已内置；部分 Win10 / LTSC 环境需手动安装一次，否则启动会提示
+  `Could not find the WebView2 Runtime`（安装包无此问题，会自动安装运行时）
 
 #### macOS 安装提示
 

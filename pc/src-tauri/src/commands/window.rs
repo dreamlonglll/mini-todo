@@ -44,6 +44,28 @@ fn sync_tray_fixed_checked(fixed: bool) {
     }
 }
 
+/// 托盘"开机自启动"勾选菜单项引用，用于跨模块同步状态
+static TRAY_AUTO_START: OnceLock<tauri::menu::CheckMenuItem<tauri::Wry>> = OnceLock::new();
+
+/// 保存托盘"开机自启动"勾选菜单项引用（在 setup 阶段调用一次）
+pub fn set_tray_auto_start_item(item: tauri::menu::CheckMenuItem<tauri::Wry>) {
+    let _ = TRAY_AUTO_START.set(item);
+}
+
+/// 同步托盘"开机自启动"勾选状态
+pub fn sync_tray_auto_start_checked(enabled: bool) {
+    if let Some(item) = TRAY_AUTO_START.get() {
+        let _ = item.set_checked(enabled);
+    }
+}
+
+/// 设置窗口切换自启后调用：把托盘勾选同步为实际状态。
+/// 托盘与设置面板是两个独立入口，不同步会出现"界面显示已开启、注册表实际已删"的状态反转。
+#[tauri::command]
+pub fn sync_auto_start_state(enabled: bool) {
+    sync_tray_auto_start_checked(enabled);
+}
+
 fn get_auto_hide_enabled_value(db: &State<Database>) -> bool {
     db.with_connection(|conn| {
         let enabled: bool = conn

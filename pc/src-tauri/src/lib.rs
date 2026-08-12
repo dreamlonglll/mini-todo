@@ -26,6 +26,7 @@ use commands::{
     save_screen_config,
     save_settings, save_subtask_image, save_sync_settings, set_auto_hide_cursor_inside,
     set_auto_hide_enabled, set_notification_type, set_show_calendar, set_text_theme, set_top_on_wake,
+    sync_auto_start_state,
     set_todo_font_family,
     set_todo_font_size, set_window_background, set_window_fixed_mode, update_screen_config_name,
     update_subtask,
@@ -116,7 +117,18 @@ pub fn run() {
             let add_todo = MenuItem::with_id(app, "add_todo", "添加待办项", true, None::<&str>)?;
             let open_settings =
                 MenuItem::with_id(app, "open_settings", "打开设置", true, None::<&str>)?;
-            let auto_start_enabled = app.autolaunch().is_enabled().unwrap_or(false);
+            // 自启自愈：is_enabled 只判断注册表键是否存在，不校验路径。便携版目录被移动/
+            // 换成安装版后，旧记录仍在但指向失效路径，这里重新 enable 一次刷新为当前 exe。
+            let auto_start_enabled = {
+                let autolaunch = app.autolaunch();
+                let enabled = autolaunch.is_enabled().unwrap_or(false);
+                if enabled {
+                    if let Err(e) = autolaunch.enable() {
+                        eprintln!("Failed to refresh autostart entry: {e}");
+                    }
+                }
+                enabled
+            };
             let auto_start = CheckMenuItem::with_id(
                 app,
                 "auto_start",
@@ -145,6 +157,8 @@ pub fn run() {
 
             // 保存托盘菜单项引用，供 set_window_fixed_mode 同步勾选状态
             commands::set_tray_toggle_fixed_item(toggle_fixed.clone());
+            // 保存自启菜单项引用，供设置面板切换后同步勾选状态
+            commands::set_tray_auto_start_item(auto_start.clone());
 
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
@@ -185,12 +199,19 @@ pub fn run() {
                             // 切换开机自启动
                             let autolaunch = app.autolaunch();
                             let currently_enabled = autolaunch.is_enabled().unwrap_or(false);
-                            if currently_enabled {
-                                let _ = autolaunch.disable();
+                            let result = if currently_enabled {
+                                autolaunch.disable()
                             } else {
-                                let _ = autolaunch.enable();
+                                autolaunch.enable()
+                            };
+                            if let Err(e) = result {
+                                eprintln!("Failed to toggle autostart: {e}");
                             }
-                            // CheckMenuItem 会自动切换勾选状态
+                            // 不依赖 CheckMenuItem 的自动翻转：它只翻显示不看结果，
+                            // 与设置面板交叉操作或 enable/disable 失败时会显示反转，
+                            // 这里按注册表实际状态回写勾选
+                            let enabled_now = autolaunch.is_enabled().unwrap_or(false);
+                            commands::sync_tray_auto_start_checked(enabled_now);
                         }
                         "quit" => {
                             app.exit(0);
@@ -288,6 +309,7 @@ pub fn run() {
             set_auto_hide_cursor_inside,
             get_window_persist_state,
             reset_window,
+            sync_auto_start_state,
             // 屏幕配置命令
             get_screen_config,
             save_screen_config,

@@ -56,6 +56,11 @@ const containerClass = computed(() => ({
   'dark-theme': appStore.isDarkTheme
 }))
 
+// 固定模式挂 body 类，供全局样式做描边/底部避让的差异化（仅主窗口有 MainView，天然不会污染子窗口）
+watch(() => appStore.isFixed, (fixed) => {
+  document.body.classList.toggle('fixed-mode', fixed)
+}, { immediate: true })
+
 // 事件监听清理函数
 let unlistenClose: (() => void) | null = null
 let unlistenMoved: (() => void) | null = null

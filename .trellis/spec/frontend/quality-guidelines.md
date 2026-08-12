@@ -44,6 +44,45 @@ root.style.setProperty('--todo-font-stack', fontStack)
 font-family: var(--todo-font-stack, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif);
 ```
 
+### Don't: Attach a new global body class without checking index.html for dead styles
+
+**Problem**: `index.html` had a leftover `body.fixed-mode { background: transparent !important }` block that no JS ever activated. When MainView later started toggling `body.fixed-mode` for border styling, the dead block would have been resurrected, turning the light-theme fixed window fully transparent.
+
+**Why it's bad**: Inline `<style>` in `index.html` is only a first-frame anti-flash fallback — but it still participates in the cascade at equal specificity, and `!important` rules there silently win.
+
+**Instead**: Before introducing any new `body`-level class, grep `index.html` (and all global styles) for that class name and delete dead selectors first.
+
+### Don't: Rely on tray CheckMenuItem auto-toggle for state with a second entry point
+
+**Problem**: muda's `CheckMenuItem` flips its checked display on every click, regardless of whether the underlying operation succeeded, and knows nothing about state changed from elsewhere (settings panel, commands).
+
+**Why it's bad**: With two entry points the display and the real state (e.g. autostart registry) invert: UI shows enabled while the registry entry is gone.
+
+**Instead**: Keep the item handle in a `OnceLock` (see `TRAY_TOGGLE_FIXED` / `TRAY_AUTO_START` in `commands/window.rs`) and explicitly `set_checked(actual_state)` after every state change, reading the actual state back rather than assuming the toggle worked.
+
+### Don't: Put follow-up UI sync calls inside the primary operation's try block
+
+**Problem**:
+```typescript
+try {
+  await enable()                                   // primary op — succeeded
+  autoStart.value = value
+  await invoke('sync_auto_start_state', ...)        // UI sync — may fail
+} catch (e) {
+  autoStart.value = !value                          // rolls back a SUCCESSFUL primary op
+  ElMessage.error('设置开机自启失败')
+}
+```
+
+**Why it's bad**: A failure in the cosmetic follow-up reports the already-successful primary operation as failed and rolls back UI state, re-creating the exact state-inversion bug the sync was meant to fix.
+
+**Instead**: Fire the follow-up with an independent `.catch` that only logs:
+```typescript
+invoke('sync_auto_start_state', { enabled: value }).catch((e) => {
+  console.error('Failed to sync tray autostart state:', e)
+})
+```
+
 ### Don't: Add conditional child without updating container v-if
 
 **Problem**:

@@ -213,6 +213,11 @@ async function handleAutoStartChange(value: boolean) {
       ElMessage.success('已关闭开机自启')
     }
     autoStart.value = value
+    // 托盘菜单是另一个入口，不同步勾选会与这里的开关状态反转。
+    // 单独捕获：走到这里注册表已改成功，托盘勾选同步失败不应把开关回滚成「设置失败」
+    invoke('sync_auto_start_state', { enabled: value }).catch((e) => {
+      console.error('Failed to sync tray autostart state:', e)
+    })
   } catch (e) {
     console.error('Failed to toggle autostart:', e)
     ElMessage.error('设置开机自启失败')
