@@ -1837,8 +1837,13 @@ function onHeaderMouseDown(e: MouseEvent) {
   background: #ffffff;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
-  transition: all 0.2s ease;
+  /* 过渡属性显式列出、不含 transform：SortableJS force-fallback 的拖拽克隆体
+     继承本类样式，transition: all 会把克隆体每次 mousemove 的 transform 更新
+     拖成 0.2s 动画，导致拖影追不上鼠标（issue #9 反馈） */
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
   position: relative;
+  /* 与主列表 .todo-item 一致，拖拽时不划选文字 */
+  user-select: none;
 
   &:last-child {
     margin-bottom: 0;
@@ -1952,6 +1957,8 @@ function onHeaderMouseDown(e: MouseEvent) {
     outline: none;
     background: #ffffff;
     font-family: inherit;
+    /* 父级为配合拖拽禁用了选择，重命名输入框需要放开 */
+    user-select: text;
   }
 
   .content-indicator {

@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/frontend/component-guidelines.md", "reason": "Vue 组件改动（EditorView/MainView）需遵循组件规范"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "样式与交互改动的质量要求"}

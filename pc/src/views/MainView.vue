@@ -124,6 +124,60 @@ function handleRootMouseLeave() {
   void reportAutoHideCursorInside(false)
 }
 
+// 新建按钮「操作模式」（issue #9 方案 2）：
+// 悬停待办操作按钮持续 0.75s → FAB 半透明沉到操作按钮之下；离开 1.5s 后恢复
+const FAB_DIM_ENTER_DELAY = 750
+const FAB_DIM_LEAVE_DELAY = 1500
+const fabDimmed = ref(false)
+let fabEnterTimer: number | null = null
+let fabLeaveTimer: number | null = null
+
+function clearFabTimers() {
+  if (fabEnterTimer !== null) {
+    clearTimeout(fabEnterTimer)
+    fabEnterTimer = null
+  }
+  if (fabLeaveTimer !== null) {
+    clearTimeout(fabLeaveTimer)
+    fabLeaveTimer = null
+  }
+}
+
+function handleActionsMouseOver(e: MouseEvent) {
+  const target = e.target as Element | null
+  if (!target?.closest('.todo-actions')) return
+  const from = e.relatedTarget as Element | null
+  // 在操作按钮内部移动不重置计时
+  if (from?.closest?.('.todo-actions')) return
+  if (fabLeaveTimer !== null) {
+    clearTimeout(fabLeaveTimer)
+    fabLeaveTimer = null
+  }
+  if (!fabDimmed.value && fabEnterTimer === null) {
+    fabEnterTimer = window.setTimeout(() => {
+      fabEnterTimer = null
+      fabDimmed.value = true
+    }, FAB_DIM_ENTER_DELAY)
+  }
+}
+
+function handleActionsMouseOut(e: MouseEvent) {
+  const target = e.target as Element | null
+  if (!target?.closest('.todo-actions')) return
+  const to = e.relatedTarget as Element | null
+  if (to?.closest?.('.todo-actions')) return
+  if (fabEnterTimer !== null) {
+    clearTimeout(fabEnterTimer)
+    fabEnterTimer = null
+  }
+  if (fabDimmed.value && fabLeaveTimer === null) {
+    fabLeaveTimer = window.setTimeout(() => {
+      fabLeaveTimer = null
+      fabDimmed.value = false
+    }, FAB_DIM_LEAVE_DELAY)
+  }
+}
+
 const preCalendarWidth = ref<number | null>(null)
 let calendarResizeReady = false
 
@@ -303,6 +357,7 @@ onUnmounted(() => {
   if (unlistenFocus) unlistenFocus()
   if (unlistenSyncCompleted) unlistenSyncCompleted()
   stopAutoSync()
+  clearFabTimers()
   if (autoRefreshTimer) {
     clearInterval(autoRefreshTimer)
     autoRefreshTimer = null
@@ -616,6 +671,8 @@ function stopAutoSync() {
     :class="[containerClass, { 'with-calendar': showCalendar }]"
     @mouseenter="handleRootMouseEnter"
     @mouseleave="handleRootMouseLeave"
+    @mouseover="handleActionsMouseOver"
+    @mouseout="handleActionsMouseOut"
   >
     <!-- 模态遮罩层 -->
     <div v-if="isModalOpen" class="modal-overlay" @mousedown="bringModalToFront"></div>
@@ -665,11 +722,11 @@ function stopAutoSync() {
       </div>
     </div>
 
-    <!-- 悬浮添加按钮（固定模式下隐藏） -->
-    <button 
-      v-if="!appStore.isFixed" 
-      class="fab-add" 
-      title="新建待办" 
+    <!-- 悬浮添加按钮（固定模式同样显示；悬停操作按钮时半透明沉底，见 fab-dimmed） -->
+    <button
+      class="fab-add"
+      :class="{ 'fab-dimmed': fabDimmed }"
+      title="新建待办"
       @click="openEditor()"
     >
       <el-icon :size="24"><Plus /></el-icon>

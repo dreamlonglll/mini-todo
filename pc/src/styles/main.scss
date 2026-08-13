@@ -369,11 +369,6 @@ body.platform-macos.dark-theme #app .app-container .empty-state {
   }
 }
 
-// 固定模式下悬浮按钮不渲染，不需要底部避让
-body.fixed-mode .main-content {
-  padding-bottom: var(--space-4);
-}
-
 // 待办列表项
 .todo-item {
   display: flex;
@@ -741,6 +736,18 @@ body.fixed-mode .main-content {
 
   &:active {
     transform: scale(0.95);
+  }
+
+  // 操作模式（issue #9 方案 2）：悬停待办操作按钮 0.75s 后半透明并沉到
+  // .todo-actions（z-index: 5）之下，避免挡住最后几项的操作按钮；
+  // 直接悬停按钮本体时恢复不透明，提示仍可点击
+  &.fab-dimmed {
+    opacity: 0.35;
+    z-index: 4;
+
+    &:hover {
+      opacity: 1;
+    }
   }
 }
 
