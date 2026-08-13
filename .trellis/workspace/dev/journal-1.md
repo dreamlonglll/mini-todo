@@ -344,3 +344,36 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 11: issue #9 第三轮反馈：子任务拖拽体验与固定模式新建入口
+
+**Date**: 2026-08-13
+**Task**: issue #9 第三轮反馈：子任务拖拽体验与固定模式新建入口
+**Branch**: `main`
+
+### Summary
+
+修复子任务拖拽划选文字与拖影不跟手（transition: all 被 SortableJS fallback 克隆体继承是根因）；按 KieMg 方案 2 实现 FAB 操作模式（悬停操作按钮 0.75s 半透明沉底、离开 1.5s 恢复），固定模式也显示 FAB 可直接新建
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `8d73c7a` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
