@@ -97,3 +97,21 @@ TodoItem and similar list items have a root-level `@click` for navigation (e.g.,
 **Prevention**: 新建任何 Milkdown 编辑入口时检查插件三件套：`listener`（回写）、`upload`（图片）、
 `clipboard`(粘贴解析)。排查"渲染像源码"问题时先查 DB 原文是否含反斜杠转义，再怀疑渲染层。
 存量已转义数据不会被此修复救回，需重新粘贴或单独数据修复。
+
+### Common Mistake: 列表项写 `transition: all` 会让 SortableJS 拖影不跟手
+
+**Symptom**: force-fallback 拖拽时，跟随鼠标的克隆体明显滞后（拖 10cm 只跟 1cm），松手落位却正确。
+
+**Cause**: fallback 克隆体来自 `dragEl.cloneNode(true)`，携带原列表项的 class；SortableJS 只把克隆体的
+**内联** transition 置空（`css(ghostEl, 'transition', '')`），并不能屏蔽样式表里的
+`transition: all 0.2s ease`。克隆体每次 mousemove 的 `transform` 更新都被拖成 0.2s 动画、
+且每次更新重置动画目标，导致永远追不上鼠标。本项目所有拖拽都开着 `:force-fallback="true"`
+（Tauri WebView2 下原生 HTML5 拖拽被拦截），此坑必然命中。
+
+**Fix**: 可拖拽列表项的过渡属性显式列出、绝不含 `transform`，例如
+`transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;`
+（对照：`.todo-item` 只过渡 `background`，所以主列表一直正常。）
+
+**Prevention**: 给任何 vuedraggable 列表项写样式时禁用 `transition: all`；
+同时列表项要配 `user-select: none`，否则 fallback 模式拖拽会划选文字
+（行内编辑输入框再用 `user-select: text` 单独放开）。

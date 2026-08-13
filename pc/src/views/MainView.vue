@@ -143,9 +143,31 @@ function clearFabTimers() {
   }
 }
 
+function cancelFabEnter() {
+  if (fabEnterTimer !== null) {
+    clearTimeout(fabEnterTimer)
+    fabEnterTimer = null
+  }
+}
+
+function startFabRecovery() {
+  if (fabDimmed.value && fabLeaveTimer === null) {
+    fabLeaveTimer = window.setTimeout(() => {
+      fabLeaveTimer = null
+      fabDimmed.value = false
+    }, FAB_DIM_LEAVE_DELAY)
+  }
+}
+
 function handleActionsMouseOver(e: MouseEvent) {
   const target = e.target as Element | null
-  if (!target?.closest('.todo-actions')) return
+  if (!target?.closest('.todo-actions')) {
+    // 删除/完成会把操作条连同所在行直接移出 DOM，此时不会触发 mouseout，
+    // 靠「悬停到非操作按钮区域」兜底：取消进入计时、补启恢复计时
+    cancelFabEnter()
+    startFabRecovery()
+    return
+  }
   const from = e.relatedTarget as Element | null
   // 在操作按钮内部移动不重置计时
   if (from?.closest?.('.todo-actions')) return
@@ -166,16 +188,8 @@ function handleActionsMouseOut(e: MouseEvent) {
   if (!target?.closest('.todo-actions')) return
   const to = e.relatedTarget as Element | null
   if (to?.closest?.('.todo-actions')) return
-  if (fabEnterTimer !== null) {
-    clearTimeout(fabEnterTimer)
-    fabEnterTimer = null
-  }
-  if (fabDimmed.value && fabLeaveTimer === null) {
-    fabLeaveTimer = window.setTimeout(() => {
-      fabLeaveTimer = null
-      fabDimmed.value = false
-    }, FAB_DIM_LEAVE_DELAY)
-  }
+  cancelFabEnter()
+  startFabRecovery()
 }
 
 const preCalendarWidth = ref<number | null>(null)
