@@ -377,3 +377,36 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 12: trellis-check：修复操作模式 FAB 卡沉底缺陷并沉淀拖拽规范
+
+**Date**: 2026-08-13
+**Task**: trellis-check：修复操作模式 FAB 卡沉底缺陷并沉淀拖拽规范
+**Branch**: `main`
+
+### Summary
+
+核查发现删除待办时操作条移出 DOM 不触发 mouseout、FAB 卡在半透明沉底；mouseover 非操作区域兜底恢复。SortableJS force-fallback 继承 transition: all 的教训写入 component-guidelines
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `d937e42` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

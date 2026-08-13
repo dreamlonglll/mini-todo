@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 11
+- **Total Sessions**: 12
 - **Last Active**: 2026-08-13
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~379 | Active |
+| `journal-1.md` | ~412 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 12 | 2026-08-13 | trellis-check：修复操作模式 FAB 卡沉底缺陷并沉淀拖拽规范 | `d937e42` | `main` |
 | 11 | 2026-08-13 | issue #9 第三轮反馈：子任务拖拽体验与固定模式新建入口 | `8d73c7a` | `main` |
 | 10 | 2026-08-12 | 修复 issue #9 v2.3.0 五条新反馈并发布 2.3.1 | `5ed316e`, `0b37f43` | `main` |
 | 9 | 2026-08-10 | 修复设置界面开关与主窗口表现不一致 | `c665551` | `main` |
