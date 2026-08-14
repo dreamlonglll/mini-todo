@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/frontend/component-guidelines.md", "reason": "改动集中在 EditorView / SubtaskEditorView 两个 Vue 组件，需遵循组件规范"}
+{"file": ".trellis/spec/frontend/type-safety.md", "reason": "新增事件 payload 需要 TypeScript 类型定义"}
