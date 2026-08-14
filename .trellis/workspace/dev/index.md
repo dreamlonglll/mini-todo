@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 15
+- **Total Sessions**: 16
 - **Last Active**: 2026-08-14
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~512 | Active |
+| `journal-1.md` | ~545 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 16 | 2026-08-14 | issue #9：修复贴边收起残留条露出列表内容 | `9600732` | `main` |
 | 15 | 2026-08-14 | issue 9：新建待办阶段编辑子任务描述（内存模式） | `97199ec` | `main` |
 | 14 | 2026-08-14 | 移除子任务蓝色内容标识图标 | `d35e0c0` | `main` |
 | 13 | 2026-08-14 | issue 9 v2.3.2 反馈：任务栏图标复现修复 + 只读模式勾选子任务 | `0dc53fd`, `f5c73b9` | `main` |

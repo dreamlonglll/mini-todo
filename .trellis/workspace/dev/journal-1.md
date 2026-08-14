@@ -510,3 +510,36 @@ v2.3.3 发布并回复 issue #9 后，用户 KieMg 反馈新建待办窗口中�
 ### Next Steps
 
 - None - task complete
+
+
+## Session 16: issue #9：修复贴边收起残留条露出列表内容
+
+**Date**: 2026-08-14
+**Task**: issue #9：修复贴边收起残留条露出列表内容
+**Branch**: `main`
+
+### Summary
+
+issue #9 用户反馈：固定模式贴边收起后 4px 把手条显示列表底部被裁切的待办内容。根因是 .main-content 滚动视口底边直接贴窗口底边界（原 76px padding 在滚动内容内部，中间滚动位置不生效）。给滚动视口加 6px 外部 margin-bottom，窗口最底部像素恒为背景色，收起后残留条呈纯色。npm run build 通过。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `9600732` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
