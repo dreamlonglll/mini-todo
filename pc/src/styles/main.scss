@@ -350,6 +350,9 @@ body.platform-macos.dark-theme #app .app-container .empty-state {
   // 底部预留「新建待办」悬浮按钮的占位（bottom 20px + 高 48px + 间距），
   // 否则滚动到底时最后一两项的操作按钮会被它盖住
   padding: 0 var(--space-4) 76px;
+  // 滚动视口外的底部间距：贴边收起只留 4 物理像素在屏幕内（HIDDEN_VISIBLE_STRIP_PX），
+  // 视口若直接贴窗口底边，残留条会露出被裁切的列表内容；留 6px 保证恒为背景色
+  margin-bottom: 6px;
 
   &::-webkit-scrollbar {
     width: 6px;
