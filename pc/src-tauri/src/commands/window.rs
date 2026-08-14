@@ -12,7 +12,8 @@ use tauri::{Manager, State, WebviewWindow, Window};
 use windows::Win32::Foundation::{HWND, POINT};
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, GetWindowLongW, SetWindowLongW, GWL_EXSTYLE, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+    GetCursorPos, GetWindowLongW, SetWindowLongW, SetWindowPos, GWL_EXSTYLE, SWP_FRAMECHANGED,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
 };
 
 /// 全局固定模式状态
@@ -557,6 +558,7 @@ pub fn tick_auto_hide(window: &WebviewWindow) {
             } else {
                 // 收回时一并撤销置顶，否则藏起来的窗口会一直压在其它窗口之上
                 let _ = window.set_always_on_top(false);
+                reassert_fixed_taskbar_style(window);
             }
         }
         AutoHideTransition::Restore { anchor } => {
@@ -571,6 +573,7 @@ pub fn tick_auto_hide(window: &WebviewWindow) {
             } else if TOP_ON_WAKE.load(Ordering::SeqCst) {
                 // 唤起时置顶：只 set_position 不改 Z 序的话，窗口会被最大化/全屏窗口整个盖住
                 let _ = window.set_always_on_top(true);
+                reassert_fixed_taskbar_style(window);
             }
         }
     }
@@ -787,6 +790,65 @@ pub fn get_text_theme(db: State<Database>) -> Result<String, String> {
 ///
 /// 同样固定取主窗口：固定模式的位置锁定与 WS_EX_TOOLWINDOW 样式只对主窗口有意义，
 /// 按调用方窗口取值会在其他 WebView 触发时改错窗口
+/// 按固定模式设置/恢复主窗口的任务栏样式。
+///
+/// 固定模式加 `WS_EX_TOOLWINDOW`、去 `WS_EX_APPWINDOW`，让窗口既不进任务栏也不参与 Alt+Tab；
+/// 样式改完补一次 `SWP_FRAMECHANGED`，任务栏才会对可见窗口的样式变更立刻生效。
+#[cfg(target_os = "windows")]
+fn apply_fixed_ex_style(window: &WebviewWindow, fixed: bool) {
+    use raw_window_handle::HasWindowHandle;
+
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let raw_window_handle::RawWindowHandle::Win32(win32_handle) = handle.as_raw() else {
+        return;
+    };
+    let hwnd = HWND(win32_handle.hwnd.get() as *mut _);
+
+    unsafe {
+        let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        let new_style = if fixed {
+            (ex_style | WS_EX_TOOLWINDOW.0) & !WS_EX_APPWINDOW.0
+        } else {
+            (ex_style & !WS_EX_TOOLWINDOW.0) | WS_EX_APPWINDOW.0
+        };
+        if new_style != ex_style {
+            SetWindowLongW(hwnd, GWL_EXSTYLE, new_style as i32);
+            let _ = SetWindowPos(
+                hwnd,
+                HWND(std::ptr::null_mut()),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
+        }
+    }
+}
+
+/// 在 tao 的窗口操作之后重申固定模式的任务栏样式。
+///
+/// tao 处理任何窗口 flag 变更（`set_always_on_top` / `show` / `unminimize` / `set_resizable` 等）
+/// 时会用内部记录的 flags 整体重写 `GWL_EXSTYLE`，把绕开它手动加的 `WS_EX_TOOLWINDOW` 抹掉，
+/// 任务栏图标随之复现（issue #9：贴边唤起/收回各调一次 set_always_on_top，图标就回来了）。
+/// 这些操作都是投递到主线程消息队列异步执行的，补样式必须排进同一条队列，
+/// 才能保证发生在它们之后且无竞态。
+fn reassert_fixed_taskbar_style(window: &WebviewWindow) {
+    #[cfg(target_os = "windows")]
+    {
+        let w = window.clone();
+        let _ = window.run_on_main_thread(move || {
+            apply_fixed_ex_style(&w, is_fixed_mode());
+        });
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = window;
+    }
+}
+
 #[tauri::command]
 pub fn set_window_fixed_mode(
     app_handle: tauri::AppHandle,
@@ -832,30 +894,9 @@ pub fn set_window_fixed_mode(
         }));
     }
 
-    #[cfg(target_os = "windows")]
-    {
-        use raw_window_handle::HasWindowHandle;
-
-        if let Ok(handle) = window.window_handle() {
-            if let raw_window_handle::RawWindowHandle::Win32(win32_handle) = handle.as_raw() {
-                let hwnd = HWND(win32_handle.hwnd.get() as *mut _);
-
-                unsafe {
-                    let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE);
-
-                    if fixed {
-                        // 设置为工具窗口样式，不显示在任务栏
-                        let new_style = (ex_style as u32 | WS_EX_TOOLWINDOW.0) & !WS_EX_APPWINDOW.0;
-                        SetWindowLongW(hwnd, GWL_EXSTYLE, new_style as i32);
-                    } else {
-                        // 恢复为普通窗口样式
-                        let new_style = (ex_style as u32 & !WS_EX_TOOLWINDOW.0) | WS_EX_APPWINDOW.0;
-                        SetWindowLongW(hwnd, GWL_EXSTYLE, new_style as i32);
-                    }
-                }
-            }
-        }
-    }
+    // 任务栏样式排队补写：既覆盖此处的模式切换，也保证排在前端刚发出的
+    // setResizable 等 tao 操作之后，不被其样式重写顶掉
+    reassert_fixed_taskbar_style(&window);
 
     sync_tray_fixed_checked(fixed);
 
@@ -919,6 +960,7 @@ pub fn set_auto_hide_enabled(
                 y: anchor.y,
             }));
             let _ = main_window.show();
+            reassert_fixed_taskbar_style(&main_window);
         }
     }
 
@@ -926,6 +968,7 @@ pub fn set_auto_hide_enabled(
     if !enabled {
         if let Some(main_window) = app_handle.get_webview_window("main") {
             let _ = main_window.set_always_on_top(false);
+            reassert_fixed_taskbar_style(&main_window);
         }
     }
 
@@ -958,6 +1001,7 @@ pub fn set_top_on_wake(
     if !enabled {
         if let Some(main_window) = app_handle.get_webview_window("main") {
             let _ = main_window.set_always_on_top(false);
+            reassert_fixed_taskbar_style(&main_window);
         }
     }
 
@@ -1058,6 +1102,7 @@ pub fn bring_main_window_to_front(app: &tauri::AppHandle) {
     let _ = window.show();
     let _ = window.set_always_on_top(true);
     let _ = window.set_focus();
+    reassert_fixed_taskbar_style(&window);
 
     let app = app.clone();
     std::thread::spawn(move || {
@@ -1065,6 +1110,7 @@ pub fn bring_main_window_to_front(app: &tauri::AppHandle) {
         if !should_stay_on_top() {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_always_on_top(false);
+                reassert_fixed_taskbar_style(&window);
             }
         }
     });
