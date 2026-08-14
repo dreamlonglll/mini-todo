@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 14
+- **Total Sessions**: 15
 - **Last Active**: 2026-08-14
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~479 | Active |
+| `journal-1.md` | ~512 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 15 | 2026-08-14 | issue 9：新建待办阶段编辑子任务描述（内存模式） | `97199ec` | `main` |
 | 14 | 2026-08-14 | 移除子任务蓝色内容标识图标 | `d35e0c0` | `main` |
 | 13 | 2026-08-14 | issue 9 v2.3.2 反馈：任务栏图标复现修复 + 只读模式勾选子任务 | `0dc53fd`, `f5c73b9` | `main` |
 | 12 | 2026-08-13 | trellis-check：修复操作模式 FAB 卡沉底缺陷并沉淀拖拽规范 | `d937e42` | `main` |

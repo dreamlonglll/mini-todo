@@ -477,3 +477,36 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 15: issue 9：新建待办阶段编辑子任务描述（内存模式）
+
+**Date**: 2026-08-14
+**Task**: issue 9：新建待办阶段编辑子任务描述（内存模式）
+**Branch**: `main`
+
+### Summary
+
+v2.3.3 发布并回复 issue #9 后，用户 KieMg 反馈新建待办窗口中的子任务无法添加描述、眼睛按钮打开空窗口。根因：新建模式子任务是内存对象（临时负数 id），而子任务窗口按 DB id 加载。方案 B：子任务窗口新增 memory=1 内存模式，初始数据经 subtask-memory-init 事件传入，保存经 subtask-memory-save 回写 pendingSubtasks，待办保存时一并落库；新建模式补显编辑按钮，监听器随窗口销毁清理。npm run build 通过。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `97199ec` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
