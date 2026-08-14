@@ -1191,14 +1191,14 @@ function onHeaderMouseDown(e: MouseEvent) {
                 class="subtask-item-editor"
                 :class="{ completed: subtask.completed, readonly: isViewMode }"
               >
-                <!-- 只读详情也允许拖拽排序（issue #9 反馈），其余写入口仍随只读隐藏 -->
+                <!-- 只读详情也允许拖拽排序与勾选完成（issue #9 反馈），其余写入口仍随只读隐藏 -->
                 <el-icon class="subtask-drag-handle" :size="14" title="拖拽排序">
                   <Rank />
                 </el-icon>
                 <div
                   class="custom-checkbox"
                   :class="{ checked: subtask.completed }"
-                  @click="isViewMode ? null : (isEdit ? toggleSubtask(subtask.id) : togglePendingSubtask(subtask.id))"
+                  @click="isEdit ? toggleSubtask(subtask.id) : togglePendingSubtask(subtask.id)"
                 >
                   <el-icon v-if="subtask.completed" class="check-icon"><Check /></el-icon>
                 </div>
@@ -1914,19 +1914,6 @@ function onHeaderMouseDown(e: MouseEvent) {
         color: #ffffff;
         font-size: 12px;
       }
-    }
-  }
-
-  /* 只读模式：复选框只表示状态，不该显得可点 */
-  &.readonly .custom-checkbox {
-    cursor: default;
-
-    &:hover {
-      border-color: #cbd5e1;
-    }
-
-    &.checked:hover {
-      border-color: transparent;
     }
   }
 
