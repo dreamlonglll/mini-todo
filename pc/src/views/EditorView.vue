@@ -1216,14 +1216,6 @@ function onHeaderMouseDown(e: MouseEvent) {
                 >
                   {{ subtask.title }}
                 </span>
-                <el-icon
-                  v-if="subtask.content"
-                  class="content-indicator"
-                  :size="12"
-                  title="包含详细内容"
-                >
-                  <Document />
-                </el-icon>
                 <div v-if="inlineEditingSubtaskId !== subtask.id" class="subtask-actions">
                   <button
                     class="action-btn view-btn"
@@ -1946,12 +1938,6 @@ function onHeaderMouseDown(e: MouseEvent) {
     font-family: inherit;
     /* 父级为配合拖拽禁用了选择，重命名输入框需要放开 */
     user-select: text;
-  }
-
-  .content-indicator {
-    color: #3b82f6;
-    flex-shrink: 0;
-    opacity: 0.7;
   }
 
   .subtask-actions {
