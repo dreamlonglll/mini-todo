@@ -1,17 +1,22 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute } from 'vue-router'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import { listen, emit } from '@tauri-apps/api/event'
 import MarkdownEditor from '@/components/MarkdownEditor.vue'
 
 const route = useRoute()
 const subtaskId = parseInt(route.query.id as string)
 const isViewMode = route.query.mode === 'view'
+// 内存模式：父窗口（新建待办）中的子任务尚未落库，数据通过事件与父窗口交换，不碰数据库
+const isMemoryMode = route.query.memory === '1'
 const appWindow = getCurrentWindow()
 
 const title = ref('')
 const markdownContent = ref('')
+
+let unlistenMemoryInit: (() => void) | null = null
 
 async function loadSubtask() {
   try {
@@ -23,8 +28,30 @@ async function loadSubtask() {
   }
 }
 
+async function initMemorySubtask() {
+  // 先挂监听再通知父窗口就绪，避免初始数据在监听建立前发出
+  unlistenMemoryInit = await listen<{ pendingId: number; title: string; content: string | null }>(
+    'subtask-memory-init',
+    (event) => {
+      if (event.payload.pendingId !== subtaskId) return
+      title.value = event.payload.title
+      markdownContent.value = event.payload.content || ''
+    }
+  )
+  await emit('subtask-memory-ready', { pendingId: subtaskId })
+}
+
 async function handleSave() {
   if (!title.value.trim()) return
+  if (isMemoryMode) {
+    await emit('subtask-memory-save', {
+      pendingId: subtaskId,
+      title: title.value.trim(),
+      content: markdownContent.value,
+    })
+    appWindow.close()
+    return
+  }
   try {
     await invoke('update_subtask', {
       id: subtaskId,
@@ -62,7 +89,16 @@ function onHeaderMouseDown(e: MouseEvent) {
 }
 
 onMounted(async () => {
-  await loadSubtask()
+  if (isMemoryMode) {
+    await initMemorySubtask()
+  } else {
+    await loadSubtask()
+  }
+})
+
+onBeforeUnmount(() => {
+  unlistenMemoryInit?.()
+  unlistenMemoryInit = null
 })
 </script>
 

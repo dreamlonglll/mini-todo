@@ -5,6 +5,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { currentMonitor, primaryMonitor } from '@tauri-apps/api/window'
+import { listen, emit } from '@tauri-apps/api/event'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import type { Todo, CreateTodoRequest, UpdateTodoRequest, CreateSubTaskRequest, QuadrantType } from '@/types'
@@ -725,13 +726,50 @@ function handleInlineEditKeydown(e: KeyboardEvent, subtaskId: number) {
 async function openSubtaskWindow(subtaskId: number, mode: 'edit' | 'view') {
   if (isSubtaskEditorOpen.value) return
 
+  // 新建模式下子任务尚未落库（pendingSubtasks 临时负数 id），子任务窗口走内存模式：
+  // 初始数据与保存结果通过全局事件传递，按 pendingId 过滤（同一时刻只有一个子任务窗口）
+  const isMemoryMode = !isEdit.value
+  const memoryParam = isMemoryMode ? '&memory=1' : ''
   const modeParam = mode === 'view' ? '&mode=view' : ''
-  const url = `#/subtask-editor?id=${subtaskId}${modeParam}`
+  const url = `#/subtask-editor?id=${subtaskId}${memoryParam}${modeParam}`
   const label = `subtask-${mode}-${Date.now()}`
   const isEditMode = mode === 'edit'
 
+  let unlistenMemoryReady: (() => void) | null = null
+  let unlistenMemorySave: (() => void) | null = null
+  const cleanupMemoryListeners = () => {
+    unlistenMemoryReady?.()
+    unlistenMemorySave?.()
+    unlistenMemoryReady = null
+    unlistenMemorySave = null
+  }
+
   try {
     isSubtaskEditorOpen.value = true
+
+    if (isMemoryMode) {
+      const pending = pendingSubtasks.value.find(s => s.id === subtaskId)
+      if (!pending) {
+        isSubtaskEditorOpen.value = false
+        return
+      }
+      unlistenMemoryReady = await listen<{ pendingId: number }>('subtask-memory-ready', (event) => {
+        if (event.payload.pendingId !== subtaskId) return
+        void emit('subtask-memory-init', {
+          pendingId: subtaskId,
+          title: pending.title,
+          content: pending.content,
+        })
+      })
+      unlistenMemorySave = await listen<{ pendingId: number; title: string; content: string }>(
+        'subtask-memory-save',
+        (event) => {
+          if (event.payload.pendingId !== subtaskId) return
+          pending.title = event.payload.title
+          pending.content = event.payload.content || null
+        }
+      )
+    }
 
     const windowWidth = 800
     const windowHeight = 750
@@ -769,14 +807,17 @@ async function openSubtaskWindow(subtaskId: number, mode: 'edit' | 'view') {
 
     webview.once('tauri://destroyed', async () => {
       isSubtaskEditorOpen.value = false
-      if (isEditMode) await loadTodo()
+      cleanupMemoryListeners()
+      if (isEditMode && !isMemoryMode) await loadTodo()
     })
 
     webview.once('tauri://error', () => {
       isSubtaskEditorOpen.value = false
+      cleanupMemoryListeners()
     })
   } catch (e) {
     isSubtaskEditorOpen.value = false
+    cleanupMemoryListeners()
     console.error(`Failed to open subtask ${mode}:`, e)
   }
 }
@@ -1225,7 +1266,7 @@ function onHeaderMouseDown(e: MouseEvent) {
                     <el-icon><View /></el-icon>
                   </button>
                   <button
-                    v-if="isEdit && !isViewMode"
+                    v-if="!isViewMode"
                     class="action-btn edit-btn"
                     title="编辑子任务"
                     @click="openSubtaskWindow(subtask.id, 'edit')"
