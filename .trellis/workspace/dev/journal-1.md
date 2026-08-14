@@ -410,3 +410,37 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 13: issue 9 v2.3.2 反馈：任务栏图标复现修复 + 只读模式勾选子任务
+
+**Date**: 2026-08-14
+**Task**: issue 9 v2.3.2 反馈：任务栏图标复现修复 + 只读模式勾选子任务
+**Branch**: `main`
+
+### Summary
+
+定位并修复固定模式任务栏图标复现：tao 在 set_always_on_top/show 等操作时用内部 flags 整体重写 GWL_EXSTYLE，抹掉手动加的 WS_EX_TOOLWINDOW；在全部调用点后经主线程消息队列补写样式并加 SWP_FRAMECHANGED 刷新。只读详情模式子任务复选框恢复可点，直接切换完成态，其余写入口仍隐藏。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `0dc53fd` | (see git log) |
+| `f5c73b9` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

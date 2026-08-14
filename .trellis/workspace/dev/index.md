@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 12
-- **Last Active**: 2026-08-13
+- **Total Sessions**: 13
+- **Last Active**: 2026-08-14
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~412 | Active |
+| `journal-1.md` | ~446 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 13 | 2026-08-14 | issue 9 v2.3.2 反馈：任务栏图标复现修复 + 只读模式勾选子任务 | `0dc53fd`, `f5c73b9` | `main` |
 | 12 | 2026-08-13 | trellis-check：修复操作模式 FAB 卡沉底缺陷并沉淀拖拽规范 | `d937e42` | `main` |
 | 11 | 2026-08-13 | issue #9 第三轮反馈：子任务拖拽体验与固定模式新建入口 | `8d73c7a` | `main` |
 | 10 | 2026-08-12 | 修复 issue #9 v2.3.0 五条新反馈并发布 2.3.1 | `5ed316e`, `0b37f43` | `main` |
