@@ -170,20 +170,32 @@ pub fn export_data_internal(db: &Database) -> Result<String, String> {
 /// task_dependencies / prompt_templates / agent_executions 字段以及 todo / subtask
 /// 上的 agent / 调度 / 工作流字段，会被 serde 在反序列化阶段静默忽略
 /// （`ExportData` / `Todo` / `SubTask` 在 v2.0 后不再声明这些字段）。
+///
+/// 整个导入体（清空 + 逐条 INSERT + 写设置）包在单个 `BEGIN IMMEDIATE` 事务里：
+/// 中途任一语句失败时旧数据整体回滚，不会出现"旧数据已删、新数据只写了半截"
+/// 的永久丢失（手动导入与 WebDAV 应用远端共用此路径）。
+/// `with_connection` 只给 `&Connection`，用不了需要 `&mut` 的 `conn.transaction()`，
+/// 因此走 `Transaction::new_unchecked`；返回的 guard 默认 drop 即 ROLLBACK。
+/// 附带收益：逐行 autocommit 变单次提交，大备份导入少掉 N 次 fsync。
 pub fn import_data_raw(db: &Database, json_data: &str) -> Result<(), String> {
     let import: ExportData =
         serde_json::from_str(json_data).map_err(|e| format!("Invalid JSON format: {}", e))?;
 
     db.with_connection(|conn| {
-        conn.execute("DELETE FROM subtasks", [])?;
-        conn.execute("DELETE FROM todos", [])?;
+        let tx = rusqlite::Transaction::new_unchecked(
+            conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+
+        tx.execute("DELETE FROM subtasks", [])?;
+        tx.execute("DELETE FROM todos", [])?;
 
         for todo in &import.todos {
             let notified_i = if todo.notified { 1i32 } else { 0 };
             let completed_i = if todo.completed { 1i32 } else { 0 };
             let repeat_enabled_i = if todo.repeat_enabled { 1i32 } else { 0 };
 
-            conn.execute(
+            tx.execute(
                 "INSERT INTO todos (title, description, color, quadrant, notify_at, notify_before,
                                     notified, completed, sort_order, start_time, end_time, created_at, updated_at,
                                     repeat_enabled, repeat_type, repeat_interval, repeat_weekdays, repeat_month_day)
@@ -200,11 +212,11 @@ pub fn import_data_raw(db: &Database, json_data: &str) -> Result<(), String> {
                 ],
             )?;
 
-            let new_todo_id = conn.last_insert_rowid();
+            let new_todo_id = tx.last_insert_rowid();
 
             for subtask in &todo.subtasks {
                 let sub_completed_i = if subtask.completed { 1i32 } else { 0 };
-                conn.execute(
+                tx.execute(
                     "INSERT INTO subtasks (parent_id, title, content, completed, sort_order, created_at, updated_at)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                     params![
@@ -216,8 +228,9 @@ pub fn import_data_raw(db: &Database, json_data: &str) -> Result<(), String> {
             }
         }
 
-        write_app_settings(conn, &import.settings)?;
+        write_app_settings(&tx, &import.settings)?;
 
+        tx.commit()?;
         Ok(())
     })
     .map_err(|e| e.to_string())
@@ -277,5 +290,149 @@ pub fn import_data_from_file(db: State<Database>, file_path: String) -> Result<(
         let json_data =
             String::from_utf8(file_bytes).map_err(|e| format!("文件编码错误: {}", e))?;
         import_data_raw(&db, &json_data)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::SubTask;
+
+    fn test_db() -> Database {
+        Database::new_in_memory().expect("打开内存库失败")
+    }
+
+    fn make_todo(id: i64, title: &str) -> Todo {
+        Todo {
+            id,
+            title: title.to_string(),
+            description: None,
+            color: "#F59E0B".to_string(),
+            quadrant: 4,
+            notify_at: None,
+            notify_before: 0,
+            notified: false,
+            completed: false,
+            sort_order: 0,
+            start_time: None,
+            end_time: None,
+            created_at: "2026-01-01 00:00:00".to_string(),
+            updated_at: "2026-01-01 00:00:00".to_string(),
+            repeat_enabled: false,
+            repeat_type: None,
+            repeat_interval: 1,
+            repeat_weekdays: None,
+            repeat_month_day: None,
+            subtasks: Vec::new(),
+        }
+    }
+
+    fn make_subtask(id: i64, parent_id: i64, title: &str) -> SubTask {
+        SubTask {
+            id,
+            parent_id,
+            title: title.to_string(),
+            content: None,
+            completed: false,
+            sort_order: 0,
+            created_at: "2026-01-01 00:00:00".to_string(),
+            updated_at: "2026-01-01 00:00:00".to_string(),
+        }
+    }
+
+    fn export_json(todos: Vec<Todo>) -> String {
+        let data = ExportData {
+            version: "4.0".to_string(),
+            exported_at: "2026-01-02T00:00:00+08:00".to_string(),
+            todos,
+            settings: AppSettings {
+                is_fixed: false,
+                window_position: None,
+                window_size: None,
+                auto_hide_enabled: true,
+                top_on_wake: true,
+                window_bg_color: DEFAULT_WINDOW_BG_COLOR.to_string(),
+                window_bg_alpha: DEFAULT_WINDOW_BG_ALPHA,
+                text_theme: "dark".to_string(),
+                show_calendar: false,
+                view_mode: "list".to_string(),
+                notification_type: "system".to_string(),
+            },
+        };
+        serde_json::to_string(&data).expect("序列化导出数据失败")
+    }
+
+    /// 先塞一条已有待办 + 子任务，模拟"用户导入前的现存数据"
+    fn seed_existing(db: &Database) {
+        db.with_connection(|conn| {
+            conn.execute(
+                "INSERT INTO todos (id, title, color, quadrant, created_at, updated_at)
+                 VALUES (1, '已有待办', '#EF4444', 1, '2026-01-01 00:00:00', '2026-01-01 00:00:00')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO subtasks (id, parent_id, title, created_at, updated_at)
+                 VALUES (11, 1, '已有子任务', '2026-01-01 00:00:00', '2026-01-01 00:00:00')",
+                [],
+            )?;
+            Ok(())
+        })
+        .expect("写入初始数据失败");
+    }
+
+    fn count(db: &Database, table: &str) -> i64 {
+        db.with_connection(|conn| {
+            conn.query_row(&format!("SELECT COUNT(*) FROM {}", table), [], |r| r.get(0))
+        })
+        .expect("统计行数失败")
+    }
+
+    fn titles(db: &Database) -> Vec<String> {
+        db.with_connection(|conn| {
+            let mut stmt = conn.prepare("SELECT title FROM todos ORDER BY id")?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            Ok(rows.filter_map(|r| r.ok()).collect())
+        })
+        .expect("读取标题失败")
+    }
+
+    #[test]
+    fn import_replaces_all_data_on_success() {
+        let db = test_db();
+        seed_existing(&db);
+
+        let mut t = make_todo(100, "导入待办");
+        t.subtasks.push(make_subtask(200, 100, "导入子任务"));
+        import_data_raw(&db, &export_json(vec![t])).expect("导入应当成功");
+
+        assert_eq!(titles(&db), vec!["导入待办".to_string()]);
+        assert_eq!(count(&db, "subtasks"), 1);
+    }
+
+    /// 导入中途失败（此处用 TEMP TRIGGER 模拟磁盘满 / IO 错误导致的 INSERT 失败）时，
+    /// 事务整体回滚，用户原有数据必须完好无损。
+    #[test]
+    fn failed_import_rolls_back_and_keeps_existing_data() {
+        let db = test_db();
+        seed_existing(&db);
+
+        db.with_connection(|conn| {
+            conn.execute_batch(
+                "CREATE TEMP TRIGGER fail_import BEFORE INSERT ON todos
+                 WHEN NEW.title = '__fail__'
+                 BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+            )
+        })
+        .expect("创建测试触发器失败");
+
+        let mut ok_todo = make_todo(100, "导入待办");
+        ok_todo.subtasks.push(make_subtask(200, 100, "导入子任务"));
+        let json = export_json(vec![ok_todo, make_todo(101, "__fail__")]);
+
+        let err = import_data_raw(&db, &json).expect_err("导入应当失败");
+        assert!(err.contains("boom"), "应当是触发器中断导致的失败：{}", err);
+
+        assert_eq!(titles(&db), vec!["已有待办".to_string()]);
+        assert_eq!(count(&db, "subtasks"), 1);
     }
 }
