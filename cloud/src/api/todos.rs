@@ -1,6 +1,7 @@
 //! `/todos` CRUD。
 //!
-//! 写路径统一：变更 → `repo::set_meta(conn, "dirty", "true")` 唤醒 push worker。
+//! 写路径统一：变更 → `repo::mark_dirty(conn)` 唤醒 push worker（置 dirty 并
+//! 递增 `dirty_generation`，push 据此判断推送窗口期内是否又有新写入）。
 //! merge 语义：PATCH 把请求 body 的字段覆盖到 `data_json` 上，未提及字段保留
 //! （包括 PC 端 v24/v25 加的未知字段也透传）。
 
@@ -195,7 +196,7 @@ pub async fn create_todo(
     let seq = state.db.with_conn(|conn| -> rusqlite::Result<i64> {
         repo::upsert_todo(conn, &id_str, &body_str, &now)?;
         let seq = repo::assign_seq(conn, &id_str)?;
-        repo::set_meta(conn, "dirty", "true")?;
+        repo::mark_dirty(conn)?;
         Ok(seq)
     })?;
 
@@ -242,7 +243,7 @@ pub async fn patch_todo(
             }
             let body_str = current.to_string();
             repo::upsert_todo(conn, &id, &body_str, &now)?;
-            repo::set_meta(conn, "dirty", "true")?;
+            repo::mark_dirty(conn)?;
             attach_seq(conn, &id, &mut current);
             Ok(Some(current))
         })?;
@@ -286,7 +287,7 @@ pub async fn delete_todo(
                 repo::add_tombstone(&tx, "subtask", &sid, &now)?;
             }
             repo::delete_seq(&tx, &id)?;
-            repo::set_meta(&tx, "dirty", "true")?;
+            repo::mark_dirty(&tx)?;
         }
         tx.commit()?;
         Ok(existed)

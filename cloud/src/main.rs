@@ -46,15 +46,20 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => warn!(target: "minitodo_cloud", "initial pull failed: {:#}", e),
     }
 
+    // 同步互斥锁：pull / push / POST /sync 系列共享一把，全进程只建一次。
+    // （启动时那次 pull_once 在 worker spawn 之前跑，不存在并发，无需加锁）
+    let sync_lock = sync::new_sync_lock();
+
     // 后台 worker
-    sync::pull::start_pull_loop(cfg.clone(), db.clone());
-    sync::push::start_push_loop(cfg.clone(), db.clone());
+    sync::pull::start_pull_loop(cfg.clone(), db.clone(), sync_lock.clone());
+    sync::push::start_push_loop(cfg.clone(), db.clone(), sync_lock.clone());
     sync::images::spawn_bootstrap(cfg.clone());
 
     // axum
     let state = AppState {
         config: cfg.clone(),
         db: db.clone(),
+        sync_lock,
     };
     let router = api::build_router(state);
 

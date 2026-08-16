@@ -14,6 +14,7 @@ use axum::http::HeaderName;
 use axum::middleware::Next;
 use axum::response::Response;
 use chrono::{NaiveDateTime, Utc};
+use tracing::warn;
 
 use super::AppState;
 use crate::db::repo;
@@ -51,9 +52,18 @@ pub async fn inject_sync_headers(
 }
 
 pub fn compute_sync_status(state: &AppState) -> SyncStatus {
-    let last_pull_at = state
+    // 读不到（键不存在）与读失败都按 offline 处理，但后者要留日志——
+    // header 注入不该因为一次 DB 错误静默降级成"看起来只是还没同步过"。
+    let last_pull_at = match state
         .db
-        .with_conn(|conn| repo::get_meta(conn, "last_pull_at"));
+        .with_conn(|conn| repo::get_meta(conn, "last_pull_at"))
+    {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(target: "minitodo_cloud::api", "读 meta.last_pull_at 失败: {}", e);
+            None
+        }
+    };
 
     let Some(ref s) = last_pull_at else {
         return SyncStatus {

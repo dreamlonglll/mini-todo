@@ -125,14 +125,14 @@ pub async fn upload_image(
 
     // 写 dirty_images：JSON 数组形式存进 meta
     state.db.with_conn(|conn| -> rusqlite::Result<()> {
-        let raw = repo::get_meta(conn, "dirty_images").unwrap_or_else(|| "[]".to_string());
+        let raw = repo::get_meta(conn, "dirty_images")?.unwrap_or_else(|| "[]".to_string());
         let mut arr: Vec<String> = serde_json::from_str(&raw).unwrap_or_default();
         if !arr.iter().any(|n| n == &name) {
             arr.push(name.clone());
         }
         let new_raw = serde_json::to_string(&arr).unwrap_or_else(|_| "[]".to_string());
         repo::set_meta(conn, "dirty_images", &new_raw)?;
-        repo::set_meta(conn, "dirty", "true")?;
+        repo::mark_dirty(conn)?;
         Ok(())
     })?;
 

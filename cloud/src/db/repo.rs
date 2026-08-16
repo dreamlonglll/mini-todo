@@ -31,13 +31,14 @@ pub struct SubtaskRow {
 // meta KV
 // =============================================================================
 
-pub fn get_meta(conn: &Connection, key: &str) -> Option<String> {
+/// 读 meta 值。`Ok(None)` 只表示"键不存在"，DB 错误按 `Err` 上抛——
+/// 早期版本用 `.ok().flatten()` 把两者混成 `None`，导致 pull 读 dirty 失败时
+/// 被当成"不脏"而执行孤儿清理，可能误删还没 push 的本地记录。
+pub fn get_meta(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
     conn.query_row("SELECT value FROM meta WHERE key = ?1", [key], |row| {
         row.get::<_, String>(0)
     })
     .optional()
-    .ok()
-    .flatten()
 }
 
 pub fn set_meta(conn: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
@@ -47,6 +48,25 @@ pub fn set_meta(conn: &Connection, key: &str, value: &str) -> rusqlite::Result<(
         params![key, value],
     )?;
     Ok(())
+}
+
+/// 标脏：置 `dirty=true` 并把 `dirty_generation` 计数 +1。
+///
+/// 所有写路径（todos / subtasks / images 的增删改）都必须走这里。generation
+/// 是 push worker 的并发判据：push 开始时记下 `g0`，PUT 成功后仅当计数仍为
+/// `g0` 才清 dirty；否则说明推送窗口期内又有新写入，dirty 保留给下一轮。
+pub fn mark_dirty(conn: &Connection) -> rusqlite::Result<()> {
+    set_meta(conn, "dirty", "true")?;
+    let next = get_dirty_generation(conn)? + 1;
+    set_meta(conn, "dirty_generation", &next.to_string())?;
+    Ok(())
+}
+
+/// 读 `dirty_generation` 计数；键不存在或值非法均视为 0。
+pub fn get_dirty_generation(conn: &Connection) -> rusqlite::Result<i64> {
+    Ok(get_meta(conn, "dirty_generation")?
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(0))
 }
 
 /// 给 `todo_id` 分配 / 取得 cloud-only 短码 `seq`。
@@ -773,10 +793,39 @@ mod tests {
     #[test]
     fn meta_kv_roundtrip() {
         let c = fresh();
-        assert_eq!(get_meta(&c, "dirty"), None);
+        assert_eq!(get_meta(&c, "dirty").unwrap(), None);
         set_meta(&c, "dirty", "true").unwrap();
-        assert_eq!(get_meta(&c, "dirty").as_deref(), Some("true"));
+        assert_eq!(get_meta(&c, "dirty").unwrap().as_deref(), Some("true"));
         set_meta(&c, "dirty", "false").unwrap();
-        assert_eq!(get_meta(&c, "dirty").as_deref(), Some("false"));
+        assert_eq!(get_meta(&c, "dirty").unwrap().as_deref(), Some("false"));
+    }
+
+    /// DB 错误不得被吞成 `None`——否则调用方无法区分"键不存在"和"读失败"。
+    #[test]
+    fn get_meta_propagates_db_error() {
+        let c = fresh();
+        c.execute_batch("DROP TABLE meta").unwrap();
+        assert!(
+            get_meta(&c, "dirty").is_err(),
+            "meta 表不存在时必须报错而不是返回 None"
+        );
+    }
+
+    #[test]
+    fn mark_dirty_sets_flag_and_bumps_generation() {
+        let c = fresh();
+        assert_eq!(get_dirty_generation(&c).unwrap(), 0);
+        mark_dirty(&c).unwrap();
+        assert_eq!(get_meta(&c, "dirty").unwrap().as_deref(), Some("true"));
+        assert_eq!(get_dirty_generation(&c).unwrap(), 1);
+        mark_dirty(&c).unwrap();
+        assert_eq!(get_dirty_generation(&c).unwrap(), 2);
+    }
+
+    #[test]
+    fn get_dirty_generation_defaults_to_zero_on_garbage() {
+        let c = fresh();
+        set_meta(&c, "dirty_generation", "not-a-number").unwrap();
+        assert_eq!(get_dirty_generation(&c).unwrap(), 0);
     }
 }

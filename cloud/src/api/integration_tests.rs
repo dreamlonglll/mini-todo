@@ -48,6 +48,7 @@ fn fixture() -> Fixture {
     let state = AppState {
         config: cfg,
         db: db.clone(),
+        sync_lock: crate::sync::new_sync_lock(),
     };
     let router = build_router(state.clone());
     Fixture {
@@ -289,8 +290,20 @@ async fn create_todo_sets_dirty_flag() {
         req(Method::POST, "/todos", Some(json!({"title": "dirty"}))),
     )
     .await;
-    let dirty = fx.state.db.with_conn(|c| repo::get_meta(c, "dirty"));
+    let dirty = fx
+        .state
+        .db
+        .with_conn(|c| repo::get_meta(c, "dirty"))
+        .unwrap();
     assert_eq!(dirty.as_deref(), Some("true"));
+    // 写路径必须走 mark_dirty：generation 同步递增，push 才能判断
+    // "推送窗口期内是否又有新写入"
+    let gen = fx
+        .state
+        .db
+        .with_conn(|c| repo::get_dirty_generation(c))
+        .unwrap();
+    assert_eq!(gen, 1, "写路径必须递增 dirty_generation");
 }
 
 // =============================================================================
@@ -994,7 +1007,11 @@ async fn upload_image_then_fetch_roundtrip() {
     assert_eq!(got.as_slice(), payload);
 
     // dirty_images meta 也要记录
-    let dirty_images = fx.state.db.with_conn(|c| repo::get_meta(c, "dirty_images"));
+    let dirty_images = fx
+        .state
+        .db
+        .with_conn(|c| repo::get_meta(c, "dirty_images"))
+        .unwrap();
     let arr: Vec<String> = serde_json::from_str(dirty_images.as_deref().unwrap_or("[]")).unwrap();
     assert!(arr.contains(&name));
 }
@@ -1310,8 +1327,12 @@ async fn sync_push_route_fails_when_dirty_and_webdav_unreachable() {
     let _ = create_todo(&fx, json!({"title": "trigger dirty"})).await;
     let (status, _, _) = send(&fx.router, req(Method::POST, "/sync/push", None)).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    // 失败后 dirty 必须复位回 true，等下一轮重试
-    let dirty = fx.state.db.with_conn(|c| repo::get_meta(c, "dirty"));
+    // PUT 没成功过，dirty 必须保持 true，等下一轮重试
+    let dirty = fx
+        .state
+        .db
+        .with_conn(|c| repo::get_meta(c, "dirty"))
+        .unwrap();
     assert_eq!(dirty.as_deref(), Some("true"));
 }
 

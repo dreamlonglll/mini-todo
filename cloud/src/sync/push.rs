@@ -18,19 +18,31 @@ use tracing::{error, info, warn};
 use crate::config::Config;
 use crate::db::{repo, Db};
 use crate::sync::webdav::WebDavClient;
+use crate::sync::SyncLock;
 use crate::time::now_local_string;
 
 const REMOTE_DIR: &str = "/mini-todo";
 const REMOTE_IMAGES_DIR: &str = "/mini-todo/images";
 const SYNC_DATA_FILE: &str = "/mini-todo/sync-data.json.gz";
 
+/// 一次 sync-data 推送的结果。
+enum PushOutcome {
+    /// PUT 成功落到远端。
+    Pushed,
+    /// 412：远端被别人改过，本轮放弃；dirty 保持 true 等下一轮重试。
+    Retry,
+}
+
 /// 后台 spawn 的 push 循环（1s tick）。
-pub fn start_push_loop(cfg: Arc<Config>, db: Db) {
+pub fn start_push_loop(cfg: Arc<Config>, db: Db, sync_lock: SyncLock) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
             let cfg_ref = cfg.clone();
             let db_ref = db.clone();
+            // 在 async 层拿锁、持有到 blocking 段结束（不能在 blocking 线程里
+            // 做 async 锁操作），与 pull tick / POST /sync 串行。
+            let _guard = sync_lock.lock().await;
             let res = tokio::task::spawn_blocking(move || push_tick(&cfg_ref, &db_ref)).await;
             match res {
                 Ok(Ok(_)) => {}
@@ -44,23 +56,22 @@ pub fn start_push_loop(cfg: Arc<Config>, db: Db) {
 }
 
 /// 单次 tick：检查 dirty / dirty_images 并处理。
+///
+/// dirty 的清除时机：**PUT 成功之后**，且仅当 `dirty_generation` 相比本轮开始
+/// 时没有变化。早期版本在推送前就置 dirty=false，慢速网络窗口期内并发的 pull
+/// 会把本地新建、还没推上去的记录当孤儿删掉（进程在此期间崩溃亦然）。
 pub fn push_tick(cfg: &Config, db: &Db) -> anyhow::Result<()> {
     // === dirty sync-data ===
-    let dirty = db.with_conn(|conn| repo::get_meta(conn, "dirty"));
+    let dirty = db
+        .with_conn(|conn| repo::get_meta(conn, "dirty"))
+        .map_err(|e| anyhow::anyhow!("读 meta.dirty 失败: {}", e))?;
     if dirty.as_deref() == Some("true") {
-        // CAS：先标 false，处理失败再标回 true。这样并发写入新增的 dirty=true
-        // 不会被本轮覆盖。
-        db.with_conn(|conn| -> rusqlite::Result<()> {
-            repo::set_meta(conn, "dirty", "false")?;
-            Ok(())
-        })?;
-        if let Err(e) = do_push_sync_data(cfg, db) {
-            // 失败：复位 dirty=true，下轮重试
-            let _ = db.with_conn(|conn| -> rusqlite::Result<()> {
-                repo::set_meta(conn, "dirty", "true")?;
-                Ok(())
-            });
-            return Err(e);
+        // 记录本轮起始 generation；dirty 不预清，失败 / 崩溃路径天然保持 true。
+        let g0 = db
+            .with_conn(|conn| repo::get_dirty_generation(conn))
+            .map_err(|e| anyhow::anyhow!("读 meta.dirty_generation 失败: {}", e))?;
+        if let PushOutcome::Pushed = do_push_sync_data(cfg, db)? {
+            clear_dirty_if_unchanged(db, g0)?;
         }
     }
 
@@ -69,7 +80,22 @@ pub fn push_tick(cfg: &Config, db: &Db) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn do_push_sync_data(cfg: &Config, db: &Db) -> anyhow::Result<()> {
+/// PUT 成功后的收尾：generation 仍等于 `g0` 才置 dirty=false，返回是否清除。
+///
+/// generation 变了说明推送窗口期内又有新写入（这些改动不在刚 PUT 的快照里），
+/// dirty 必须保留给下一轮。读 + 判 + 写在同一个 `with_conn` 闭包内完成，与
+/// 写路径的 `mark_dirty` 互斥（`Db` 的 Mutex 保证）。
+fn clear_dirty_if_unchanged(db: &Db, g0: i64) -> rusqlite::Result<bool> {
+    db.with_conn(|conn| -> rusqlite::Result<bool> {
+        if repo::get_dirty_generation(conn)? != g0 {
+            return Ok(false);
+        }
+        repo::set_meta(conn, "dirty", "false")?;
+        Ok(true)
+    })
+}
+
+fn do_push_sync_data(cfg: &Config, db: &Db) -> anyhow::Result<PushOutcome> {
     let client = WebDavClient::new(&cfg.webdav_url, &cfg.webdav_username, &cfg.webdav_password)?;
     let _ = client.ensure_dir(REMOTE_DIR);
     let _ = client.ensure_dir(REMOTE_IMAGES_DIR);
@@ -132,16 +158,12 @@ fn do_push_sync_data(cfg: &Config, db: &Db) -> anyhow::Result<()> {
                 Ok(())
             })?;
             info!(target: "minitodo_cloud::push", "push ok");
-            Ok(())
+            Ok(PushOutcome::Pushed)
         }
         412 => {
-            // 远端被别人改过：dirty 回设 true，下轮重试
+            // 远端被别人改过：本轮不算推送成功，dirty 保持 true，下轮重试
             warn!(target: "minitodo_cloud::push", "412 precondition failed; will retry");
-            db.with_conn(|conn| -> rusqlite::Result<()> {
-                repo::set_meta(conn, "dirty", "true")?;
-                Ok(())
-            })?;
-            Ok(())
+            Ok(PushOutcome::Retry)
         }
         other => {
             anyhow::bail!("push PUT 收到状态 {}", other);
@@ -455,7 +477,9 @@ fn gunzip(data: &[u8]) -> anyhow::Result<String> {
 // =============================================================================
 
 fn push_dirty_images(cfg: &Config, db: &Db) -> anyhow::Result<()> {
-    let raw = db.with_conn(|conn| repo::get_meta(conn, "dirty_images"));
+    let raw = db
+        .with_conn(|conn| repo::get_meta(conn, "dirty_images"))
+        .map_err(|e| anyhow::anyhow!("读 meta.dirty_images 失败: {}", e))?;
     let names: Vec<String> = raw
         .as_deref()
         .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
@@ -529,6 +553,71 @@ fn guess_image_content_type(name: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+
+    fn fresh_db() -> (Db, TempDir) {
+        let tmp = TempDir::new().expect("tempdir");
+        let db = Db::open(&tmp.path().join("data.db")).expect("open db");
+        (db, tmp)
+    }
+
+    fn dirty_flag(db: &Db) -> Option<String> {
+        db.with_conn(|conn| repo::get_meta(conn, "dirty"))
+            .expect("读 dirty")
+    }
+
+    /// 推送窗口期内（g0 已读、dirty 还没清）又有写入 → PUT 成功也不能清 dirty，
+    /// 否则这批新写入永远不会被推上去（且随后的 pull 会把它们当孤儿删掉）。
+    #[test]
+    fn clear_dirty_keeps_flag_when_write_lands_during_push() {
+        let (db, _tmp) = fresh_db();
+        db.with_conn(|conn| repo::mark_dirty(conn)).unwrap();
+        let g0 = db
+            .with_conn(|conn| repo::get_dirty_generation(conn))
+            .unwrap();
+
+        // 慢速 PUT 期间，API 写路径又标了一次脏
+        db.with_conn(|conn| repo::mark_dirty(conn)).unwrap();
+
+        assert!(
+            !clear_dirty_if_unchanged(&db, g0).unwrap(),
+            "generation 变了就不该清 dirty"
+        );
+        assert_eq!(dirty_flag(&db).as_deref(), Some("true"));
+    }
+
+    /// 推送期间无写入 → PUT 成功后正常清 dirty。
+    #[test]
+    fn clear_dirty_clears_flag_when_no_write_during_push() {
+        let (db, _tmp) = fresh_db();
+        db.with_conn(|conn| repo::mark_dirty(conn)).unwrap();
+        let g0 = db
+            .with_conn(|conn| repo::get_dirty_generation(conn))
+            .unwrap();
+
+        assert!(clear_dirty_if_unchanged(&db, g0).unwrap());
+        assert_eq!(dirty_flag(&db).as_deref(), Some("false"));
+    }
+
+    /// PUT 失败（WebDAV 不可达）→ dirty 必须保持 true 留给下一轮。
+    /// 新语义下 dirty 全程没被清过，失败路径不需要任何"复位"动作。
+    #[test]
+    fn push_tick_keeps_dirty_when_put_fails() {
+        let (db, tmp) = fresh_db();
+        db.with_conn(|conn| repo::mark_dirty(conn)).unwrap();
+
+        // Config::for_tests 的 webdav_url 指向 127.0.0.1:0，必然连不上
+        let cfg = Config::for_tests(
+            "test-api-key-1234567890abcdef",
+            tmp.path().join("data"),
+            tmp.path().join("images"),
+        );
+        assert!(
+            push_tick(&cfg, &db).is_err(),
+            "WebDAV 不可达时 push_tick 必须报错"
+        );
+        assert_eq!(dirty_flag(&db).as_deref(), Some("true"));
+    }
 
     #[test]
     fn merge_subtasks_lww_keeps_newer() {

@@ -25,6 +25,10 @@ pub async fn post_sync(State(state): State<AppState>) -> (StatusCode, Json<SyncR
     let cfg = state.config.clone();
     let db = state.db.clone();
 
+    // 与后台 pull / push worker 串行：语义是"排队等待"而非"拒绝并发"。
+    // 锁在 async 层获取、持有到 blocking 段结束。
+    let _guard = state.sync_lock.lock().await;
+
     let (pull_res, push_res) = tokio::task::spawn_blocking(move || {
         let p = pull::pull_once(&cfg, &db);
         let s = push::push_tick(&cfg, &db);
@@ -62,6 +66,7 @@ pub async fn post_sync_pull(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let cfg = state.config.clone();
     let db = state.db.clone();
+    let _guard = state.sync_lock.lock().await;
 
     tokio::task::spawn_blocking(move || pull::pull_once(&cfg, &db))
         .await
@@ -76,6 +81,7 @@ pub async fn post_sync_push(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let cfg = state.config.clone();
     let db = state.db.clone();
+    let _guard = state.sync_lock.lock().await;
 
     tokio::task::spawn_blocking(move || push::push_tick(&cfg, &db))
         .await

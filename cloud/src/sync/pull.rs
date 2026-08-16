@@ -18,6 +18,7 @@ use tracing::{error, info, warn};
 use crate::config::Config;
 use crate::db::{repo, Db};
 use crate::sync::webdav::WebDavClient;
+use crate::sync::SyncLock;
 use crate::time::now_local_string;
 
 /// 远端 `/mini-todo` 同步目录路径。
@@ -68,7 +69,9 @@ fn pull_once_inner(cfg: &Config, db: &Db) -> anyhow::Result<()> {
     let client = WebDavClient::new(&cfg.webdav_url, &cfg.webdav_username, &cfg.webdav_password)?;
     let _ = client.ensure_dir(REMOTE_DIR);
 
-    let last_etag = db.with_conn(|conn| repo::get_meta(conn, "last_etag"));
+    let last_etag = db
+        .with_conn(|conn| repo::get_meta(conn, "last_etag"))
+        .map_err(|e| anyhow::anyhow!("读 meta.last_etag 失败: {}", e))?;
     let res = client.get(SYNC_DATA_FILE, last_etag.as_deref())?;
 
     let now = now_local_string(cfg.timezone_offset);
@@ -142,13 +145,16 @@ pub(crate) fn backfill_missing_seq(db: &Db) -> rusqlite::Result<usize> {
 }
 
 /// 后台 spawn 的轮询循环。
-pub fn start_pull_loop(cfg: Arc<Config>, db: Db) {
+pub fn start_pull_loop(cfg: Arc<Config>, db: Db, sync_lock: SyncLock) {
     let interval = Duration::from_secs(cfg.pull_interval_secs);
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(interval).await;
             let cfg_ref = cfg.clone();
             let db_ref = db.clone();
+            // 在 async 层拿锁、持有到 blocking 段结束（不能在 blocking 线程里
+            // 做 async 锁操作），与 push tick / POST /sync 串行。
+            let _guard = sync_lock.lock().await;
             let res = tokio::task::spawn_blocking(move || pull_once(&cfg_ref, &db_ref)).await;
             match res {
                 Ok(Ok(())) => {}
@@ -172,8 +178,19 @@ fn merge_into_sqlite(db: &Db, data: &SyncData) -> anyhow::Result<(usize, usize)>
 
         // dirty flag 必须在事务内读，防止事务开始后 API handler 新建 todo
         // 设 dirty=true 但清理逻辑仍按旧的 dirty=false 执行。
-        let is_dirty = repo::get_meta(&tx, "dirty");
-        let skip_cleanup = is_dirty.as_deref() == Some("true");
+        //
+        // 读失败时按"可能有未推送的本地新建"处理：跳过清理并打日志。
+        // 宁可留孤儿（下次 pull 会再清），不可误删本地记录。
+        let skip_cleanup = match repo::get_meta(&tx, "dirty") {
+            Ok(v) => v.as_deref() == Some("true"),
+            Err(e) => {
+                warn!(
+                    target: "minitodo_cloud::pull",
+                    "读 meta.dirty 失败，本轮跳过孤儿清理: {}", e
+                );
+                true
+            }
+        };
 
         let mut todo_n = 0usize;
         let mut sub_n = 0usize;
@@ -364,6 +381,35 @@ mod tests {
         .unwrap();
 
         assert!(todo_title(&db, "2").is_some(), "dirty 时不得清理本地记录");
+    }
+
+    /// 读 dirty 出错（这里用 DROP TABLE meta 注入 DB 错误）时同样跳过清理：
+    /// 早期 `get_meta` 把错误吞成 `None`，会被误判成"不脏"而删掉本地新记录。
+    #[test]
+    fn merge_cleanup_skipped_when_dirty_read_fails() {
+        let (db, _tmp) = fresh_db();
+        merge_into_sqlite(
+            &db,
+            &sync_data(vec![
+                todo_value(1, "A", "2026-01-01 10:00:00"),
+                todo_value(2, "本地新建", "2026-01-01 10:00:00"),
+            ]),
+        )
+        .unwrap();
+        // 注入 DB 错误：meta 表没了，get_meta 必然返回 Err
+        db.with_conn(|conn| conn.execute_batch("DROP TABLE meta"))
+            .unwrap();
+
+        merge_into_sqlite(
+            &db,
+            &sync_data(vec![todo_value(1, "A", "2026-01-01 10:00:00")]),
+        )
+        .unwrap();
+
+        assert!(
+            todo_title(&db, "2").is_some(),
+            "读 dirty 失败时不得清理本地记录"
+        );
     }
 
     #[test]

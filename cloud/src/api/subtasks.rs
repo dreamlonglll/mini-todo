@@ -58,7 +58,7 @@ pub async fn create_subtask(
         let body_str = v.to_string();
 
         repo::upsert_subtask(conn, &id_str, &parent_id, &body_str, &now)?;
-        repo::set_meta(conn, "dirty", "true")?;
+        repo::mark_dirty(conn)?;
         Ok(v)
     })?;
 
@@ -94,7 +94,7 @@ pub async fn patch_subtask(
             }
             let body_str = current.to_string();
             repo::upsert_subtask(conn, &id, &row.todo_id, &body_str, &now)?;
-            repo::set_meta(conn, "dirty", "true")?;
+            repo::mark_dirty(conn)?;
             Ok(Some(current))
         })?;
 
@@ -118,7 +118,7 @@ pub async fn delete_subtask(
         let existed = repo::delete_subtask(&tx, &id)?;
         if existed {
             repo::add_tombstone(&tx, TOMBSTONE_SUBTASK, &id, &now)?;
-            repo::set_meta(&tx, "dirty", "true")?;
+            repo::mark_dirty(&tx)?;
         }
         tx.commit()?;
         Ok(existed)

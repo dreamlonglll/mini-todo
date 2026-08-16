@@ -31,12 +31,16 @@ use axum::Router;
 
 use crate::config::Config;
 use crate::db::Db;
+use crate::sync::SyncLock;
 
 /// API 路由层共享的 state。
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
     pub db: Db,
+    /// 与后台 pull / push worker 共享的同步互斥锁。只有 `/sync` 系列端点会
+    /// 获取它；CRUD 写路径不拿锁，避免被慢速网络同步阻塞。
+    pub sync_lock: SyncLock,
 }
 
 pub fn build_router(state: AppState) -> Router {
