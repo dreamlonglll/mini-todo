@@ -1,0 +1,2 @@
+{"file": ".trellis/tasks/08-16-fix-4-critical-defects/prd.md", "reason": "对照验收标准逐项核查"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "确认改动未破坏导入导出/同步链路的跨层契约"}

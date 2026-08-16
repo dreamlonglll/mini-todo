@@ -1,0 +1,2 @@
+{"file": ".trellis/tasks/08-16-fix-4-critical-defects/prd.md", "reason": "任务 PRD：4 项缺陷的精确定位、修法约束、验收标准与 out-of-scope"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "复用现有事务/毒锁模式而非新造轮子"}
