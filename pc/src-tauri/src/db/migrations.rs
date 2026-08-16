@@ -1,4 +1,23 @@
-use rusqlite::{Connection, Result};
+use rusqlite::{Connection, Result, Transaction, TransactionBehavior};
+
+/// 执行单个迁移，并把"迁移体 + 版本号 INSERT"包进同一个事务。
+///
+/// 迁移中途失败（多语句迁移尤其容易）时整体回滚，数据库停留在上一个版本，
+/// 下次启动可以安全重跑；否则会出现"前半截 DDL 已生效、版本号没记上"，
+/// 重跑时在已变更的 schema 上再次报错，用户陷入"启动即失败"的死循环。
+///
+/// `run_migrations` 只拿得到 `&Connection`（`Database::with_connection` 的约束），
+/// 用不了需要 `&mut` 的 `conn.transaction()`，因此走 `Transaction::new_unchecked`；
+/// 返回的 guard 默认 drop 即 ROLLBACK。
+fn apply_migration<F>(conn: &Connection, version: i32, f: F) -> Result<()>
+where
+    F: FnOnce(&Connection) -> Result<()>,
+{
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    f(&tx)?;
+    tx.execute("INSERT INTO migrations (version) VALUES (?1)", [version])?;
+    tx.commit()
+}
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {
     // 创建迁移版本表
@@ -19,133 +38,107 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         .unwrap_or(0);
 
     if current_version < 1 {
-        migration_v1(conn)?;
-        conn.execute("INSERT INTO migrations (version) VALUES (1)", [])?;
+        apply_migration(conn, 1, migration_v1)?;
     }
 
     if current_version < 2 {
-        migration_v2(conn)?;
-        conn.execute("INSERT INTO migrations (version) VALUES (2)", [])?;
+        apply_migration(conn, 2, migration_v2)?;
     }
 
     if current_version < 3 {
-        migration_v3(conn)?;
-        conn.execute("INSERT INTO migrations (version) VALUES (3)", [])?;
+        apply_migration(conn, 3, migration_v3)?;
     }
 
     if current_version < 4 {
-        migration_v4(conn)?;
-        conn.execute("INSERT INTO migrations (version) VALUES (4)", [])?;
+        apply_migration(conn, 4, migration_v4)?;
     }
 
     if current_version < 5 {
-        migration_v5(conn)?;
-        conn.execute("INSERT INTO migrations (version) VALUES (5)", [])?;
+        apply_migration(conn, 5, migration_v5)?;
     }
 
     if current_version < 6 {
-        migration_v6(conn)?;
-        conn.execute("INSERT INTO migrations (version) VALUES (6)", [])?;
+        apply_migration(conn, 6, migration_v6)?;
     }
 
     if current_version < 7 {
-        migration_v7(conn)?;
-        conn.execute("INSERT INTO migrations (version) VALUES (7)", [])?;
+        apply_migration(conn, 7, migration_v7)?;
     }
 
     if current_version < 8 {
-        migration_v8(conn)?;
-        conn.execute("INSERT INTO migrations (version) VALUES (8)", [])?;
+        apply_migration(conn, 8, migration_v8)?;
     }
 
     if current_version < 9 {
-        migration_v9(conn)?;
-        conn.execute("INSERT INTO migrations (version) VALUES (9)", [])?;
+        apply_migration(conn, 9, migration_v9)?;
     }
 
     if current_version < 10 {
-        migration_v10(conn)?;
-        conn.execute("INSERT INTO migrations (version) VALUES (10)", [])?;
+        apply_migration(conn, 10, migration_v10)?;
     }
 
     if current_version < 11 {
-        migration_v11(conn)?;
-        conn.execute("INSERT INTO migrations (version) VALUES (11)", [])?;
+        apply_migration(conn, 11, migration_v11)?;
     }
 
     if current_version < 12 {
-        migration_v12(conn)?;
-        conn.execute("INSERT INTO migrations (version) VALUES (12)", [])?;
+        apply_migration(conn, 12, migration_v12)?;
     }
 
     if current_version < 13 {
-        migration_v13(conn)?;
-        conn.execute("INSERT INTO migrations (version) VALUES (13)", [])?;
+        apply_migration(conn, 13, migration_v13)?;
     }
 
     if current_version < 14 {
-        migration_v14(conn)?;
-        conn.execute("INSERT INTO migrations (version) VALUES (14)", [])?;
+        apply_migration(conn, 14, migration_v14)?;
     }
 
     if current_version < 15 {
-        migration_v15(conn)?;
-        conn.execute("INSERT INTO migrations (version) VALUES (15)", [])?;
+        apply_migration(conn, 15, migration_v15)?;
     }
 
     if current_version < 16 {
-        migration_v16(conn)?;
-        conn.execute("INSERT INTO migrations (version) VALUES (16)", [])?;
+        apply_migration(conn, 16, migration_v16)?;
     }
 
     if current_version < 17 {
-        migration_v17(conn)?;
-        conn.execute("INSERT INTO migrations (version) VALUES (17)", [])?;
+        apply_migration(conn, 17, migration_v17)?;
     }
 
     if current_version < 18 {
-        migration_v18(conn)?;
-        conn.execute("INSERT INTO migrations (version) VALUES (18)", [])?;
+        apply_migration(conn, 18, migration_v18)?;
     }
 
     if current_version < 19 {
-        migration_v19(conn)?;
-        conn.execute("INSERT INTO migrations (version) VALUES (19)", [])?;
+        apply_migration(conn, 19, migration_v19)?;
     }
 
     if current_version < 20 {
-        migration_v20(conn)?;
-        conn.execute("INSERT INTO migrations (version) VALUES (20)", [])?;
+        apply_migration(conn, 20, migration_v20)?;
     }
 
     if current_version < 21 {
-        migration_v21(conn)?;
-        conn.execute("INSERT INTO migrations (version) VALUES (21)", [])?;
+        apply_migration(conn, 21, migration_v21)?;
     }
 
     if current_version < 22 {
-        migration_v22(conn)?;
-        conn.execute("INSERT INTO migrations (version) VALUES (22)", [])?;
+        apply_migration(conn, 22, migration_v22)?;
     }
 
     if current_version < 23 {
-        migration_v23(conn)?;
-        conn.execute("INSERT INTO migrations (version) VALUES (23)", [])?;
+        apply_migration(conn, 23, migration_v23)?;
     }
 
     if current_version < 24 {
-        migration_v24(conn)?;
-        conn.execute("INSERT INTO migrations (version) VALUES (24)", [])?;
+        apply_migration(conn, 24, migration_v24)?;
     }
 
     if current_version < 25 {
-        migration_v25(conn)?;
-        conn.execute("INSERT INTO migrations (version) VALUES (25)", [])?;
+        apply_migration(conn, 25, migration_v25)?;
     }
 
     if current_version < 26 {
-        migration_v26(conn)?;
-        conn.execute("INSERT INTO migrations (version) VALUES (26)", [])?;
+        apply_migration(conn, 26, migration_v26)?;
     }
 
     Ok(())
@@ -716,4 +709,101 @@ fn migration_v1(conn: &Connection) -> Result<()> {
     )?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fresh_conn() -> Connection {
+        let conn = Connection::open_in_memory().expect("打开内存库失败");
+        // 与 Database::new 保持一致，避免测试与真实启动路径行为分叉
+        conn.execute("PRAGMA foreign_keys = ON", [])
+            .expect("启用外键失败");
+        conn
+    }
+
+    fn conn_with_migrations_table() -> Connection {
+        let conn = fresh_conn();
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+            )",
+            [],
+        )
+        .expect("创建 migrations 表失败");
+        conn
+    }
+
+    fn max_version(conn: &Connection) -> i32 {
+        conn.query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM migrations",
+            [],
+            |row| row.get(0),
+        )
+        .expect("读取迁移版本失败")
+    }
+
+    fn table_exists(conn: &Connection, name: &str) -> bool {
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [name],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("查询表是否存在失败")
+            > 0
+    }
+
+    /// 迁移中途失败：已执行的 DDL 回滚、版本号不推进，下次启动可安全重跑。
+    #[test]
+    fn failed_migration_rolls_back_ddl_and_version() {
+        let conn = conn_with_migrations_table();
+
+        let result = apply_migration(&conn, 99, |c| {
+            c.execute("CREATE TABLE probe (id INTEGER PRIMARY KEY)", [])?;
+            // 模拟多语句迁移的后半截失败
+            c.execute("INSERT INTO not_exists_table (id) VALUES (1)", [])?;
+            Ok(())
+        });
+
+        assert!(result.is_err(), "迁移应当失败");
+        assert!(!table_exists(&conn, "probe"), "失败迁移的 DDL 应当被回滚");
+        assert_eq!(max_version(&conn), 0, "失败迁移不应写入版本号");
+
+        // 重试：修好后重跑同一版本可以正常推进
+        apply_migration(&conn, 99, |c| {
+            c.execute("CREATE TABLE probe (id INTEGER PRIMARY KEY)", [])?;
+            Ok(())
+        })
+        .expect("重试迁移应当成功");
+
+        assert!(table_exists(&conn, "probe"));
+        assert_eq!(max_version(&conn), 99);
+    }
+
+    /// 26 个迁移逐个包事务后，全新库仍能一次性迁到最新版本。
+    #[test]
+    fn fresh_database_migrates_to_latest_version() {
+        let conn = fresh_conn();
+        run_migrations(&conn).expect("全新库迁移失败");
+
+        assert_eq!(max_version(&conn), 26);
+        assert!(table_exists(&conn, "todos"));
+        assert!(table_exists(&conn, "subtasks"));
+        assert!(table_exists(&conn, "settings"));
+        assert!(table_exists(&conn, "screen_configs"));
+        // v23 已删除的 Agent 相关表不应残留
+        assert!(!table_exists(&conn, "agent_configs"));
+    }
+
+    /// 迁移是幂等的：重复调用不重复执行、版本号不变。
+    #[test]
+    fn rerunning_migrations_is_noop() {
+        let conn = fresh_conn();
+        run_migrations(&conn).expect("首次迁移失败");
+        run_migrations(&conn).expect("二次迁移失败");
+
+        assert_eq!(max_version(&conn), 26);
+    }
 }
