@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 16
-- **Last Active**: 2026-08-14
+- **Total Sessions**: 17
+- **Last Active**: 2026-08-16
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~545 | Active |
+| `journal-1.md` | ~581 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 17 | 2026-08-16 | 修复 4 个 bug 级缺陷（导入事务/迁移事务/通知计数/云端竞态） | `0f67cd7`, `0cd454c`, `a8c7927`, `4e7c25d` | `main` |
 | 16 | 2026-08-14 | issue #9：修复贴边收起残留条露出列表内容 | `9600732` | `main` |
 | 15 | 2026-08-14 | issue 9：新建待办阶段编辑子任务描述（内存模式） | `97199ec` | `main` |
 | 14 | 2026-08-14 | 移除子任务蓝色内容标识图标 | `d35e0c0` | `main` |

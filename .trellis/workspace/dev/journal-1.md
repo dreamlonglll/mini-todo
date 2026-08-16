@@ -543,3 +543,39 @@ issue #9 用户反馈：固定模式贴边收起后 4px 把手条显示列表底
 ### Next Steps
 
 - None - task complete
+
+
+## Session 17: 修复 4 个 bug 级缺陷（导入事务/迁移事务/通知计数/云端竞态）
+
+**Date**: 2026-08-16
+**Task**: 修复 4 个 bug 级缺陷（导入事务/迁移事务/通知计数/云端竞态）
+**Branch**: `main`
+
+### Summary
+
+全仓代码审查定位 4 个 bug 级缺陷并逐项修复：import_data_raw 与 26 个数据库迁移分别包进 BEGIN IMMEDIATE 事务（Transaction::new_unchecked，失败整体回滚）；通知计数改为 Destroyed 事件单次 saturating 递减，消除 u32 下溢与 listener 泄漏；cloud 端 pull/push/sync 端点共享 tokio Mutex 串行化，dirty 改为 PUT 成功后按 dirty_generation 清除，get_meta 不再吞 DB 错误。实现由 claude-opus-5 子代理完成，新增 14 个测试，PC 端 20 个、cloud 端 109 个测试全绿，双轴 code-review 无阻塞发现。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `0f67cd7` | (see git log) |
+| `0cd454c` | (see git log) |
+| `a8c7927` | (see git log) |
+| `4e7c25d` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
