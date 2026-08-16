@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::async_runtime;
 use tauri::WebviewUrl;
 use tauri::WebviewWindowBuilder;
-use tauri::{Emitter, Listener, Manager};
+use tauri::Manager;
 use tauri_plugin_notification::NotificationExt;
 
 // 通知窗口计数器（用于生成唯一的窗口标签）
@@ -18,6 +18,20 @@ const NOTIFICATION_WIDTH: u32 = 320;
 const NOTIFICATION_HEIGHT: u32 = 120;
 const NOTIFICATION_MARGIN: u32 = 20;
 const NOTIFICATION_SPACING: u32 = 10;
+
+/// 活动通知计数安全递减，返回递减后的值。
+///
+/// 计数为 0 时保持 0：u32 下溢会让下一条通知的 y 坐标
+/// （`screen_height - ... - active_count * 130`）算术溢出，
+/// debug 构建直接 panic、release 构建窗口飞出屏幕。
+fn decrement_active(counter: &AtomicU32) -> u32 {
+    counter
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+            Some(current.saturating_sub(1))
+        })
+        .map(|prev| prev.saturating_sub(1))
+        .unwrap_or(0)
+}
 
 pub struct NotificationService;
 
@@ -224,23 +238,15 @@ impl NotificationService {
 
         let _ = window_builder.build().map_err(|e| e.to_string())?;
 
-        // 监听窗口关闭事件，减少活动通知计数
-        let _ = app_handle.listen(
-            format!("notification-closed-{}", window_label_clone),
-            move |_| {
-                ACTIVE_NOTIFICATIONS.fetch_sub(1, Ordering::SeqCst);
-            },
-        );
-
-        // 监听窗口销毁事件
+        // 监听窗口销毁事件，减少活动通知计数。
+        // `Destroyed` 是窗口生命周期的权威信号，计数只在这里减一次；
+        // 早期版本这里还会 emit `notification-closed-{label}` 并额外注册一个
+        // listener 再减一次，导致每关一个窗口计数减 2、从 0 下溢到 u32::MAX，
+        // 后续通知的 y 坐标计算随之溢出（debug panic / release 位置错乱）。
         if let Some(window) = app_handle_clone.get_webview_window(&window_label_clone) {
-            let app_handle_for_destroy = app_handle_clone.clone();
-            let label_for_destroy = window_label_clone.clone();
             window.on_window_event(move |event| {
                 if let tauri::WindowEvent::Destroyed = event {
-                    ACTIVE_NOTIFICATIONS.fetch_sub(1, Ordering::SeqCst);
-                    let _ = app_handle_for_destroy
-                        .emit(&format!("notification-closed-{}", label_for_destroy), ());
+                    decrement_active(&ACTIVE_NOTIFICATIONS);
                 }
             });
         }
@@ -462,6 +468,28 @@ fn last_day_of_month(year: i32, month: u32) -> u32 {
             }
         }
         _ => 30,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decrement_active_subtracts_one() {
+        let counter = AtomicU32::new(2);
+
+        assert_eq!(decrement_active(&counter), 1);
+        assert_eq!(decrement_active(&counter), 0);
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn decrement_active_never_underflows() {
+        let counter = AtomicU32::new(0);
+
+        assert_eq!(decrement_active(&counter), 0);
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
     }
 }
 
