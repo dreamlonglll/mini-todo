@@ -12,8 +12,9 @@ use tauri::{Manager, State, WebviewWindow, Window};
 use windows::Win32::Foundation::{HWND, POINT};
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, GetWindowLongW, SetWindowLongW, SetWindowPos, GWL_EXSTYLE, SWP_FRAMECHANGED,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+    GetCursorPos, GetWindowLongW, SetWindowLongW, SetWindowPos, ShowWindow, GWL_EXSTYLE,
+    HWND_NOTOPMOST, HWND_TOPMOST, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_NOZORDER, SW_RESTORE, SW_SHOW, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
 };
 
 /// 全局固定模式状态
@@ -24,6 +25,13 @@ pub static IS_FIXED_MODE: AtomicBool = AtomicBool::new(false);
 /// 缓存成原子变量是因为 `tick_auto_hide` 跑在后台轮询线程里，拿不到 `State<Database>`。
 /// 写入点：应用启动（`init_top_on_wake`）、`set_top_on_wake`、`set_window_fixed_mode`。
 static TOP_ON_WAKE: AtomicBool = AtomicBool::new(true);
+
+/// 固定模式下期望的置顶态。
+///
+/// 置顶改走 Win32 后，tao 内部记录的 `ALWAYS_ON_TOP` 会与真实 Z 序漂移，之后任何 tao 侧的
+/// 窗口操作（如前端 `setResizable`）都可能按它的旧认知把置顶顺手撤掉。缓存期望值，
+/// 由 `reassert_fixed_window_state` 兜底补回。
+static DESIRED_TOPMOST: AtomicBool = AtomicBool::new(false);
 
 /// 托盘"固定模式"勾选菜单项引用，用于跨模块同步状态
 static TRAY_TOGGLE_FIXED: OnceLock<tauri::menu::CheckMenuItem<tauri::Wry>> = OnceLock::new();
@@ -520,6 +528,18 @@ fn evaluate_auto_hide_transition(
     }
 }
 
+/// 固定模式守护：窗口一旦被最小化就立刻还原。
+///
+/// 固定模式下窗口不在任务栏也不参与 Alt+Tab，被 Win+D / Win+M 最小化后就再没有入口点回来。
+/// 还原走 `unminimize_window` / `show_window`，避免 tao 的样式覆写让任务栏图标闪现。
+pub fn restore_if_minimized(window: &WebviewWindow) {
+    if !window.is_minimized().unwrap_or(false) {
+        return;
+    }
+    unminimize_window(window);
+    show_window(window);
+}
+
 /// 固定模式轮询：处理贴边自动隐藏与边缘唤起
 pub fn tick_auto_hide(window: &WebviewWindow) {
     let cursor = get_cursor_position();
@@ -557,8 +577,9 @@ pub fn tick_auto_hide(window: &WebviewWindow) {
                 });
             } else {
                 // 收回时一并撤销置顶，否则藏起来的窗口会一直压在其它窗口之上
-                let _ = window.set_always_on_top(false);
-                reassert_fixed_taskbar_style(window);
+                set_window_always_on_top(window, false);
+                // 兜底：set_position 在窗口处于最大化态时会经 apply_diff 重写 ex style
+                reassert_fixed_window_state(window);
             }
         }
         AutoHideTransition::Restore { anchor } => {
@@ -572,8 +593,9 @@ pub fn tick_auto_hide(window: &WebviewWindow) {
                 });
             } else if TOP_ON_WAKE.load(Ordering::SeqCst) {
                 // 唤起时置顶：只 set_position 不改 Z 序的话，窗口会被最大化/全屏窗口整个盖住
-                let _ = window.set_always_on_top(true);
-                reassert_fixed_taskbar_style(window);
+                set_window_always_on_top(window, true);
+                // 兜底：set_position 在窗口处于最大化态时会经 apply_diff 重写 ex style
+                reassert_fixed_window_state(window);
             }
         }
     }
@@ -795,16 +817,21 @@ pub fn get_text_theme(db: State<Database>) -> Result<String, String> {
 /// 固定模式加 `WS_EX_TOOLWINDOW`、去 `WS_EX_APPWINDOW`，让窗口既不进任务栏也不参与 Alt+Tab；
 /// 样式改完补一次 `SWP_FRAMECHANGED`，任务栏才会对可见窗口的样式变更立刻生效。
 #[cfg(target_os = "windows")]
-fn apply_fixed_ex_style(window: &WebviewWindow, fixed: bool) {
+fn window_hwnd(window: &WebviewWindow) -> Option<HWND> {
     use raw_window_handle::HasWindowHandle;
 
-    let Ok(handle) = window.window_handle() else {
-        return;
-    };
+    let handle = window.window_handle().ok()?;
     let raw_window_handle::RawWindowHandle::Win32(win32_handle) = handle.as_raw() else {
+        return None;
+    };
+    Some(HWND(win32_handle.hwnd.get() as *mut _))
+}
+
+#[cfg(target_os = "windows")]
+fn apply_fixed_ex_style(window: &WebviewWindow, fixed: bool) {
+    let Some(hwnd) = window_hwnd(window) else {
         return;
     };
-    let hwnd = HWND(win32_handle.hwnd.get() as *mut _);
 
     unsafe {
         let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
@@ -828,19 +855,117 @@ fn apply_fixed_ex_style(window: &WebviewWindow, fixed: bool) {
     }
 }
 
-/// 在 tao 的窗口操作之后重申固定模式的任务栏样式。
+/// 固定模式下用 Win32 直接换 Z 序，返回 true 表示已处理、无需再走 tao。
 ///
-/// tao 处理任何窗口 flag 变更（`set_always_on_top` / `show` / `unminimize` / `set_resizable` 等）
-/// 时会用内部记录的 flags 整体重写 `GWL_EXSTYLE`，把绕开它手动加的 `WS_EX_TOOLWINDOW` 抹掉，
-/// 任务栏图标随之复现（issue #9：贴边唤起/收回各调一次 set_always_on_top，图标就回来了）。
-/// 这些操作都是投递到主线程消息队列异步执行的，补样式必须排进同一条队列，
+/// tao 的 `set_always_on_top` 会触发 `WindowFlags::apply_diff`：它按 tao 自己记录的 flags
+/// 重算并**整体覆写** `GWL_EXSTYLE`（tao-0.34.5 `window_state.rs:439-440`），手动打的
+/// `WS_EX_TOOLWINDOW` 当场被抹掉、`WS_EX_APPWINDOW` 被加回，紧跟的 `SWP_FRAMECHANGED`
+/// 让 shell 立即生效——任务栏按钮就此出现。事后补样式只能让它闪一下再消失，消不掉中间态。
+///
+/// 直接 `SetWindowPos` 换 Z 序只翻 `WS_EX_TOPMOST` 位，不触碰 ex style 的其余部分，
+/// 也不带 `SWP_FRAMECHANGED`，因而全程不会有任务栏按钮出现。
+#[cfg(target_os = "windows")]
+fn win32_set_topmost(window: &WebviewWindow, on: bool) -> bool {
+    if !is_fixed_mode() {
+        return false;
+    }
+    let Some(hwnd) = window_hwnd(window) else {
+        return false;
+    };
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            if on { HWND_TOPMOST } else { HWND_NOTOPMOST },
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
+    true
+}
+
+#[cfg(not(target_os = "windows"))]
+fn win32_set_topmost(_window: &WebviewWindow, _on: bool) -> bool {
+    false
+}
+
+/// 固定模式下用 Win32 直接显示/还原窗口，返回 true 表示已处理。
+///
+/// 与置顶同理：`show` / `unminimize` 也走 tao 的 flag 通路，会覆写 `GWL_EXSTYLE`。
+/// `ShowWindow` 不碰 ex style，且 tao 的 `MINIMIZED` flag 由窗口过程按 `WM_SIZE` 自行同步
+/// （tao-0.34.5 `event_loop.rs:1286`），绕过去不会让 tao 的状态漂移。
+#[cfg(target_os = "windows")]
+fn win32_show(window: &WebviewWindow, restore: bool) -> bool {
+    if !is_fixed_mode() {
+        return false;
+    }
+    let Some(hwnd) = window_hwnd(window) else {
+        return false;
+    };
+    unsafe {
+        let _ = ShowWindow(hwnd, if restore { SW_RESTORE } else { SW_SHOW });
+    }
+    true
+}
+
+#[cfg(not(target_os = "windows"))]
+fn win32_show(_window: &WebviewWindow, _restore: bool) -> bool {
+    false
+}
+
+/// 置顶/取消置顶。固定模式下绕开 tao 的 flag 通路，避免任务栏图标闪现。
+fn set_window_always_on_top(window: &WebviewWindow, on: bool) {
+    DESIRED_TOPMOST.store(on, Ordering::SeqCst);
+    if win32_set_topmost(window, on) {
+        return;
+    }
+    let _ = window.set_always_on_top(on);
+}
+
+/// 显示窗口。固定模式下绕开 tao 的 flag 通路。
+fn show_window(window: &WebviewWindow) {
+    if win32_show(window, false) {
+        return;
+    }
+    let _ = window.show();
+}
+
+/// 从最小化还原窗口。固定模式下绕开 tao 的 flag 通路。
+///
+/// 未最小化时直接返回：`SW_RESTORE` 对最大化窗口会执行"还原大小"、对普通窗口会激活它，
+/// 而 tao 的 `unminimize` 在 flag 无变化时是彻底的 no-op。不加这道闸，
+/// 托盘唤起会顺带把窗口从最大化缩回去。
+fn unminimize_window(window: &WebviewWindow) {
+    if !window.is_minimized().unwrap_or(false) {
+        return;
+    }
+    if win32_show(window, true) {
+        return;
+    }
+    let _ = window.unminimize();
+}
+
+/// 在 tao 的窗口操作之后重申固定模式的窗口状态（任务栏样式 + 置顶态）。
+///
+/// 主路径的置顶/显示已改走 Win32，正常不会再破坏样式。但仍有 tao 侧操作会走 `apply_diff`
+/// 整体重写 `GWL_EXSTYLE`（典型是前端的 `setResizable`），把 `WS_EX_TOOLWINDOW` 抹掉、
+/// 并按 tao 内部那份已漂移的 `ALWAYS_ON_TOP` 把置顶撤掉。此处作为兜底把两者都补回来。
+///
+/// 这些操作都是投递到主线程消息队列异步执行的，补状态必须排进同一条队列，
 /// 才能保证发生在它们之后且无竞态。
-fn reassert_fixed_taskbar_style(window: &WebviewWindow) {
+fn reassert_fixed_window_state(window: &WebviewWindow) {
     #[cfg(target_os = "windows")]
     {
         let w = window.clone();
         let _ = window.run_on_main_thread(move || {
-            apply_fixed_ex_style(&w, is_fixed_mode());
+            let fixed = is_fixed_mode();
+            // 只翻 TOOLWINDOW / APPWINDOW 两位，带 SWP_NOZORDER，不会动到 Z 序
+            apply_fixed_ex_style(&w, fixed);
+            if fixed {
+                win32_set_topmost(&w, DESIRED_TOPMOST.load(Ordering::SeqCst));
+            }
         });
     }
     #[cfg(not(target_os = "windows"))]
@@ -864,9 +989,10 @@ pub fn set_window_fixed_mode(
     let auto_hide_enabled = get_auto_hide_enabled_value(&db);
     TOP_ON_WAKE.store(get_top_on_wake_value(&db), Ordering::SeqCst);
 
-    // 退出固定模式时贴边逻辑随之停用，遗留的置顶要一并撤销
+    // 退出固定模式时贴边逻辑随之停用，遗留的置顶要一并撤销。
+    // 此处 IS_FIXED_MODE 已置 false，走的是 tao 通路——退出固定模式本就该恢复任务栏图标
     if !fixed {
-        let _ = window.set_always_on_top(false);
+        set_window_always_on_top(&window, false);
     }
 
     let restore_position = with_auto_hide_state(|state| {
@@ -894,9 +1020,9 @@ pub fn set_window_fixed_mode(
         }));
     }
 
-    // 任务栏样式排队补写：既覆盖此处的模式切换，也保证排在前端刚发出的
+    // 窗口状态排队补写：既覆盖此处的模式切换，也保证排在前端刚发出的
     // setResizable 等 tao 操作之后，不被其样式重写顶掉
-    reassert_fixed_taskbar_style(&window);
+    reassert_fixed_window_state(&window);
 
     sync_tray_fixed_checked(fixed);
 
@@ -959,16 +1085,16 @@ pub fn set_auto_hide_enabled(
                 x: anchor.x,
                 y: anchor.y,
             }));
-            let _ = main_window.show();
-            reassert_fixed_taskbar_style(&main_window);
+            show_window(&main_window);
+            reassert_fixed_window_state(&main_window);
         }
     }
 
     // 关掉贴边隐藏时，唤起态遗留的置顶必须撤销，否则窗口会一直压在其它窗口之上
     if !enabled {
         if let Some(main_window) = app_handle.get_webview_window("main") {
-            let _ = main_window.set_always_on_top(false);
-            reassert_fixed_taskbar_style(&main_window);
+            set_window_always_on_top(&main_window, false);
+            reassert_fixed_window_state(&main_window);
         }
     }
 
@@ -1000,8 +1126,8 @@ pub fn set_top_on_wake(
     // 关闭时立刻撤销当前置顶，不必等窗口下一次收回
     if !enabled {
         if let Some(main_window) = app_handle.get_webview_window("main") {
-            let _ = main_window.set_always_on_top(false);
-            reassert_fixed_taskbar_style(&main_window);
+            set_window_always_on_top(&main_window, false);
+            reassert_fixed_window_state(&main_window);
         }
     }
 
@@ -1098,19 +1224,21 @@ pub fn bring_main_window_to_front(app: &tauri::AppHandle) {
         }));
     }
 
-    let _ = window.unminimize();
-    let _ = window.show();
-    let _ = window.set_always_on_top(true);
+    unminimize_window(&window);
+    show_window(&window);
+    set_window_always_on_top(&window, true);
+    // set_focus 只走 SetForegroundWindow，不碰 tao 的 flags，不会触发样式覆写
     let _ = window.set_focus();
-    reassert_fixed_taskbar_style(&window);
+    // 兜底：set_position 在窗口处于最大化态时会经 apply_diff 重写 ex style
+    reassert_fixed_window_state(&window);
 
     let app = app.clone();
     std::thread::spawn(move || {
         std::thread::sleep(TRAY_WAKE_TOPMOST_DURATION);
         if !should_stay_on_top() {
             if let Some(window) = app.get_webview_window("main") {
-                let _ = window.set_always_on_top(false);
-                reassert_fixed_taskbar_style(&window);
+                set_window_always_on_top(&window, false);
+                reassert_fixed_window_state(&window);
             }
         }
     });
@@ -1151,9 +1279,16 @@ pub fn get_window_persist_state(app_handle: tauri::AppHandle) -> Result<WindowPe
 }
 
 /// 重置窗口位置和大小（用于 Tauri 命令）
+///
+/// 与 `get_window_persist_state` 同理固定取 label 为 "main" 的窗口：设置、编辑器等独立
+/// WebView 也可能调用此命令，按调用方窗口重置会把它们挪到主窗口该在的位置
 #[tauri::command]
 pub fn reset_window(window: Window) -> Result<(), String> {
-    reset_window_impl(&window)
+    let main_window = window
+        .app_handle()
+        .get_webview_window("main")
+        .ok_or_else(|| "主窗口不存在".to_string())?;
+    reset_window_impl(&main_window)
 }
 
 /// 重置 WebviewWindow 位置和大小（用于托盘菜单）
@@ -1162,12 +1297,12 @@ pub fn reset_webview_window(window: WebviewWindow) -> Result<(), String> {
 }
 
 /// 内部重置窗口实现
-fn reset_window_impl<T: tauri::Runtime>(window: &impl WindowExt<T>) -> Result<(), String> {
+fn reset_window_impl(window: &WebviewWindow) -> Result<(), String> {
     clear_auto_hide_runtime_state();
 
     // 置顶只在 tick_auto_hide 的 Hide 分支撤销。这里刚把 docked_edge / hidden 清空，
     // 若窗口正处于唤起置顶态，Hide 分支再也不会触发，置顶就永久留下了。
-    let _ = window.set_always_on_top(false);
+    set_window_always_on_top(window, false);
 
     // 重置到屏幕左上角（10%边距），默认大小 380x600
     let default_width = 380.0;
@@ -1199,52 +1334,11 @@ fn reset_window_impl<T: tauri::Runtime>(window: &impl WindowExt<T>) -> Result<()
         let _ = window.set_resizable(true);
     }
 
+    // set_resizable 走 tao 的 flag 通路，会整体重写 GWL_EXSTYLE。
+    // 固定模式下重置窗口时要把任务栏样式补回来，否则图标会一直留在任务栏上
+    reassert_fixed_window_state(window);
+
     Ok(())
-}
-
-/// 窗口扩展 trait
-trait WindowExt<R: tauri::Runtime> {
-    fn primary_monitor(&self) -> tauri::Result<Option<tauri::Monitor>>;
-    fn set_position(&self, position: tauri::Position) -> tauri::Result<()>;
-    fn set_size(&self, size: tauri::Size) -> tauri::Result<()>;
-    fn set_resizable(&self, resizable: bool) -> tauri::Result<()>;
-    fn set_always_on_top(&self, always_on_top: bool) -> tauri::Result<()>;
-}
-
-impl<R: tauri::Runtime> WindowExt<R> for Window<R> {
-    fn primary_monitor(&self) -> tauri::Result<Option<tauri::Monitor>> {
-        Window::primary_monitor(self)
-    }
-    fn set_position(&self, position: tauri::Position) -> tauri::Result<()> {
-        Window::set_position(self, position)
-    }
-    fn set_size(&self, size: tauri::Size) -> tauri::Result<()> {
-        Window::set_size(self, size)
-    }
-    fn set_resizable(&self, resizable: bool) -> tauri::Result<()> {
-        Window::set_resizable(self, resizable)
-    }
-    fn set_always_on_top(&self, always_on_top: bool) -> tauri::Result<()> {
-        Window::set_always_on_top(self, always_on_top)
-    }
-}
-
-impl<R: tauri::Runtime> WindowExt<R> for WebviewWindow<R> {
-    fn primary_monitor(&self) -> tauri::Result<Option<tauri::Monitor>> {
-        WebviewWindow::primary_monitor(self)
-    }
-    fn set_position(&self, position: tauri::Position) -> tauri::Result<()> {
-        WebviewWindow::set_position(self, position)
-    }
-    fn set_size(&self, size: tauri::Size) -> tauri::Result<()> {
-        WebviewWindow::set_size(self, size)
-    }
-    fn set_resizable(&self, resizable: bool) -> tauri::Result<()> {
-        WebviewWindow::set_resizable(self, resizable)
-    }
-    fn set_always_on_top(&self, always_on_top: bool) -> tauri::Result<()> {
-        WebviewWindow::set_always_on_top(self, always_on_top)
-    }
 }
 
 // ============ 屏幕配置相关命令 ============

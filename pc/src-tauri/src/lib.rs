@@ -262,11 +262,8 @@ pub fn run() {
                     // 只在固定模式下检测
                     if is_fixed_mode() {
                         if let Some(window) = handle.get_webview_window("main") {
-                            // 检查窗口是否被最小化
-                            if window.is_minimized().unwrap_or(false) {
-                                let _ = window.unminimize();
-                                let _ = window.show();
-                            }
+                            // 被最小化就立刻还原：固定模式下没有任务栏入口可以点回来
+                            commands::restore_if_minimized(&window);
 
                             // 固定模式下贴边自动隐藏/唤起
                             commands::tick_auto_hide(&window);
