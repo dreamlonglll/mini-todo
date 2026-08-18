@@ -23,7 +23,11 @@ export default defineConfig(async () => ({
   server: {
     port: 1420,
     strictPort: true,
-    host: host || false,
+    // 显式绑 127.0.0.1：默认的 false 会让 Vite 绑到 "localhost"，而 Windows 上
+    // localhost 优先解析成 ::1，Node 17+ 按首个解析结果绑定，结果只监听 IPv6。
+    // tauri dev 探测 http://localhost:1420/ 走 IPv4 会被拒，卡在
+    // "Waiting for your frontend dev server to start" 不动
+    host: host || "127.0.0.1",
     hmr: host
       ? {
           protocol: "ws",
