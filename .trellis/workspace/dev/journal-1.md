@@ -579,3 +579,42 @@ issue #9 用户反馈：固定模式贴边收起后 4px 把手条显示列表底
 ### Next Steps
 
 - None - task complete
+
+
+## Session 18: issue #9：固定模式任务栏图标闪现根治 + vite dev server IPv6 绑定
+
+**Date**: 2026-08-18
+**Task**: 08-18-fix-taskbar-icon-flash
+**Branch**: `main`
+
+### Summary
+
+Session 13 引入的 reassert_fixed_taskbar_style 是「先破坏、再补回」，排队到执行之间必然有可见中间态，即 issue #9 报告的约 0.2s 图标闪现（托盘点击三连击 unminimize+show+set_always_on_top，贴边唤起/收回各一次 set_always_on_top）。本次改为根本不破坏：固定模式下置顶走 SetWindowPos(HWND_TOPMOST/NOTOPMOST)、显示/还原走 ShowWindow，均不触碰 GWL_EXSTYLE，绕开 tao 的 WindowFlags::apply_diff（tao-0.34.5 window_state.rs:439-440 整体覆写 ex style）。reassert 扩展为 reassert_fixed_window_state 保留作兜底（set_position/set_inner_size 在 MAXIMIZED 为真时仍会经 apply_diff 重写），并新增 DESIRED_TOPMOST 缓存修正绕开 tao 后的 ALWAYS_ON_TOP 漂移。排除了 tao 自带 set_skip_taskbar（ITaskbarList::DeleteTab 不受 apply_diff 影响，但只摘任务栏按钮、不影响 Alt+Tab，会丢掉 WS_EX_TOOLWINDOW 的既有语义）。附带修掉 vite.config.ts 的 server.host: false 导致 Vite 只绑 ::1、tauri dev 卡在等待 dev server 的问题。
+
+### Main Changes
+
+- `commands/window.rs`：新增 window_hwnd / win32_set_topmost / win32_show 及 set_window_always_on_top / show_window / unminimize_window 三个分派 helper；reassert_fixed_taskbar_style → reassert_fixed_window_state（样式 + 置顶双补）；最小化守护抽成 restore_if_minimized；reset_window_impl 去掉 WindowExt 泛型 trait 改为直接取主窗口
+- `lib.rs`：固定模式轮询改调 commands::restore_if_minimized
+- `vite.config.ts`：server.host 由 false 改为显式 127.0.0.1，保留 TAURI_DEV_HOST 分支
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `518bc1c` | (see git log) |
+| `8139821` | (see git log) |
+| `d5f12fd` | (see git log) |
+| `df1d488` | (see git log) |
+
+### Testing
+
+- [OK] cargo check 通过，20 个单测全绿
+- [OK] 用户真机验证：托盘唤起、贴边唤起/收回全程无任务栏图标，Alt+Tab 行为保持
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
