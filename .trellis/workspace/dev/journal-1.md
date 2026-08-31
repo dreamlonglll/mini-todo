@@ -618,3 +618,38 @@ Session 13 引入的 reassert_fixed_taskbar_style 是「先破坏、再补回」
 ### Next Steps
 
 - None - task complete
+
+
+## Session 18: 修复 issue #11 两处功能缺陷并发布 v2.3.8
+
+**Date**: 2026-08-31
+**Task**: 修复 issue #11 两处功能缺陷并发布 v2.3.8
+**Branch**: `main`
+
+### Summary
+
+根因定位并修复 issue #11：已完成列表恢复按钮调用了后端从未注册的 toggle_complete 命令导致静默失败，改走 update_todo{completed:false}；EditorView 的 loadTodo 在子任务操作后整体重建表单冲掉未保存修改，拆分为 refreshForm 参数、8 处子任务路径只刷子任务列表。版本号三处同步升 2.3.8，vue-tsc 与 cargo check 通过，随后推 tag 发版。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `e5335ba` | (see git log) |
+| `b012dd2` | (see git log) |
+| `1d8d0b5` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
