@@ -41,12 +41,13 @@ async function loadCompletedTodos() {
   }
 }
 
-async function handleToggleComplete(todo: Todo) {
+async function handleRestore(todo: Todo) {
   try {
-    await invoke('toggle_complete', { id: todo.id })
+    // 列表里只有已完成项，语义固定为恢复未完成；与 todoStore.toggleComplete 同走 update_todo
+    await invoke('update_todo', { id: todo.id, data: { completed: false } })
     await loadCompletedTodos()
   } catch (e) {
-    console.error('Failed to toggle complete:', e)
+    console.error('Failed to restore todo:', e)
   }
 }
 
@@ -187,7 +188,7 @@ onBeforeUnmount(() => {
 
         <div class="item-actions">
           <el-tooltip content="恢复为未完成" placement="top">
-            <button class="action-btn restore" @click.stop="handleToggleComplete(todo)">
+            <button class="action-btn restore" @click.stop="handleRestore(todo)">
               <el-icon :size="16"><RefreshLeft /></el-icon>
             </button>
           </el-tooltip>

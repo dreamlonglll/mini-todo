@@ -158,7 +158,7 @@ async function onSubtaskDragEnd() {
   } catch (e) {
     console.error('Failed to reorder subtasks:', e)
     // 落库失败时本地顺序已经变了，重新拉一次让两边一致
-    await loadTodo()
+    await loadTodo(false)
   }
 }
 
@@ -343,14 +343,18 @@ onMounted(async () => {
 })
 
 // 加载待办数据
-async function loadTodo() {
+//
+// refreshForm=false 时只刷新 todo.value（子任务列表、completed 状态的来源），
+// 不重建左侧表单——子任务操作（增删改、编辑窗口关闭等）会中途触发本函数，
+// 若整体重建 form 会把用户未保存的标题/描述/颜色/象限等修改冲掉（issue #11）
+async function loadTodo(refreshForm = true) {
   if (!todoId.value) return
-  
+
   try {
     const todos = await invoke<Todo[]>('get_todos')
     todo.value = todos.find(t => t.id === todoId.value) || null
-    
-    if (todo.value) {
+
+    if (todo.value && refreshForm) {
       form.value = {
         title: todo.value.title,
         description: todo.value.description || '',
@@ -521,7 +525,7 @@ async function addSubtask() {
         title: newSubtaskTitle.value.trim()
       }
       await invoke('create_subtask', { data })
-      await loadTodo()
+      await loadTodo(false)
       newSubtaskTitle.value = ''
     } catch (e) {
       console.error('Failed to add subtask:', e)
@@ -567,7 +571,7 @@ async function importSubtasks() {
       paths,
     })
 
-    await loadTodo()
+    await loadTodo(false)
     ElMessage.success(`成功导入 ${created.length} 个子任务`)
   } catch (e) {
     ElMessage.error('导入失败: ' + String(e))
@@ -595,7 +599,7 @@ async function importSubtasksFromFolder() {
       paths,
     })
 
-    await loadTodo()
+    await loadTodo(false)
     ElMessage.success(`成功导入 ${created.length} 个子任务`)
   } catch (e) {
     ElMessage.error('导入失败: ' + String(e))
@@ -608,11 +612,11 @@ async function toggleSubtask(subtaskId: number) {
   if (!subtask) return
 
   try {
-    await invoke('update_subtask', { 
-      id: subtaskId, 
-      data: { completed: !subtask.completed } 
+    await invoke('update_subtask', {
+      id: subtaskId,
+      data: { completed: !subtask.completed }
     })
-    await loadTodo()
+    await loadTodo(false)
   } catch (e) {
     console.error('Failed to toggle subtask:', e)
   }
@@ -650,7 +654,7 @@ async function deleteSubtask(subtaskId: number) {
     // 编辑模式：调用 API 删除子任务
     try {
       await invoke('delete_subtask', { id: subtaskId })
-      await loadTodo()
+      await loadTodo(false)
     } catch (e) {
       console.error('Failed to delete subtask:', e)
     }
@@ -702,7 +706,7 @@ async function saveInlineEdit(subtaskId: number) {
       id: subtaskId,
       data: { title: newTitle },
     })
-    await loadTodo()
+    await loadTodo(false)
   } catch (e) {
     console.error('Failed to update subtask title:', e)
   }
@@ -808,7 +812,7 @@ async function openSubtaskWindow(subtaskId: number, mode: 'edit' | 'view') {
     webview.once('tauri://destroyed', async () => {
       isSubtaskEditorOpen.value = false
       cleanupMemoryListeners()
-      if (isEditMode && !isMemoryMode) await loadTodo()
+      if (isEditMode && !isMemoryMode) await loadTodo(false)
     })
 
     webview.once('tauri://error', () => {
