@@ -1,0 +1,6 @@
+{"file": ".trellis/spec/frontend/index.md", "reason": "Frontend spec entry point and quality check list"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "Verify appStore changes, cross-window settings events and main-window command resolution follow the documented pattern"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Verify tray CheckMenuItem sync, body-class handling and error-handling placement"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Check the new is_desktop setting is wired through migration, AppSettings read/write, export/import, sync and TS types (CLAUDE.md 12-item checklist)"}
+{"file": ".trellis/tasks/09-07-desktop-embed-mode/research/win32-desktop-embed.md", "reason": "Reference for validating the host-window lookup and Show-desktop handling logic"}
+{"file": ".trellis/tasks/09-07-desktop-embed-mode/research/tao-wry-transparency.md", "reason": "Reference for validating that the transparency approach matches what tao/wry actually do"}

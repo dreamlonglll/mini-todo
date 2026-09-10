@@ -1,0 +1,8 @@
+{"file": ".trellis/spec/frontend/index.md", "reason": "Frontend spec entry point and pre-development checklist"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "appStore conventions, cross-window settings event pattern, and the rule that main-window commands must resolve the main window explicitly instead of taking the caller Window"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Tray CheckMenuItem must be synced explicitly via OnceLock handle; body-class rule; follow-up sync calls outside primary try block"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "New settings key spans SQLite migration, Rust AppSettings, export/import, WebDAV sync and TS types"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Reuse existing Win32 helpers (window_hwnd, apply_fixed_ex_style, reassert_fixed_window_state) and the 200ms poll thread instead of duplicating"}
+{"file": ".trellis/tasks/archive/2026-08/08-18-fix-taskbar-icon-flash/prd.md", "reason": "Documents why tao WindowFlags::apply_diff overwrites GWL_EXSTYLE and how fixed mode bypasses tao with raw Win32; desktop mode must follow the same bypass pattern"}
+{"file": ".trellis/tasks/09-07-desktop-embed-mode/research/win32-desktop-embed.md", "reason": "Desktop window hierarchy (Win10 / Win11 24H2), Lively and Rainmeter techniques, Show-desktop behaviour, explorer-restart handling"}
+{"file": ".trellis/tasks/09-07-desktop-embed-mode/research/tao-wry-transparency.md", "reason": "How tao/wry implement transparency on Windows and what survives SetParent; candidate techniques for transparent child windows"}
