@@ -13,8 +13,7 @@ import { replaceAll } from '@milkdown/kit/utils'
 import type { Node, Schema } from '@milkdown/kit/prose/model'
 import type { Uploader, UploadOptions } from '@milkdown/kit/plugin/upload'
 import '@milkdown/theme-nord/style.css'
-import { handleFileLinkClick } from '@/utils/fileLink'
-import { revealItemInDir } from '@tauri-apps/plugin-opener'
+import { handleLinkClick } from '@/utils/fileLink'
 
 const props = defineProps<{
   modelValue: string
@@ -99,6 +98,11 @@ async function imageUploader(files: FileList, schema: Schema): Promise<Node[]> {
   return nodes
 }
 
+// 只读排版即详情预览：链接点击直接交给系统（file:/// 走资源管理器，http(s) 走默认浏览器）
+function onLinkClick(event: MouseEvent): boolean {
+  return handleLinkClick(event, { readonly: props.readonly === true })
+}
+
 async function initEditor() {
   if (!editorContainer.value) return
 
@@ -112,29 +116,20 @@ async function initEditor() {
       ctx.set(rootCtx, editorContainer.value!)
       ctx.set(defaultValueCtx, contentAtInit)
 
-      const fileLinkDOMHandler = {
-        click: (_view: unknown, event: Event) => {
-          const target = (event.target as HTMLElement)?.closest('a') as HTMLAnchorElement | null
-          if (!target) return false
-          const href = target.getAttribute('href') || ''
-          if (!href.startsWith('file:///')) return false
-          event.preventDefault()
-          let path = decodeURIComponent(href.slice(8)).split('#')[0].replace(/\//g, '\\')
-          if (path) revealItemInDir(path).catch(console.error)
-          return true
-        },
+      const linkDOMHandler = {
+        click: (_view: unknown, event: Event) => onLinkClick(event as MouseEvent),
       }
 
       if (props.readonly) {
         ctx.update(editorViewOptionsCtx, (prev) => ({
           ...prev,
           editable: () => false,
-          handleDOMEvents: { ...prev.handleDOMEvents, ...fileLinkDOMHandler },
+          handleDOMEvents: { ...prev.handleDOMEvents, ...linkDOMHandler },
         }))
       } else {
         ctx.update(editorViewOptionsCtx, (prev) => ({
           ...prev,
-          handleDOMEvents: { ...prev.handleDOMEvents, ...fileLinkDOMHandler },
+          handleDOMEvents: { ...prev.handleDOMEvents, ...linkDOMHandler },
         }))
         ctx.get(listenerCtx).markdownUpdated((_ctx, markdown, prevMarkdown) => {
           if (markdown !== prevMarkdown) {
@@ -198,12 +193,12 @@ onMounted(async () => {
   internalContent = props.modelValue ?? ''
   await initEditor()
   editorContainer.value?.addEventListener('click', handleImageClick)
-  editorContainer.value?.addEventListener('click', handleFileLinkClick)
+  editorContainer.value?.addEventListener('click', onLinkClick)
 })
 
 onBeforeUnmount(() => {
   editorContainer.value?.removeEventListener('click', handleImageClick)
-  editorContainer.value?.removeEventListener('click', handleFileLinkClick)
+  editorContainer.value?.removeEventListener('click', onLinkClick)
   destroyEditor()
 })
 </script>
