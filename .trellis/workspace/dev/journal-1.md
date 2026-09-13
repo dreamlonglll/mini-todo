@@ -653,3 +653,41 @@ Session 13 引入的 reassert_fixed_taskbar_style 是「先破坏、再补回」
 ### Next Steps
 
 - None - task complete
+
+
+## Session 19: 桌面模式 e2e 验收、改为固定模式嵌入桌面开关并收尾
+
+**Date**: 2026-09-13
+**Task**: 桌面模式 e2e 验收、改为固定模式嵌入桌面开关并收尾
+**Branch**: `feat/desktop-embed-mode`
+
+### Summary
+
+完成桌面模式全部 e2e（Win+D/Win+M、真实鼠标操作、Explorer 重启重挂、重启恢复）；按用户决定把独立桌面模式按钮改为设置开关「固定模式时，嵌入桌面中」（仅 Windows，注明需 Win11 24H2+），v27 迁移改为 fixed_embed_desktop 键；沉淀 backend/window-modes.md code-spec、桌面窗口 e2e 指南与 pc/scripts/e2e 工具；版本升至 2.4.0，分支已 rebase 到 main（v2.3.9）
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `d71a1c4` | (see git log) |
+| `572deec` | (see git log) |
+| `cf0d885` | (see git log) |
+| `1887d6f` | (see git log) |
+| `9927eac` | (see git log) |
+| `1a60d3b` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
