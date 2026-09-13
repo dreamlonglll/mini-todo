@@ -6,3 +6,4 @@
 {"file": ".trellis/tasks/archive/2026-08/08-18-fix-taskbar-icon-flash/prd.md", "reason": "Documents why tao WindowFlags::apply_diff overwrites GWL_EXSTYLE and how fixed mode bypasses tao with raw Win32; desktop mode must follow the same bypass pattern"}
 {"file": ".trellis/tasks/09-07-desktop-embed-mode/research/win32-desktop-embed.md", "reason": "Desktop window hierarchy (Win10 / Win11 24H2), Lively and Rainmeter techniques, Show-desktop behaviour, explorer-restart handling"}
 {"file": ".trellis/tasks/09-07-desktop-embed-mode/research/tao-wry-transparency.md", "reason": "How tao/wry implement transparency on Windows and what survives SetParent; candidate techniques for transparent child windows"}
+{"file": ".trellis/tasks/09-07-desktop-embed-mode/research/spike-results.md", "reason": "Prototype results that fixed the design: owner=Progman + tao always_on_bottom, measured Z-order / Win+D / DPI behaviour on the target machine"}

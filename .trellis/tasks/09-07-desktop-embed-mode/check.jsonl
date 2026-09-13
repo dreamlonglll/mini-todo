@@ -4,3 +4,4 @@
 {"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Check the new is_desktop setting is wired through migration, AppSettings read/write, export/import, sync and TS types (CLAUDE.md 12-item checklist)"}
 {"file": ".trellis/tasks/09-07-desktop-embed-mode/research/win32-desktop-embed.md", "reason": "Reference for validating the host-window lookup and Show-desktop handling logic"}
 {"file": ".trellis/tasks/09-07-desktop-embed-mode/research/tao-wry-transparency.md", "reason": "Reference for validating that the transparency approach matches what tao/wry actually do"}
+{"file": ".trellis/tasks/09-07-desktop-embed-mode/research/spike-results.md", "reason": "Reference for what the desktop-mode Win32 sequence must do (owner, HWND_BOTTOM, no minimizebox) and what must NOT change (transparency, corners, DPI)"}

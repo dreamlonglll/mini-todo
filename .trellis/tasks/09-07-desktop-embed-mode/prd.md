@@ -54,8 +54,8 @@
 
 ## Open Questions
 
-* （技术，原型解决）透明背景在"桌面子窗口"形态下是否可行；若不可行，是否有保持顶层窗口
-  但同样免疫 Win+D 的方案（见 Technical Approach 的方案 B）
+* ~~透明背景在"桌面子窗口"形态下是否可行~~ → 原型已回答：方案 A 透明可行但 DPI / 圆角退化；方案 B 零退化，采用 B
+* Explorer 重启后 owner=Progman 的主窗口是否被连带销毁 → e2e 阶段实测（见 Decision 第 7 条）
 
 ## Requirements (evolving)
 
@@ -77,7 +77,8 @@
    （`AppSettings` 加 `#[serde(default)]` 字段，旧备份兼容）
 6. 健壮性：Explorer 重启 / 崩溃后桌面宿主窗口失效，需在轮询中检测并自动重新挂载；
    轮询线程在桌面模式下跳过 `restore_if_minimized` / `tick_auto_hide`
-7. 兼容 Windows 10 与 Windows 11（含 24H2 之后的桌面窗口层级变化）
+7. 目标平台 Windows 11 24H2+（Show desktop 抬起 Progman 本身的层级）；Win10 / Win11 ≤23H2 上代码照常运行
+   但不保证 Win+D 期间可见（见 Decision 第 6 条，留到下一轮）
 
 ## Acceptance Criteria (evolving)
 
@@ -110,6 +111,7 @@
 * 实色底回退方案
 * macOS / Linux 上的等价实现（命令在非 Windows 平台返回错误或 no-op）
 * 重写现有固定模式
+* Win10 / Win11 ≤23H2 的 WorkerW 哨兵状态机（本轮只做 24H2+，用户 2026-09-12 决定）
 
 ## Technical Approach
 
@@ -144,7 +146,167 @@
 
 ## Decision (ADR-lite)
 
-待原型验证后填写。
+**2026-09-12 定稿：采用方案 B（顶层窗口 + owner=Progman + tao `always_on_bottom`），本轮只保证 Win11 24H2+。**
+原型结论见 `research/spike-results.md`。
+
+### 决策要点
+
+1. **不做 SetParent / 不做子窗口**：方案 A 在用户 125%+100% 双屏下 DPI 退化肉眼可见、圆角丢失，否决。
+2. **Z 序压底不用 `SetWindowSubclass`，直接用 tao 自带的 `ALWAYS_ON_BOTTOM`**：
+   `window.set_always_on_bottom(true)` 后，tao 在 `WM_WINDOWPOSCHANGING` 里把每次 `SetWindowPos` 的
+   `hwndInsertAfter` 强制改成 `HWND_BOTTOM`（tao-0.34.5 `event_loop.rs:1229-1235`，见
+   `research/tao-wry-transparency.md` §1.5）。有 owner=Progman 时 `HWND_BOTTOM` 的实际效果就是
+   "紧贴 Progman 之上"（系统保证 owned 窗口永远在 owner 之上，原型实测 z[1]）。
+   **不需要新增 Cargo feature**：`GetShellWindow` / `SetWindowLongPtrW` / `GetWindowLongPtrW` /
+   `GWLP_HWNDPARENT` / `GetClassNameW` / `IsWindow` / `HWND_BOTTOM` / `HWND_TOP` 都在已启用的
+   `Win32_UI_WindowsAndMessaging` 里。
+3. **不被最小化用 tao `set_minimizable(false)`**（去 `WS_MINIMIZEBOX`），而不是手改 `GWL_STYLE`：
+   tao 自己记录的 flag 在后续任何 `apply_diff` 里都会被保留，不需要兜底。
+4. **owner=Progman 用 Win32 `SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, progman)`**：tao 不感知也不会覆写
+   `GWLP_HWNDPARENT`（`set_window_flags` 只重写 `GWL_STYLE` / `GWL_EXSTYLE`）。
+5. **任务栏 / Alt+Tab 复用固定模式的 `apply_fixed_ex_style(window, true)`**（加 `WS_EX_TOOLWINDOW`、去
+   `WS_EX_APPWINDOW`）。tao 的 `apply_diff` 会整体覆写 ex style，所以同样需要 `reassert_*` 兜底
+   （见下方"tao 覆写兜底"）。
+6. **Win10 / Win11 ≤23H2 明确不在本轮范围**（用户 2026-09-12 决定）：那些系统上 Show desktop 抬起的是
+   WorkerW 而非 Progman，owner 帮不上忙，需要 Rainmeter 式哨兵状态机，且当前机器（25H2）无法验证。
+   本轮代码在旧系统上照常运行（不最小化、不进任务栏），只是 Win+D 期间可能被桌面盖住；
+   `desktop_host()` 找不到合格宿主时记录日志并仍然挂 owner。
+7. **Explorer 重启**：owner 被销毁时跨进程 owned 窗口的命运（被销毁 vs 仅被孤立）文档不明确，
+   原型未测。设计上保留 seam：`desktop_attach` / `desktop_detach` / `tick_desktop_mode` 三个函数封装全部
+   Win32 细节，e2e 阶段用 `taskkill /f /im explorer.exe` 实测（用户已同意）；若主窗口确实被销毁，
+   回退方案是去掉 owner、只留 `always_on_bottom` + tick 检测 Progman 抬升后用 `SWP_NOSENDCHANGING`
+   重排（绕过 tao 钩子）。
+
+### 状态与持久化
+
+| 层 | 内容 |
+|---|---|
+| Rust 原子量 | `pub static IS_DESKTOP_MODE: AtomicBool`（与 `IS_FIXED_MODE` 并列、互斥，`is_desktop_mode()`）；`static DESKTOP_OWNER: AtomicIsize` 缓存挂上的 Progman HWND，供 tick 检测宿主失效 |
+| settings 键 | `is_desktop`（`'true'`/`'false'`），v27 migration `INSERT OR IGNORE ... 'false'` |
+| screen_configs 列 | `is_desktop INTEGER NOT NULL DEFAULT 0`，同一 v27 migration `ALTER TABLE ADD COLUMN` |
+| Rust 模型 | `AppSettings.is_desktop` / `ScreenConfig.is_desktop` / `SaveScreenConfigRequest.is_desktop`，全部 `#[serde(default)]`（旧备份、旧前端兼容） |
+| 读写点 | `window.rs` `get_settings` / `save_settings` / `save_screen_config` / `get_screen_config` / `list_screen_configs`（所有 `SELECT ... is_fixed` 的地方同步加列）；`data.rs` `read_app_settings` / `write_app_settings`；`sync_cmd.rs` 把 `settings` 当整体 `Value` 传输，`AppSettings` 加字段即自动纳入 |
+| 前端 | `WindowMode = 'normal' \| 'fixed' \| 'desktop'`；`appStore.isDesktop` ref + `windowMode`；`ScreenConfig.isDesktop` / `SaveScreenConfigRequest.isDesktop` / `AppSettings.isDesktop` |
+
+### 后端命令与流程（`pc/src-tauri/src/commands/window.rs`）
+
+```
+#[tauri::command] set_window_desktop_mode(app_handle, db, enabled: bool)
+  固定取 "main" 窗口（同 set_window_fixed_mode）
+  enabled = true:
+    1. 若 IS_FIXED_MODE：走退出固定模式的清理（撤销置顶、AutoHideState 复位、hidden 时挪回 anchor），
+       IS_FIXED_MODE = false，sync_tray_fixed_checked(false)
+    2. IS_DESKTOP_MODE = true
+    3. tao 通路（会触发 apply_diff，必须排在 Win32 改样式之前）：
+         window.set_minimizable(false)；window.set_always_on_bottom(true)
+    4. run_on_main_thread(desktop_attach)   // 排在 3 之后，与 reassert_fixed_window_state 同一套队列语义
+    5. sync_tray_desktop_checked(true)
+  enabled = false:
+    1. IS_DESKTOP_MODE = false
+    2. window.set_always_on_bottom(false)；window.set_minimizable(true)
+    3. run_on_main_thread(desktop_detach)
+    4. sync_tray_desktop_checked(false)
+
+set_window_fixed_mode(fixed = true) 里若 IS_DESKTOP_MODE：先按上面 enabled=false 的步骤退出桌面模式再进固定模式
+
+#[cfg(windows)] fn desktop_host() -> Option<HWND>
+  GetShellWindow()，校验 GetClassNameW == "Progman"，否则 None（记录 eprintln）
+
+#[cfg(windows)] fn desktop_attach(window)        // 幂等，可反复调用
+  hwnd = window_hwnd(window)?; host = desktop_host()?
+  SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, host)
+  apply_fixed_ex_style(window, true)
+  SetWindowPos(hwnd, HWND_BOTTOM, 0,0,0,0, SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE|SWP_FRAMECHANGED)
+  DESKTOP_OWNER = host
+
+#[cfg(windows)] fn desktop_detach(window)
+  SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, 0)
+  apply_fixed_ex_style(window, false)
+  SetWindowPos(hwnd, HWND_TOP, ... SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE|SWP_FRAMECHANGED)
+  DESKTOP_OWNER = 0
+
+pub fn tick_desktop_mode(window)                  // 200ms 轮询线程调用，仅 IS_DESKTOP_MODE 时
+  owner = DESKTOP_OWNER
+  若 owner == 0 || !IsWindow(owner) || GetShellWindow() != owner
+     || GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT) != owner
+    → run_on_main_thread(desktop_attach)         // Explorer 重启 / owner 被清 → 重挂
+  （不做 restore_if_minimized / tick_auto_hide）
+
+reassert_fixed_window_state → 改名 reassert_window_mode_state（或保留名字但扩展语义）：
+  fixed   → 现有逻辑
+  desktop → desktop_attach（幂等地补 ex style + owner + HWND_BOTTOM）
+  normal  → apply_fixed_ex_style(false)
+
+bring_main_window_to_front（托盘单击/双击）在桌面模式下：不 set_always_on_top，只 show + set_focus + reassert
+reset_window_impl（托盘"重置位置"）：前端收到 tray-reset-window 时若 isDesktop 也要退出桌面模式（同 isFixed 处理）
+```
+
+`SetWindowLongPtrW` 在 `windows` crate 里只对 64 位目标导出；项目只发 x64，直接用即可
+（若需兼容 x86 再加 `cfg(target_pointer_width)` 分支）。
+
+非 Windows 平台：`set_window_desktop_mode` 返回 `Err("桌面模式仅支持 Windows")`，`tick_desktop_mode` 为空函数。
+
+### 轮询线程（`lib.rs` setup）
+
+```
+loop 200ms:
+  if is_desktop_mode()  { tick_desktop_mode(&window) }
+  else if is_fixed_mode() { restore_if_minimized; tick_auto_hide }
+```
+
+### 托盘（`lib.rs`）
+
+* 新增 `CheckMenuItem::with_id(app, "toggle_desktop", "桌面模式", true, is_desktop_mode(), None)`，
+  放在 `toggle_fixed` 之后；`commands::set_tray_toggle_desktop_item(item.clone())`
+* 菜单事件 `"toggle_desktop"` → `window.emit("tray-toggle-desktop", ())`，由前端 `appStore.toggleDesktopMode()` 处理
+  （与 `tray-toggle-fixed` 同一模式：托盘只发事件，状态由前端 store 单点维护后再回写后端）
+* 勾选同步：`sync_tray_desktop_checked` / `sync_tray_fixed_checked` 在两个命令里互相清理
+
+### 前端
+
+* `appStore.ts`
+  * `isDesktop = ref(false)`；`windowMode` 随 `isFixed` / `isDesktop` 推导（`'desktop' > 'fixed' > 'normal'`）
+  * `toggleDesktopMode()`：翻转 `isDesktop`；进入时 `isFixed = false`；调 `applyDesktopMode()` /
+    `applyNormalMode()`；最后 `saveWindowState()`
+  * `applyDesktopMode()`：`appWindow.setResizable(false)` → `invoke('set_window_desktop_mode', { enabled: true })`
+  * `applyNormalMode()`：`setResizable(true)` → 同时 `set_window_fixed_mode(false)` 与
+    `set_window_desktop_mode(false)`（后端命令幂等，重复调用无副作用）
+  * `toggleFixedMode()`：进入固定模式时 `isDesktop = false`（后端 `set_window_fixed_mode(true)` 自行退出桌面模式）
+  * `initSettings()`：`savedConfig.isDesktop` → 先 setPosition / setSize，再 `applyDesktopMode()`
+  * `saveWindowState()`：`configRequest.isDesktop` 与 `save_settings` 的 `isDesktop`
+* `TitleBar.vue`：锁按钮旁新增桌面模式按钮，图标 `Monitor`（@element-plus/icons-vue），
+  `:class="{ active: isDesktop }"`，title `'桌面模式' / '退出桌面模式'`；
+  拖拽禁用条件从 `isFixed` 改为 `isFixed || isDesktop`（`no-drag` class、`data-tauri-drag-region`、`onTitleBarMouseDown`）
+* `MainView.vue`：`listen('tray-toggle-desktop')` → `appStore.toggleDesktopMode()`；`tray-reset-window` 里
+  `isDesktop` 也退出；**不要**给桌面模式加 `body.fixed-mode`（那个类会去掉圆角与描边，桌面模式要保留普通模式观感）；
+  子窗口继续传 `parent: appWindow`（方案 B 主窗口仍是顶层窗口，owner 链 编辑器→主窗口→Progman 正常）
+* `SettingsView.vue` 屏幕配置列表的模式文案：`isDesktop ? '桌面模式' : isFixed ? '固定模式' : '普通模式'`
+* `types/app.ts`：`WindowMode` 加 `'desktop'`；`AppSettings` / `ScreenConfig` / `SaveScreenConfigRequest` 加 `isDesktop: boolean`
+
+### 单元测试（Rust）
+
+* `desktop_host` 的类名校验逻辑抽成纯函数 `is_desktop_host_class(name: &str) -> bool`，测 `"Progman"` / `"WorkerW"` / `""`
+* `tick_desktop_mode` 的"是否需要重挂"判定抽成纯函数
+  `needs_reattach(cached_owner: isize, owner_alive: bool, shell_now: isize, current_owner: isize) -> bool`，覆盖四种失效情形
+* 现有 `evaluate_auto_hide_transition` 测试不受影响
+
+### 2026-09-13 UX 调整（用户决定，e2e 全部通过之后）
+
+**桌面模式不再作为第三种独立模式暴露给用户**，改为设置 → 常规里的开关
+「固定模式时，嵌入桌面中」（仅 Windows 可见，说明文字注明需要 Windows 11 24H2 及以上）：
+
+* 开启后，固定模式 = 原桌面模式（owner=Progman + always_on_bottom + 无最小化框）；关闭则是原固定模式
+* 去掉 TitleBar 的 `Monitor` 按钮与托盘「桌面模式」项 / `tray-toggle-desktop` 事件；入口只剩锁按钮 + 托盘「固定模式」
+* 当前已处于固定模式时切换开关立即生效：后端 `set_fixed_embed_desktop` 落库后按状态调
+  `set_window_desktop_mode(true)` / `set_window_fixed_mode(true)`；不在固定模式时只记住偏好
+* 持久化改为全局偏好：settings `fixed_embed_desktop`（v27 重写，未发布过所以直接改而不是加 v28）；
+  `screen_configs.is_desktop` 列与 `is_desktop` 键删除，当前是否固定继续由 `is_fixed` 记录
+* 前端 `WindowMode` 回到 `'normal' | 'fixed'`；`appStore.fixedEmbedDesktop` + `isEmbeddedInDesktop`
+  （= isFixed && fixedEmbedDesktop）；`applyFixedMode` 按开关选命令；`body.fixed-mode` 只在
+  "固定且未嵌入"时挂（嵌入态保留圆角与描边）
+* 设置窗口 → 主窗口同步走既有 `app-settings-changed` 模式，key `fixedEmbedDesktop`
+* 后端保留 `IS_DESKTOP_MODE` / `IS_FIXED_MODE` 两个原子量与全部 Win32 路径不变，
+  托盘「固定模式」在两种状态下都勾选
 
 ## Technical Notes
 
@@ -153,7 +315,9 @@
   `pc/src/stores/appStore.ts`、`pc/src/types/app.ts`、`pc/src/components/TitleBar.vue`、
   `pc/src/views/MainView.vue`
 * 新增 settings 键必须走 CLAUDE.md「维护检查清单」12 项
-* 桌面模式下 MainView 打开子窗口不要再传 `parent: appWindow`（owner 会被解析成桌面宿主）
+* 方案 B 下主窗口仍是顶层窗口，MainView 打开子窗口**继续**传 `parent: appWindow`（原型已验证编辑窗口正常在主窗口之上）
 * 轮询线程已存在（200ms），桌面模式的宿主存活检测 / 重挂载复用它，不新开线程
+* 原型观察到的"首次点击丢失"是既有行为（普通模式同样存在），不属于本任务
+* `Open Questions` 中的透明可行性已由原型回答：方案 B 顶层窗口透明 / 圆角 / DPI 全部零改动
 * 自动化验证手段：`(New-Object -ComObject Shell.Application).ToggleDesktop()` 触发显示桌面；
   PowerShell + Win32 查询 `IsIconic` / `GetParent` / `GetWindowRect`；截屏比对透明效果
