@@ -163,6 +163,21 @@ mini-todo/
   - 固定在用户指定位置
   - 忽略 Win+D（显示桌面）
   - 禁用关闭、最小化、拖拽
+- **固定模式时嵌入桌面**（设置 → 常规「固定模式时，嵌入桌面中」，仅 Windows 可见，Win11 24H2+ 保证 Win+D 免疫）：
+  - 不是第三种模式，而是固定模式的一个全局开关：开启后进入固定模式即走后端"桌面模式"路径，
+    关闭则是原来的固定模式；当前已固定时切换开关立即生效（`set_fixed_embed_desktop`）
+  - 主窗口仍是顶层窗口：owner=Progman（`GWLP_HWNDPARENT`）+ tao `always_on_bottom` +
+    `set_minimizable(false)` + `WS_EX_TOOLWINDOW`，位于桌面图标之上、所有应用窗口之下
+  - Win+D / Win+M / 任务栏"显示桌面"时随 Progman 一起被抬起，不最小化、不被盖住
+  - 透明背景 / 圆角 / DPI 与普通模式零差异（不做 SetParent 子窗口化；主窗口不挂 `body.fixed-mode`）
+  - 不可拖拽、不可缩放；不做贴边隐藏 / 唤起置顶；不在任务栏、不参与 Alt+Tab
+  - 200ms 轮询线程检测 Explorer 重启（`tick_desktop_mode`），owner 失效时自动重挂
+  - 入口不变：TitleBar 锁按钮、托盘 CheckMenuItem「固定模式」（嵌入态托盘同样勾选）
+  - 持久化：settings `fixed_embed_desktop`（v27）；当前是否固定仍由 `is_fixed` / `screen_configs.is_fixed` 记录
+  - 后端：`commands/window.rs` `IS_DESKTOP_MODE` / `set_window_desktop_mode` / `desktop_attach` / `desktop_detach`；
+    前端 `appStore.applyFixedMode` 按开关选择命令；与固定模式共用 `reassert_window_mode_state`
+    兜底 tao `apply_diff` 的 ex style 覆写
+  - 非 Windows：开关不显示，`set_window_desktop_mode(true)` 返回错误、`false` 为 no-op
 
 ## 开发规范
 
@@ -182,11 +197,12 @@ mini-todo/
 ### 数据库设计
 - **数据库类型**：SQLite
 - **存储位置**：`%APPDATA%/mini-todo/data.db`
-- **迁移版本**：当前 v1~v26，通过 `pc/src-tauri/src/db/migrations.rs` 管理
+- **迁移版本**：当前 v1~v27，通过 `pc/src-tauri/src/db/migrations.rs` 管理
   - v23：移除所有 AI Agent / 任务调度 / 工作流相关表和字段（详见迁移注释）
   - v24：新增 `webdav_last_modified` settings key，用于条件 PUT
   - v25：新增 `top_on_wake` settings key，贴边唤起时是否临时置顶
   - v26：新增 `window_bg_color` / `window_bg_alpha` settings key，窗口底色与背景透明度
+  - v27：新增 `fixed_embed_desktop` settings key，固定模式时是否嵌入桌面（仅 Windows）
 
 #### 主要数据表
 
@@ -221,7 +237,7 @@ mini-todo/
 |------|---------|------|
 | `todos`（全字段） | 是 | 含重复提醒字段 |
 | `subtasks`（全字段） | 是 | 标题 + Markdown 内容 + 完成态 |
-| `settings`（部分） | 是 | 11 个应用设置项，不含 WebDAV 配置 |
+| `settings`（部分） | 是 | 12 个应用设置项（含 `is_fixed` / `fixed_embed_desktop`），不含 WebDAV 配置 |
 | `images`（文件） | 是 | 通过 WebDAV 独立上传/下载 |
 | `screen_configs` | 否 | 设备特定的屏幕配置 |
 | `migrations` | 否 | 结构性表，应用启动自动管理 |
@@ -365,6 +381,7 @@ PC 端 WebDAV 同步（PR3 后）：
 - **Tauri invoke**：前端调用后端 Rust 命令（请求-响应）
 - **Tauri emit/listen**：事件驱动通信（实时推送）
   - `tray-toggle-fixed`、`tray-reset-window`、`tray-add-todo`、`tray-open-settings`：托盘菜单事件
+  - `app-settings-changed`：设置窗口改动应用设置后通知主窗口按 `key` 重载（含 `fixedEmbedDesktop`）
   - `todo-font-changed`：字体设置变更通知
 
 ### 独立 WebView 窗口

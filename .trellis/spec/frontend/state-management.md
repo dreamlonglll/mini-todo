@@ -65,11 +65,40 @@ When a setting in the child window must take immediate effect on the main window
 Adding a new setting means touching three places: the `AppSettingKey` union, the emit site in
 SettingsView, and the handler branch in MainView. The union makes a typo a compile error (TS2678).
 
-The "modal close" refresh path (`MainView.reloadAppSettings()`) is still a fallback.
+The "modal close" refresh path (`MainView.reloadAppSettings()`) is still a fallback — add the new
+`load*()` there too.
 
 Both sides of the pattern matter — a child window must also **load** the real value on mount.
 A `computed(() => appStore.isDarkTheme)` in SettingsView reads that window's default `false`
 unless `loadDarkTheme()` runs there first.
+
+#### Convention: a setting that changes the main window's live mode is applied by the backend command
+
+**What**: When a settings-window switch must change the main window *right now* (e.g.
+`fixed_embed_desktop` flipping a fixed window between classic and embedded), the narrow backend
+command (`set_fixed_embed_desktop`) writes the key **and** performs the window change by resolving
+`app_handle.get_webview_window("main")`. The `app-settings-changed` handler in MainView only
+`load*()`s the value; it never calls `applyFixedMode()` / `applyNormalMode()` in response.
+
+**Why**: The backend already queued Win32 work on the main thread; a second apply from the event
+handler races it (see `.trellis/spec/backend/window-modes.md` §3 "Ordering rules"). The main
+window still needs the fresh value for `body.fixed-mode` and for the next `saveWindowState()`.
+
+#### Convention: load every key that `saveWindowState()` writes before the first save
+
+**What**: `saveWindowState()` persists `is_fixed`, `top_on_wake`, `fixed_embed_desktop`, background
+colour, … from the store's current refs. `initSettings()` therefore calls `loadTopOnWake()`,
+`loadFixedEmbedDesktop()`, `loadWindowBackground()` **before** restoring the window and before any
+toggle can save.
+
+**Why**: A ref still at its default (`true` for `topOnWake`, `false` for `fixedEmbedDesktop`) would
+silently overwrite the user's stored value on the first mode toggle after startup.
+
+#### Convention: platform-only settings rows use a UA check in the view
+
+**What**: `const isWindows = /windows/i.test(navigator.userAgent)` + `v-if="isWindows"` on the
+row (same approach as `applyPlatformClass()` for macOS). The backend command still rejects the
+operation on other platforms; the `v-if` is UX, not the safety net.
 
 ---
 

@@ -23,6 +23,7 @@ These guides help you **ask the right questions before coding**.
 |-------|---------|-------------|
 | [Code Reuse Thinking Guide](./code-reuse-thinking-guide.md) | Identify patterns and reduce duplication | When you notice repeated patterns |
 | [Cross-Layer Thinking Guide](./cross-layer-thinking-guide.md) | Think through data flow across layers | Features spanning multiple layers |
+| [Desktop Window E2E Guide](./desktop-window-e2e-guide.md) | Prove a main-window mode/style change against live Win32 state | Any change to fixed / embedded mode, tao window flags, owner or Z-order |
 
 ---
 
