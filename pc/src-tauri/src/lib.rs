@@ -17,18 +17,22 @@ const DOUBLE_CLICK_THRESHOLD_MS: u64 = 500;
 use commands::{
     close_all_notification_windows, close_notification_window, create_subtask, create_todo,
     delete_screen_config, delete_subtask, delete_todo, export_data, export_data_to_file,
-    fetch_holidays, get_auto_hide_enabled, get_images_dir, get_notification_type, get_top_on_wake,
+    fetch_holidays, get_auto_hide_enabled, get_fixed_embed_desktop, get_images_dir,
+    get_notification_type, get_top_on_wake,
     get_screen_config, get_settings, get_show_calendar, get_subtask, get_sync_settings,
     get_system_fonts, get_text_theme, get_todo_font_family, get_todo_font_size, get_todos,
     get_window_background, get_window_persist_state, import_data, import_data_from_file,
     import_subtasks_from_paths,
-    is_fixed_mode, list_screen_configs, reorder_subtasks, reorder_todos, reset_window,
+    is_desktop_mode, is_fixed_mode, list_screen_configs, reorder_subtasks, reorder_todos,
+    reset_window,
     save_screen_config,
     save_settings, save_subtask_image, save_sync_settings, set_auto_hide_cursor_inside,
-    set_auto_hide_enabled, set_notification_type, set_show_calendar, set_text_theme, set_top_on_wake,
+    set_auto_hide_enabled, set_fixed_embed_desktop, set_notification_type, set_show_calendar,
+    set_text_theme, set_top_on_wake,
     sync_auto_start_state,
     set_todo_font_family,
-    set_todo_font_size, set_window_background, set_window_fixed_mode, update_screen_config_name,
+    set_todo_font_size, set_window_background, set_window_desktop_mode, set_window_fixed_mode,
+    update_screen_config_name,
     update_subtask,
     update_todo, webdav_apply_remote, webdav_auto_sync, webdav_download_sync,
     webdav_test_connection, webdav_upload_sync,
@@ -155,7 +159,8 @@ pub fn run() {
                 ],
             )?;
 
-            // 保存托盘菜单项引用，供 set_window_fixed_mode 同步勾选状态
+            // 保存托盘菜单项引用，供 set_window_fixed_mode / set_window_desktop_mode 同步勾选状态
+            // （嵌入桌面的固定模式对托盘来说同样是"固定模式"）
             commands::set_tray_toggle_fixed_item(toggle_fixed.clone());
             // 保存自启菜单项引用，供设置面板切换后同步勾选状态
             commands::set_tray_auto_start_item(auto_start.clone());
@@ -253,14 +258,18 @@ pub fn run() {
             // 启动通知调度器
             NotificationService::start_scheduler(app.handle().clone());
 
-            // 启动固定模式监听器（定时检测窗口最小化状态）
+            // 启动窗口模式监听器（固定模式：最小化守护 + 贴边隐藏；桌面模式：宿主存活检测）
             let handle = app.handle().clone();
             std::thread::spawn(move || {
                 loop {
                     std::thread::sleep(std::time::Duration::from_millis(200));
 
-                    // 只在固定模式下检测
-                    if is_fixed_mode() {
+                    if is_desktop_mode() {
+                        // 桌面模式下窗口不可最小化、也不贴边，只需盯着 Explorer 重启后重新挂载
+                        if let Some(window) = handle.get_webview_window("main") {
+                            commands::tick_desktop_mode(&window);
+                        }
+                    } else if is_fixed_mode() {
                         if let Some(window) = handle.get_webview_window("main") {
                             // 被最小化就立刻还原：固定模式下没有任务栏入口可以点回来
                             commands::restore_if_minimized(&window);
@@ -297,10 +306,13 @@ pub fn run() {
             get_text_theme,
             set_text_theme,
             set_window_fixed_mode,
+            set_window_desktop_mode,
             get_auto_hide_enabled,
             set_auto_hide_enabled,
             get_top_on_wake,
             set_top_on_wake,
+            get_fixed_embed_desktop,
+            set_fixed_embed_desktop,
             get_window_background,
             set_window_background,
             set_auto_hide_cursor_inside,

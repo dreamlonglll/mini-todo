@@ -196,6 +196,10 @@ pub struct WindowSize {
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
     pub is_fixed: bool,
+    /// 固定模式时是否嵌入桌面（窗口嵌在桌面图标之上、所有应用窗口之下，Win+D 不最小化），
+    /// 仅 Windows 生效。v27 引入，`default` 保证旧备份 / 旧版远端数据反序列化不报错
+    #[serde(default)]
+    pub fixed_embed_desktop: bool,
     pub window_position: Option<WindowPosition>,
     pub window_size: Option<WindowSize>,
     /// 是否启用贴边自动隐藏

@@ -26,6 +26,7 @@ fn get_setting_bool(conn: &rusqlite::Connection, key: &str, default: bool) -> bo
 
 fn read_app_settings(conn: &rusqlite::Connection) -> AppSettings {
     let is_fixed = get_setting_bool(conn, "is_fixed", false);
+    let fixed_embed_desktop = get_setting_bool(conn, "fixed_embed_desktop", false);
     let window_position: Option<WindowPosition> = conn
         .query_row(
             "SELECT value FROM settings WHERE key = 'window_position'",
@@ -59,6 +60,7 @@ fn read_app_settings(conn: &rusqlite::Connection) -> AppSettings {
 
     AppSettings {
         is_fixed,
+        fixed_embed_desktop,
         window_position,
         window_size,
         auto_hide_enabled,
@@ -76,6 +78,10 @@ pub(crate) fn write_app_settings(conn: &rusqlite::Connection, settings: &AppSett
     conn.execute(
         "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('is_fixed', ?1, datetime('now', 'localtime'))",
         [if settings.is_fixed { "true" } else { "false" }],
+    )?;
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('fixed_embed_desktop', ?1, datetime('now', 'localtime'))",
+        [if settings.fixed_embed_desktop { "true" } else { "false" }],
     )?;
     if let Some(pos) = &settings.window_position {
         let pos_json = serde_json::to_string(pos).unwrap_or_default();
@@ -347,6 +353,7 @@ mod tests {
             todos,
             settings: AppSettings {
                 is_fixed: false,
+                fixed_embed_desktop: false,
                 window_position: None,
                 window_size: None,
                 auto_hide_enabled: true,
@@ -434,5 +441,71 @@ mod tests {
 
         assert_eq!(titles(&db), vec!["已有待办".to_string()]);
         assert_eq!(count(&db, "subtasks"), 1);
+    }
+
+    fn setting_value(db: &Database, key: &str) -> Option<String> {
+        db.with_connection(|conn| {
+            Ok(conn
+                .query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
+                    r.get::<_, String>(0)
+                })
+                .ok())
+        })
+        .expect("读取设置失败")
+    }
+
+    /// v27 之前的备份没有 fixedEmbedDesktop 字段：导入不报错，且按 serde default 落库为 false。
+    ///
+    /// 先把库里预置成 true：v27 迁移本身就会把 fixed_embed_desktop 种成 false，不预置的话
+    /// 断言无论 write_app_settings 有没有写这个键都会通过，测不出东西。
+    #[test]
+    fn import_without_fixed_embed_desktop_defaults_to_false() {
+        let db = test_db();
+        db.with_connection(|conn| {
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES ('fixed_embed_desktop', 'true')",
+                [],
+            )?;
+            Ok(())
+        })
+        .expect("预置 fixed_embed_desktop 失败");
+
+        let json =
+            export_json(vec![make_todo(1, "a")]).replace("\"fixedEmbedDesktop\":false,", "");
+        assert!(
+            !json.contains("fixedEmbedDesktop"),
+            "测试前提：JSON 中不含 fixedEmbedDesktop"
+        );
+
+        import_data_raw(&db, &json).expect("旧版备份导入应当成功");
+
+        assert_eq!(
+            setting_value(&db, "fixed_embed_desktop").as_deref(),
+            Some("false")
+        );
+    }
+
+    /// 导出 → 导入往返后 fixed_embed_desktop 保留。
+    #[test]
+    fn fixed_embed_desktop_survives_export_import_round_trip() {
+        let db = test_db();
+        db.with_connection(|conn| {
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES ('fixed_embed_desktop', 'true')",
+                [],
+            )?;
+            Ok(())
+        })
+        .expect("写入 fixed_embed_desktop 失败");
+
+        let exported = export_data_internal(&db).expect("导出失败");
+        assert!(exported.contains("\"fixedEmbedDesktop\": true"));
+
+        let db2 = test_db();
+        import_data_raw(&db2, &exported).expect("导入失败");
+        assert_eq!(
+            setting_value(&db2, "fixed_embed_desktop").as_deref(),
+            Some("true")
+        );
     }
 }

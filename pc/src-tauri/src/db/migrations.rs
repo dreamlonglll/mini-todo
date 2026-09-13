@@ -141,6 +141,25 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         apply_migration(conn, 26, migration_v26)?;
     }
 
+    if current_version < 27 {
+        apply_migration(conn, 27, migration_v27)?;
+    }
+
+    Ok(())
+}
+
+/// 迁移 v27：新增 `fixed_embed_desktop` settings key。
+///
+/// "固定模式时，嵌入桌面中"开关（仅 Windows）：开启后进入固定模式即把主窗口以 Progman
+/// 为 owner 并常驻 Z 序底部，嵌在桌面图标之上、所有应用窗口之下，Win+D / Win+M 不会
+/// 最小化它。它是全局偏好而不是第三种窗口模式：当前是否固定仍由 `is_fixed` /
+/// `screen_configs.is_fixed` 记录，`screen_configs` 不需要新列。
+/// 默认 false：升级后的用户固定模式行为不变。
+fn migration_v27(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES ('fixed_embed_desktop', 'false', datetime('now', 'localtime'))",
+        [],
+    )?;
     Ok(())
 }
 
@@ -782,19 +801,43 @@ mod tests {
         assert_eq!(max_version(&conn), 99);
     }
 
-    /// 26 个迁移逐个包事务后，全新库仍能一次性迁到最新版本。
+    /// 27 个迁移逐个包事务后，全新库仍能一次性迁到最新版本。
     #[test]
     fn fresh_database_migrates_to_latest_version() {
         let conn = fresh_conn();
         run_migrations(&conn).expect("全新库迁移失败");
 
-        assert_eq!(max_version(&conn), 26);
+        assert_eq!(max_version(&conn), 27);
         assert!(table_exists(&conn, "todos"));
         assert!(table_exists(&conn, "subtasks"));
         assert!(table_exists(&conn, "settings"));
         assert!(table_exists(&conn, "screen_configs"));
         // v23 已删除的 Agent 相关表不应残留
         assert!(!table_exists(&conn, "agent_configs"));
+    }
+
+    /// v27：settings 有 fixed_embed_desktop 键且默认 false；screen_configs 不加列。
+    #[test]
+    fn v27_adds_fixed_embed_desktop_key() {
+        let conn = fresh_conn();
+        run_migrations(&conn).expect("迁移失败");
+
+        let value: String = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'fixed_embed_desktop'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("fixed_embed_desktop 键应存在");
+        assert_eq!(value, "false");
+
+        let has_is_desktop_column = conn
+            .prepare("SELECT is_desktop FROM screen_configs")
+            .is_ok();
+        assert!(
+            !has_is_desktop_column,
+            "嵌入桌面是全局偏好，screen_configs 不应有 is_desktop 列"
+        );
     }
 
     /// 迁移是幂等的：重复调用不重复执行、版本号不变。
@@ -804,6 +847,6 @@ mod tests {
         run_migrations(&conn).expect("首次迁移失败");
         run_migrations(&conn).expect("二次迁移失败");
 
-        assert_eq!(max_version(&conn), 26);
+        assert_eq!(max_version(&conn), 27);
     }
 }
