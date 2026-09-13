@@ -56,9 +56,10 @@ const containerClass = computed(() => ({
   'dark-theme': appStore.isDarkTheme
 }))
 
-// 固定模式挂 body 类，供全局样式做描边/底部避让的差异化（仅主窗口有 MainView，天然不会污染子窗口）
-watch(() => appStore.isFixed, (fixed) => {
-  document.body.classList.toggle('fixed-mode', fixed)
+// 固定模式挂 body 类，供全局样式做描边/底部避让的差异化（仅主窗口有 MainView，天然不会污染子窗口）。
+// 嵌入桌面的固定模式例外：它要保留普通模式的圆角与描边观感，不挂这个类
+watch(() => appStore.isFixed && !appStore.isEmbeddedInDesktop, (fixedLook) => {
+  document.body.classList.toggle('fixed-mode', fixedLook)
 }, { immediate: true })
 
 // 事件监听清理函数
@@ -235,6 +236,7 @@ async function reloadAppSettings() {
   await todoStore.loadViewMode()
   await appStore.loadShowCalendar()
   await appStore.loadAutoHideEnabled()
+  await appStore.loadFixedEmbedDesktop()
   await appStore.loadTopOnWake()
   await appStore.loadWindowBackground()
   await appStore.loadDarkTheme()
@@ -272,9 +274,9 @@ onMounted(async () => {
   unlistenTrayToggle = await listen('tray-toggle-fixed', async () => {
     await appStore.toggleFixedMode()
   })
-  
+
   unlistenTrayReset = await listen('tray-reset-window', async () => {
-    // 重置后需要更新 appStore 状态并取消固定模式
+    // 重置后需要更新 appStore 状态并退回普通模式（固定模式不允许挪窗口，嵌入桌面同样）
     if (appStore.isFixed) {
       await appStore.toggleFixedMode()
     }
@@ -311,6 +313,10 @@ onMounted(async () => {
         break
       case 'topOnWake':
         await appStore.loadTopOnWake()
+        break
+      case 'fixedEmbedDesktop':
+        // 窗口本身的切换由后端 set_fixed_embed_desktop 直接完成，这里只同步 store（body 类、保存时的值）
+        await appStore.loadFixedEmbedDesktop()
         break
       case 'windowBackground':
         await appStore.loadWindowBackground()

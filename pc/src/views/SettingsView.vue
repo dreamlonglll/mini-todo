@@ -47,6 +47,9 @@ const showCalendar = computed(() => appStore.showCalendar)
 const autoHideEnabled = computed(() => appStore.autoHideEnabled)
 // 贴边唤起时置顶
 const topOnWake = computed(() => appStore.topOnWake)
+// 固定模式时嵌入桌面（仅 Windows 可见：实现依赖 Win32 桌面宿主，其它平台后端直接拒绝）
+const fixedEmbedDesktop = computed(() => appStore.fixedEmbedDesktop)
+const isWindows = /windows/i.test(navigator.userAgent)
 // 窗口底色与背景透明度
 const windowBgColor = computed(() => appStore.windowBgColor)
 const windowBgAlpha = computed(() => appStore.windowBgAlpha)
@@ -78,6 +81,7 @@ onMounted(async () => {
   await appStore.loadShowCalendar()
   await appStore.loadAutoHideEnabled()
   await appStore.loadTopOnWake()
+  await appStore.loadFixedEmbedDesktop()
   await appStore.loadWindowBackground()
   await appStore.loadDarkTheme()
   await loadSyncSettings()
@@ -115,6 +119,11 @@ async function handleAutoHideChange(val: boolean) {
 async function handleTopOnWakeChange(val: boolean) {
   await appStore.setTopOnWake(val)
   await notifyAppSettingChanged('topOnWake')
+}
+
+async function handleFixedEmbedDesktopChange(val: boolean) {
+  await appStore.setFixedEmbedDesktop(val)
+  await notifyAppSettingChanged('fixedEmbedDesktop')
 }
 
 async function handleBgColorChange(color: string) {
@@ -594,6 +603,24 @@ async function handleCheckUpdate() {
               :model-value="topOnWake"
               :disabled="!autoHideEnabled"
               @change="(val: boolean) => handleTopOnWakeChange(val)"
+            />
+          </div>
+
+          <!-- 仅 Windows：依赖 Win32 桌面宿主（owner=Progman），其它平台不显示 -->
+          <div v-if="isWindows" class="settings-row">
+            <div class="row-left">
+              <el-icon class="row-icon"><Monitor /></el-icon>
+              <div class="row-content">
+                <span class="settings-label">固定模式时，嵌入桌面中</span>
+                <span class="settings-desc">
+                  固定后窗口嵌在桌面图标之上、其它窗口之下，显示桌面（Win+D）时不会被隐藏；贴边隐藏与唤起置顶不再生效。
+                  需要 Windows 11 24H2 及以上
+                </span>
+              </div>
+            </div>
+            <el-switch
+              :model-value="fixedEmbedDesktop"
+              @change="(val: boolean) => handleFixedEmbedDesktopChange(val)"
             />
           </div>
 

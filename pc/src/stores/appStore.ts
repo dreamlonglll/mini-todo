@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { getVersion } from '@tauri-apps/api/app'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow, PhysicalPosition, PhysicalSize, availableMonitors, primaryMonitor } from '@tauri-apps/api/window'
@@ -39,7 +39,7 @@ export const useAppStore = defineStore('app', () => {
   const isDarkTheme = ref(false)
   const windowPosition = ref<WindowPosition | null>(null)
   const windowSize = ref<WindowSize | null>(null)
-  const windowMode = ref<WindowMode>('normal')
+  const windowMode = computed<WindowMode>(() => (isFixed.value ? 'fixed' : 'normal'))
   
   // 屏幕配置相关状态
   const currentScreenConfigId = ref<string>('')
@@ -51,6 +51,11 @@ export const useAppStore = defineStore('app', () => {
   const autoHideEnabled = ref(true)
   // 贴边唤起时是否临时置顶
   const topOnWake = ref(true)
+  // 固定模式时是否嵌入桌面（仅 Windows）：开启后固定模式 = 桌面模式（owner=Progman、常驻 Z 序底部，
+  // Win+D 不最小化），贴边隐藏 / 唤起置顶不再生效；关闭则是原来的固定模式
+  const fixedEmbedDesktop = ref(false)
+  // 当前窗口是否真的嵌在桌面里（主窗口的 body.fixed-mode 类要排除这种情况：嵌入桌面保留圆角与描边）
+  const isEmbeddedInDesktop = computed(() => isFixed.value && fixedEmbedDesktop.value)
   // 窗口底色与背景透明度（仅深色主题下生效）
   const windowBgColor = ref(DEFAULT_BG_COLOR)
   const windowBgAlpha = ref(DEFAULT_BG_ALPHA)
@@ -156,6 +161,8 @@ export const useAppStore = defineStore('app', () => {
       await loadAutoHideEnabled()
       // saveWindowState 会连带写回 topOnWake，不先加载真值就会把用户的关闭状态刷成默认 true
       await loadTopOnWake()
+      // 同理连带写回 fixedEmbedDesktop；且下面恢复固定模式时要靠它决定走哪条命令
+      await loadFixedEmbedDesktop()
       await loadWindowBackground()
 
       // 加载深色主题设置
@@ -173,8 +180,7 @@ export const useAppStore = defineStore('app', () => {
         isFixed.value = savedConfig.isFixed
         windowPosition.value = { x: savedConfig.windowX, y: savedConfig.windowY }
         windowSize.value = { width: savedConfig.windowWidth, height: savedConfig.windowHeight }
-        windowMode.value = savedConfig.isFixed ? 'fixed' : 'normal'
-        
+
         // 恢复窗口位置
         try {
           await appWindow.setPosition(
@@ -193,17 +199,16 @@ export const useAppStore = defineStore('app', () => {
           console.error('Failed to restore window size:', e)
         }
         
-        // 如果是固定模式，应用固定模式设置
-        if (savedConfig.isFixed) {
+        // 先定位、后固定 / 嵌入：位置和尺寸都恢复完毕再切模式
+        if (isFixed.value) {
           await applyFixedMode()
         }
       } else {
         // 没有保存的配置，使用主屏幕中心位置
         console.log('No saved config found, using primary monitor center')
-        
+
         isFixed.value = false
-        windowMode.value = 'normal'
-        
+
         try {
           const monitor = await primaryMonitor()
           if (monitor) {
@@ -361,11 +366,33 @@ export const useAppStore = defineStore('app', () => {
     }
   }
 
+  // 加载"固定模式时，嵌入桌面中"开关
+  async function loadFixedEmbedDesktop() {
+    try {
+      fixedEmbedDesktop.value = await invoke<boolean>('get_fixed_embed_desktop')
+    } catch (e) {
+      console.error('Failed to load fixed embed desktop setting:', e)
+      fixedEmbedDesktop.value = false
+    }
+  }
+
+  // 设置"固定模式时，嵌入桌面中"（同 setAutoHideEnabled，不要在这里调 saveWindowState）。
+  // 后端命令自行处理"当前已是固定模式"的即时切换：开 → 嵌入桌面，关 → 普通固定
+  async function setFixedEmbedDesktop(enabled: boolean) {
+    const oldValue = fixedEmbedDesktop.value
+    try {
+      fixedEmbedDesktop.value = enabled
+      await invoke('set_fixed_embed_desktop', { enabled })
+    } catch (e) {
+      console.error('Failed to set fixed embed desktop:', e)
+      fixedEmbedDesktop.value = oldValue
+    }
+  }
+
   // 切换固定模式
   async function toggleFixedMode() {
     try {
       isFixed.value = !isFixed.value
-      windowMode.value = isFixed.value ? 'fixed' : 'normal'
 
       // 应用窗口模式
       if (isFixed.value) {
@@ -382,20 +409,31 @@ export const useAppStore = defineStore('app', () => {
   }
 
   // 应用固定模式（仅锁定行为，不含主题）
+  //
+  // 开了"嵌入桌面"就走桌面模式命令（owner=Progman、常驻 Z 序底部），否则是普通固定模式；
+  // 两个后端命令互斥，各自会先退出另一方
   async function applyFixedMode() {
     try {
       await appWindow.setResizable(false)
-      await invoke('set_window_fixed_mode', { fixed: true })
+      if (fixedEmbedDesktop.value) {
+        await invoke('set_window_desktop_mode', { enabled: true })
+      } else {
+        await invoke('set_window_fixed_mode', { fixed: true })
+      }
     } catch (e) {
       console.error('Failed to apply fixed mode:', e)
     }
   }
 
   // 应用普通模式（仅解锁行为，不含主题）
+  //
+  // 两个后端命令都是幂等的：不处于对应模式时退出是 no-op，
+  // 所以不必判断"刚才是普通固定还是嵌入桌面"，一律都调一遍
   async function applyNormalMode() {
     try {
       await appWindow.setResizable(true)
       await invoke('set_window_fixed_mode', { fixed: false })
+      await invoke('set_window_desktop_mode', { enabled: false })
     } catch (e) {
       console.error('Failed to apply normal mode:', e)
     }
@@ -508,12 +546,13 @@ export const useAppStore = defineStore('app', () => {
         windowHeight: Math.round(size.height),
         isFixed: isFixed.value
       }
-      
+
       await invoke('save_screen_config', { config: configRequest })
-      
+
       await invoke('save_settings', {
         settings: {
           isFixed: isFixed.value,
+          fixedEmbedDesktop: fixedEmbedDesktop.value,
           windowPosition: windowPosition.value,
           windowSize: windowSize.value,
           autoHideEnabled: autoHideEnabled.value,
@@ -641,6 +680,7 @@ export const useAppStore = defineStore('app', () => {
   return {
     // 状态
     isFixed,
+    isEmbeddedInDesktop,
     isDarkTheme,
     windowPosition,
     windowSize,
@@ -684,6 +724,10 @@ export const useAppStore = defineStore('app', () => {
     topOnWake,
     loadTopOnWake,
     setTopOnWake,
+    // 固定模式时嵌入桌面（仅 Windows）
+    fixedEmbedDesktop,
+    loadFixedEmbedDesktop,
+    setFixedEmbedDesktop,
     // 窗口底色与透明度
     windowBgColor,
     windowBgAlpha,

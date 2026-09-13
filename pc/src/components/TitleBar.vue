@@ -10,6 +10,7 @@ const appWindow = getCurrentWindow()
 
 function onTitleBarMouseDown(e: MouseEvent) {
   if (e.buttons !== 1) return
+  // 固定模式下位置锁定（含嵌入桌面），不允许拖拽
   if (appStore.isFixed) return
   const target = e.target as HTMLElement
   if (target.closest('[data-tauri-drag-region="false"]')) return
@@ -37,8 +38,11 @@ const emit = defineEmits<{
 const appStore = useAppStore()
 const todoStore = useTodoStore()
 
-// 是否固定模式
+// 是否固定模式（含嵌入桌面）
 const isFixed = computed(() => appStore.isFixed)
+
+// 固定模式下窗口位置锁定，标题栏不可拖拽
+const dragLocked = computed(() => isFixed.value)
 
 // 是否深色主题
 const isDarkTheme = computed(() => appStore.isDarkTheme)
@@ -107,8 +111,8 @@ async function handleVersionClick() {
 <template>
   <div
     class="title-bar"
-    :class="{ 'no-drag': isFixed, 'dark-theme': isDarkTheme }"
-    :data-tauri-drag-region="isFixed ? 'false' : 'deep'"
+    :class="{ 'no-drag': dragLocked, 'dark-theme': isDarkTheme }"
+    :data-tauri-drag-region="dragLocked ? 'false' : 'deep'"
     @mousedown="onTitleBarMouseDown"
   >
     <div class="title-left">
@@ -248,7 +252,7 @@ async function handleVersionClick() {
   -webkit-user-select: none;
 }
 
-/* 固定模式下禁用拖拽 */
+/* 固定 / 桌面模式下禁用拖拽 */
 .title-bar.no-drag {
   -webkit-app-region: no-drag !important;
 }

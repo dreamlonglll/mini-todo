@@ -36,6 +36,11 @@ export interface AppSettings {
   windowPosition: WindowPosition | null
   windowSize: WindowSize | null
   isFixed: boolean
+  /**
+   * 固定模式时是否嵌入桌面（嵌在桌面图标之上、所有应用窗口之下，Win+D 不最小化）。
+   * 仅 Windows 生效（Windows 11 24H2 及以上保证 Win+D 期间可见）
+   */
+  fixedEmbedDesktop: boolean
   autoHideEnabled: boolean
   /** 贴边唤起时是否临时置顶（关闭后窗口会被全屏窗口遮挡） */
   topOnWake: boolean
@@ -47,7 +52,7 @@ export interface AppSettings {
   textTheme: TextTheme
 }
 
-// 窗口模式
+// 窗口模式：普通 / 固定（可贴边隐藏、置顶唤起；开启"嵌入桌面"后固定即嵌入桌面图标层之上）
 export type WindowMode = 'normal' | 'fixed'
 
 /**
@@ -61,6 +66,7 @@ export type AppSettingKey =
   | 'showCalendar'
   | 'autoHide'
   | 'topOnWake'
+  | 'fixedEmbedDesktop'
   | 'theme'
   | 'windowBackground'
   | 'sync'
