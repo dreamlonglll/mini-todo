@@ -291,12 +291,16 @@ UI 线程阻塞与若干正确性 bug，并做一轮性能与工程化优化。�
 
 ## Acceptance Criteria
 
-- [ ] `pc/src-tauri`：`cargo fmt --check`、`cargo clippy --all-targets --locked -- -D warnings`（Linux）、`cargo test --locked` 全绿；
+- [x] `pc/src-tauri`：`cargo fmt --check`、`cargo clippy --all-targets --locked -- -D warnings`（Linux）、`cargo test --locked` 全绿；
       `cargo check --target x86_64-pc-windows-gnu` 通过（Windows cfg 代码可编译）。
-- [ ] `pc`：`npm run typecheck`、`npm run lint`（0 error）、`npm run build`、`npm run test` 通过；lockfile 无 npmmirror 地址。
-- [ ] `cloud`：`cargo fmt --check`、`cargo clippy --all-targets --locked -- -D warnings`、`cargo test --locked` 全绿；`python -m py_compile` 通过。
-- [ ] 跨端契约测试（主会话做）：cloud 产出的 sync-data 能被 PC 反序列化并合并；PC 导出的 sync-data 被 cloud pull 正确处理（含墓碑、未知顶层键）。
-- [ ] 每个单元在报告中列出：改了什么、对应的审查条目编号、未做的项与原因、需要主会话更新的文档点。
+- [x] `pc`：`npm run typecheck`、`npm run lint`（0 error）、`npm run build`、`npm run test` 通过；lockfile 无 npmmirror 地址。
+- [x] `cloud`：`cargo fmt --check`、`cargo clippy --all-targets --locked -- -D warnings`、`cargo test --locked` 全绿；`python -m py_compile` 通过。
+- [x] 跨端契约测试（主会话做）：cloud 产出的 sync-data 能被 PC 反序列化并合并；PC 导出的 sync-data 被 cloud pull 正确处理（含墓碑、未知顶层键）。
+- [x] 每个单元在报告中列出：改了什么、对应的审查条目编号、未做的项与原因、需要主会话更新的文档点。
+
+验收记录（2026-10-02，最终 HEAD b73b6ea）：pc/src-tauri fmt / clippy（Linux + x86_64-pc-windows-gnu）/ 161 测试通过；
+pc 前端 typecheck / lint / vitest 86 / build 通过；cloud fmt / clippy / 264 测试 + Skill 17 测试通过；
+Linux e2e 37/37 通过（含 Apache / nginx 双服务端的跨端契约用例），见 `research/e2e-results.md`。
 
 ## Out of Scope（本轮不做，记录原因）
 
