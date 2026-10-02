@@ -26,3 +26,7 @@ dist-ssr
 # mini-term SSH MCP（本机相关配置，勿提交）
 .mcp.json
 .codex/
+
+# Python 字节码缓存
+__pycache__/
+*.pyc
