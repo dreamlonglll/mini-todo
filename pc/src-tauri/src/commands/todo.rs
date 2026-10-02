@@ -1,3 +1,5 @@
+use crate::db::sync_store;
+use crate::db::time::now_local;
 use crate::db::{
     subtask_from_row, todo_from_row, CreateSubTaskRequest, CreateTodoRequest, Database, SubTask,
     Todo, UpdateSubTaskRequest, UpdateTodoRequest, SUBTASK_COLUMNS, TODO_COLUMNS,
@@ -196,13 +198,12 @@ pub fn update_todo(db: State<Database>, id: i64, data: UpdateTodoRequest) -> Res
     .map_err(|e| e.to_string())
 }
 
+/// 删除待办及其全部子任务，并为它们写墓碑（同步时删除才能传播，不会被另一端复活）
 #[tauri::command]
 pub fn delete_todo(db: State<Database>, id: i64) -> Result<(), String> {
-    db.with_connection(|conn| {
-        conn.execute("DELETE FROM todos WHERE id = ?", [id])?;
-        Ok(())
-    })
-    .map_err(|e| e.to_string())
+    let now = now_local();
+    db.with_transaction(|tx| sync_store::delete_todo_with_tombstones(tx, id, &now).map(|_| ()))
+        .map_err(|e: rusqlite::Error| e.to_string())
 }
 
 #[tauri::command]
@@ -317,13 +318,12 @@ pub fn get_subtask(db: State<Database>, id: i64) -> Result<SubTask, String> {
     .map_err(|e| e.to_string())
 }
 
+/// 删除子任务并写墓碑
 #[tauri::command]
 pub fn delete_subtask(db: State<Database>, id: i64) -> Result<(), String> {
-    db.with_connection(|conn| {
-        conn.execute("DELETE FROM subtasks WHERE id = ?", [id])?;
-        Ok(())
-    })
-    .map_err(|e| e.to_string())
+    let now = now_local();
+    db.with_transaction(|tx| sync_store::delete_subtask_with_tombstone(tx, id, &now).map(|_| ()))
+        .map_err(|e: rusqlite::Error| e.to_string())
 }
 
 fn get_images_dir_path() -> PathBuf {

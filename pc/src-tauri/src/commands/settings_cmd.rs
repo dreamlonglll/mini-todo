@@ -1,3 +1,4 @@
+use crate::db::settings_kv::{get_setting, get_setting_or, set_setting};
 use crate::db::Database;
 use tauri::State;
 
@@ -53,42 +54,21 @@ pub fn get_system_fonts() -> Result<Vec<String>, String> {
 
 #[tauri::command]
 pub fn get_todo_font_family(db: State<Database>) -> Result<String, String> {
-    db.with_connection(|conn| {
-        Ok(conn
-            .query_row(
-                "SELECT value FROM settings WHERE key = 'todo_font_family'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap_or_default())
-    })
-    .map_err(|e| e.to_string())
+    db.with_connection(|conn| Ok(get_setting(conn, "todo_font_family")?.unwrap_or_default()))
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn set_todo_font_family(db: State<Database>, font_family: String) -> Result<(), String> {
-    db.with_connection(|conn| {
-        conn.execute(
-            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('todo_font_family', ?1, datetime('now', 'localtime'))",
-            [&font_family],
-        )?;
-        Ok(())
-    })
-    .map_err(|e| e.to_string())
+    db.with_connection(|conn| set_setting(conn, "todo_font_family", &font_family).map(|_| ()))
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn get_todo_font_size(db: State<Database>) -> Result<i32, String> {
     db.with_connection(|conn| {
-        Ok(conn
-            .query_row(
-                "SELECT value FROM settings WHERE key = 'todo_font_size'",
-                [],
-                |row| {
-                    let val: String = row.get(0)?;
-                    Ok(val.parse::<i32>().unwrap_or(14))
-                },
-            )
+        Ok(get_setting(conn, "todo_font_size")?
+            .and_then(|v| v.parse::<i32>().ok())
             .unwrap_or(14))
     })
     .map_err(|e| e.to_string())
@@ -97,30 +77,15 @@ pub fn get_todo_font_size(db: State<Database>) -> Result<i32, String> {
 #[tauri::command]
 pub fn set_todo_font_size(db: State<Database>, font_size: i32) -> Result<(), String> {
     let size = font_size.clamp(12, 20);
-    db.with_connection(|conn| {
-        conn.execute(
-            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('todo_font_size', ?1, datetime('now', 'localtime'))",
-            [&size.to_string()],
-        )?;
-        Ok(())
-    })
-    .map_err(|e| e.to_string())
+    db.with_connection(|conn| set_setting(conn, "todo_font_size", &size.to_string()).map(|_| ()))
+        .map_err(|e| e.to_string())
 }
 
 /// 获取通知类型设置
 #[tauri::command]
 pub fn get_notification_type(db: State<Database>) -> Result<String, String> {
-    db.with_connection(|conn| {
-        let result: String = conn
-            .query_row(
-                "SELECT value FROM settings WHERE key = 'notification_type'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap_or_else(|_| "system".to_string());
-        Ok(result)
-    })
-    .map_err(|e| e.to_string())
+    db.with_connection(|conn| Ok(get_setting_or(conn, "notification_type", "system")))
+        .map_err(|e| e.to_string())
 }
 
 /// 设置通知类型
@@ -132,12 +97,6 @@ pub fn set_notification_type(db: State<Database>, notification_type: String) -> 
         _ => "system".to_string(),
     };
 
-    db.with_connection(|conn| {
-        conn.execute(
-            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('notification_type', ?1, datetime('now', 'localtime'))",
-            [&valid_type],
-        )?;
-        Ok(())
-    })
-    .map_err(|e| e.to_string())
+    db.with_connection(|conn| set_setting(conn, "notification_type", &valid_type).map(|_| ()))
+        .map_err(|e| e.to_string())
 }

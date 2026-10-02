@@ -19,8 +19,44 @@ where
     tx.commit()
 }
 
-pub fn run_migrations(conn: &Connection) -> Result<()> {
-    // 创建迁移版本表
+type MigrationFn = fn(&Connection) -> Result<()>;
+
+/// 全部迁移，按版本号升序。新增迁移只需在末尾追加一项。
+const MIGRATIONS: &[(i32, MigrationFn)] = &[
+    (1, migration_v1),
+    (2, migration_v2),
+    (3, migration_v3),
+    (4, migration_v4),
+    (5, migration_v5),
+    (6, migration_v6),
+    (7, migration_v7),
+    (8, migration_v8),
+    (9, migration_v9),
+    (10, migration_v10),
+    (11, migration_v11),
+    (12, migration_v12),
+    (13, migration_v13),
+    (14, migration_v14),
+    (15, migration_v15),
+    (16, migration_v16),
+    (17, migration_v17),
+    (18, migration_v18),
+    (19, migration_v19),
+    (20, migration_v20),
+    (21, migration_v21),
+    (22, migration_v22),
+    (23, migration_v23),
+    (24, migration_v24),
+    (25, migration_v25),
+    (26, migration_v26),
+    (27, migration_v27),
+    (28, migration_v28),
+];
+
+/// 最新迁移版本号（启动时可与 [`current_version`] 比较，判断是否有待执行迁移，例如迁移前备份）
+pub const LATEST_VERSION: i32 = 28;
+
+fn ensure_migrations_table(conn: &Connection) -> Result<()> {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS migrations (
             version INTEGER PRIMARY KEY,
@@ -28,123 +64,120 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         )",
         [],
     )?;
+    Ok(())
+}
 
-    let current_version: i32 = conn
-        .query_row(
-            "SELECT COALESCE(MAX(version), 0) FROM migrations",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
+/// 当前已应用的最高迁移版本（全新库为 0）
+pub fn current_version(conn: &Connection) -> Result<i32> {
+    ensure_migrations_table(conn)?;
+    conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM migrations",
+        [],
+        |row| row.get(0),
+    )
+}
 
-    if current_version < 1 {
-        apply_migration(conn, 1, migration_v1)?;
+pub fn run_migrations(conn: &Connection) -> Result<()> {
+    run_migrations_to(conn, i32::MAX)
+}
+
+/// 依次应用 `(当前版本, target]` 区间内的迁移；每个迁移各自一个事务（见 `apply_migration`）。
+fn run_migrations_to(conn: &Connection, target: i32) -> Result<()> {
+    debug_assert_eq!(MIGRATIONS.last().map(|(v, _)| *v), Some(LATEST_VERSION));
+    let current = current_version(conn)?;
+    for &(version, migration) in MIGRATIONS {
+        if version > current && version <= target {
+            apply_migration(conn, version, migration)?;
+        }
+    }
+    Ok(())
+}
+
+/// 迁移 v28：同步重构（10-02 全面优化 R1）。
+///
+/// - `sync_meta(key, value)`：本地变更计数。`local_seq` 由 todos / subtasks 的
+///   AFTER INSERT / UPDATE / DELETE 触发器递增，`synced_seq` 记录最近一次成功同步时的
+///   `local_seq`；二者不等即"有未上传的本地变更"。替代旧的 `updated_at > last_sync_at`
+///   字符串比较（两边格式不同，当天修改永远判成无变更，A1）。
+///   种子 `local_seq=1, synced_seq=0`：升级后首次同步必定执行一次合并上传。
+/// - `tombstones(entity_type, entity_id, deleted_at)`：删除墓碑，删除随同步传播（A3）。
+/// - 存量时间规范化为 `YYYY-MM-DD HH:MM:SS`（K1）：只改格式，不刷新 `updated_at`；
+///   在建触发器之前执行，不计为本地变更。无法识别的值原样保留。
+/// - 新 settings 键：`webdav_remote_etag`（条件请求基准 ETag）、
+///   `webdav_synced_settings_at`（基准版本里的 settingsUpdatedAt）。`webdav_last_modified` 保留。
+fn migration_v28(conn: &Connection) -> Result<()> {
+    normalize_stored_datetimes(conn)?;
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS sync_meta (
+            key   TEXT PRIMARY KEY,
+            value INTEGER NOT NULL
+        );
+        INSERT OR IGNORE INTO sync_meta (key, value) VALUES ('local_seq', 1);
+        INSERT OR IGNORE INTO sync_meta (key, value) VALUES ('synced_seq', 0);
+        CREATE TABLE IF NOT EXISTS tombstones (
+            entity_type TEXT    NOT NULL,
+            entity_id   INTEGER NOT NULL,
+            deleted_at  TEXT    NOT NULL,
+            PRIMARY KEY (entity_type, entity_id)
+        );",
+    )?;
+
+    for table in ["todos", "subtasks"] {
+        for event in ["insert", "update", "delete"] {
+            conn.execute_batch(&format!(
+                "CREATE TRIGGER IF NOT EXISTS trg_{table}_{event}_local_seq
+                 AFTER {upper} ON {table}
+                 BEGIN
+                     UPDATE sync_meta SET value = value + 1 WHERE key = 'local_seq';
+                 END;",
+                upper = event.to_uppercase(),
+            ))?;
+        }
     }
 
-    if current_version < 2 {
-        apply_migration(conn, 2, migration_v2)?;
+    for key in ["webdav_remote_etag", "webdav_synced_settings_at"] {
+        conn.execute(
+            "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (?1, '', datetime('now', 'localtime'))",
+            [key],
+        )?;
     }
+    Ok(())
+}
 
-    if current_version < 3 {
-        apply_migration(conn, 3, migration_v3)?;
+/// 把存量时间列规范化为 K1 格式（`T` → 空格、补秒、截断小数秒、带时区的换算为本地）。
+/// 只改格式，不碰 `updated_at` 的取值语义；无法识别的值原样保留。
+fn normalize_stored_datetimes(conn: &Connection) -> Result<()> {
+    use crate::db::time::{normalize_datetime, DefaultTime};
+
+    let columns: [(&str, &str, DefaultTime); 7] = [
+        ("todos", "notify_at", DefaultTime::Notify),
+        ("todos", "start_time", DefaultTime::StartOfDay),
+        ("todos", "end_time", DefaultTime::EndOfDay),
+        ("todos", "created_at", DefaultTime::StartOfDay),
+        ("todos", "updated_at", DefaultTime::StartOfDay),
+        ("subtasks", "created_at", DefaultTime::StartOfDay),
+        ("subtasks", "updated_at", DefaultTime::StartOfDay),
+    ];
+    for (table, column, default) in columns {
+        let rows: Vec<(i64, String)> = {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT id, CAST({column} AS TEXT) FROM {table} WHERE {column} IS NOT NULL"
+            ))?;
+            let mapped = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            mapped.collect::<Result<_>>()?
+        };
+        for (id, value) in rows {
+            if let Some(normalized) = normalize_datetime(&value, default) {
+                if normalized != value {
+                    conn.execute(
+                        &format!("UPDATE {table} SET {column} = ?1 WHERE id = ?2"),
+                        rusqlite::params![normalized, id],
+                    )?;
+                }
+            }
+        }
     }
-
-    if current_version < 4 {
-        apply_migration(conn, 4, migration_v4)?;
-    }
-
-    if current_version < 5 {
-        apply_migration(conn, 5, migration_v5)?;
-    }
-
-    if current_version < 6 {
-        apply_migration(conn, 6, migration_v6)?;
-    }
-
-    if current_version < 7 {
-        apply_migration(conn, 7, migration_v7)?;
-    }
-
-    if current_version < 8 {
-        apply_migration(conn, 8, migration_v8)?;
-    }
-
-    if current_version < 9 {
-        apply_migration(conn, 9, migration_v9)?;
-    }
-
-    if current_version < 10 {
-        apply_migration(conn, 10, migration_v10)?;
-    }
-
-    if current_version < 11 {
-        apply_migration(conn, 11, migration_v11)?;
-    }
-
-    if current_version < 12 {
-        apply_migration(conn, 12, migration_v12)?;
-    }
-
-    if current_version < 13 {
-        apply_migration(conn, 13, migration_v13)?;
-    }
-
-    if current_version < 14 {
-        apply_migration(conn, 14, migration_v14)?;
-    }
-
-    if current_version < 15 {
-        apply_migration(conn, 15, migration_v15)?;
-    }
-
-    if current_version < 16 {
-        apply_migration(conn, 16, migration_v16)?;
-    }
-
-    if current_version < 17 {
-        apply_migration(conn, 17, migration_v17)?;
-    }
-
-    if current_version < 18 {
-        apply_migration(conn, 18, migration_v18)?;
-    }
-
-    if current_version < 19 {
-        apply_migration(conn, 19, migration_v19)?;
-    }
-
-    if current_version < 20 {
-        apply_migration(conn, 20, migration_v20)?;
-    }
-
-    if current_version < 21 {
-        apply_migration(conn, 21, migration_v21)?;
-    }
-
-    if current_version < 22 {
-        apply_migration(conn, 22, migration_v22)?;
-    }
-
-    if current_version < 23 {
-        apply_migration(conn, 23, migration_v23)?;
-    }
-
-    if current_version < 24 {
-        apply_migration(conn, 24, migration_v24)?;
-    }
-
-    if current_version < 25 {
-        apply_migration(conn, 25, migration_v25)?;
-    }
-
-    if current_version < 26 {
-        apply_migration(conn, 26, migration_v26)?;
-    }
-
-    if current_version < 27 {
-        apply_migration(conn, 27, migration_v27)?;
-    }
-
     Ok(())
 }
 
@@ -801,13 +834,19 @@ mod tests {
         assert_eq!(max_version(&conn), 99);
     }
 
-    /// 27 个迁移逐个包事务后，全新库仍能一次性迁到最新版本。
+    /// 全部迁移逐个包事务后，全新库仍能一次性迁到最新版本。
     #[test]
     fn fresh_database_migrates_to_latest_version() {
         let conn = fresh_conn();
         run_migrations(&conn).expect("全新库迁移失败");
 
-        assert_eq!(max_version(&conn), 27);
+        assert_eq!(max_version(&conn), LATEST_VERSION);
+        assert_eq!(LATEST_VERSION, 28);
+        assert_eq!(
+            MIGRATIONS.last().map(|(v, _)| *v),
+            Some(LATEST_VERSION),
+            "LATEST_VERSION 必须与迁移表末项一致"
+        );
         assert!(table_exists(&conn, "todos"));
         assert!(table_exists(&conn, "subtasks"));
         assert!(table_exists(&conn, "settings"));
@@ -847,6 +886,144 @@ mod tests {
         run_migrations(&conn).expect("首次迁移失败");
         run_migrations(&conn).expect("二次迁移失败");
 
+        assert_eq!(max_version(&conn), LATEST_VERSION);
+    }
+
+    fn meta(conn: &Connection, key: &str) -> i64 {
+        conn.query_row("SELECT value FROM sync_meta WHERE key = ?1", [key], |r| {
+            r.get(0)
+        })
+        .expect("读取 sync_meta 失败")
+    }
+
+    /// v28：sync_meta 种子、墓碑表、新 settings 键都在。
+    #[test]
+    fn v28_creates_sync_tables_and_seeds_counters() {
+        let conn = fresh_conn();
+        run_migrations(&conn).expect("迁移失败");
+
+        assert_eq!(meta(&conn, "local_seq"), 1);
+        assert_eq!(meta(&conn, "synced_seq"), 0);
+        assert!(table_exists(&conn, "tombstones"));
+        conn.execute(
+            "INSERT INTO tombstones (entity_type, entity_id, deleted_at) VALUES ('todo', 1, '2026-01-01 00:00:00')",
+            [],
+        )
+        .unwrap();
+        let dup = conn.execute(
+            "INSERT INTO tombstones (entity_type, entity_id, deleted_at) VALUES ('todo', 1, '2026-01-02 00:00:00')",
+            [],
+        );
+        assert!(dup.is_err(), "(entity_type, entity_id) 应为主键");
+
+        for key in [
+            "webdav_remote_etag",
+            "webdav_synced_settings_at",
+            "webdav_last_modified",
+        ] {
+            let value: String = conn
+                .query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
+                    r.get(0)
+                })
+                .unwrap_or_else(|_| panic!("{key} 应存在"));
+            assert_eq!(value, "");
+        }
+    }
+
+    /// v28：todos / subtasks 的每一次增删改都让 local_seq + 1，未命中行的 UPDATE 不计数。
+    #[test]
+    fn v28_triggers_bump_local_seq_on_every_write() {
+        let conn = fresh_conn();
+        run_migrations(&conn).expect("迁移失败");
+        let base = meta(&conn, "local_seq");
+
+        conn.execute("INSERT INTO todos (id, title) VALUES (1, 'a')", [])
+            .unwrap();
+        assert_eq!(meta(&conn, "local_seq"), base + 1);
+        conn.execute("UPDATE todos SET title = 'b' WHERE id = 1", [])
+            .unwrap();
+        assert_eq!(meta(&conn, "local_seq"), base + 2);
+        conn.execute("UPDATE todos SET title = 'c' WHERE id = 999", [])
+            .unwrap();
+        assert_eq!(meta(&conn, "local_seq"), base + 2, "未命中行不计数");
+
+        conn.execute(
+            "INSERT INTO subtasks (id, parent_id, title) VALUES (11, 1, 's')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(meta(&conn, "local_seq"), base + 3);
+        conn.execute("UPDATE subtasks SET completed = 1 WHERE id = 11", [])
+            .unwrap();
+        assert_eq!(meta(&conn, "local_seq"), base + 4);
+        conn.execute("DELETE FROM subtasks WHERE id = 11", [])
+            .unwrap();
+        assert_eq!(meta(&conn, "local_seq"), base + 5);
+        conn.execute("DELETE FROM todos WHERE id = 1", []).unwrap();
+        assert_eq!(meta(&conn, "local_seq"), base + 6);
+    }
+
+    /// v28：升级时把存量时间规范为 K1 格式，不刷新 updated_at，也不计为本地变更。
+    #[test]
+    fn v28_normalizes_stored_datetimes_without_touching_updated_at() {
+        let conn = fresh_conn();
+        run_migrations_to(&conn, 27).expect("迁移到 v27 失败");
         assert_eq!(max_version(&conn), 27);
+
+        conn.execute(
+            "INSERT INTO todos (id, title, notify_at, start_time, end_time, created_at, updated_at)
+             VALUES (1, 'a', '2026-05-01T09:30', '2026-05-01T08:00:00', '2026-05-02T18:00:00.000',
+                     '2026-04-01 10:00:00', '2026-04-02 11:00:00')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO todos (id, title, notify_at, start_time, end_time)
+             VALUES (2, 'b', '2026-05-01 09:30:00', 'not a time', NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO subtasks (id, parent_id, title, created_at, updated_at)
+             VALUES (11, 1, 's', '2026-04-01T10:00', '2026-04-02 11:00:00')",
+            [],
+        )
+        .unwrap();
+
+        run_migrations(&conn).expect("迁移到 v28 失败");
+
+        let row: (String, String, String, String) = conn
+            .query_row(
+                "SELECT notify_at, start_time, end_time, updated_at FROM todos WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0, "2026-05-01 09:30:00");
+        assert_eq!(row.1, "2026-05-01 08:00:00");
+        assert_eq!(row.2, "2026-05-02 18:00:00");
+        assert_eq!(row.3, "2026-04-02 11:00:00", "updated_at 不应被刷新");
+
+        let (notify2, start2, end2): (String, String, Option<String>) = conn
+            .query_row(
+                "SELECT notify_at, start_time, end_time FROM todos WHERE id = 2",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(notify2, "2026-05-01 09:30:00");
+        assert_eq!(start2, "not a time", "无法识别的值原样保留");
+        assert_eq!(end2, None);
+
+        let sub_created: String = conn
+            .query_row("SELECT created_at FROM subtasks WHERE id = 11", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(sub_created, "2026-04-01 10:00:00");
+
+        // 规范化发生在建触发器之前：local_seq 仍是种子值
+        assert_eq!(meta(&conn, "local_seq"), 1);
+        assert_eq!(meta(&conn, "synced_seq"), 0);
     }
 }

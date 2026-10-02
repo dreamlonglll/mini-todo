@@ -29,8 +29,9 @@ pub fn todo_from_row(row: &Row) -> rusqlite::Result<Todo> {
         color: row.get(3)?,
         quadrant: row.get(4)?,
         notify_at: row.get(5)?,
-        notify_before: row.get(6)?,
-        notified: row.get::<_, i32>(7)? != 0,
+        // v1 建表时这两列可空；NULL 按 0 处理，避免整行读取失败
+        notify_before: row.get::<_, Option<i32>>(6)?.unwrap_or(0),
+        notified: row.get::<_, Option<i32>>(7)?.unwrap_or(0) != 0,
         completed: row.get::<_, i32>(8)? != 0,
         sort_order: row.get(9)?,
         start_time: row.get(10)?,
@@ -46,26 +47,39 @@ pub fn todo_from_row(row: &Row) -> rusqlite::Result<Todo> {
     })
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// 待办。
+///
+/// 反序列化（导入备份、合并 WebDAV 远端）对非关键字段宽容：缺失时取与建表默认值一致的值。
+/// `id` / `title` 必填；`updatedAt` 缺失时为空串，同步合并会把它当作无法识别的记录跳过
+/// （LWW 需要它），手动导入则会统一改写为导入时刻。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Todo {
     pub id: i64,
     pub title: String,
     pub description: Option<String>,
     /// 颜色（HEX 格式，如 #EF4444）
+    #[serde(default = "default_color")]
     pub color: String,
     /// 四象限：1=重要紧急, 2=重要不紧急, 3=紧急不重要, 4=不紧急不重要
+    #[serde(default = "default_quadrant")]
     pub quadrant: i32,
     pub notify_at: Option<String>,
+    #[serde(default)]
     pub notify_before: i32,
+    #[serde(default)]
     pub notified: bool,
+    #[serde(default)]
     pub completed: bool,
+    #[serde(default)]
     pub sort_order: i32,
     /// 开始时间（可为空，空则使用 created_at）
     pub start_time: Option<String>,
     /// 截止时间（可为空）
     pub end_time: Option<String>,
+    #[serde(default)]
     pub created_at: String,
+    #[serde(default)]
     pub updated_at: String,
     #[serde(default)]
     pub repeat_enabled: bool,
@@ -85,17 +99,41 @@ fn default_repeat_interval() -> i32 {
     1
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// 与 v4 迁移 `color` 列的默认值一致
+fn default_color() -> String {
+    "#F59E0B".to_string()
+}
+
+/// 子任务。反序列化宽容规则同 [`Todo`]；`parentId` 在导入 / 合并时以外层待办的 id 为准。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubTask {
     pub id: i64,
+    #[serde(default)]
     pub parent_id: i64,
     pub title: String,
     pub content: Option<String>,
+    #[serde(default)]
     pub completed: bool,
+    #[serde(default)]
     pub sort_order: i32,
+    #[serde(default)]
     pub created_at: String,
+    #[serde(default)]
     pub updated_at: String,
+}
+
+/// 删除墓碑（K2）：同步时用来阻止已删除的记录被另一端"复活"。
+///
+/// `entityType` 为 `"todo"` 或 `"subtask"`；`deletedAt` 为 K1 规范时间。
+/// 规则：存在 `deletedAt >= record.updatedAt` 的墓碑 → 记录被删除 / 压制；
+/// 删除后又被编辑（`updatedAt > deletedAt`）的记录保留。保留期 30 天。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Tombstone {
+    pub entity_type: String,
+    pub entity_id: i64,
+    pub deleted_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

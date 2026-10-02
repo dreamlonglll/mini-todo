@@ -1,265 +1,373 @@
+use crate::db::backup;
+use crate::db::settings_kv::{
+    bool_str, get_bool_setting, get_setting, get_setting_or, set_bool_setting, set_setting,
+    set_setting_at,
+};
+use crate::db::sync_store::{
+    self, insert_subtask_row, insert_todo_row, normalize_todo_lenient, EntityKind,
+};
+use crate::db::time::now_local;
 use crate::db::{
-    subtask_from_row, todo_from_row, AppSettings, Database, ExportData, Todo, WindowPosition,
-    WindowSize, DEFAULT_WINDOW_BG_ALPHA, DEFAULT_WINDOW_BG_COLOR, SUBTASK_COLUMNS, TODO_COLUMNS,
+    AppSettings, Database, ExportData, WindowPosition, WindowSize, DEFAULT_WINDOW_BG_ALPHA,
+    DEFAULT_WINDOW_BG_COLOR,
 };
 use chrono::Local;
-use rusqlite::params;
+use serde_json::{Map, Value};
+use std::collections::HashSet;
 use std::io::{Read as _, Write as _};
-use tauri::State;
+use tauri::{AppHandle, Manager};
 
-/// 从 settings 表读取字符串值的辅助函数
-fn get_setting_string(conn: &rusqlite::Connection, key: &str, default: &str) -> String {
-    conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| {
-        row.get(0)
-    })
-    .unwrap_or_else(|_| default.to_string())
+/// 导出 / 同步文档的格式版本
+pub const EXPORT_VERSION: &str = "4.0";
+
+/// 参与同步 LWW 的设置键（K3-5）：本地设置版本 = 这些键的 `max(updated_at)`。
+/// `window_position` / `window_size` 是设备相关的，仍写入导出 / 上传以兼容旧版，
+/// 但永不从远端应用，也不计入设置版本。
+pub(crate) const SYNCED_SETTING_KEYS: [&str; 10] = [
+    "is_fixed",
+    "fixed_embed_desktop",
+    "auto_hide_enabled",
+    "top_on_wake",
+    "window_bg_color",
+    "window_bg_alpha",
+    "text_theme",
+    "show_calendar",
+    "view_mode",
+    "notification_type",
+];
+
+fn read_json_setting<T: serde::de::DeserializeOwned>(
+    conn: &rusqlite::Connection,
+    key: &str,
+) -> Option<T> {
+    get_setting(conn, key)
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_str(&v).ok())
 }
 
-/// 从 settings 表读取布尔值的辅助函数
-fn get_setting_bool(conn: &rusqlite::Connection, key: &str, default: bool) -> bool {
-    conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| {
-        let val: String = row.get(0)?;
-        Ok(val == "true")
-    })
-    .unwrap_or(default)
-}
-
-fn read_app_settings(conn: &rusqlite::Connection) -> AppSettings {
-    let is_fixed = get_setting_bool(conn, "is_fixed", false);
-    let fixed_embed_desktop = get_setting_bool(conn, "fixed_embed_desktop", false);
-    let window_position: Option<WindowPosition> = conn
-        .query_row(
-            "SELECT value FROM settings WHERE key = 'window_position'",
-            [],
-            |row| {
-                let val: String = row.get(0)?;
-                Ok(serde_json::from_str(&val).ok())
-            },
-        )
-        .unwrap_or(None);
-    let window_size: Option<WindowSize> = conn
-        .query_row(
-            "SELECT value FROM settings WHERE key = 'window_size'",
-            [],
-            |row| {
-                let val: String = row.get(0)?;
-                Ok(serde_json::from_str(&val).ok())
-            },
-        )
-        .unwrap_or(None);
-    let text_theme = get_setting_string(conn, "text_theme", "dark");
-    let auto_hide_enabled = get_setting_bool(conn, "auto_hide_enabled", true);
-    let top_on_wake = get_setting_bool(conn, "top_on_wake", true);
-    let window_bg_color = get_setting_string(conn, "window_bg_color", DEFAULT_WINDOW_BG_COLOR);
-    let window_bg_alpha = get_setting_string(conn, "window_bg_alpha", "")
+pub(crate) fn read_app_settings(conn: &rusqlite::Connection) -> AppSettings {
+    let window_position: Option<WindowPosition> = read_json_setting(conn, "window_position");
+    let window_size: Option<WindowSize> = read_json_setting(conn, "window_size");
+    let window_bg_alpha = get_setting_or(conn, "window_bg_alpha", "")
         .parse::<f64>()
         .unwrap_or(DEFAULT_WINDOW_BG_ALPHA);
-    let show_calendar = get_setting_bool(conn, "show_calendar", false);
-    let view_mode = get_setting_string(conn, "view_mode", "list");
-    let notification_type = get_setting_string(conn, "notification_type", "system");
 
     AppSettings {
-        is_fixed,
-        fixed_embed_desktop,
+        is_fixed: get_bool_setting(conn, "is_fixed", false),
+        fixed_embed_desktop: get_bool_setting(conn, "fixed_embed_desktop", false),
         window_position,
         window_size,
-        auto_hide_enabled,
-        top_on_wake,
-        window_bg_color,
+        auto_hide_enabled: get_bool_setting(conn, "auto_hide_enabled", true),
+        top_on_wake: get_bool_setting(conn, "top_on_wake", true),
+        window_bg_color: get_setting_or(conn, "window_bg_color", DEFAULT_WINDOW_BG_COLOR),
         window_bg_alpha,
-        text_theme,
-        show_calendar,
-        view_mode,
-        notification_type,
+        text_theme: get_setting_or(conn, "text_theme", "dark"),
+        show_calendar: get_bool_setting(conn, "show_calendar", false),
+        view_mode: get_setting_or(conn, "view_mode", "list"),
+        notification_type: get_setting_or(conn, "notification_type", "system"),
     }
 }
 
+/// 写入全部应用设置（手动导入用，含窗口位置 / 尺寸）。只有值变化的键会刷新 updated_at。
+/// 事务由调用方负责。
 pub(crate) fn write_app_settings(
     conn: &rusqlite::Connection,
     settings: &AppSettings,
 ) -> rusqlite::Result<()> {
-    conn.execute(
-        "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('is_fixed', ?1, datetime('now', 'localtime'))",
-        [if settings.is_fixed { "true" } else { "false" }],
-    )?;
-    conn.execute(
-        "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('fixed_embed_desktop', ?1, datetime('now', 'localtime'))",
-        [if settings.fixed_embed_desktop { "true" } else { "false" }],
-    )?;
+    set_bool_setting(conn, "is_fixed", settings.is_fixed)?;
+    set_bool_setting(conn, "fixed_embed_desktop", settings.fixed_embed_desktop)?;
     if let Some(pos) = &settings.window_position {
         let pos_json = serde_json::to_string(pos).unwrap_or_default();
-        conn.execute(
-            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('window_position', ?1, datetime('now', 'localtime'))",
-            [&pos_json],
-        )?;
+        set_setting(conn, "window_position", &pos_json)?;
     }
     if let Some(size) = &settings.window_size {
         let size_json = serde_json::to_string(size).unwrap_or_default();
-        conn.execute(
-            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('window_size', ?1, datetime('now', 'localtime'))",
-            [&size_json],
-        )?;
+        set_setting(conn, "window_size", &size_json)?;
     }
-    conn.execute(
-        "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('auto_hide_enabled', ?1, datetime('now', 'localtime'))",
-        [if settings.auto_hide_enabled { "true" } else { "false" }],
+    set_bool_setting(conn, "auto_hide_enabled", settings.auto_hide_enabled)?;
+    set_bool_setting(conn, "top_on_wake", settings.top_on_wake)?;
+    set_setting(conn, "window_bg_color", &settings.window_bg_color)?;
+    set_setting(
+        conn,
+        "window_bg_alpha",
+        &settings.window_bg_alpha.to_string(),
     )?;
-    conn.execute(
-        "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('top_on_wake', ?1, datetime('now', 'localtime'))",
-        [if settings.top_on_wake { "true" } else { "false" }],
-    )?;
-    conn.execute(
-        "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('window_bg_color', ?1, datetime('now', 'localtime'))",
-        [&settings.window_bg_color],
-    )?;
-    conn.execute(
-        "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('window_bg_alpha', ?1, datetime('now', 'localtime'))",
-        [&settings.window_bg_alpha.to_string()],
-    )?;
-    conn.execute(
-        "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('text_theme', ?1, datetime('now', 'localtime'))",
-        [&settings.text_theme],
-    )?;
-    conn.execute(
-        "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('show_calendar', ?1, datetime('now', 'localtime'))",
-        [if settings.show_calendar { "true" } else { "false" }],
-    )?;
-    conn.execute(
-        "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('view_mode', ?1, datetime('now', 'localtime'))",
-        [&settings.view_mode],
-    )?;
-    conn.execute(
-        "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('notification_type', ?1, datetime('now', 'localtime'))",
-        [&settings.notification_type],
-    )?;
+    set_setting(conn, "text_theme", &settings.text_theme)?;
+    set_bool_setting(conn, "show_calendar", settings.show_calendar)?;
+    set_setting(conn, "view_mode", &settings.view_mode)?;
+    set_setting(conn, "notification_type", &settings.notification_type)?;
     Ok(())
 }
 
-pub fn export_data_internal(db: &Database) -> Result<String, String> {
-    let result = db.with_connection(|conn| {
-        let todo_sql = format!("SELECT {} FROM todos ORDER BY sort_order ASC", TODO_COLUMNS);
-        let mut stmt = conn.prepare(&todo_sql)?;
-        let todo_iter = stmt.query_map([], todo_from_row)?;
+/// 本地设置版本：参与同步的设置键的 `max(updated_at)`（规范时间格式）
+pub(crate) fn settings_version(conn: &rusqlite::Connection) -> rusqlite::Result<Option<String>> {
+    let placeholders = vec!["?"; SYNCED_SETTING_KEYS.len()].join(", ");
+    let sql = format!(
+        "SELECT MAX(updated_at) FROM settings WHERE key IN ({})",
+        placeholders
+    );
+    conn.query_row(
+        &sql,
+        rusqlite::params_from_iter(SYNCED_SETTING_KEYS.iter()),
+        |r| r.get(0),
+    )
+}
 
-        let mut todos: Vec<Todo> = todo_iter.filter_map(|t| t.ok()).collect();
+/// 远端 settings JSON 字段 → 本地键 + 取值校验
+enum SettingKind {
+    Bool,
+    HexColor,
+    Alpha,
+    OneOf(&'static [&'static str]),
+}
 
-        for todo in &mut todos {
-            let subtask_sql = format!(
-                "SELECT {} FROM subtasks WHERE parent_id = ? ORDER BY sort_order ASC",
-                SUBTASK_COLUMNS
-            );
-            let mut subtask_stmt = conn.prepare(&subtask_sql)?;
-            let subtask_iter = subtask_stmt.query_map([todo.id], subtask_from_row)?;
+const REMOTE_SETTING_FIELDS: [(&str, &str, SettingKind); 10] = [
+    ("isFixed", "is_fixed", SettingKind::Bool),
+    (
+        "fixedEmbedDesktop",
+        "fixed_embed_desktop",
+        SettingKind::Bool,
+    ),
+    ("autoHideEnabled", "auto_hide_enabled", SettingKind::Bool),
+    ("topOnWake", "top_on_wake", SettingKind::Bool),
+    ("windowBgColor", "window_bg_color", SettingKind::HexColor),
+    ("windowBgAlpha", "window_bg_alpha", SettingKind::Alpha),
+    (
+        "textTheme",
+        "text_theme",
+        SettingKind::OneOf(&["light", "dark"]),
+    ),
+    ("showCalendar", "show_calendar", SettingKind::Bool),
+    (
+        "viewMode",
+        "view_mode",
+        SettingKind::OneOf(&["list", "quadrant"]),
+    ),
+    (
+        "notificationType",
+        "notification_type",
+        SettingKind::OneOf(&["system", "app"]),
+    ),
+];
 
-            todo.subtasks = subtask_iter.filter_map(|s| s.ok()).collect();
+fn is_hex_color(s: &str) -> bool {
+    let Some(hex) = s.strip_prefix('#') else {
+        return false;
+    };
+    matches!(hex.len(), 3 | 6 | 8) && hex.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+impl SettingKind {
+    fn to_db(&self, v: &Value) -> Option<String> {
+        match self {
+            Self::Bool => v.as_bool().map(|b| bool_str(b).to_string()),
+            Self::HexColor => v.as_str().filter(|s| is_hex_color(s)).map(str::to_string),
+            Self::Alpha => v
+                .as_f64()
+                .filter(|a| (0.0..=1.0).contains(a))
+                .map(|a| a.to_string()),
+            Self::OneOf(allowed) => v
+                .as_str()
+                .filter(|s| allowed.contains(s))
+                .map(str::to_string),
         }
-
-        let settings = read_app_settings(conn);
-
-        Ok((todos, settings))
-    });
-
-    match result {
-        Ok((todos, settings)) => {
-            let export_data = ExportData {
-                version: "4.0".to_string(),
-                exported_at: Local::now().format("%Y-%m-%dT%H:%M:%S%:z").to_string(),
-                todos,
-                settings,
-            };
-            serde_json::to_string_pretty(&export_data).map_err(|e| e.to_string())
-        }
-        Err(e) => Err(e.to_string()),
     }
 }
 
-/// 导入备份数据。
+/// 应用远端 settings（K3-5）：只处理参与同步的键，且只写远端对象里**存在且合法**的字段
+/// （缺失的字段不回落默认值，避免占位对象把本地设置重置）；`windowPosition` / `windowSize`
+/// 永不应用。变化的键 `updated_at` 记为 `updated_at`（远端 settingsUpdatedAt）。
+/// 返回是否有设置真的发生变化。事务由调用方负责。
+pub(crate) fn apply_settings_json(
+    conn: &rusqlite::Connection,
+    remote: &Map<String, Value>,
+    updated_at: &str,
+) -> rusqlite::Result<bool> {
+    let mut changed = false;
+    for (json_key, db_key, kind) in &REMOTE_SETTING_FIELDS {
+        let Some(value) = remote.get(*json_key) else {
+            continue;
+        };
+        match kind.to_db(value) {
+            Some(v) => changed |= set_setting_at(conn, db_key, &v, updated_at)?,
+            None => eprintln!("[sync] 忽略远端非法设置 {}: {}", json_key, value),
+        }
+    }
+    Ok(changed)
+}
+
+/// 采用远端设置（K3-5 远端较新 / 本机首次同步 / 强制拉取）：应用远端字段后，把全部同步键的
+/// `updated_at` 对齐到远端的 `settingsUpdatedAt`——本地设置此刻就是远端那个版本。
+/// 否则没被远端覆盖的键还带着更新的本地时间戳，下次同步会把同样的设置再上传一遍。
+/// 返回是否有设置值真的发生变化。事务由调用方负责。
+pub(crate) fn adopt_settings_json(
+    conn: &rusqlite::Connection,
+    remote: &Map<String, Value>,
+    updated_at: &str,
+) -> rusqlite::Result<bool> {
+    let changed = apply_settings_json(conn, remote, updated_at)?;
+    let placeholders = vec!["?"; SYNCED_SETTING_KEYS.len()].join(", ");
+    conn.execute(
+        &format!(
+            "UPDATE settings SET updated_at = ? WHERE key IN ({}) AND updated_at IS NOT ?",
+            placeholders
+        ),
+        rusqlite::params_from_iter(
+            std::iter::once(updated_at)
+                .chain(SYNCED_SETTING_KEYS.iter().copied())
+                .chain(std::iter::once(updated_at)),
+        ),
+    )?;
+    Ok(changed)
+}
+
+pub fn export_data_internal(db: &Database) -> Result<String, String> {
+    let (todos, settings) = db
+        .with_connection(|conn| {
+            let mut todos = sync_store::load_todos_with_subtasks(conn, "sort_order ASC, id ASC")?;
+            for todo in &mut todos {
+                normalize_todo_lenient(todo);
+            }
+            Ok((todos, read_app_settings(conn)))
+        })
+        .map_err(|e| e.to_string())?;
+
+    let export_data = ExportData {
+        version: EXPORT_VERSION.to_string(),
+        exported_at: Local::now().format("%Y-%m-%dT%H:%M:%S%:z").to_string(),
+        todos,
+        settings,
+    };
+    serde_json::to_string_pretty(&export_data).map_err(|e| e.to_string())
+}
+
+/// 导入备份数据（手动导入，语义为"整体替换"）。
 ///
 /// 兼容 v3.0 与 v4.0 两个版本：v3.0 备份内的 agent_configs / workflow_steps /
 /// task_dependencies / prompt_templates / agent_executions 字段以及 todo / subtask
 /// 上的 agent / 调度 / 工作流字段，会被 serde 在反序列化阶段静默忽略
 /// （`ExportData` / `Todo` / `SubTask` 在 v2.0 后不再声明这些字段）。
 ///
-/// 整个导入体（清空 + 逐条 INSERT + 写设置）包在单个 `BEGIN IMMEDIATE` 事务里：
-/// 中途任一语句失败时旧数据整体回滚，不会出现"旧数据已删、新数据只写了半截"
-/// 的永久丢失（手动导入与 WebDAV 应用远端共用此路径）。
-/// `with_connection` 只给 `&Connection`，用不了需要 `&mut` 的 `conn.transaction()`，
-/// 因此走 `Transaction::new_unchecked`；返回的 guard 默认 drop 即 ROLLBACK。
-/// 附带收益：逐行 autocommit 变单次提交，大备份导入少掉 N 次 fsync。
+/// 1. 导入前先 `VACUUM INTO` 备份当前库（`backups/`，保留最近 5 份；内存库跳过）
+/// 2. 单个事务内：清空 → 按**原 id** 插入（子任务的 parentId 以外层待办为准）→ 写设置
+/// 3. 导入的记录 `updated_at` 统一改为导入时刻：恢复备份是用户的明确意图，应当在同步
+///    合并中胜出，而不是被远端的"较新"旧数据覆盖（A11）
+/// 4. 导入前存在、导入后不存在的记录写墓碑，删除随同步传播；导入后存在的记录清掉同键墓碑
+///
+/// 任一步失败整体回滚，原有数据不受影响。
 pub fn import_data_raw(db: &Database, json_data: &str) -> Result<(), String> {
     let import: ExportData =
         serde_json::from_str(json_data).map_err(|e| format!("Invalid JSON format: {}", e))?;
 
-    db.with_connection(|conn| {
-        let tx = rusqlite::Transaction::new_unchecked(
-            conn,
-            rusqlite::TransactionBehavior::Immediate,
-        )?;
+    db.with_connection(|conn| Ok(backup::snapshot(conn, "import")))
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("导入前备份失败，已取消导入: {}", e))?;
 
-        tx.execute("DELETE FROM subtasks", [])?;
-        tx.execute("DELETE FROM todos", [])?;
+    let now = now_local();
+    db.with_transaction(|tx| import_records(tx, &import, &now))
+        .map_err(|e| e.to_string())?;
 
-        for todo in &import.todos {
-            let notified_i = if todo.notified { 1i32 } else { 0 };
-            let completed_i = if todo.completed { 1i32 } else { 0 };
-            let repeat_enabled_i = if todo.repeat_enabled { 1i32 } else { 0 };
+    // TODO(R2): reload_runtime_prefs —— 导入改写了 top_on_wake / auto_hide_enabled 等设置，
+    // 需要调用 crate::commands::window::reload_runtime_prefs(db) 刷新窗口模块的运行时缓存。
+    Ok(())
+}
 
-            tx.execute(
-                "INSERT INTO todos (title, description, color, quadrant, notify_at, notify_before,
-                                    notified, completed, sort_order, start_time, end_time, created_at, updated_at,
-                                    repeat_enabled, repeat_type, repeat_interval, repeat_weekdays, repeat_month_day)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-                         ?14, ?15, ?16, ?17, ?18)",
-                params![
-                    todo.title, todo.description, todo.color, todo.quadrant,
-                    todo.notify_at, todo.notify_before,
-                    notified_i, completed_i,
-                    todo.sort_order, todo.start_time, todo.end_time,
-                    todo.created_at, todo.updated_at,
-                    repeat_enabled_i, todo.repeat_type, todo.repeat_interval,
-                    todo.repeat_weekdays, todo.repeat_month_day,
-                ],
-            )?;
+fn import_records(
+    conn: &rusqlite::Connection,
+    import: &ExportData,
+    now: &str,
+) -> rusqlite::Result<()> {
+    let ids_of = |table: &str| -> rusqlite::Result<HashSet<i64>> {
+        let mut stmt = conn.prepare(&format!("SELECT id FROM {table}"))?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        rows.collect()
+    };
+    let before_todos = ids_of("todos")?;
+    let before_subtasks = ids_of("subtasks")?;
 
-            let new_todo_id = tx.last_insert_rowid();
+    conn.execute("DELETE FROM subtasks", [])?;
+    conn.execute("DELETE FROM todos", [])?;
 
-            for subtask in &todo.subtasks {
-                let sub_completed_i = if subtask.completed { 1i32 } else { 0 };
-                tx.execute(
-                    "INSERT INTO subtasks (parent_id, title, content, completed, sort_order, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    params![
-                        new_todo_id, subtask.title, subtask.content,
-                        sub_completed_i,
-                        subtask.sort_order, subtask.created_at, subtask.updated_at,
-                    ],
-                )?;
-            }
+    let mut after_todos = HashSet::new();
+    let mut after_subtasks = HashSet::new();
+    for original in &import.todos {
+        let mut todo = original.clone();
+        normalize_todo_lenient(&mut todo);
+        todo.updated_at = now.to_string();
+        if todo.created_at.trim().is_empty() {
+            todo.created_at = now.to_string();
         }
+        insert_todo_row(conn, &todo)?;
+        after_todos.insert(todo.id);
 
-        write_app_settings(&tx, &import.settings)?;
+        for sub in &todo.subtasks {
+            let mut sub = sub.clone();
+            sub.parent_id = todo.id;
+            sub.updated_at = now.to_string();
+            if sub.created_at.trim().is_empty() {
+                sub.created_at = now.to_string();
+            }
+            insert_subtask_row(conn, &sub)?;
+            after_subtasks.insert(sub.id);
+        }
+    }
 
-        tx.commit()?;
-        Ok(())
+    for id in before_todos.difference(&after_todos) {
+        sync_store::record_tombstone(conn, EntityKind::Todo, *id, now)?;
+    }
+    for id in before_subtasks.difference(&after_subtasks) {
+        sync_store::record_tombstone(conn, EntityKind::Subtask, *id, now)?;
+    }
+    for id in &after_todos {
+        sync_store::remove_tombstone(conn, EntityKind::Todo, *id)?;
+    }
+    for id in &after_subtasks {
+        sync_store::remove_tombstone(conn, EntityKind::Subtask, *id)?;
+    }
+
+    write_app_settings(conn, &import.settings)?;
+    Ok(())
+}
+
+/// 在阻塞线程池里跑 `f(&Database)`：导入导出要读写文件、做备份，不能占住主线程（C1）
+async fn run_blocking<R, F>(app: AppHandle, f: F) -> Result<R, String>
+where
+    F: FnOnce(&Database) -> Result<R, String> + Send + 'static,
+    R: Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(move || {
+        let db = app.state::<Database>();
+        f(&db)
     })
-    .map_err(|e| e.to_string())
+    .await
+    .map_err(|e| format!("后台任务异常: {}", e))?
 }
 
 #[tauri::command]
-pub fn export_data(db: State<Database>) -> Result<String, String> {
-    export_data_internal(&db)
+pub async fn export_data(app: AppHandle) -> Result<String, String> {
+    run_blocking(app, export_data_internal).await
 }
 
 #[tauri::command]
-pub fn import_data(db: State<Database>, json_data: String) -> Result<(), String> {
-    import_data_raw(&db, &json_data)
+pub async fn import_data(app: AppHandle, json_data: String) -> Result<(), String> {
+    run_blocking(app, move |db| import_data_raw(db, &json_data)).await
 }
 
 #[tauri::command]
-pub fn export_data_to_file(db: State<Database>, file_path: String) -> Result<(), String> {
-    let json_data = export_data_internal(&db)?;
+pub async fn export_data_to_file(app: AppHandle, file_path: String) -> Result<(), String> {
+    run_blocking(app, move |db| export_to_file(db, &file_path)).await
+}
 
-    let file = std::fs::File::create(&file_path).map_err(|e| format!("创建文件失败: {}", e))?;
+#[tauri::command]
+pub async fn import_data_from_file(app: AppHandle, file_path: String) -> Result<(), String> {
+    run_blocking(app, move |db| import_from_file(db, &file_path)).await
+}
+
+fn export_to_file(db: &Database, file_path: &str) -> Result<(), String> {
+    let json_data = export_data_internal(db)?;
+
+    let file = std::fs::File::create(file_path).map_err(|e| format!("创建文件失败: {}", e))?;
     let mut zip = zip::ZipWriter::new(file);
 
     let options = zip::write::SimpleFileOptions::default()
@@ -274,9 +382,8 @@ pub fn export_data_to_file(db: State<Database>, file_path: String) -> Result<(),
     Ok(())
 }
 
-#[tauri::command]
-pub fn import_data_from_file(db: State<Database>, file_path: String) -> Result<(), String> {
-    let file_bytes = std::fs::read(&file_path).map_err(|e| format!("读取文件失败: {}", e))?;
+fn import_from_file(db: &Database, file_path: &str) -> Result<(), String> {
+    let file_bytes = std::fs::read(file_path).map_err(|e| format!("读取文件失败: {}", e))?;
 
     // ZIP magic bytes: PK (0x50, 0x4B)
     let is_zip = file_bytes.len() >= 2 && file_bytes[0] == 0x50 && file_bytes[1] == 0x4B;
@@ -294,18 +401,19 @@ pub fn import_data_from_file(db: State<Database>, file_path: String) -> Result<(
             .read_to_string(&mut json_data)
             .map_err(|e| format!("读取 data.json 失败: {}", e))?;
 
-        import_data_raw(&db, &json_data)
+        import_data_raw(db, &json_data)
     } else {
         let json_data =
             String::from_utf8(file_bytes).map_err(|e| format!("文件编码错误: {}", e))?;
-        import_data_raw(&db, &json_data)
+        import_data_raw(db, &json_data)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::SubTask;
+    use crate::db::{SubTask, Todo};
+    use rusqlite::OptionalExtension;
 
     fn test_db() -> Database {
         Database::new_in_memory().expect("打开内存库失败")
@@ -508,6 +616,218 @@ mod tests {
         assert_eq!(
             setting_value(&db2, "fixed_embed_desktop").as_deref(),
             Some("true")
+        );
+    }
+
+    fn tombstones(db: &Database) -> Vec<(String, i64)> {
+        db.with_connection(|conn| {
+            let mut stmt =
+                conn.prepare("SELECT entity_type, entity_id FROM tombstones ORDER BY 1, 2")?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect()
+        })
+        .expect("读取墓碑失败")
+    }
+
+    /// 导入保留原 id；导入前存在、导入后不存在的记录生成墓碑；被导入的 id 不留墓碑。
+    #[test]
+    fn import_preserves_ids_and_tombstones_removed_records() {
+        let db = test_db();
+        seed_existing(&db); // todo 1 + subtask 11
+        db.with_transaction(|tx| {
+            sync_store::record_tombstone(tx, EntityKind::Todo, 100, "2026-01-01 00:00:00")
+        })
+        .unwrap();
+
+        let mut t = make_todo(100, "导入待办");
+        t.subtasks.push(make_subtask(200, 999, "导入子任务"));
+        import_data_raw(&db, &export_json(vec![t])).expect("导入应当成功");
+
+        let (todo_id, sub_id, parent): (i64, i64, i64) = db
+            .with_connection(|c| {
+                c.query_row(
+                    "SELECT t.id, s.id, s.parent_id FROM todos t JOIN subtasks s ON s.parent_id = t.id",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!((todo_id, sub_id, parent), (100, 200, 100));
+
+        assert_eq!(
+            tombstones(&db),
+            vec![("subtask".to_string(), 11), ("todo".to_string(), 1)]
+        );
+    }
+
+    /// 导入的记录 updated_at 改为导入时刻（恢复备份是权威的），时间字段规范化。
+    #[test]
+    fn import_sets_updated_at_to_now_and_normalizes_times() {
+        let db = test_db();
+        let mut t = make_todo(7, "带时间");
+        t.notify_at = Some("2026-05-01T09:30".to_string());
+        t.end_time = Some("2026-05-02".to_string());
+        t.subtasks.push(make_subtask(70, 7, "子"));
+        let before = now_local();
+        import_data_raw(&db, &export_json(vec![t])).unwrap();
+
+        let (notify_at, end_time, updated_at, created_at): (String, String, String, String) = db
+            .with_connection(|c| {
+                c.query_row(
+                    "SELECT notify_at, end_time, updated_at, created_at FROM todos WHERE id = 7",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!(notify_at, "2026-05-01 09:30:00");
+        assert_eq!(end_time, "2026-05-02 23:59:00");
+        assert!(updated_at >= before, "{updated_at} 应不早于 {before}");
+        assert_eq!(created_at, "2026-01-01 00:00:00", "created_at 保留");
+        let sub_updated: String = db
+            .with_connection(|c| {
+                c.query_row("SELECT updated_at FROM subtasks WHERE id = 70", [], |r| {
+                    r.get(0)
+                })
+            })
+            .unwrap();
+        assert!(sub_updated >= before);
+    }
+
+    /// 导出带上规范化后的时间；导出顺序按 sort_order。
+    #[test]
+    fn export_normalizes_legacy_time_formats() {
+        let db = test_db();
+        db.with_connection(|conn| {
+            conn.execute(
+                "INSERT INTO todos (id, title, color, quadrant, notify_at, created_at, updated_at)
+                 VALUES (1, 'a', '#EF4444', 1, '2026-05-01T09:30', '2026-01-01 00:00:00', '2026-01-01 00:00:00')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let exported: ExportData =
+            serde_json::from_str(&export_data_internal(&db).unwrap()).unwrap();
+        assert_eq!(exported.version, EXPORT_VERSION);
+        assert_eq!(
+            exported.todos[0].notify_at.as_deref(),
+            Some("2026-05-01 09:30:00")
+        );
+    }
+
+    fn setting_updated_at(db: &Database, key: &str) -> Option<String> {
+        db.with_connection(|c| {
+            c.query_row(
+                "SELECT updated_at FROM settings WHERE key = ?1",
+                [key],
+                |r| r.get(0),
+            )
+            .optional()
+        })
+        .unwrap()
+    }
+
+    /// 远端设置只写存在且合法的同步键，窗口几何永不应用，变化的键记远端时间戳。
+    #[test]
+    fn apply_settings_json_is_partial_validated_and_skips_window_geometry() {
+        let db = test_db();
+        let remote = serde_json::json!({
+            "isFixed": true,
+            "textTheme": "light",
+            "viewMode": "bogus",
+            "windowBgColor": "#123456",
+            "windowBgAlpha": 2.5,
+            "windowPosition": {"x": 1, "y": 2},
+            "windowSize": {"width": 3, "height": 4}
+        });
+        let changed = db
+            .with_transaction(|tx| {
+                apply_settings_json(tx, remote.as_object().unwrap(), "2026-05-01 08:00:00")
+            })
+            .unwrap();
+        assert!(changed);
+        assert_eq!(setting_value(&db, "is_fixed").as_deref(), Some("true"));
+        assert_eq!(setting_value(&db, "text_theme").as_deref(), Some("light"));
+        assert_eq!(
+            setting_value(&db, "window_bg_color").as_deref(),
+            Some("#123456")
+        );
+        assert_eq!(
+            setting_value(&db, "view_mode").as_deref(),
+            Some("list"),
+            "非法值忽略"
+        );
+        assert_eq!(
+            setting_value(&db, "window_bg_alpha").as_deref(),
+            Some(DEFAULT_WINDOW_BG_ALPHA.to_string().as_str()),
+            "越界透明度忽略"
+        );
+        assert_eq!(setting_value(&db, "window_position"), None);
+        assert_eq!(setting_value(&db, "window_size"), None);
+        assert_eq!(
+            setting_updated_at(&db, "is_fixed").as_deref(),
+            Some("2026-05-01 08:00:00")
+        );
+
+        // 同值再应用：无变化
+        let changed = db
+            .with_transaction(|tx| {
+                apply_settings_json(tx, remote.as_object().unwrap(), "2026-06-01 08:00:00")
+            })
+            .unwrap();
+        assert!(!changed);
+        assert_eq!(
+            setting_updated_at(&db, "is_fixed").as_deref(),
+            Some("2026-05-01 08:00:00")
+        );
+    }
+
+    /// 设置版本只看同步键：窗口几何变化不推进版本，同步键变化推进版本。
+    #[test]
+    fn settings_version_tracks_only_synced_keys() {
+        let db = test_db();
+        db.with_connection(|conn| {
+            conn.execute("UPDATE settings SET updated_at = '2026-01-01 00:00:00'", [])?;
+            Ok(())
+        })
+        .unwrap();
+        let v0 = db.with_connection(settings_version).unwrap();
+        assert_eq!(v0.as_deref(), Some("2026-01-01 00:00:00"));
+
+        db.with_connection(|conn| {
+            set_setting(conn, "window_position", r#"{"x":5,"y":5}"#)?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(db.with_connection(settings_version).unwrap(), v0);
+
+        db.with_connection(|conn| {
+            set_bool_setting(conn, "show_calendar", true)?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(db.with_connection(settings_version).unwrap() > v0);
+    }
+
+    /// 采用远端设置后，设置版本恰好等于远端版本（不会因为未覆盖的键较新而再次上传）
+    #[test]
+    fn adopt_settings_aligns_version_with_remote() {
+        let db = test_db();
+        let remote = serde_json::json!({"textTheme": "light"});
+        db.with_transaction(|tx| {
+            adopt_settings_json(tx, remote.as_object().unwrap(), "2020-01-01 00:00:00")
+        })
+        .unwrap();
+        assert_eq!(setting_value(&db, "text_theme").as_deref(), Some("light"));
+        assert_eq!(
+            db.with_connection(settings_version).unwrap().as_deref(),
+            Some("2020-01-01 00:00:00")
+        );
+        assert_eq!(
+            setting_updated_at(&db, "view_mode").as_deref(),
+            Some("2020-01-01 00:00:00"),
+            "未被远端覆盖的键也对齐到远端版本"
         );
     }
 }

@@ -27,8 +27,8 @@ use commands::{
     set_auto_hide_enabled, set_fixed_embed_desktop, set_notification_type, set_show_calendar,
     set_text_theme, set_todo_font_family, set_todo_font_size, set_top_on_wake,
     set_window_background, set_window_desktop_mode, set_window_fixed_mode, sync_auto_start_state,
-    update_screen_config_name, update_subtask, update_todo, webdav_apply_remote, webdav_auto_sync,
-    webdav_download_sync, webdav_test_connection, webdav_upload_sync,
+    update_screen_config_name, update_subtask, update_todo, webdav_force_pull, webdav_force_push,
+    webdav_sync, webdav_test_connection,
 };
 
 #[cfg(target_os = "windows")]
@@ -344,10 +344,9 @@ pub fn run() {
             get_sync_settings,
             save_sync_settings,
             webdav_test_connection,
-            webdav_upload_sync,
-            webdav_download_sync,
-            webdav_apply_remote,
-            webdav_auto_sync,
+            webdav_sync,
+            webdav_force_pull,
+            webdav_force_push,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

@@ -1,8 +1,8 @@
-use rusqlite::{Connection, Result};
+use rusqlite::{Connection, Result, Transaction, TransactionBehavior};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use super::migrations;
+use super::{migrations, paths};
 
 pub struct Database {
     conn: Mutex<Connection>,
@@ -33,10 +33,7 @@ impl Database {
     }
 
     fn get_db_path() -> PathBuf {
-        dirs::data_local_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("mini-todo")
-            .join("data.db")
+        paths::db_path()
     }
 
     fn run_migrations(&self) -> Result<()> {
@@ -50,6 +47,23 @@ impl Database {
     {
         let conn = self.lock_conn();
         f(&conn)
+    }
+
+    /// 在单个 `BEGIN IMMEDIATE` 事务里执行 `f`：返回 `Ok` 时提交，返回 `Err` 或 panic 时
+    /// 由 `Transaction` 的 drop 自动回滚。多语句写入一律走这里，不要手写 BEGIN / COMMIT。
+    ///
+    /// `with_connection` 只给 `&Connection`，用不了要求 `&mut` 的 `conn.transaction()`，
+    /// 因此走 `Transaction::new_unchecked`；闭包拿到 `&mut Transaction` 以便按需开 savepoint。
+    pub fn with_transaction<F, R, E>(&self, f: F) -> std::result::Result<R, E>
+    where
+        F: FnOnce(&mut Transaction<'_>) -> std::result::Result<R, E>,
+        E: From<rusqlite::Error>,
+    {
+        let conn = self.lock_conn();
+        let mut tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+        let value = f(&mut tx)?;
+        tx.commit()?;
+        Ok(value)
     }
 
     /// 拿锁时忽略中毒标记：持锁线程 panic 只影响那一次操作，SQLite 连接本身
