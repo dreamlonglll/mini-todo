@@ -13,12 +13,14 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
+use anyhow::Context as _;
 use tracing::{debug, info, warn};
 
 use crate::db::repo::{self, meta_keys as mk};
 use crate::sync::doc::envelope_images;
 use crate::sync::webdav::{Precondition, PutOutcome, WebDavClient};
 use crate::sync::{SyncCtx, REMOTE_IMAGES_DIR};
+use crate::util::image_content_type;
 
 /// 图片文件名最大长度（K5）。
 pub const MAX_IMAGE_NAME_LEN: usize = 128;
@@ -54,24 +56,6 @@ pub fn list_local_images(dir: &Path) -> Vec<String> {
     out
 }
 
-/// 上传用的 Content-Type（WebDAV 存储侧，非对外下发）。
-pub fn guess_image_content_type(name: &str) -> &'static str {
-    match Path::new(name)
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("png") => "image/png",
-        Some("jpg") | Some("jpeg") => "image/jpeg",
-        Some("webp") => "image/webp",
-        Some("gif") => "image/gif",
-        Some("bmp") => "image/bmp",
-        Some("svg") => "image/svg+xml",
-        _ => "application/octet-stream",
-    }
-}
-
 /// 一次图片上传的统计。
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ImagePushReport {
@@ -87,11 +71,11 @@ pub fn push_dirty_images(ctx: &SyncCtx) -> anyhow::Result<ImagePushReport> {
     let queue = ctx
         .db
         .with_conn(|c| repo::dirty_image_queue(c))
-        .map_err(|e| anyhow::anyhow!("读 meta.dirty_images 失败: {}", e))?;
+        .context("读 meta.dirty_images 失败")?;
     if queue.is_empty() {
         ctx.db
             .with_conn(|c| repo::delete_meta(c, mk::IMAGE_QUEUE_SINCE))
-            .map_err(|e| anyhow::anyhow!("写 meta 失败: {}", e))?;
+            .context("写 meta 失败")?;
         return Ok(ImagePushReport::default());
     }
     ctx.db
@@ -102,7 +86,7 @@ pub fn push_dirty_images(ctx: &SyncCtx) -> anyhow::Result<ImagePushReport> {
                 &chrono::Utc::now().timestamp().to_string(),
             )
         })
-        .map_err(|e| anyhow::anyhow!("写 meta 失败: {}", e))?;
+        .context("写 meta 失败")?;
 
     let dav = ctx.dav()?;
     let mut report = ImagePushReport::default();
@@ -131,7 +115,7 @@ pub fn push_dirty_images(ctx: &SyncCtx) -> anyhow::Result<ImagePushReport> {
             }
         };
         let remote_path = format!("{}/{}", REMOTE_IMAGES_DIR, name);
-        let content_type = guess_image_content_type(name);
+        let content_type = image_content_type(name);
         let mut res = dav.put(
             &remote_path,
             &bytes,
@@ -174,7 +158,7 @@ pub fn push_dirty_images(ctx: &SyncCtx) -> anyhow::Result<ImagePushReport> {
             }
             Ok(())
         })
-        .map_err(|e| anyhow::anyhow!("更新 meta.dirty_images 失败: {}", e))?;
+        .context("更新 meta.dirty_images 失败")?;
 
     Ok(report)
 }
@@ -229,7 +213,7 @@ pub fn mirror_once(ctx: &SyncCtx) -> anyhow::Result<MirrorReport> {
             let envelope = ctx
                 .db
                 .with_conn(|c| repo::get_meta(c, mk::REMOTE_ENVELOPE))
-                .map_err(|e| anyhow::anyhow!("读 meta.remote_envelope 失败: {}", e))?;
+                .context("读 meta.remote_envelope 失败")?;
             envelope
                 .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
                 .and_then(|v| v.as_object().map(envelope_images))
@@ -305,15 +289,5 @@ mod tests {
         fs::create_dir(tmp.path().join("sub")).unwrap();
         assert_eq!(list_local_images(tmp.path()), vec!["a.png"]);
         assert!(list_local_images(&tmp.path().join("missing")).is_empty());
-    }
-
-    #[test]
-    fn guess_content_type_matches_extension() {
-        assert_eq!(guess_image_content_type("a.png"), "image/png");
-        assert_eq!(guess_image_content_type("b.JPG"), "image/jpeg");
-        assert_eq!(
-            guess_image_content_type("c.bin"),
-            "application/octet-stream"
-        );
     }
 }

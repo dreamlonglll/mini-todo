@@ -24,6 +24,7 @@ use tracing_subscriber::EnvFilter;
 mod api;
 mod config;
 mod db;
+mod model;
 mod sync;
 mod time;
 mod util;
@@ -57,6 +58,17 @@ async fn run() -> anyhow::Result<()> {
     let cfg_path = resolve_config_path();
     info!(target: "minitodo_cloud", "loading config from {}", cfg_path.display());
     let cfg = Arc::new(Config::load(&cfg_path)?);
+    for w in cfg.warnings() {
+        warn!(target: "minitodo_cloud", "config: {}", w);
+    }
+    if let Some(ca) = &cfg.webdav_ca_file {
+        info!(
+            target: "minitodo_cloud",
+            "trusting {} extra CA certificate(s) from {} for WebDAV",
+            cfg.webdav_ca_certs.len(),
+            ca.display()
+        );
+    }
 
     // 准备 data_dir / images_dir
     std::fs::create_dir_all(&cfg.data_dir)

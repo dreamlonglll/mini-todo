@@ -11,7 +11,8 @@
 //! 4. 墓碑集合：并集，同键取较大 `deletedAt`，按 30 天保留期过滤。
 //!
 //! 云端不解析 PC 记录的业务字段：记录 JSON 原样存进 `data_json`（只剥掉嵌套的
-//! `subtasks`、把子任务的 `parentId` 对齐到外层 todo）。缺 id 的坏记录跳过并计数，
+//! `subtasks`、把子任务的 `parentId` 对齐到外层 todo、把可解析的非规范时间串统一成
+//! K1 规范格式——仅格式，不改语义，未知字段原样保留）。缺 id 的坏记录跳过并计数，
 //! 不影响其它记录。
 
 use std::collections::{HashMap, HashSet};
@@ -23,6 +24,7 @@ use serde_json::{json, Value};
 use tracing::{debug, warn};
 
 use crate::db::repo;
+use crate::model::canonicalize_record_times;
 use crate::sync::doc::{EntityType, RemoteDoc};
 use crate::time::normalize_datetime;
 use crate::util::id_string;
@@ -136,6 +138,8 @@ pub fn apply_remote_doc(
             if let Some(obj) = body.as_object_mut() {
                 // 子任务单独存 subtasks 表；data_json 里不留过期的嵌套副本
                 obj.remove("subtasks");
+                // 缓存里的时间统一成规范格式（列表过滤 / 排序按字符串比较）
+                canonicalize_record_times(obj, true, tz);
             }
             repo::upsert_todo(conn, &todo_id, &body.to_string(), &remote_ts)?;
             local_todos.insert(todo_id.clone(), remote_ts);
@@ -165,9 +169,12 @@ pub fn apply_remote_doc(
                 continue;
             }
             let mut body = sub.clone();
-            if let (Some(p), Some(obj)) = (parent_num, body.as_object_mut()) {
-                // 归属以外层 todo 为准（嵌套关系就是父子关系）
-                obj.insert("parentId".into(), json!(p));
+            if let Some(obj) = body.as_object_mut() {
+                if let Some(p) = parent_num {
+                    // 归属以外层 todo 为准（嵌套关系就是父子关系）
+                    obj.insert("parentId".into(), json!(p));
+                }
+                canonicalize_record_times(obj, false, tz);
             }
             repo::upsert_subtask(conn, &sub_id, &todo_id, &body.to_string(), &remote_ts)?;
             local_subs.insert(sub_id, remote_ts);
@@ -225,6 +232,93 @@ pub fn apply_remote_doc(
     repo::purge_tombstones_before(conn, retention_cutoff)?;
 
     Ok(stats)
+}
+
+/// 合并之后，远端文档是否仍缺少本地已有的内容（与 PC 端"需要上传"的判定一致）：
+///
+/// - 本地有、远端没有的 todo / subtask
+/// - 本地版本比远端新（规范化后的 `updatedAt` 更大；平局视为相同）
+/// - 本地墓碑（`deletedAt >= recheck_cutoff`）远端没有，或远端同键的 `deletedAt` 更早。
+///   远端是旧协议文档（没有 `tombstones` 键，旧版 PC 写的）时不比较墓碑——旧版 PC
+///   不认识墓碑，每次都会把它们丢掉，比较会导致每轮都重推。
+///
+/// 典型场景：别的写入方在忽略前置条件的服务端（nginx dav / Caddy webdav）上用自己的旧
+/// 快照整包覆盖了云端刚写入的记录或墓碑。调用方（pull）为真时标脏，让 push 把并集写回去，
+/// 不让任何一端的数据被静默丢掉。必须在 `apply_remote_doc` 之后、同一事务内调用。
+pub fn remote_lacks_local_state(
+    conn: &Connection,
+    doc: &RemoteDoc,
+    tz: Tz,
+    recheck_cutoff: &str,
+) -> rusqlite::Result<bool> {
+    let mut remote_todos: HashMap<String, String> = HashMap::new();
+    let mut remote_subs: HashMap<String, String> = HashMap::new();
+    for todo in doc.todos() {
+        let Some(id) = id_string(todo).filter(|_| todo.is_object()) else {
+            continue;
+        };
+        remote_todos.insert(id, record_ts(todo, tz));
+        for sub in todo
+            .get("subtasks")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(sid) = id_string(sub).filter(|_| sub.is_object()) {
+                remote_subs.insert(sid, record_ts(sub, tz));
+            }
+        }
+    }
+    let behind = |remote: &HashMap<String, String>, id: &str, local_ts: &str| {
+        remote
+            .get(id)
+            .is_none_or(|remote_ts| canon_ts(Some(local_ts), tz) > *remote_ts)
+    };
+    // 只比较会被导出的记录（坏行 / 孤儿子任务永远到不了远端，算进去会每轮重推）
+    let (local_todos, local_subs) = repo::exportable_timestamps(conn)?;
+    for (id, ts) in local_todos {
+        if behind(&remote_todos, &id, &ts) {
+            debug!(target: "minitodo_cloud::sync", "remote lacks local todo {}", id);
+            return Ok(true);
+        }
+    }
+    for (id, ts) in local_subs {
+        if behind(&remote_subs, &id, &ts) {
+            debug!(target: "minitodo_cloud::sync", "remote lacks local subtask {}", id);
+            return Ok(true);
+        }
+    }
+
+    if !doc.has_tombstones_key() {
+        return Ok(false);
+    }
+    let (remote_tombs, _) = doc.tombstones(tz);
+    let mut remote_deleted: HashMap<(EntityType, String), String> = HashMap::new();
+    for t in remote_tombs {
+        let entry = remote_deleted
+            .entry((t.entity_type, t.entity_id))
+            .or_default();
+        if t.deleted_at > *entry {
+            *entry = t.deleted_at;
+        }
+    }
+    for (typ, id, deleted_at) in repo::list_tombstones(conn)? {
+        let Some(t) = EntityType::parse(&typ) else {
+            continue;
+        };
+        let local = canon_ts(Some(&deleted_at), tz);
+        if local.is_empty() || local.as_str() < recheck_cutoff {
+            continue;
+        }
+        if remote_deleted
+            .get(&(t, id.clone()))
+            .is_none_or(|remote| local > *remote)
+        {
+            debug!(target: "minitodo_cloud::sync", "remote lacks local tombstone {}:{}", typ, id);
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]
@@ -696,6 +790,62 @@ mod tests {
         assert!(subtask_title(&db, "11").is_none());
         assert!(subtask_title(&db, "12").is_some());
         assert!(todo_title(&db, "1").is_some());
+    }
+
+    fn lacks(db: &Db, d: &RemoteDoc, recheck_cutoff: &str) -> bool {
+        db.with_conn(|c| remote_lacks_local_state(c, d, tz(), recheck_cutoff).unwrap())
+    }
+
+    #[test]
+    fn remote_lacks_local_state_detects_missing_records_versions_and_tombstones() {
+        let (db, _tmp) = fresh_db();
+        let mut t = todo_value(1, "p", "2026-05-13 10:00:00");
+        t["subtasks"] = json!([subtask_value(11, 1, "s", "2026-05-13 10:00:00")]);
+        let full = doc(vec![t.clone()], vec![]);
+        merge(&db, &full);
+        assert!(!lacks(&db, &full, CUTOFF), "完全一致");
+
+        // 子任务缺失
+        let mut no_sub = t.clone();
+        no_sub["subtasks"] = json!([]);
+        assert!(lacks(&db, &doc(vec![no_sub], vec![]), CUTOFF));
+        // 远端版本更旧（T 格式规范化后比较）；平局不算落后
+        let mut older = t.clone();
+        older["updatedAt"] = json!("2026-05-13T09:00:00");
+        assert!(lacks(&db, &doc(vec![older], vec![]), CUTOFF));
+        let mut tie = t.clone();
+        tie["updatedAt"] = json!("2026-05-13T10:00");
+        assert!(!lacks(&db, &doc(vec![tie], vec![]), CUTOFF));
+
+        // 本地墓碑：远端没有 / 远端更早 → 落后；远端相同或更晚 → 不落后
+        db.with_conn(|c| repo::add_tombstone(c, "todo", "9", "2026-05-13 12:00:00").unwrap());
+        assert!(lacks(&db, &doc(vec![t.clone()], vec![]), CUTOFF));
+        let tomb = |d: &str| json!({"entityType": "todo", "entityId": 9, "deletedAt": d});
+        assert!(lacks(
+            &db,
+            &doc(vec![t.clone()], vec![tomb("2026-05-13 11:00:00")]),
+            CUTOFF
+        ));
+        assert!(!lacks(
+            &db,
+            &doc(vec![t.clone()], vec![tomb("2026-05-13 12:00:00")]),
+            CUTOFF
+        ));
+        // 快过期的本地墓碑不要求远端保留（各端时钟不同步时避免每轮重推）
+        assert!(!lacks(
+            &db,
+            &doc(vec![t.clone()], vec![]),
+            "2026-05-14 00:00:00"
+        ));
+        // 旧协议文档不比较墓碑
+        assert!(!lacks(&db, &legacy_doc(vec![t.clone()]), CUTOFF));
+        // 导不出去的孤儿子任务 / 坏行不算（否则每轮 pull 都会重推）
+        db.with_conn(|c| {
+            repo::purge_tombstones_before(c, "9999-01-01 00:00:00").unwrap();
+            repo::upsert_subtask(c, "99", "404", r#"{"id":99}"#, "2026-05-13 10:00:00").unwrap();
+            repo::upsert_todo(c, "8", "corrupt", "2026-05-13 10:00:00").unwrap();
+        });
+        assert!(!lacks(&db, &doc(vec![t], vec![]), CUTOFF));
     }
 
     /// 墓碑集合：同键取较大 deletedAt；保留期外的远端墓碑不导入，本地过期墓碑被清理。

@@ -4,7 +4,7 @@
 //! （mock 服务自己跑在独立线程的 runtime 上）。
 
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant};
 
 use chrono_tz::Tz;
 use serde_json::{json, Value};
@@ -15,6 +15,7 @@ use crate::db::repo::{self, meta_keys as mk};
 use crate::db::Db;
 use crate::sync::doc::{placeholder_settings, CLOUD_DEVICE_ID};
 use crate::sync::mock_dav::{MockDav, XmlStyle};
+use crate::sync::push::PRECONDITION_RETRY_DELAY;
 use crate::sync::{gzip, images, pull, push, SyncCtx, SYNC_DATA_FILE};
 use crate::time::now_local_string;
 
@@ -202,6 +203,19 @@ fn sync_data_calls(mock: &MockDav) -> Vec<(String, u16)> {
         .collect()
 }
 
+/// 任何请求都不能带基于日期的前置条件（Apache 的 IUS 不可用，nginx 的 IMS 只有整秒精度）。
+fn assert_no_date_preconditions(mock: &MockDav) {
+    for r in mock.requests() {
+        assert!(
+            r.if_unmodified_since.is_none() && r.if_modified_since.is_none(),
+            "{} {} 带了日期前置条件: {:?}",
+            r.method,
+            r.path,
+            r
+        );
+    }
+}
+
 // =============================================================================
 // K4：写前合并、基准、条件 PUT
 // =============================================================================
@@ -309,7 +323,13 @@ fn concurrent_write_between_get_and_put_triggers_412_merge_and_retry() {
         .with(|s| s.before_put = Some(Box::new(move |s| s.write_doc(&pc_v2))));
     e.mock.clear_log();
 
+    let t0 = Instant::now();
     let report = push::push_once(&e.ctx).unwrap();
+    assert!(
+        t0.elapsed() >= PRECONDITION_RETRY_DELAY,
+        "412 之后至少等 {:?} 再重试",
+        PRECONDITION_RETRY_DELAY
+    );
     assert_eq!(report.attempts, 2);
     assert_eq!(
         sync_data_calls(&e.mock),
@@ -334,63 +354,82 @@ fn concurrent_write_between_get_and_put_triggers_412_merge_and_retry() {
     let remote = e.mock.doc().unwrap();
     assert_eq!(remote_ids(&remote), vec![1, 2, 100]);
     assert_eq!(todo_title(&e.db, "2").as_deref(), Some("B-pc"));
-    assert!(!e.ctx.if_match_unreliable());
+    assert_no_date_preconditions(&e.mock);
 }
 
-/// Apache：一秒内的弱 ETag 不能用于 If-Match（必然 412）→ 用 If-Unmodified-Since；
-/// PUT 响应不带校验器 → 恰好一次 PROPFIND Depth 0，不整包 GET；ETag 变强后升级为 If-Match。
+/// Apache（e2e 实测）：写入后约 1 秒内 GET / HEAD 只给弱 ETag，`If-Match` 拿去掉 `W/`
+/// 的值在这一秒内 412、1.1 秒后可以匹配；If-Unmodified-Since 不可用（亚秒级 mtime）。
+/// 期望：GET 用 If-None-Match（弱 ETag 原样）→ 304；PUT If-Match "<opaque>" → 412 →
+/// 等 1.1 秒 → 无条件 GET → 合并 → PUT 成功；PUT 响应没有 ETag → 一次 HEAD 取基准；
+/// 全程没有 If-Unmodified-Since / If-Modified-Since。
 #[test]
-fn apache_weak_etag_uses_if_unmodified_since_and_propfind_after_put() {
-    let e = env(MockDav::start_with(|s| {
-        s.dirs.insert("/mini-todo".into());
-        s.dirs.insert("/mini-todo/images".into());
-        s.weak_etag_window = Duration::from_secs(3600);
-        s.put_returns_validators = false;
-    }));
+fn apache_weak_etag_window_412_is_retried_after_delay() {
+    let e = env(MockDav::start_apache());
     e.mock.put_doc(&pc_doc(
         vec![pc_todo(1, "A", "2026-10-01 10:00:00", vec![])],
         vec![],
     ));
+    e.mock.with(|s| s.touch(SYNC_DATA_FILE));
     pull::pull_once(&e.ctx).unwrap();
     let weak = meta(&e.db, mk::BASE_ETAG).unwrap();
-    assert!(weak.starts_with("W/"), "{}", weak);
+    assert!(weak.starts_with("W/"), "刚写入的文件给弱 ETag: {}", weak);
     assert!(
         meta(&e.db, mk::BASE_LAST_MODIFIED).is_some(),
-        "ETag 与 Last-Modified 必须一起存"
+        "ETag 与 Last-Modified 一起存"
     );
 
     api_create_todo(&e.db, 100, "from AI");
     e.mock.clear_log();
-    push::push_once(&e.ctx).unwrap();
-    let reqs = e.mock.requests();
-    // GET 用弱 ETag 做 If-None-Match（弱比较）→ 304
-    assert_eq!(reqs[0].method, "GET");
-    assert_eq!(reqs[0].status, 304);
-    assert_eq!(reqs[0].if_none_match.as_deref(), Some(weak.as_str()));
-    let put_idx = reqs.iter().position(|r| r.method == "PUT").unwrap();
-    let put = &reqs[put_idx];
-    assert!(put.if_match.is_none(), "弱 ETag 不能做 If-Match");
-    assert!(put.if_unmodified_since.is_some());
-    assert!(matches!(put.status, 201 | 204), "{}", put.status);
-    let after: Vec<_> = reqs[put_idx + 1..].iter().collect();
-    assert_eq!(after.len(), 1, "{:?}", after);
-    assert_eq!(after[0].method, "PROPFIND");
-    assert_eq!(after[0].depth.as_deref(), Some("0"));
-    let new_base = meta(&e.db, mk::BASE_ETAG).unwrap();
+    // 远端仍处于"刚写入"的一秒窗口内（PC 刚上传完）
+    e.mock.with(|s| s.touch(SYNC_DATA_FILE));
+    let t0 = Instant::now();
+    let report = push::push_once(&e.ctx).unwrap();
+    assert!(t0.elapsed() >= PRECONDITION_RETRY_DELAY);
+    assert_eq!(report.attempts, 2);
     assert_eq!(
-        Some(new_base.clone()),
-        e.mock.with(|s| s.etag_of(SYNC_DATA_FILE))
+        sync_data_calls(&e.mock),
+        vec![
+            ("GET".to_string(), 304),
+            ("PUT".to_string(), 412),
+            ("GET".to_string(), 200),
+            ("PUT".to_string(), 204),
+            ("HEAD".to_string(), 200),
+        ]
     );
-    assert!(meta(&e.db, mk::BASE_LAST_MODIFIED).is_some());
+    let reqs = e.mock.requests();
+    assert_eq!(reqs[0].if_none_match.as_deref(), Some(weak.as_str()));
+    let puts: Vec<_> = reqs.iter().filter(|r| r.method == "PUT").collect();
+    let opaque = weak.trim_start_matches("W/");
+    assert_eq!(
+        puts[0].if_match.as_deref(),
+        Some(opaque),
+        "If-Match 去掉 W/"
+    );
+    assert_eq!(puts[1].if_match.as_deref(), Some(opaque));
+    assert!(
+        reqs.iter().all(|r| r.method != "PROPFIND"),
+        "HEAD 已给出 ETag，不需要 PROPFIND"
+    );
+    assert_no_date_preconditions(&e.mock);
+    let new_base = meta(&e.db, mk::BASE_ETAG).unwrap();
+    let current = e.mock.with(|s| s.etag_of(SYNC_DATA_FILE)).unwrap();
+    assert_eq!(
+        new_base.trim_start_matches("W/"),
+        current.trim_start_matches("W/"),
+        "基准 = HEAD 给出的 ETag（刚写入时是弱 ETag）"
+    );
+    assert_eq!(remote_ids(&e.mock.doc().unwrap()), vec![1, 100]);
 
-    // 一秒后 Apache 的 ETag 变强：304 响应带回强 ETag，基准随之升级，之后的 PUT 用 If-Match
-    e.mock.with(|s| s.weak_etag_window = Duration::ZERO);
+    // 一秒后 Apache 的 ETag 变强：304 响应带回强 ETag，基准随之升级，之后一次 PUT 就成功
+    std::thread::sleep(Duration::from_millis(1100));
     pull::pull_once(&e.ctx).unwrap();
     let strong = meta(&e.db, mk::BASE_ETAG).unwrap();
     assert!(!strong.starts_with("W/"), "{}", strong);
+    assert_eq!(strong, new_base.trim_start_matches("W/"));
     api_create_todo(&e.db, 101, "again");
     e.mock.clear_log();
-    push::push_once(&e.ctx).unwrap();
+    let report = push::push_once(&e.ctx).unwrap();
+    assert_eq!(report.attempts, 1);
     let put = e
         .mock
         .requests()
@@ -398,15 +437,49 @@ fn apache_weak_etag_uses_if_unmodified_since_and_propfind_after_put() {
         .find(|r| r.method == "PUT")
         .unwrap();
     assert_eq!(put.if_match.as_deref(), Some(strong.as_str()));
+    assert_no_date_preconditions(&e.mock);
     assert_eq!(remote_ids(&e.mock.doc().unwrap()), vec![1, 100, 101]);
 }
 
-/// Apache + If-Unmodified-Since：别人在之后的某一秒写入 → 412 → 合并重试。
+/// PUT 响应与 HEAD 都没有 ETag、只有 PROPFIND 有：用一次 `PROPFIND Depth: 0` 的 getetag
+/// 作为基准（不整包 GET）。
 #[test]
-fn if_unmodified_since_conflict_is_merged_and_retried() {
+fn base_falls_back_to_propfind_getetag() {
     let e = env(MockDav::start_with(|s| {
         s.dirs.insert("/mini-todo".into());
-        s.weak_etag_window = Duration::from_secs(3600);
+        s.put_returns_validators = false;
+        s.head_etag = false;
+        s.propfind_etag = crate::sync::mock_dav::PropfindEtag::Strong;
+    }));
+    api_create_todo(&e.db, 100, "from AI");
+    push::push_once(&e.ctx).unwrap();
+    let reqs = e.mock.requests();
+    let put_idx = reqs.iter().position(|r| r.method == "PUT").unwrap();
+    let after: Vec<(String, Option<String>)> = reqs[put_idx + 1..]
+        .iter()
+        .map(|r| (r.method.clone(), r.depth.clone()))
+        .collect();
+    assert_eq!(
+        after,
+        vec![
+            ("HEAD".to_string(), None),
+            ("PROPFIND".to_string(), Some("0".to_string()))
+        ]
+    );
+    assert_eq!(
+        meta(&e.db, mk::BASE_ETAG),
+        e.mock.with(|s| s.etag_of(SYNC_DATA_FILE))
+    );
+    assert!(meta(&e.db, mk::BASE_LAST_MODIFIED).is_some());
+}
+
+/// 完全不给 ETag 的服务端：GET / PUT 都不带前置条件（绝不退回 IMS / IUS），
+/// 写前 GET + 合并照样保住别人的写入。
+#[test]
+fn server_without_etags_uses_unconditional_requests_only() {
+    let e = env(MockDav::start_with(|s| {
+        s.dirs.insert("/mini-todo".into());
+        s.etags_enabled = false;
         s.put_returns_validators = false;
     }));
     e.mock.put_doc(&pc_doc(
@@ -414,49 +487,40 @@ fn if_unmodified_since_conflict_is_merged_and_retried() {
         vec![],
     ));
     pull::pull_once(&e.ctx).unwrap();
-    api_create_todo(&e.db, 100, "from AI");
-    let pc_v2 = pc_doc(
+    assert_eq!(meta(&e.db, mk::BASE_ETAG), None);
+    assert!(meta(&e.db, mk::BASE_LAST_MODIFIED).is_some());
+
+    // PC 在云端下次 push 之前写入
+    e.mock.put_doc(&pc_doc(
         vec![
             pc_todo(1, "A", "2026-10-01 10:00:00", vec![]),
             pc_todo(2, "B-pc", "2026-10-01 11:00:00", vec![]),
         ],
         vec![],
-    );
-    let later = SystemTime::now() + Duration::from_secs(5);
-    e.mock.with(|s| {
-        s.before_put = Some(Box::new(move |s| {
-            s.write_at(
-                SYNC_DATA_FILE,
-                gzip(pc_v2.to_string().as_bytes()).unwrap(),
-                later,
-            )
-        }))
-    });
+    ));
+    api_create_todo(&e.db, 100, "from AI");
     e.mock.clear_log();
-    let report = push::push_once(&e.ctx).unwrap();
-    assert_eq!(report.attempts, 2);
-    let puts: Vec<_> = e
-        .mock
-        .requests()
-        .into_iter()
-        .filter(|r| r.method == "PUT")
-        .collect();
-    assert_eq!(puts.len(), 2);
-    assert_eq!(puts[0].status, 412);
-    assert!(puts
+    push::push_once(&e.ctx).unwrap();
+    let calls = sync_data_calls(&e.mock);
+    assert_eq!(
+        &calls[..2],
+        &[("GET".to_string(), 200), ("PUT".to_string(), 204)]
+    );
+    let reqs = e.mock.requests();
+    assert!(reqs
         .iter()
-        .all(|p| p.if_unmodified_since.is_some() && p.if_match.is_none()));
+        .all(|r| r.if_match.is_none() && r.if_none_match.is_none()));
+    assert_no_date_preconditions(&e.mock);
     assert_eq!(remote_ids(&e.mock.doc().unwrap()), vec![1, 2, 100]);
+    assert_eq!(todo_title(&e.db, "2").as_deref(), Some("B-pc"));
 }
 
-/// nginx dav / Caddy：PUT 忽略前置条件、永远不会 412。写前 GET + 合并是唯一的保护：
-/// 云端上次同步之后 PC 写入的内容不会被覆盖掉。
+/// nginx dav（e2e 实测）：忽略前置条件、PUT 响应与 PROPFIND 都没有 ETag，只有 HEAD / GET
+/// 有。期望：写前 GET + 合并保住 PC 的写入；PUT 之后一次 HEAD 取基准；之后的 pull 用
+/// If-None-Match——与基准同一秒内的 PC 写入也能拉到（If-Modified-Since 会 304 漏掉）。
 #[test]
-fn nginx_ignoring_preconditions_still_merges_before_put() {
-    let e = env(MockDav::start_with(|s| {
-        s.dirs.insert("/mini-todo".into());
-        s.ignore_preconditions = true;
-    }));
+fn nginx_uses_head_for_base_and_if_none_match_catches_same_second_write() {
+    let e = env(MockDav::start_nginx());
     e.mock.put_doc(&pc_doc(
         vec![pc_todo(1, "A", "2026-10-01 10:00:00", vec![])],
         vec![],
@@ -475,14 +539,132 @@ fn nginx_ignoring_preconditions_still_merges_before_put() {
     push::push_once(&e.ctx).unwrap();
     assert_eq!(
         sync_data_calls(&e.mock),
-        vec![("GET".to_string(), 200), ("PUT".to_string(), 204)]
+        vec![
+            ("GET".to_string(), 200),
+            ("PUT".to_string(), 204),
+            ("HEAD".to_string(), 200),
+        ]
     );
+    assert_no_date_preconditions(&e.mock);
     assert_eq!(remote_ids(&e.mock.doc().unwrap()), vec![1, 2, 100]);
+    let base = meta(&e.db, mk::BASE_ETAG).expect("HEAD 给出的 ETag 记为基准");
+    assert_eq!(
+        Some(base.clone()),
+        e.mock.with(|s| s.etag_of(SYNC_DATA_FILE))
+    );
+
+    // PC 在与基准同一秒内改了标题（长度变了 → nginx 的 ETag 变了）
+    let mut pc_next = e.mock.doc().unwrap();
+    for t in pc_next["todos"].as_array_mut().unwrap() {
+        if t["id"] == json!(1) {
+            t["title"] = json!("A edited on the PC");
+            t["updatedAt"] = json!("2026-10-01 12:00:00");
+        }
+    }
+    let same_second = e.mock.with(|s| s.modified_of(SYNC_DATA_FILE)).unwrap();
+    e.mock.with(|s| {
+        s.write_at(
+            SYNC_DATA_FILE,
+            gzip(pc_next.to_string().as_bytes()).unwrap(),
+            same_second,
+        )
+    });
+    e.mock.clear_log();
+    let r = pull::pull_once(&e.ctx).unwrap();
+    assert!(r.changed, "If-None-Match 必须发现同一秒内的修改");
+    assert_eq!(sync_data_calls(&e.mock), vec![("GET".to_string(), 200)]);
+    assert_eq!(
+        e.mock.requests()[0].if_none_match.as_deref(),
+        Some(base.as_str())
+    );
+    assert_no_date_preconditions(&e.mock);
+    assert_eq!(
+        todo_title(&e.db, "1").as_deref(),
+        Some("A edited on the PC")
+    );
 }
 
-/// 服务端被证实错误处理 If-Match（远端没变却 412）→ 退回 If-Unmodified-Since。
+/// PUT 成功后、HEAD 之前远端又被别人覆盖：HEAD 报告的长度对不上 → 不把别人的版本记为
+/// 基准（否则之后的 If-None-Match 会 304，永远合并不到那次写入）；下一次 pull 全量拉取。
 #[test]
-fn server_rejecting_valid_if_match_falls_back_to_if_unmodified_since() {
+fn overwrite_right_after_put_is_not_recorded_as_base() {
+    let e = env(MockDav::start_nginx());
+    e.mock.put_doc(&pc_doc(
+        vec![pc_todo(1, "A", "2026-10-01 10:00:00", vec![])],
+        vec![],
+    ));
+    pull::pull_once(&e.ctx).unwrap();
+    api_create_todo(&e.db, 100, "from AI");
+    let pc_doc_v3 = pc_doc(
+        vec![
+            pc_todo(1, "A", "2026-10-01 10:00:00", vec![]),
+            pc_todo(
+                3,
+                "C-pc with a much longer title",
+                "2026-10-01 11:00:00",
+                vec![],
+            ),
+        ],
+        vec![],
+    );
+    e.mock
+        .with(|s| s.after_put = Some(Box::new(move |s| s.write_doc(&pc_doc_v3))));
+    push::push_once(&e.ctx).unwrap();
+    assert_eq!(
+        meta(&e.db, mk::BASE_ETAG),
+        None,
+        "长度不符的 HEAD 结果不能记为基准"
+    );
+
+    e.mock.clear_log();
+    let r = pull::pull_once(&e.ctx).unwrap();
+    assert!(r.changed);
+    assert!(
+        e.mock.requests()[0].if_none_match.is_none(),
+        "没有基准 → 无条件 GET"
+    );
+    assert!(todo_title(&e.db, "3").is_some());
+    assert!(r.repush_scheduled, "覆盖者的文档里没有 100 → 重推");
+}
+
+/// nginx 的 ETag 只有秒级精度：同一秒内写入、压缩后长度又相同的修改会被 304 掩盖。
+/// 后台每隔若干轮做一次无条件全量拉取兜底（`pull_once_with(force_full = true)`）。
+#[test]
+fn nginx_same_second_same_length_write_is_caught_by_full_pull() {
+    let e = env(MockDav::start_nginx());
+    // 两份文档压缩后长度恰好相同（gzip 是确定性的，用一个未知顶层键的随机内容调长度）
+    let padded = |title: &str, updated_at: &str, pad: &str| {
+        let mut doc = pc_doc(vec![pc_todo(1, title, updated_at, vec![])], vec![]);
+        doc["pad"] = json!(pad);
+        gzip(doc.to_string().as_bytes()).unwrap()
+    };
+    let pad_a = "q7Zk3mWv9Xp2LrT8";
+    let gz_a = padded("AAAA", "2026-10-01 10:00:00", pad_a);
+    let gz_b = (0..pad_a.len() * 4)
+        .map(|n| padded("BBBB", "2026-10-01 11:00:00", &pad_a.repeat(4)[..n]))
+        .find(|gz| gz.len() == gz_a.len())
+        .expect("测试前提：能构造出压缩后长度相同的文档");
+    e.mock.with(|s| s.write(SYNC_DATA_FILE, gz_a));
+    pull::pull_once(&e.ctx).unwrap();
+    assert_eq!(todo_title(&e.db, "1").as_deref(), Some("AAAA"));
+
+    let same_second = e.mock.with(|s| s.modified_of(SYNC_DATA_FILE)).unwrap();
+    e.mock
+        .with(|s| s.write_at(SYNC_DATA_FILE, gz_b, same_second));
+    let r = pull::pull_once(&e.ctx).unwrap();
+    assert!(!r.changed, "秒级 ETag 相同 → 304（服务端局限）");
+    assert_eq!(todo_title(&e.db, "1").as_deref(), Some("AAAA"));
+
+    let r = pull::pull_once_with(&e.ctx, true).unwrap();
+    assert!(r.changed);
+    assert_eq!(todo_title(&e.db, "1").as_deref(), Some("BBBB"));
+    assert!(!is_dirty(&e.db), "全量拉取到的内容与本地一致时不重推");
+}
+
+/// 服务端意外地 412（远端其实没变）：等 1.1 秒后无条件 GET、再用 If-Match 重试；
+/// 不会退回 If-Unmodified-Since，也不会永久放弃 If-Match。
+#[test]
+fn spurious_412_is_retried_after_delay_with_if_match_again() {
     let e = env(MockDav::start());
     e.mock.put_doc(&pc_doc(
         vec![pc_todo(1, "A", "2026-10-01 10:00:00", vec![])],
@@ -492,8 +674,9 @@ fn server_rejecting_valid_if_match_falls_back_to_if_unmodified_since() {
     api_create_todo(&e.db, 100, "from AI");
     e.mock.add_fault("PUT", "sync-data", 412, 1);
     e.mock.clear_log();
+    let t0 = Instant::now();
     push::push_once(&e.ctx).unwrap();
-    assert!(e.ctx.if_match_unreliable());
+    assert!(t0.elapsed() >= PRECONDITION_RETRY_DELAY);
     let puts: Vec<_> = e
         .mock
         .requests()
@@ -501,9 +684,164 @@ fn server_rejecting_valid_if_match_falls_back_to_if_unmodified_since() {
         .filter(|r| r.method == "PUT")
         .collect();
     assert_eq!(puts.len(), 2);
-    assert!(puts[0].if_match.is_some());
-    assert!(puts[1].if_match.is_none() && puts[1].if_unmodified_since.is_some());
+    assert!(puts.iter().all(|p| p.if_match.is_some()));
+    assert_no_date_preconditions(&e.mock);
     assert_eq!(remote_ids(&e.mock.doc().unwrap()), vec![1, 100]);
+
+    // 下一次 push 照样用 If-Match
+    api_create_todo(&e.db, 101, "again");
+    e.mock.clear_log();
+    push::push_once(&e.ctx).unwrap();
+    assert!(e
+        .mock
+        .requests()
+        .iter()
+        .filter(|r| r.method == "PUT")
+        .all(|p| p.if_match.is_some()));
+}
+
+/// 连续 412 用完重试次数 → 报错、dirty 保留、记录 last_push_error。
+#[test]
+fn persistent_412_gives_up_after_bounded_attempts() {
+    let e = env(MockDav::start());
+    e.mock.put_doc(&pc_doc(vec![], vec![]));
+    pull::pull_once(&e.ctx).unwrap();
+    api_create_todo(&e.db, 100, "from AI");
+    e.mock
+        .add_fault("PUT", "sync-data", 412, push::MAX_PUT_ATTEMPTS as usize);
+    e.mock.clear_log();
+    let err = push::push_once(&e.ctx).unwrap_err();
+    assert!(format!("{:#}", err).contains("412"), "{:#}", err);
+    assert_eq!(
+        e.mock.count("PUT", "sync-data"),
+        push::MAX_PUT_ATTEMPTS as usize
+    );
+    assert!(is_dirty(&e.db));
+    assert!(meta(&e.db, mk::LAST_PUSH_ERROR).is_some());
+}
+
+// =============================================================================
+// 远端缺少本地内容 → 重新推送（与 PC 端一致）
+// =============================================================================
+
+/// 别的写入方在忽略前置条件的服务端（nginx）上用旧快照整包覆盖：远端丢了云端写入的
+/// 记录与墓碑。pull 合并后发现远端落后 → 标脏 → push 把并集写回去；已删除的记录不复活。
+#[test]
+fn remote_overwritten_by_stale_writer_triggers_repush() {
+    let e = env(MockDav::start_nginx());
+    let stale = pc_doc(
+        vec![
+            pc_todo(1, "A", "2026-10-01 10:00:00", vec![]),
+            pc_todo(5, "to delete", "2026-10-01 10:00:00", vec![]),
+        ],
+        vec![],
+    );
+    e.mock.put_doc(&stale);
+    pull::pull_once(&e.ctx).unwrap();
+    api_create_todo(&e.db, 100, "from AI");
+    api_delete_todo(&e.db, "5");
+    push::push_once(&e.ctx).unwrap();
+    let remote = e.mock.doc().unwrap();
+    assert_eq!(remote_ids(&remote), vec![1, 100]);
+    assert!(has_tombstone(&remote, "todo", 5));
+    assert!(!is_dirty(&e.db));
+
+    // PC 拿着旧快照（没有 100、没有墓碑、还带着 5）整包覆盖，外加它自己新建的 2
+    let mut overwritten = stale.clone();
+    overwritten["todos"].as_array_mut().unwrap().push(pc_todo(
+        2,
+        "B-pc",
+        "2026-10-01 11:00:00",
+        vec![],
+    ));
+    e.mock.put_doc(&overwritten);
+    let r = pull::pull_once(&e.ctx).unwrap();
+    assert!(r.changed);
+    assert!(r.repush_scheduled);
+    assert!(is_dirty(&e.db), "远端缺少本地记录 / 墓碑 → 标脏重推");
+    assert!(todo_title(&e.db, "5").is_none(), "墓碑压制远端的陈旧副本");
+    assert_eq!(todo_title(&e.db, "100").as_deref(), Some("from AI"));
+
+    push::push_once(&e.ctx).unwrap();
+    let remote = e.mock.doc().unwrap();
+    assert_eq!(remote_ids(&remote), vec![1, 2, 100]);
+    assert!(has_tombstone(&remote, "todo", 5));
+    assert!(!is_dirty(&e.db));
+
+    // 远端已经包含全部本地内容 → 再拉取（含全量）不再重推
+    let r = pull::pull_once_with(&e.ctx, true).unwrap();
+    assert!(!r.repush_scheduled);
+    assert!(!is_dirty(&e.db));
+}
+
+/// 远端记录比本地旧（本地有更新的编辑没进远端）同样重推；旧协议文档（没有 tombstones 键）
+/// 缺墓碑不算落后——旧版 PC 不认识墓碑，比较会导致每轮重推。
+#[test]
+fn newer_local_version_triggers_repush_but_legacy_doc_tombstones_do_not() {
+    let e = env(MockDav::start());
+    let legacy = |todos: Vec<Value>| {
+        json!({"version": "4.0", "deviceId": "old_pc", "updatedAt": "x", "todos": todos,
+               "settings": {"isFixed": false, "windowPosition": null, "windowSize": null}, "images": []})
+    };
+    e.mock.put_doc(&legacy(vec![
+        pc_todo(1, "A", "2026-10-01 10:00:00", vec![]),
+        pc_todo(2, "B", "2026-10-01 10:00:00", vec![]),
+    ]));
+    pull::pull_once(&e.ctx).unwrap();
+    // 本地有一个墓碑，旧版 PC 的文档里没有 tombstones 键
+    e.db.with_conn(|c| repo::add_tombstone(c, "todo", "77", &ts(-5)))
+        .unwrap();
+    e.mock.put_doc(&legacy(vec![
+        pc_todo(1, "A", "2026-10-01 10:00:00", vec![]),
+        pc_todo(2, "B", "2026-10-01 10:00:00", vec![]),
+    ]));
+    let r = pull::pull_once(&e.ctx).unwrap();
+    assert!(!r.repush_scheduled, "旧协议文档缺墓碑不触发重推");
+    assert!(!is_dirty(&e.db));
+
+    // 本地对 1 有更新的编辑（例如远端被旧快照覆盖），远端还是旧版本 → 重推
+    e.db.with_conn(|c| {
+        repo::upsert_todo(
+            c,
+            "1",
+            &pc_todo(1, "A-newer", "2026-10-01 12:00:00", vec![]).to_string(),
+            "2026-10-01 12:00:00",
+        )
+    })
+    .unwrap();
+    e.mock.put_doc(&legacy(vec![
+        pc_todo(1, "A", "2026-10-01 10:00:00", vec![]),
+        pc_todo(2, "B", "2026-10-01 10:00:00", vec![]),
+    ]));
+    let r = pull::pull_once(&e.ctx).unwrap();
+    assert!(r.repush_scheduled);
+    assert!(is_dirty(&e.db));
+    assert_eq!(todo_title(&e.db, "1").as_deref(), Some("A-newer"));
+}
+
+/// 远端文件不见了（被删除 / 换了新的 WebDAV）而本地有数据 → 重推；本地为空 → 不推。
+#[test]
+fn remote_404_with_local_data_schedules_repush() {
+    let e = env(MockDav::start());
+    let r = pull::pull_once(&e.ctx).unwrap();
+    assert!(!r.remote_exists);
+    assert!(!r.repush_scheduled, "本地也是空的");
+    assert!(!is_dirty(&e.db));
+
+    e.mock.put_doc(&pc_doc(
+        vec![pc_todo(1, "A", "2026-10-01 10:00:00", vec![])],
+        vec![],
+    ));
+    pull::pull_once(&e.ctx).unwrap();
+    e.mock.with(|s| {
+        s.files.remove(SYNC_DATA_FILE);
+    });
+    let r = pull::pull_once(&e.ctx).unwrap();
+    assert!(!r.remote_exists);
+    assert!(r.repush_scheduled);
+    assert!(is_dirty(&e.db));
+    push::push_once(&e.ctx).unwrap();
+    assert_eq!(remote_ids(&e.mock.doc().unwrap()), vec![1]);
 }
 
 /// 读不懂的远端绝不覆盖；读失败的 GET 不记为基准。

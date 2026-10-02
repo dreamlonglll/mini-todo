@@ -22,14 +22,12 @@ pub(crate) mod mock_dav;
 mod scenario_tests;
 
 use std::io::{Read as _, Write as _};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use tokio::sync::{Mutex, Notify};
-use tracing::warn;
 
 use crate::config::Config;
 use crate::db::Db;
@@ -60,9 +58,6 @@ pub struct SyncCtx {
     /// 图片镜像 worker 的唤醒信号（pull 拿到新文档后触发）。`Notify` 会保留一个
     /// 许可，worker 还没开始等待时发出的通知也不会丢。
     mirror_wakeup: Notify,
-    /// 服务端被证实错误处理 `If-Match`（远端没变却回 412）后，本进程不再用
-    /// `If-Match`，退回 `If-Unmodified-Since`。
-    if_match_unreliable: AtomicBool,
 }
 
 impl SyncCtx {
@@ -73,7 +68,6 @@ impl SyncCtx {
             lock: Arc::new(Mutex::new(())),
             dav: OnceLock::new(),
             mirror_wakeup: Notify::new(),
-            if_match_unreliable: AtomicBool::new(false),
         })
     }
 
@@ -86,6 +80,7 @@ impl SyncCtx {
             &self.cfg.webdav_url,
             &self.cfg.webdav_username,
             &self.cfg.webdav_password,
+            &self.cfg.webdav_ca_certs,
         )?;
         // 并发初始化时只有一个能 set 成功，另一个直接丢弃（阻塞上下文里 drop 安全）
         let _ = self.dav.set(client);
@@ -119,19 +114,6 @@ impl SyncCtx {
 
     pub(crate) async fn mirror_requested(&self) {
         self.mirror_wakeup.notified().await;
-    }
-
-    pub(crate) fn if_match_unreliable(&self) -> bool {
-        self.if_match_unreliable.load(Ordering::Relaxed)
-    }
-
-    pub(crate) fn mark_if_match_unreliable(&self) {
-        if !self.if_match_unreliable.swap(true, Ordering::Relaxed) {
-            warn!(
-                target: "minitodo_cloud::push",
-                "WebDAV 服务端对未变化的文件拒绝了 If-Match（412），本进程改用 If-Unmodified-Since"
-            );
-        }
     }
 }
 

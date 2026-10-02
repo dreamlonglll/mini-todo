@@ -242,25 +242,45 @@ async fn create_todo_minimal_succeeds_with_defaults() {
     );
 }
 
+/// K6 别名：priority → color、dueDate → endTime（仅日期 → 23:59:00）、notes → description；
+/// 响应里的 priority 是由 color 派生的，别名字段本身不入库。
 #[tokio::test]
-async fn create_todo_passes_through_user_fields() {
+async fn create_todo_maps_aliases_to_pc_fields() {
     let fx = fixture();
     let body = json!({
         "title": "with extras",
         "priority": "high",
-        "quadrant": 1,
-        "color": "#EF4444",
+        "quadrant": "urgent_important",
         "dueDate": "2026-05-20",
         "notes": "free text"
     });
     let (status, _, raw) = send(&fx.router, req(Method::POST, "/todos", Some(body))).await;
     assert_eq!(status, StatusCode::CREATED);
     let v = json_body(&raw);
+    assert_eq!(v["color"], "#EF4444");
     assert_eq!(v["priority"], "high");
     assert_eq!(v["quadrant"], 1);
-    assert_eq!(v["color"], "#EF4444");
-    assert_eq!(v["dueDate"], "2026-05-20");
-    assert_eq!(v["notes"], "free text");
+    assert_eq!(v["endTime"], "2026-05-20 23:59:00");
+    assert_eq!(v["description"], "free text");
+    assert!(v.get("dueDate").is_none() && v.get("notes").is_none());
+
+    let stored = stored_todo(&fx, &todo_id_path(&v));
+    assert!(
+        stored.get("priority").is_none(),
+        "派生字段不入库: {}",
+        stored
+    );
+    assert!(stored.get("seq").is_none());
+    assert_eq!(stored["color"], "#EF4444");
+
+    // 同时给了 color：以 color 为准，派生优先级随之变化
+    let v = create_todo(
+        &fx,
+        json!({"title": "c", "priority": "high", "color": "#3b82f6"}),
+    )
+    .await;
+    assert_eq!(v["color"], "#3B82F6");
+    assert!(v["priority"].is_null(), "自定义颜色的派生优先级为 null");
 }
 
 #[tokio::test]
@@ -338,6 +358,16 @@ async fn create_todo(fx: &Fixture, body: Value) -> Value {
 
 fn todo_id_path(v: &Value) -> String {
     v["id"].as_i64().expect("id is number").to_string()
+}
+
+/// 缓存里实际存的 data_json。
+fn stored_todo(fx: &Fixture, id: &str) -> Value {
+    let row = fx
+        .state
+        .db
+        .with_conn(|c| repo::get_todo(c, id).unwrap())
+        .expect("row exists");
+    serde_json::from_str(&row.data_json).unwrap()
 }
 
 #[tokio::test]
@@ -670,7 +700,7 @@ async fn patch_todo_merges_fields_and_updates_updated_at() {
     let fx = fixture();
     let t = create_todo(
         &fx,
-        json!({"title": "old", "priority": "low", "color": "#000000"}),
+        json!({"title": "old", "priority": "low", "description": "kept", "color": "#000000"}),
     )
     .await;
     let id = todo_id_path(&t);
@@ -684,16 +714,17 @@ async fn patch_todo_merges_fields_and_updates_updated_at() {
         req(
             Method::PATCH,
             &format!("/todos/{}", id),
-            Some(json!({"title": "new", "priority": "high"})),
+            Some(json!({"title": "new", "completed": true})),
         ),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
     let v = json_body(&raw);
     assert_eq!(v["title"], "new");
-    assert_eq!(v["priority"], "high");
+    assert_eq!(v["completed"], true);
     // 未提及字段保留
     assert_eq!(v["color"], "#000000");
+    assert_eq!(v["description"], "kept");
     // updatedAt 必须前进
     assert!(
         v["updatedAt"].as_str().unwrap() > old_updated.as_str(),
@@ -726,20 +757,26 @@ async fn patch_todo_cannot_change_id() {
 #[tokio::test]
 async fn patch_todo_null_value_explicitly_writes_null() {
     let fx = fixture();
-    let t = create_todo(&fx, json!({"title": "x", "notes": "kept"})).await;
+    let t = create_todo(
+        &fx,
+        json!({"title": "x", "description": "kept", "endTime": "2026-05-20 10:00"}),
+    )
+    .await;
     let id = todo_id_path(&t);
     let (status, _, raw) = send(
         &fx.router,
         req(
             Method::PATCH,
             &format!("/todos/{}", id),
-            Some(json!({"notes": null})),
+            Some(json!({"description": null, "endTime": ""})),
         ),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
     let v = json_body(&raw);
-    assert!(v["notes"].is_null());
+    assert!(v["description"].is_null());
+    assert!(v["endTime"].is_null(), "空串清空时间字段");
+    assert!(v.as_object().unwrap().contains_key("description"));
 }
 
 #[tokio::test]
@@ -1638,4 +1675,811 @@ async fn error_body_shape_is_consistent() {
     let v = json_body(&body);
     assert!(v["error"].is_string());
     assert!(v["detail"].is_string());
+}
+
+// =============================================================================
+// K6：写入校验 / 别名 / 派生字段（E2）
+// =============================================================================
+
+fn mark_clean(fx: &Fixture) {
+    fx.state.db.with_conn(|c| {
+        let g = repo::get_dirty_generation(c).unwrap();
+        assert!(repo::clear_dirty_if_unchanged(c, g).unwrap());
+    });
+}
+
+fn is_dirty(fx: &Fixture) -> bool {
+    fx.state.db.with_conn(|c| repo::is_dirty(c).unwrap())
+}
+
+#[tokio::test]
+async fn unknown_fields_are_rejected_with_field_lists() {
+    let fx = fixture();
+    let (status, _, body) = send(
+        &fx.router,
+        req(
+            Method::POST,
+            "/todos",
+            Some(json!({"title": "x", "tags": ["a"], "dueDat": "2026-05-20"})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let v = json_body(&body);
+    assert_eq!(v["error"], "bad_request");
+    let detail = v["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("unknown field(s): dueDat, tags"),
+        "{}",
+        detail
+    );
+    assert!(detail.contains("allowed:"), "{}", detail);
+    assert_eq!(v["unknownFields"], json!(["dueDat", "tags"]));
+    let allowed: Vec<&str> = v["allowedFields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a.as_str().unwrap())
+        .collect();
+    for f in ["title", "endTime", "color", "dueDate", "priority", "notes"] {
+        assert!(allowed.contains(&f), "{} missing from {:?}", f, allowed);
+    }
+    let (_, _, raw) = send(&fx.router, req(Method::GET, "/todos", None)).await;
+    assert_eq!(json_body(&raw), json!([]), "被拒绝的请求不落库");
+
+    let t = create_todo(&fx, json!({"title": "keep"})).await;
+    let (status, _, _) = send(
+        &fx.router,
+        req(
+            Method::PATCH,
+            &format!("/todos/{}", todo_id_path(&t)),
+            Some(json!({"title": "changed", "foo": 1})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(stored_todo(&fx, &todo_id_path(&t))["title"], "keep");
+}
+
+#[tokio::test]
+async fn type_errors_name_every_bad_field() {
+    let fx = fixture();
+    let t = create_todo(&fx, json!({"title": "x"})).await;
+    let id = todo_id_path(&t);
+    mark_clean(&fx);
+    let (status, _, body) = send(
+        &fx.router,
+        req(
+            Method::PATCH,
+            &format!("/todos/{}", id),
+            Some(json!({"quadrant": "soon", "color": null, "completed": "yes", "notifyAt": "tomorrow"})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let v = json_body(&body);
+    let invalid = v["invalidFields"].as_object().unwrap();
+    let mut keys: Vec<&String> = invalid.keys().collect();
+    keys.sort();
+    assert_eq!(keys, vec!["color", "completed", "notifyAt", "quadrant"]);
+    assert!(invalid["notifyAt"]
+        .as_str()
+        .unwrap()
+        .contains("YYYY-MM-DD HH:MM:SS"));
+    assert!(!is_dirty(&fx), "失败的写入不标脏");
+    assert_eq!(stored_todo(&fx, &id), {
+        let mut s = t.clone();
+        let o = s.as_object_mut().unwrap();
+        o.remove("priority");
+        o.remove("seq");
+        s
+    });
+}
+
+#[tokio::test]
+async fn malformed_json_bodies_get_json_errors() {
+    let fx = fixture();
+    let r = Request::builder()
+        .method(Method::POST)
+        .uri("/todos")
+        .header(header::AUTHORIZATION, bearer())
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from("{not json"))
+        .unwrap();
+    let (status, headers, body) = send(&fx.router, r).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        headers.get(header::CONTENT_TYPE).unwrap(),
+        "application/json"
+    );
+    assert_eq!(json_body(&body)["error"], "bad_request");
+
+    let r = Request::builder()
+        .method(Method::POST)
+        .uri("/todos")
+        .header(header::AUTHORIZATION, bearer())
+        .body(Body::from(r#"{"title":"x"}"#))
+        .unwrap();
+    let (status, _, body) = send(&fx.router, r).await;
+    assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    assert_eq!(json_body(&body)["error"], "unsupported_media_type");
+}
+
+/// 客户端把读到的对象（含 id / seq / 派生 priority / subtasks 等）改几个字段整包写回：可以。
+#[tokio::test]
+async fn read_modify_write_round_trip_is_accepted() {
+    let fx = fixture();
+    let t = create_todo(&fx, json!({"title": "x", "color": "#3B82F6"})).await;
+    let id = todo_id_path(&t);
+    let (_, _, raw) = send(
+        &fx.router,
+        req(Method::GET, &format!("/todos/{}", id), None),
+    )
+    .await;
+    let mut v = json_body(&raw);
+    assert!(v["priority"].is_null() && v["seq"] == 1 && v["subtasks"] == json!([]));
+    v["title"] = json!("renamed");
+    let (status, _, raw) = send(
+        &fx.router,
+        req(Method::PATCH, &format!("/todos/{}", id), Some(v)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&raw));
+    let after = json_body(&raw);
+    assert_eq!(after["title"], "renamed");
+    assert_eq!(after["id"], t["id"]);
+    assert_eq!(after["createdAt"], t["createdAt"]);
+    assert_eq!(after["color"], "#3B82F6");
+}
+
+/// 读出来只改 priority 再整包写回：对象里原样带着的 color 不能让这次修改被静默忽略。
+#[tokio::test]
+async fn read_modify_write_of_priority_alias_takes_effect() {
+    let fx = fixture();
+    let t = create_todo(&fx, json!({"title": "x"})).await;
+    let id = todo_id_path(&t);
+    let (_, _, raw) = send(
+        &fx.router,
+        req(Method::GET, &format!("/todos/{}", id), None),
+    )
+    .await;
+    let mut v = json_body(&raw);
+    assert_eq!(v["priority"], "low");
+    v["priority"] = json!("high");
+    v["dueDate"] = json!("2026-06-01");
+    let (status, _, raw) = send(
+        &fx.router,
+        req(Method::PATCH, &format!("/todos/{}", id), Some(v)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let after = json_body(&raw);
+    assert_eq!(after["color"], "#EF4444");
+    assert_eq!(after["priority"], "high");
+    assert_eq!(after["endTime"], "2026-06-01 23:59:00");
+}
+
+/// 补丁不改变任何内容（原样写回）→ 不刷新 updatedAt、不标脏：无意义的回写不能在 LWW 里
+/// 压过 PC 还没同步上来的编辑。
+#[tokio::test]
+async fn no_op_patch_does_not_bump_updated_at_or_mark_dirty() {
+    let fx = fixture();
+    let t = create_todo(&fx, json!({"title": "x", "endTime": "2026-05-20 10:00:00"})).await;
+    let id = todo_id_path(&t);
+    mark_clean(&fx);
+    let row_before = fx
+        .state
+        .db
+        .with_conn(|c| repo::get_todo(c, &id).unwrap().unwrap());
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let (status, _, raw) = send(
+        &fx.router,
+        req(
+            Method::PATCH,
+            &format!("/todos/{}", id),
+            Some(json!({"title": "x", "endTime": "2026-05-20T10:00", "priority": "low"})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json_body(&raw)["updatedAt"], t["updatedAt"]);
+    assert!(!is_dirty(&fx));
+    let row_after = fx
+        .state
+        .db
+        .with_conn(|c| repo::get_todo(c, &id).unwrap().unwrap());
+    assert_eq!(row_after.updated_at, row_before.updated_at);
+}
+
+#[tokio::test]
+async fn datetimes_are_normalized_and_notify_change_resets_notified() {
+    let fx = fixture();
+    let t = create_todo(
+        &fx,
+        json!({
+            "title": "x",
+            "startTime": "2026-05-20",
+            "endTime": "2026-05-20T18:30",
+            "notifyAt": "2026-05-20T01:00:00Z",
+            "notified": true
+        }),
+    )
+    .await;
+    assert_eq!(t["startTime"], "2026-05-20 00:00:00");
+    assert_eq!(t["endTime"], "2026-05-20 18:30:00");
+    assert_eq!(t["notifyAt"], "2026-05-20 09:00:00", "UTC → 配置时区墙钟");
+    assert_eq!(t["notified"], true);
+    let (_, _, raw) = send(
+        &fx.router,
+        req(
+            Method::PATCH,
+            &format!("/todos/{}", todo_id_path(&t)),
+            Some(json!({"notifyAt": "2026-05-21"})),
+        ),
+    )
+    .await;
+    let v = json_body(&raw);
+    assert_eq!(v["notifyAt"], "2026-05-21 09:00:00");
+    assert_eq!(v["notified"], false, "新的提醒时间要重新提醒（与 PC 一致）");
+}
+
+#[tokio::test]
+async fn subtask_writes_are_validated_and_parent_is_fixed() {
+    let fx = fixture();
+    let a = create_todo(&fx, json!({"title": "A"})).await;
+    let b = create_todo(&fx, json!({"title": "B"})).await;
+    let (a_id, b_id) = (todo_id_path(&a), todo_id_path(&b));
+    let (status, _, raw) = send(
+        &fx.router,
+        req(
+            Method::POST,
+            &format!("/todos/{}/subtasks", a_id),
+            Some(json!({"title": "s", "parentId": a["id"]})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let s = json_body(&raw);
+    let sid = s["id"].as_i64().unwrap().to_string();
+
+    for (body, field) in [
+        (json!({"parentId": b["id"]}), "parentId"),
+        (json!({"completed": "yes"}), "completed"),
+        (json!({"title": ""}), "title"),
+    ] {
+        let (status, _, raw) = send(
+            &fx.router,
+            req(Method::PATCH, &format!("/subtasks/{}", sid), Some(body)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            json_body(&raw)["invalidFields"].get(field).is_some(),
+            "{}",
+            field
+        );
+    }
+    let (status, _, raw) = send(
+        &fx.router,
+        req(
+            Method::PATCH,
+            &format!("/subtasks/{}", sid),
+            Some(json!({"done": true})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json_body(&raw)["unknownFields"], json!(["done"]));
+
+    // 同一个父待办原样写回可以
+    let (status, _, raw) = send(
+        &fx.router,
+        req(
+            Method::PATCH,
+            &format!("/subtasks/{}", sid),
+            Some(json!({"parentId": a["id"], "title": "s2"})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json_body(&raw)["parentId"], a["id"]);
+
+    // 在 A 下面创建却声称属于 B → 400
+    let (status, _, _) = send(
+        &fx.router,
+        req(
+            Method::POST,
+            &format!("/todos/{}/subtasks", a_id),
+            Some(json!({"title": "x", "parentId": b["id"]})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let row = fx
+        .state
+        .db
+        .with_conn(|c| repo::get_subtask(c, &sid).unwrap().unwrap());
+    assert_eq!(row.todo_id, a_id);
+    let _ = b_id;
+}
+
+#[tokio::test]
+async fn priority_is_derived_from_color_for_filters_and_sorting() {
+    let fx = fixture();
+    let _ = create_todo(&fx, json!({"title": "red", "priority": "high"})).await;
+    let _ = create_todo(&fx, json!({"title": "blue", "color": "#3B82F6"})).await;
+    let _ = create_todo(&fx, json!({"title": "green"})).await; // 默认 #10B981 → low
+                                                               // PC 来的记录：小写颜色、没有 priority 字段
+    let now = now_local_string(fx.state.config.timezone);
+    fx.state.db.with_conn(|c| {
+        repo::upsert_todo(
+            c,
+            "7",
+            r##"{"id":7,"title":"pc red","color":"#ef4444"}"##,
+            &now,
+        )
+        .unwrap()
+    });
+
+    let (_, _, raw) = send(&fx.router, req(Method::GET, "/todos?priority=HIGH", None)).await;
+    let mut titles: Vec<String> = json_body(&raw)
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| {
+            assert_eq!(t["priority"], "high");
+            t["title"].as_str().unwrap().to_string()
+        })
+        .collect();
+    titles.sort();
+    assert_eq!(titles, vec!["pc red", "red"]);
+
+    let (status, _, _) = send(&fx.router, req(Method::GET, "/todos?priority=urgent", None)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (_, _, raw) = send(&fx.router, req(Method::GET, "/todos?sort=-priority", None)).await;
+    let list = json_body(&raw);
+    let prios: Vec<Value> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["priority"].clone())
+        .collect();
+    assert_eq!(
+        prios,
+        vec![json!("high"), json!("high"), json!("low"), Value::Null]
+    );
+}
+
+#[tokio::test]
+async fn due_date_filters_accept_k1_and_date_only_is_inclusive() {
+    let fx = fixture();
+    let _ = create_todo(&fx, json!({"title": "a", "endTime": "2026-05-14 10:00"})).await;
+    let _ = create_todo(&fx, json!({"title": "b", "endTime": "2026-05-15 09:00"})).await;
+    let titles = |raw: &[u8]| -> Vec<String> {
+        json_body(raw)
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["title"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let (_, _, raw) = send(
+        &fx.router,
+        req(Method::GET, "/todos?dueDateBefore=2026-05-14", None),
+    )
+    .await;
+    assert_eq!(titles(&raw), vec!["a"], "仅日期的 dueDateBefore 包含当天");
+    let (_, _, raw) = send(
+        &fx.router,
+        req(Method::GET, "/todos?dueDateAfter=2026-05-15", None),
+    )
+    .await;
+    assert_eq!(titles(&raw), vec!["b"]);
+    let (_, _, raw) = send(
+        &fx.router,
+        req(Method::GET, "/todos?dueDateBefore=2026-05-14T12:00", None),
+    )
+    .await;
+    assert_eq!(titles(&raw), vec!["a"]);
+    let (status, _, _) = send(
+        &fx.router,
+        req(Method::GET, "/todos?dueDateBefore=next-week", None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _, _) = send(&fx.router, req(Method::GET, "/todos?startDate=today", None)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn list_with_subtasks_groups_each_todos_children() {
+    let fx = fixture();
+    let mut ids = Vec::new();
+    for i in 0..3 {
+        let t = create_todo(&fx, json!({"title": format!("t{}", i), "sortOrder": i})).await;
+        ids.push(todo_id_path(&t));
+    }
+    for (todo, title, order) in [(0, "a2", 2), (0, "a1", 1), (2, "c1", 0)] {
+        let (status, _, _) = send(
+            &fx.router,
+            req(
+                Method::POST,
+                &format!("/todos/{}/subtasks", ids[todo]),
+                Some(json!({"title": title, "sortOrder": order})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+    let (_, _, raw) = send(
+        &fx.router,
+        req(Method::GET, "/todos?withSubtasks=true&sort=sortOrder", None),
+    )
+    .await;
+    let v = json_body(&raw);
+    let names = |t: &Value| -> Vec<String> {
+        t["subtasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["title"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(names(&v[0]), vec!["a1", "a2"]);
+    assert!(names(&v[1]).is_empty());
+    assert_eq!(names(&v[2]), vec!["c1"]);
+    let (_, _, raw) = send(&fx.router, req(Method::GET, "/todos?sort=sortOrder", None)).await;
+    let v = json_body(&raw);
+    let counts: Vec<i64> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["subtaskCount"].as_i64().unwrap())
+        .collect();
+    assert_eq!(counts, vec![2, 0, 1]);
+}
+
+/// 旧版 API 写进缓存的记录：任何一次 PATCH 都会顺带按 K6 修好。
+#[tokio::test]
+async fn legacy_record_is_normalized_on_patch() {
+    let fx = fixture();
+    let now = now_local_string(fx.state.config.timezone);
+    fx.state.db.with_conn(|c| {
+        repo::upsert_todo(
+            c,
+            "42",
+            r##"{"id":42,"title":"ai","priority":"high","color":"#10B981","dueDate":"2026-05-20","notes":"n","quadrant":"urgent_important"}"##,
+            &now,
+        )
+        .unwrap()
+    });
+    let (status, _, raw) = send(
+        &fx.router,
+        req(Method::PATCH, "/todos/42", Some(json!({"completed": true}))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v = json_body(&raw);
+    assert_eq!(v["color"], "#EF4444");
+    assert_eq!(v["priority"], "high");
+    assert_eq!(v["endTime"], "2026-05-20 23:59:00");
+    assert_eq!(v["description"], "n");
+    assert_eq!(v["quadrant"], 1);
+    let stored = stored_todo(&fx, "42");
+    for gone in ["priority", "dueDate", "notes"] {
+        assert!(stored.get(gone).is_none(), "{} still stored", gone);
+    }
+}
+
+// =============================================================================
+// 错误不泄露内部细节（E2）
+// =============================================================================
+
+#[tokio::test]
+async fn storage_errors_return_generic_message() {
+    let fx = fixture();
+    fx.state
+        .db
+        .with_conn(|c| c.execute_batch("DROP TABLE todos"))
+        .unwrap();
+    let (status, _, body) = send(&fx.router, req(Method::GET, "/todos", None)).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let v = json_body(&body);
+    assert_eq!(v["error"], "internal");
+    let text = String::from_utf8_lossy(&body);
+    assert!(!text.contains("no such table"), "{}", text);
+    assert!(!text.contains("sqlite"), "{}", text);
+}
+
+#[tokio::test]
+async fn image_errors_do_not_leak_server_paths() {
+    let fx = fixture();
+    let images_dir = fx.state.config.images_dir.clone();
+    // 一个同名目录：读取会失败（不是 NotFound）
+    std::fs::create_dir_all(images_dir.join("broken.png")).unwrap();
+    let (status, _, body) = send(&fx.router, req(Method::GET, "/images/broken.png", None)).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let text = String::from_utf8_lossy(&body);
+    assert!(
+        !text.contains(&images_dir.display().to_string()),
+        "{}",
+        text
+    );
+    // K5 文件名规则
+    for bad in [".hidden.png", "a%20b.png", "-x.png"] {
+        let (status, _, _) = send(
+            &fx.router,
+            req(Method::GET, &format!("/images/{}", bad), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{}", bad);
+    }
+}
+
+/// `/sync*` 与 `/health` 里的同步错误：WebDAV 层面的照常给出，本地存储错误只说"本地存储错误"。
+#[tokio::test]
+async fn sync_errors_are_sanitized() {
+    use crate::sync::mock_dav::MockDav;
+    let mock = MockDav::start();
+    let fx = fixture_with_webdav(Some(&mock.base_url));
+    mock.put_doc(&json!({"version": "4.0", "todos": [], "tombstones": []}));
+    fx.state
+        .db
+        .with_conn(|c| c.execute_batch("DROP TABLE tombstones"))
+        .unwrap();
+    let (status, _, body) = send(&fx.router, req(Method::POST, "/sync/pull", None)).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let v = json_body(&body);
+    assert_eq!(v["error"], "sync_failed");
+    let detail = v["detail"].as_str().unwrap();
+    assert!(
+        detail.contains(crate::util::LOCAL_STORAGE_ERROR),
+        "{}",
+        detail
+    );
+    assert!(!detail.contains("no such table"), "{}", detail);
+
+    let (_, _, body) = send(&fx.router, req(Method::GET, "/health", None)).await;
+    let h = json_body(&body);
+    let last = h["lastPullError"].as_str().unwrap();
+    assert!(!last.contains("no such table"), "{}", last);
+}
+
+// =============================================================================
+// 访问日志（E2）
+// =============================================================================
+
+#[derive(Clone, Default)]
+struct LogBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBuf {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(b);
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn access_log_records_requests_but_never_credentials() {
+    let buf = LogBuf::default();
+    let writer = buf.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let fx = fixture();
+    // tracing 的 callsite 兴趣缓存是全局的：并行的其它测试线程可能在本订阅者装上之前
+    // 注册了同一批 callsite 并缓存为 never。先打一个请求确保注册完成，再强制重建缓存。
+    let _ = send(&fx.router, req(Method::GET, "/health", None)).await;
+    tracing::callsite::rebuild_interest_cache();
+    buf.0.lock().unwrap().clear();
+
+    let _ = send(&fx.router, req(Method::GET, "/todos?q=secret-search", None)).await;
+    let _ = send(&fx.router, req_no_auth(Method::GET, "/health")).await;
+    let log = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+    assert!(log.contains("path=/todos"), "{}", log);
+    assert!(log.contains("status=200"), "{}", log);
+    assert!(log.contains("status=401"), "未鉴权的请求也要记录: {}", log);
+    assert!(!log.contains(API_KEY), "{}", log);
+    assert!(
+        !log.to_ascii_lowercase().contains("authorization"),
+        "{}",
+        log
+    );
+    assert!(
+        !log.contains("secret-search"),
+        "query 不进访问日志: {}",
+        log
+    );
+}
+
+// =============================================================================
+// 跨端契约：云端写出的记录必须能被 PC 的强类型模型反序列化（K6）
+// =============================================================================
+
+/// 与 `pc/src-tauri/src/db/models.rs::Todo` 相同的 serde 约束（字段、类型、默认值）。
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+struct PcTodo {
+    id: i64,
+    title: String,
+    description: Option<String>,
+    #[serde(default = "pc_default_color")]
+    color: String,
+    #[serde(default = "pc_default_quadrant")]
+    quadrant: i32,
+    notify_at: Option<String>,
+    #[serde(default)]
+    notify_before: i32,
+    #[serde(default)]
+    notified: bool,
+    #[serde(default)]
+    completed: bool,
+    #[serde(default)]
+    sort_order: i32,
+    start_time: Option<String>,
+    end_time: Option<String>,
+    #[serde(default)]
+    created_at: String,
+    #[serde(default)]
+    updated_at: String,
+    #[serde(default)]
+    repeat_enabled: bool,
+    #[serde(default)]
+    repeat_type: Option<String>,
+    #[serde(default = "pc_default_repeat_interval")]
+    repeat_interval: i32,
+    #[serde(default)]
+    repeat_weekdays: Option<String>,
+    #[serde(default)]
+    repeat_month_day: Option<i32>,
+    #[serde(default)]
+    subtasks: Vec<PcSubTask>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+struct PcSubTask {
+    id: i64,
+    #[serde(default)]
+    parent_id: i64,
+    title: String,
+    content: Option<String>,
+    #[serde(default)]
+    completed: bool,
+    #[serde(default)]
+    sort_order: i32,
+    #[serde(default)]
+    created_at: String,
+    #[serde(default)]
+    updated_at: String,
+}
+
+fn pc_default_color() -> String {
+    "#F59E0B".into()
+}
+fn pc_default_quadrant() -> i32 {
+    4
+}
+fn pc_default_repeat_interval() -> i32 {
+    1
+}
+
+fn assert_canonical_time(v: &Option<String>, what: &str) {
+    if let Some(s) = v {
+        assert_eq!(s.len(), 19, "{} = {:?}", what, s);
+        assert_eq!(&s[10..11], " ", "{} = {:?}", what, s);
+    }
+}
+
+#[tokio::test]
+async fn pushed_records_deserialize_into_pc_model() {
+    use crate::sync::mock_dav::MockDav;
+    let mock = MockDav::start();
+    let fx = fixture_with_webdav(Some(&mock.base_url));
+
+    // 远端已有 PC 的数据；先 pull 一次
+    mock.put_doc(&json!({
+        "version": "4.0", "deviceId": "pc", "updatedAt": "2026-10-02T10:00:00+08:00",
+        "todos": [{"id": 1, "title": "from pc", "color": "#3B82F6", "quadrant": 2,
+                   "notifyAt": "2026-05-20T09:00", "createdAt": "2026-05-01 08:00:00",
+                   "updatedAt": "2026-05-01 08:00:00", "subtasks": []}],
+        "settings": {"isFixed": false, "windowPosition": null, "windowSize": null},
+        "images": [], "tombstones": []
+    }));
+    let (status, _, _) = send(&fx.router, req(Method::POST, "/sync/pull", None)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // 旧版 API 写进缓存的问题记录（在第一次成功 pull 之后才会被归一化，这里再拉一次触发）
+    let now = now_local_string(fx.state.config.timezone);
+    fx.state.db.with_conn(|c| {
+        repo::upsert_todo(
+            c,
+            "77",
+            r##"{"id":77,"title":"legacy","priority":"medium","color":null,"quadrant":"urgent_not_important","dueDate":"2026-06-01","completed":0,"sortOrder":"3"}"##,
+            &now,
+        )
+        .unwrap();
+        repo::upsert_subtask(c, "770", "77", r#"{"id":770,"parentId":5,"title":7,"completed":"true"}"#, &now)
+            .unwrap();
+        repo::delete_meta(c, repo::meta_keys::CACHE_NORMALIZED).unwrap();
+    });
+
+    // AI 通过 API 写入各种形态
+    let t = create_todo(
+        &fx,
+        json!({"title": "ai", "priority": "low", "dueDate": "2026-05-30", "notes": "n",
+               "repeatEnabled": true, "repeatType": "WEEKLY", "repeatWeekdays": [5, 1],
+               "notifyAt": "2026-05-25T07:30", "quadrant": "important_not_urgent"}),
+    )
+    .await;
+    let (status, _, _) = send(
+        &fx.router,
+        req(
+            Method::POST,
+            &format!("/todos/{}/subtasks", todo_id_path(&t)),
+            Some(json!({"title": "step", "content": "**md**"})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, _, body) = send(&fx.router, req(Method::POST, "/sync", None)).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+
+    let remote = mock.doc().expect("uploaded");
+    let todos = remote["todos"].as_array().unwrap();
+    assert_eq!(todos.len(), 3);
+    for raw in todos {
+        let t: PcTodo = serde_json::from_value(raw.clone())
+            .unwrap_or_else(|e| panic!("PC 无法反序列化 {}: {}", raw, e));
+        for (v, what) in [
+            (&t.notify_at, "notifyAt"),
+            (&t.start_time, "startTime"),
+            (&t.end_time, "endTime"),
+        ] {
+            assert_canonical_time(v, what);
+        }
+        assert_canonical_time(&Some(t.updated_at.clone()), "updatedAt");
+        for s in &t.subtasks {
+            assert_eq!(s.parent_id, t.id);
+            assert_canonical_time(&Some(s.updated_at.clone()), "subtask.updatedAt");
+        }
+        for derived in ["priority", "seq", "subtaskCount", "dueDate", "notes"] {
+            assert!(
+                raw.get(derived).is_none(),
+                "{} leaked into sync-data: {}",
+                derived,
+                raw
+            );
+        }
+    }
+    let legacy = todos.iter().find(|t| t["id"] == 77).unwrap();
+    assert_eq!(legacy["color"], "#F59E0B", "medium");
+    assert_eq!(legacy["quadrant"], 3);
+    assert_eq!(legacy["endTime"], "2026-06-01 23:59:00");
+    assert_eq!(legacy["subtasks"][0]["title"], "7");
+    let ai = todos.iter().find(|x| x["id"] == t["id"]).unwrap();
+    assert_eq!(ai["color"], "#10B981");
+    assert_eq!(ai["repeatType"], "weekly");
+    assert_eq!(ai["repeatWeekdays"], "1,5");
+    assert_eq!(ai["quadrant"], 2);
+    let pc = todos.iter().find(|x| x["id"] == 1).unwrap();
+    assert_eq!(
+        pc["notifyAt"], "2026-05-20 09:00:00",
+        "合并进来的时间统一成规范格式"
+    );
+    assert_eq!(
+        pc["updatedAt"], "2026-05-01 08:00:00",
+        "仅格式修正不刷新 updatedAt"
+    );
 }

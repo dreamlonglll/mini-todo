@@ -2,34 +2,44 @@
 //!
 //! 流程（整段在同步锁内、阻塞线程里执行）：
 //! 1. **先传图片**（`meta.dirty_images` 队列），失败的留在队列里下轮重试
-//! 2. sync-data（仅当 `meta.dirty`）：
-//!    - 写前**总是**先条件 GET 并按 K3 合并进本地 SQLite（与 pull 同一实现，
-//!      合并与记录基准同一事务）。服务端忽略条件头（nginx dav / Caddy webdav）
-//!      时，丢更新窗口也只剩 GET→PUT 的几秒
+//! 2. sync-data（仅当 `meta.dirty`，或刚传了新图片）：
+//!    - 写前**总是**先条件 GET（只用 `If-None-Match`）并按 K3 合并进本地 SQLite
+//!      （与 pull 同一实现，合并与记录基准同一事务）。服务端忽略前置条件
+//!      （nginx dav / Caddy webdav）时，丢更新窗口也只剩 GET→PUT 的几秒
 //!    - 用"合并后的本地状态 + 基准信封"构造文档：未知顶层键、`settings`、
 //!      `settingsUpdatedAt` 原样保留
-//!    - 条件 PUT：基准是强 ETag 才用 `If-Match`（Apache 一秒内的弱 ETag 做
-//!      `If-Match` 必然 412）；否则用 `If-Unmodified-Since`；远端不存在不带条件
-//!    - 412 → 无条件重新 GET → 合并 → 重试（≤3 次）；404/409 → MKCOL 后重试一次
-//!    - 成功 → 基准取 PUT 响应的 ETag/Last-Modified，都没有（Apache）就用一次
-//!      `PROPFIND Depth: 0`，**不整包 GET**；本地缓存此时已经等于刚上传的文档
-//!      （合并结果先落库再导出），不会出现"基准指向缓存里没有的内容"（审查 A4）
+//!    - 条件 PUT：知道基准 ETag 就发 `If-Match: "<opaque>"`（去掉 `W/`），否则不带前置
+//!      条件。**从不发 `If-Unmodified-Since`**：Apache 用文件的亚秒级 mtime 和秒级日期
+//!      比较，拿文件自己的 Last-Modified 也会 412（e2e 实测）
+//!    - 412 → 至少等 1.1 秒（Apache 写入后约 1 秒内 ETag 是弱的，这一秒内 `If-Match`
+//!      必然 412）→ 无条件重新 GET → 合并 → 重试（共 ≤3 次）；404/409 → MKCOL 后重试一次
+//!    - 成功 → 基准 ETag 依次取自：PUT 响应 → `HEAD`（nginx 只在 HEAD/GET 给 ETag）→
+//!      `PROPFIND Depth: 0` 的 getetag；Last-Modified 一并记录但不用于前置条件。
+//!      **不整包 GET**；本地缓存此时已经等于刚上传的文档（合并结果先落库再导出），
+//!      不会出现"基准指向缓存里没有的内容"（审查 A4）
 //!    - dirty 只在 `dirty_generation` 没变时清除（推送窗口期内的新写入留给下一轮）
 
 use std::collections::HashSet;
+use std::time::Duration;
 
-use tracing::{info, warn};
+use anyhow::Context as _;
+use tracing::{debug, info, warn};
 
 use crate::db::repo::{self, meta_keys as mk};
 use crate::sync::doc::{self, envelope_images, TOMBSTONE_RETENTION_DAYS};
 use crate::sync::images::{self, ImagePushReport};
 use crate::sync::pull::{fetch_and_merge, load_base, load_envelope, store_base};
-use crate::sync::webdav::{is_strong_etag, Precondition, PutOutcome, Validators, WebDavClient};
+use crate::sync::webdav::{etag_for_if_match, Precondition, PutOutcome, Validators, WebDavClient};
 use crate::sync::{gzip, SyncCtx, REMOTE_DIR, SYNC_DATA_FILE};
 use crate::time::{days_ago_local_string, now_local_string};
+use crate::util::public_error_message;
 
 /// sync-data PUT 最多尝试次数（412 重试上限）。
 pub const MAX_PUT_ATTEMPTS: u32 = 3;
+
+/// 412 之后、下一次尝试之前至少等待的时长：Apache 写入后约 1 秒内只给弱 ETag，
+/// 这一秒内 `If-Match`（强比较）必然 412；e2e 实测 1.1 秒后同一个值可以匹配。
+pub const PRECONDITION_RETRY_DELAY: Duration = Duration::from_millis(1100);
 
 /// 一次 push 的结果。
 #[derive(Debug, Default)]
@@ -46,35 +56,21 @@ pub struct PushReport {
 /// 选择 PUT 的前置条件（K4）。
 ///
 /// - 远端不存在 → 不带条件
-/// - 基准 ETag 是强 ETag（且服务端没被证实错误处理 If-Match）→ `If-Match`
-/// - 否则有 Last-Modified → `If-Unmodified-Since`
-/// - 什么都没有 → 不带条件
-pub fn select_precondition(
-    remote_exists: bool,
-    base: &Validators,
-    if_match_allowed: bool,
-) -> Precondition<'_> {
+/// - 知道基准 ETag（强弱都行）→ `If-Match: "<opaque>"`（去掉 `W/`）
+/// - 否则 → 不带条件（**不**退回 `If-Unmodified-Since`，见模块注释）
+pub fn select_precondition(remote_exists: bool, base: &Validators) -> Precondition<'_> {
     if !remote_exists {
         return Precondition::Unconditional;
     }
-    if if_match_allowed {
-        if let Some(etag) = base.etag.as_deref().filter(|e| is_strong_etag(e)) {
-            return Precondition::IfMatch(etag.trim());
-        }
-    }
-    match base
-        .last_modified
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        Some(lm) => Precondition::IfUnmodifiedSince(lm),
+    match base.etag.as_deref().and_then(etag_for_if_match) {
+        Some(tag) => Precondition::IfMatch(tag),
         None => Precondition::Unconditional,
     }
 }
 
 /// 单次 push。失败时把错误写进 `meta.last_push_error`，成功（含无事可做）时清除它
-/// ——`/health` 展示的是"当前还没解决的推送问题"。
+/// ——`/health` 展示的是"当前还没解决的推送问题"。写进 meta 的是脱敏后的消息
+/// （本地存储错误只留上下文，详情只进日志，见 `util::public_error_message`）。
 /// 只能在阻塞上下文、同步锁内调用（见 `SyncCtx::run_locked`）。
 pub fn push_once(ctx: &SyncCtx) -> anyhow::Result<PushReport> {
     let res = push_inner(ctx);
@@ -83,7 +79,7 @@ pub fn push_once(ctx: &SyncCtx) -> anyhow::Result<PushReport> {
             .db
             .with_conn(|c| repo::delete_meta(c, mk::LAST_PUSH_ERROR)),
         Err(e) => {
-            let msg = format!("{:#}", e);
+            let msg = public_error_message(e);
             ctx.db
                 .with_conn(|c| repo::set_meta(c, mk::LAST_PUSH_ERROR, &msg))
         }
@@ -108,7 +104,7 @@ fn push_inner(ctx: &SyncCtx) -> anyhow::Result<PushReport> {
         .with_conn(|c| -> rusqlite::Result<(bool, i64)> {
             Ok((repo::is_dirty(c)?, repo::get_dirty_generation(c)?))
         })
-        .map_err(|e| anyhow::anyhow!("读 meta.dirty 失败: {}", e))?;
+        .context("读 meta.dirty 失败")?;
     if dirty || uploaded_any {
         push_sync_data(ctx, g0, &mut report)?;
     }
@@ -130,21 +126,12 @@ fn push_sync_data(ctx: &SyncCtx, g0: i64, report: &mut PushReport) -> anyhow::Re
     let dav = ctx.dav()?;
     let tz = ctx.cfg.timezone;
     let mut force_full = false;
-    let mut sent_if_match: Option<String> = None;
 
     for attempt in 1..=MAX_PUT_ATTEMPTS {
         report.attempts = attempt;
 
-        // 1) 写前先（条件）GET 并合并
+        // 1) 写前先 GET 并合并（412 之后无条件 GET：保证拿到最新内容与校验器）
         let fetched = fetch_and_merge(ctx, force_full)?;
-        if let (Some(sent), Some(seen)) =
-            (sent_if_match.as_deref(), fetched.fetched_etag.as_deref())
-        {
-            if sent == seen.trim() {
-                // 远端根本没变，服务端却拒绝了 If-Match：它对 If-Match 的处理不可靠
-                ctx.mark_if_match_unreliable();
-            }
-        }
 
         // 2) 合并后的本地状态 + 基准信封 → 要上传的文档
         let cutoff = days_ago_local_string(tz, TOMBSTONE_RETENTION_DAYS);
@@ -165,15 +152,11 @@ fn push_sync_data(ctx: &SyncCtx, g0: i64, report: &mut PushReport) -> anyhow::Re
                 let doc = doc::build_outgoing_doc(c, &envelope, images, tz, &cutoff)?;
                 Ok((base, doc))
             })
-            .map_err(|e| anyhow::anyhow!("构造 sync-data 失败: {}", e))?;
+            .context("构造 sync-data 失败")?;
         let payload = gzip(&serde_json::to_vec(&doc)?)?;
 
         // 3) 条件 PUT
-        let pre = select_precondition(fetched.remote_exists, &base, !ctx.if_match_unreliable());
-        sent_if_match = match pre {
-            Precondition::IfMatch(etag) => Some(etag.to_string()),
-            _ => None,
-        };
+        let pre = select_precondition(fetched.remote_exists, &base);
         let mut outcome = dav.put(SYNC_DATA_FILE, &payload, "application/gzip", pre)?;
         if let PutOutcome::ParentMissing(status) = outcome {
             info!(
@@ -203,7 +186,7 @@ fn push_sync_data(ctx: &SyncCtx, g0: i64, report: &mut PushReport) -> anyhow::Re
                         tx.commit()?;
                         Ok(cleared)
                     })
-                    .map_err(|e| anyhow::anyhow!("PUT 成功后写 meta 失败: {}", e))?;
+                    .context("PUT 成功后写 meta 失败")?;
                 report.pushed = true;
                 report.dirty_cleared = cleared;
                 info!(
@@ -219,10 +202,14 @@ fn push_sync_data(ctx: &SyncCtx, g0: i64, report: &mut PushReport) -> anyhow::Re
             PutOutcome::PreconditionFailed => {
                 info!(
                     target: "minitodo_cloud::push",
-                    "PUT sync-data 412（第 {} 次），远端已被其它写入方修改，重新拉取合并后重试",
-                    attempt
+                    "PUT sync-data 412（第 {} 次）：远端已被其它写入方修改，或 ETag 仍处于弱 ETag 窗口；{:?} 后重新拉取合并再试",
+                    attempt,
+                    PRECONDITION_RETRY_DELAY
                 );
                 force_full = true;
+                if attempt < MAX_PUT_ATTEMPTS {
+                    std::thread::sleep(PRECONDITION_RETRY_DELAY);
+                }
             }
             PutOutcome::ParentMissing(status) => {
                 anyhow::bail!(
@@ -235,31 +222,59 @@ fn push_sync_data(ctx: &SyncCtx, g0: i64, report: &mut PushReport) -> anyhow::Re
     anyhow::bail!("多次重试后仍冲突（连续 {} 次 412）", MAX_PUT_ATTEMPTS)
 }
 
-/// PUT 响应里的校验器是否足以做下一次条件 PUT：有强 ETag（可用 If-Match）或有
-/// Last-Modified（可用 If-Unmodified-Since）。只有弱 ETag 或什么都没有（Apache）时
-/// 需要再 PROPFIND 一次。
-fn put_validators_sufficient(v: &Validators) -> bool {
-    v.etag.as_deref().is_some_and(is_strong_etag) || v.last_modified.is_some()
+/// 长度对不上说明远端在 PUT 之后又被别人覆盖了：不能把那个没合并过的版本记为基准。
+fn length_matches(reported: Option<u64>, payload_len: usize) -> bool {
+    reported.is_none_or(|n| n == payload_len as u64)
 }
 
-/// PUT 成功后确定新的基准校验器：优先用 PUT 响应头；不够用时（Apache 什么都不给）
-/// 用一次 `PROPFIND Depth: 0` 补齐，**不整包 GET**。PROPFIND 报告的长度与刚上传的
-/// 不一致说明远端已被别人覆盖，此时不记录基准（下次全量拉取合并）——宁可多一次 GET
-/// 也不把没合并过的版本当作基准。
+/// PUT 成功后确定新的基准校验器（K4）：
+/// 1. PUT 响应里有 ETag → 直接用
+/// 2. 否则 `HEAD`（nginx：PUT 响应与 PROPFIND 都没有 ETag，只有 HEAD / GET 有）
+/// 3. 再不行 `PROPFIND Depth: 0` 的 getetag（Apache 的 PROPFIND 给强 ETag）
+///
+/// Last-Modified 一并记录（只作信息，不用于前置条件）。**不整包 GET**。HEAD / PROPFIND
+/// 报告的长度与刚上传的不一致说明远端已被别人覆盖，此时不记录基准（下次全量拉取合并）
+/// ——宁可多一次 GET 也不把没合并过的版本当作基准。
 fn validators_after_put(
     dav: &WebDavClient,
     from_put: Validators,
     payload_len: usize,
 ) -> Validators {
-    if put_validators_sufficient(&from_put) {
+    if from_put.etag.is_some() {
         return from_put;
+    }
+    let mut last_modified = from_put.last_modified;
+    match dav.head(SYNC_DATA_FILE) {
+        Ok(Some(info)) => {
+            if !length_matches(info.content_length, payload_len) {
+                warn!(
+                    target: "minitodo_cloud::push",
+                    "HEAD 返回的长度 {:?} 与刚上传的 {} 不一致，远端可能已被覆盖；不记录基准",
+                    info.content_length,
+                    payload_len
+                );
+                return Validators::default();
+            }
+            last_modified = info.validators.last_modified.or(last_modified);
+            if info.validators.etag.is_some() {
+                return Validators {
+                    etag: info.validators.etag,
+                    last_modified,
+                };
+            }
+            debug!(target: "minitodo_cloud::push", "HEAD 没有 ETag，改用 PROPFIND Depth: 0");
+        }
+        Ok(None) => {
+            warn!(target: "minitodo_cloud::push", "PUT 成功后 HEAD 返回 404；不记录基准");
+            return Validators::default();
+        }
+        Err(e) => {
+            debug!(target: "minitodo_cloud::push", "PUT 成功后 HEAD 失败，改用 PROPFIND: {:#}", e);
+        }
     }
     match dav.propfind_meta(SYNC_DATA_FILE) {
         Ok(Some(entry)) => {
-            if entry
-                .content_length
-                .is_some_and(|n| n != payload_len as u64)
-            {
+            if !length_matches(entry.content_length, payload_len) {
                 warn!(
                     target: "minitodo_cloud::push",
                     "PROPFIND 返回的长度 {:?} 与刚上传的 {} 不一致，远端可能已被覆盖；不记录基准",
@@ -269,8 +284,8 @@ fn validators_after_put(
                 return Validators::default();
             }
             Validators {
-                etag: entry.etag.or(from_put.etag),
-                last_modified: entry.last_modified.or(from_put.last_modified),
+                etag: entry.etag,
+                last_modified: entry.last_modified.or(last_modified),
             }
         }
         Ok(None) => {
@@ -280,9 +295,12 @@ fn validators_after_put(
         Err(e) => {
             warn!(
                 target: "minitodo_cloud::push",
-                "PUT 成功后 PROPFIND 失败，不记录基准（下次全量拉取）: {:#}", e
+                "PUT 成功后 HEAD / PROPFIND 都拿不到 ETag（下次全量拉取）: {:#}", e
             );
-            Validators::default()
+            Validators {
+                etag: None,
+                last_modified,
+            }
         }
     }
 }
@@ -307,65 +325,46 @@ mod tests {
     #[test]
     fn precondition_none_when_remote_absent() {
         assert_eq!(
-            select_precondition(false, &v(Some("\"a\""), Some(LM)), true),
+            select_precondition(false, &v(Some("\"a\""), Some(LM))),
             Precondition::Unconditional
         );
     }
 
     #[test]
-    fn precondition_prefers_if_match_for_strong_etag() {
+    fn precondition_is_if_match_for_any_known_etag() {
         assert_eq!(
-            select_precondition(true, &v(Some("\"a\""), Some(LM)), true),
+            select_precondition(true, &v(Some("\"a\""), Some(LM))),
             Precondition::IfMatch("\"a\"")
         );
+        // Apache 一秒内的弱 ETag：去掉 W/ 再发（这一秒内 412，等 1.1 秒后重试即可匹配）
         assert_eq!(
-            select_precondition(true, &v(Some("\"a\""), None), true),
-            Precondition::IfMatch("\"a\"")
+            select_precondition(true, &v(Some("W/\"3-65cdc\""), Some(LM))),
+            Precondition::IfMatch("\"3-65cdc\"")
         );
     }
 
-    /// Apache 一秒内刚修改的文件给弱 ETag；弱 ETag 做 If-Match 必然 412，必须退回 LM。
+    /// 只有 Last-Modified（或什么都没有）时不带前置条件：绝不发 If-Unmodified-Since。
     #[test]
-    fn precondition_falls_back_to_lm_for_weak_etag() {
+    fn precondition_never_falls_back_to_last_modified() {
         assert_eq!(
-            select_precondition(true, &v(Some("W/\"3-65cdc\""), Some(LM)), true),
-            Precondition::IfUnmodifiedSince(LM)
+            select_precondition(true, &v(None, Some(LM))),
+            Precondition::Unconditional
         );
         assert_eq!(
-            select_precondition(true, &v(Some("W/\"3-65cdc\""), None), true),
+            select_precondition(true, &v(Some("  "), Some(LM))),
+            Precondition::Unconditional
+        );
+        assert_eq!(
+            select_precondition(true, &v(None, None)),
             Precondition::Unconditional
         );
     }
 
     #[test]
-    fn put_response_validators_sufficiency() {
-        assert!(put_validators_sufficient(&v(Some("\"a\""), None)));
-        assert!(put_validators_sufficient(&v(None, Some(LM))));
-        assert!(put_validators_sufficient(&v(Some("W/\"a\""), Some(LM))));
-        // 只有弱 ETag：下一次 PUT 既不能 If-Match 也没有 LM，必须 PROPFIND 补齐
-        assert!(!put_validators_sufficient(&v(Some("W/\"a\""), None)));
-        // Apache：PUT 响应什么都没有
-        assert!(!put_validators_sufficient(&v(None, None)));
-    }
-
-    #[test]
-    fn precondition_uses_lm_without_etag_or_when_if_match_unreliable() {
-        assert_eq!(
-            select_precondition(true, &v(None, Some(LM)), true),
-            Precondition::IfUnmodifiedSince(LM)
-        );
-        assert_eq!(
-            select_precondition(true, &v(Some("\"a\""), Some(LM)), false),
-            Precondition::IfUnmodifiedSince(LM)
-        );
-        assert_eq!(
-            select_precondition(true, &v(None, Some("  ")), true),
-            Precondition::Unconditional
-        );
-        assert_eq!(
-            select_precondition(true, &v(None, None), true),
-            Precondition::Unconditional
-        );
+    fn length_check_tolerates_missing_length() {
+        assert!(length_matches(None, 10));
+        assert!(length_matches(Some(10), 10));
+        assert!(!length_matches(Some(11), 10));
     }
 
     fn fresh_db() -> (Db, TempDir) {

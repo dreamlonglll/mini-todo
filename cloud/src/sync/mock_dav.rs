@@ -8,10 +8,15 @@
 //!   前缀 + 绝对 URL、默认命名空间）
 //! - MKCOL：已存在 405、父目录缺失 409
 //!
-//! 可模拟的服务端行为：
-//! - Apache：修改后 `weak_etag_window` 内给弱 ETag；`put_returns_validators = false`
-//!   时 PUT 响应不带 ETag / Last-Modified
-//! - nginx dav / Caddy webdav：`ignore_preconditions = true` 时 PUT 忽略前置条件
+//! 可模拟的服务端行为（`MockDav::start_apache` / `start_nginx` 按 e2e 实测预设）：
+//! - Apache mod_dav：修改后 `weak_etag_window`（1 秒）内 GET / HEAD 给弱 ETag，
+//!   PROPFIND 的 getetag 给强 ETag；PUT 响应不带校验器；`If-Unmodified-Since` 拿文件的
+//!   亚秒级 mtime 与秒级日期比较（`ius_subsecond`），哪怕日期就是文件自己的
+//!   Last-Modified 也 412
+//! - nginx dav：PUT 忽略前置条件；PUT 响应不带校验器；PROPFIND 没有 getetag；ETag 只在
+//!   HEAD / GET 上，形如 `"<mtime秒>-<长度>"`（`EtagStyle::MtimeSecondsSize`，秒级精度）；
+//!   `If-Modified-Since` 按整秒比较
+//! - 完全不给 ETag 的服务端（`etags_enabled = false`）
 //! - 故障注入（方法 + 路径片段 → 状态码）、请求延迟、"下一次 PUT sync-data 之前"的
 //!   并发写入钩子
 
@@ -40,6 +45,26 @@ pub struct MockFile {
     pub modified: SystemTime,
     /// 真实修改时刻（判断弱 ETag 窗口用）。
     pub modified_at: Instant,
+}
+
+/// PROPFIND 里 getetag 的输出方式。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PropfindEtag {
+    /// 与 GET / HEAD 相同（可能是弱 ETag）。
+    Current,
+    /// 总是强 ETag（Apache）。
+    Strong,
+    /// 不输出 getetag（nginx）。
+    Omit,
+}
+
+/// ETag 的生成方式。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EtagStyle {
+    /// 每次写入一个新版本号（唯一）。
+    Version,
+    /// nginx：`"<mtime 秒，十六进制>-<长度，十六进制>"`，同一秒内写入且长度相同 → 同一个 ETag。
+    MtimeSecondsSize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,6 +103,14 @@ pub struct MockState {
     pub ignore_preconditions: bool,
     pub weak_etag_window: Duration,
     pub put_returns_validators: bool,
+    /// Apache：`If-Unmodified-Since` 与文件的亚秒级 mtime 比较。
+    pub ius_subsecond: bool,
+    pub propfind_etag: PropfindEtag,
+    pub etag_style: EtagStyle,
+    /// `false`：任何响应都不带 ETag（只有 Last-Modified 的服务端）。
+    pub etags_enabled: bool,
+    /// `false`：HEAD 响应不带 ETag（GET 照常带）。
+    pub head_etag: bool,
     pub xml_style: XmlStyle,
     pub log: Vec<LoggedRequest>,
     /// 收到请求时（注入延迟之前）记录的 (方法, 路径)，测试用来等"请求已经开始"。
@@ -87,6 +120,8 @@ pub struct MockState {
     pub delays: Vec<(String, String, Duration)>,
     /// 下一次 PUT sync-data 之前执行一次（模拟另一个写入方抢先写入）。
     pub before_put: Option<Hook>,
+    /// 下一次成功 PUT sync-data 之后执行一次（模拟另一个写入方紧接着覆盖）。
+    pub after_put: Option<Hook>,
 }
 
 impl Default for MockState {
@@ -98,12 +133,18 @@ impl Default for MockState {
             ignore_preconditions: false,
             weak_etag_window: Duration::ZERO,
             put_returns_validators: true,
+            ius_subsecond: false,
+            propfind_etag: PropfindEtag::Current,
+            etag_style: EtagStyle::Version,
+            etags_enabled: true,
+            head_etag: true,
             xml_style: XmlStyle::NginxMultiLine,
             log: Vec::new(),
             started: Vec::new(),
             faults: Vec::new(),
             delays: Vec::new(),
             before_put: None,
+            after_put: None,
         }
     }
 }
@@ -200,16 +241,41 @@ impl MockState {
         self.write(SYNC_DATA_FILE, gzip(doc.to_string().as_bytes()).unwrap());
     }
 
+    /// 不带弱标记的 ETag。
+    fn strong_etag(&self, f: &MockFile) -> String {
+        match self.etag_style {
+            EtagStyle::Version => format!("\"v{}\"", f.version),
+            EtagStyle::MtimeSecondsSize => {
+                format!("\"{:x}-{:x}\"", epoch_secs(f.modified), f.body.len())
+            }
+        }
+    }
+
+    /// GET / HEAD 给出的 ETag：修改后 `weak_etag_window` 内是弱 ETag。
     pub fn etag(&self, f: &MockFile) -> String {
+        let strong = self.strong_etag(f);
         if f.modified_at.elapsed() < self.weak_etag_window {
-            format!("W/\"v{}\"", f.version)
+            format!("W/{}", strong)
         } else {
-            format!("\"v{}\"", f.version)
+            strong
         }
     }
 
     pub fn etag_of(&self, path: &str) -> Option<String> {
         self.files.get(path).map(|f| self.etag(f))
+    }
+
+    /// 把文件的"刚被修改"计时重置为现在（内容、版本、Last-Modified 都不变）：
+    /// 让 Apache 式的弱 ETag 窗口确定地覆盖接下来的请求，测试不依赖机器快慢。
+    pub fn touch(&mut self, path: &str) {
+        if let Some(f) = self.files.get_mut(path) {
+            f.modified_at = Instant::now();
+        }
+    }
+
+    /// 修改时间（亚秒级），测试构造"同一秒内的另一次写入"用。
+    pub fn modified_of(&self, path: &str) -> Option<SystemTime> {
+        self.files.get(path).map(|f| f.modified)
     }
 
     fn take_fault(&mut self, method: &str, path: &str) -> Option<u16> {
@@ -248,22 +314,25 @@ impl MockState {
                 };
                 let etag = self.etag(f);
                 let lm = http_date(f.modified);
-                let validators = vec![("etag", etag.clone()), ("last-modified", lm)];
-                if let Some(inm) = header("if-none-match") {
+                let mut validators = vec![("last-modified", lm)];
+                if self.etags_enabled && (method != Method::HEAD || self.head_etag) {
+                    validators.push(("etag", etag.clone()));
+                }
+                if let Some(inm) = header("if-none-match").filter(|_| self.etags_enabled) {
                     if inm.trim() == "*" || inm.split(',').any(|t| weak_eq(t, &etag)) {
                         return (304, validators, vec![]);
                     }
                 } else if let Some(ims) = header("if-modified-since") {
+                    // 整秒比较（nginx / Apache 都是）：同一秒内的后一次写入也会 304
                     if parse_http_date(&ims).is_some_and(|d| epoch_secs(f.modified) <= d) {
                         return (304, validators, vec![]);
                     }
                 }
-                let body = if method == Method::HEAD {
-                    vec![]
-                } else {
-                    f.body.clone()
-                };
-                (200, validators, body)
+                if method == Method::HEAD {
+                    validators.push(("content-length", f.body.len().to_string()));
+                    return (200, validators, vec![]);
+                }
+                (200, validators, f.body.clone())
             }
             "PUT" => {
                 if path == SYNC_DATA_FILE {
@@ -293,7 +362,13 @@ impl MockState {
                     }
                     if let Some(ius) = header("if-unmodified-since") {
                         if let (Some(f), Some(d)) = (self.files.get(path), parse_http_date(&ius)) {
-                            if epoch_secs(f.modified) > d {
+                            let modified_after = if self.ius_subsecond {
+                                // Apache：亚秒级 mtime > 秒级日期 → 文件自己的 LM 也 412
+                                f.modified > UNIX_EPOCH + Duration::from_secs(d.max(0) as u64)
+                            } else {
+                                epoch_secs(f.modified) > d
+                            };
+                            if modified_after {
                                 return (412, vec![], vec![]);
                             }
                         }
@@ -304,8 +379,15 @@ impl MockState {
                 let mut out_headers = vec![];
                 if self.put_returns_validators {
                     let f = &self.files[path];
-                    out_headers.push(("etag", self.etag(f)));
+                    if self.etags_enabled {
+                        out_headers.push(("etag", self.etag(f)));
+                    }
                     out_headers.push(("last-modified", http_date(f.modified)));
+                }
+                if path == SYNC_DATA_FILE {
+                    if let Some(hook) = self.after_put.take() {
+                        hook(self);
+                    }
                 }
                 (if existed { 204 } else { 201 }, out_headers, vec![])
             }
@@ -362,10 +444,16 @@ impl MockState {
     }
 
     fn file_entry(&self, path: &str, f: &MockFile) -> PropEntry {
+        let etag = match self.propfind_etag {
+            _ if !self.etags_enabled => None,
+            PropfindEtag::Current => Some(self.etag(f)),
+            PropfindEtag::Strong => Some(self.strong_etag(f)),
+            PropfindEtag::Omit => None,
+        };
         PropEntry {
             href: format!("{}{}", ROOT, encode_path(path)),
             collection: false,
-            etag: Some(self.etag(f)),
+            etag,
             last_modified: Some(http_date(f.modified)),
             content_length: Some(f.body.len()),
         }
@@ -513,6 +601,32 @@ impl MockDav {
         })
     }
 
+    /// Apache mod_dav 的实测行为：写入后 1 秒内 GET / HEAD 给弱 ETag（PROPFIND 给强
+    /// ETag）、PUT 响应不带校验器、`If-Unmodified-Since` 用亚秒级 mtime 比较。
+    pub fn start_apache() -> Self {
+        Self::start_with(|s| {
+            s.dirs.insert("/mini-todo".into());
+            s.dirs.insert("/mini-todo/images".into());
+            s.weak_etag_window = Duration::from_secs(1);
+            s.put_returns_validators = false;
+            s.propfind_etag = PropfindEtag::Strong;
+            s.ius_subsecond = true;
+        })
+    }
+
+    /// nginx dav 的实测行为：忽略 If-Match / If-Unmodified-Since、PUT 响应不带校验器、
+    /// PROPFIND 没有 getetag、ETag 只在 HEAD / GET（秒级精度 `mtime-长度`）。
+    pub fn start_nginx() -> Self {
+        Self::start_with(|s| {
+            s.dirs.insert("/mini-todo".into());
+            s.dirs.insert("/mini-todo/images".into());
+            s.ignore_preconditions = true;
+            s.put_returns_validators = false;
+            s.propfind_etag = PropfindEtag::Omit;
+            s.etag_style = EtagStyle::MtimeSecondsSize;
+        })
+    }
+
     /// 空服务器（连 `/mini-todo` 都没有），测 MKCOL 用。
     pub fn start_empty() -> Self {
         Self::start_with(|_| {})
@@ -634,6 +748,42 @@ mod tests {
         let s = http_date(t);
         assert_eq!(s, "Mon, 21 Sep 2026 14:13:20 GMT");
         assert_eq!(parse_http_date(&s), Some(1_790_000_000));
+    }
+
+    /// Apache 的 If-Unmodified-Since：拿文件自己的 Last-Modified 也 412（亚秒级 mtime），
+    /// 这正是客户端绝不能发 If-Unmodified-Since 的原因。
+    #[test]
+    fn apache_ius_with_own_last_modified_is_rejected() {
+        let mut s = MockState {
+            ius_subsecond: true,
+            ..Default::default()
+        };
+        s.dirs.insert("/d".into());
+        let t = UNIX_EPOCH + Duration::from_millis(1_790_000_000_500);
+        s.write_at("/d/f", b"x".to_vec(), t);
+        let lm = http_date(t);
+        let mut headers = HeaderMap::new();
+        headers.insert("if-unmodified-since", lm.parse().unwrap());
+        let (status, _, _) = s.dispatch(&Method::PUT, "/d/f", &headers, Bytes::from_static(b"y"));
+        assert_eq!(status, 412);
+        s.ius_subsecond = false;
+        let (status, _, _) = s.dispatch(&Method::PUT, "/d/f", &headers, Bytes::from_static(b"y"));
+        assert_eq!(status, 204, "整秒比较时同一秒内可以通过");
+    }
+
+    #[test]
+    fn nginx_etag_has_second_resolution() {
+        let mut s = MockState {
+            etag_style: EtagStyle::MtimeSecondsSize,
+            ..Default::default()
+        };
+        let t = UNIX_EPOCH + Duration::from_millis(1_790_000_000_100);
+        s.write_at("/f", b"aaaa".to_vec(), t);
+        let a = s.etag_of("/f").unwrap();
+        s.write_at("/f", b"bbbb".to_vec(), t + Duration::from_millis(300));
+        assert_eq!(s.etag_of("/f").unwrap(), a, "同一秒、同长度 → 同一个 ETag");
+        s.write_at("/f", b"bbbbb".to_vec(), t + Duration::from_millis(300));
+        assert_ne!(s.etag_of("/f").unwrap(), a);
     }
 
     #[test]

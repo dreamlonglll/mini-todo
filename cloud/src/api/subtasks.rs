@@ -1,19 +1,30 @@
 //! `/subtasks` CRUD（独立 PATCH/DELETE）+ 嵌于 `/todos/:id/subtasks` 的 POST。
+//!
+//! 写入（K6）：只接受 `title` / `content` / `completed` / `sortOrder`；`parentId` 只能等于
+//! 当前父待办（改归属 → 400：PC 合并时以外层 todo 为准，改了也没用，旧版还会让 PC 的外键
+//! 失败、整个合并回滚）；未知字段 / 类型错误 → 400。每个写操作一个事务。
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
-use super::error::ApiError;
-use super::ids::new_id_string;
+use super::error::{ApiError, ApiJson};
+use super::ids::{insert_with_fresh_id, new_id};
 use super::todos::ensure_todo_exists;
 use super::AppState;
 use crate::db::repo;
+use crate::model::{self, WriteMode};
 use crate::time::now_local_string;
 
 const TOMBSTONE_SUBTASK: &str = "subtask";
+
+/// todo 主键（i64 字符串）→ 数值。缓存里的主键都来自 i64 id，解析失败只可能是坏数据。
+fn todo_id_num(id: &str) -> Result<i64, ApiError> {
+    id.parse::<i64>()
+        .map_err(|_| ApiError::internal("non-numeric todo id in cache", id))
+}
 
 // =============================================================================
 // POST /todos/:id/subtasks
@@ -22,47 +33,37 @@ const TOMBSTONE_SUBTASK: &str = "subtask";
 pub async fn create_subtask(
     State(state): State<AppState>,
     Path(raw_todo_ref): Path<String>,
-    Json(body): Json<Value>,
+    ApiJson(body): ApiJson<Value>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    if !body.is_object() {
-        return Err(ApiError::bad_request("body must be a JSON object"));
-    }
-    let title = body
-        .get("title")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.trim().is_empty())
-        .ok_or_else(|| ApiError::bad_request("title is required"))?
-        .to_string();
-
     let now = now_local_string(state.config.timezone);
-    let id_str = new_id_string();
 
-    // 同一事务内解析父 todo ref（支持 C 短码）+ 写 subtask。
-    let v = state.db.with_conn(|conn| -> Result<Value, ApiError> {
-        let parent_id = ensure_todo_exists(conn, &raw_todo_ref)?;
+    // 同一事务内解析父 todo ref（支持 C 短码）+ 校验 + 写 subtask + 标脏。
+    let record = state
+        .db
+        .with_conn(|conn| -> Result<Map<String, Value>, ApiError> {
+            let tx = conn.transaction()?;
+            let parent_id = ensure_todo_exists(&tx, &raw_todo_ref)?;
+            let parent_num = todo_id_num(&parent_id)?;
+            let patch = model::validate_subtask_input(&body, WriteMode::Create, parent_num)
+                .map_err(ApiError::validation)?;
 
-        let mut obj = body.as_object().cloned().unwrap_or_default();
-        obj.insert("id".into(), json!(id_str.parse::<i64>().unwrap_or(0)));
-        obj.insert(
-            "parentId".into(),
-            json!(parent_id.parse::<i64>().unwrap_or(0)),
-        );
-        obj.insert("title".into(), json!(title));
-        obj.entry("createdAt").or_insert(json!(now.clone()));
-        obj.insert("updatedAt".into(), json!(now.clone()));
-        obj.entry("completed").or_insert(json!(false));
-        obj.entry("sortOrder").or_insert(json!(0));
-        obj.entry("content").or_insert(json!(null));
+            let mut record = Map::new();
+            insert_with_fresh_id(new_id, |id| {
+                record = model::new_subtask_record(id, parent_num, &patch, &now);
+                repo::insert_subtask(
+                    &tx,
+                    &id.to_string(),
+                    &parent_id,
+                    &Value::Object(record.clone()).to_string(),
+                    &now,
+                )
+            })?;
+            repo::mark_dirty(&tx)?;
+            tx.commit()?;
+            Ok(record)
+        })?;
 
-        let v = Value::Object(obj);
-        let body_str = v.to_string();
-
-        repo::upsert_subtask(conn, &id_str, &parent_id, &body_str, &now)?;
-        repo::mark_dirty(conn)?;
-        Ok(v)
-    })?;
-
-    Ok((StatusCode::CREATED, Json(v)))
+    Ok((StatusCode::CREATED, Json(Value::Object(record))))
 }
 
 // =============================================================================
@@ -72,30 +73,57 @@ pub async fn create_subtask(
 pub async fn patch_subtask(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(body): Json<Value>,
+    ApiJson(body): ApiJson<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    if !body.is_object() {
-        return Err(ApiError::bad_request("body must be a JSON object"));
-    }
-    let now = now_local_string(state.config.timezone);
+    let tz = state.config.timezone;
+    let now = now_local_string(tz);
 
-    let updated: Option<Value> = state
+    let updated = state
         .db
-        .with_conn(|conn| -> rusqlite::Result<Option<Value>> {
-            let Some(row) = repo::get_subtask(conn, &id)? else {
+        .with_conn(|conn| -> Result<Option<Value>, ApiError> {
+            let tx = conn.transaction()?;
+            let Some(row) = repo::get_subtask(&tx, &id)? else {
                 return Ok(None);
             };
-            let mut current: Value =
-                serde_json::from_str(&row.data_json).unwrap_or_else(|_| json!({"id": row.id}));
-            merge_json_shallow(&mut current, &body);
-            if let Some(obj) = current.as_object_mut() {
-                obj.insert("id".into(), json!(id.parse::<i64>().unwrap_or(0)));
-                obj.insert("updatedAt".into(), json!(now.clone()));
+            let parent_num = todo_id_num(&row.todo_id)?;
+            let patch = model::validate_subtask_input(&body, WriteMode::Update, parent_num)
+                .map_err(ApiError::validation)?;
+
+            let mut base = match serde_json::from_str::<Value>(&row.data_json) {
+                Ok(Value::Object(m)) => m,
+                _ => Map::new(),
+            };
+            let normalized = model::normalize_stored_subtask(
+                &mut base,
+                tz,
+                &row.id,
+                &row.todo_id,
+                &row.updated_at,
+            );
+            let mut next = base.clone();
+            crate::util::merge_json_shallow(&mut next, &patch);
+
+            if normalized.semantic || next != base {
+                next.insert("updatedAt".into(), json!(now));
+                repo::upsert_subtask(
+                    &tx,
+                    &row.id,
+                    &row.todo_id,
+                    &Value::Object(next.clone()).to_string(),
+                    &now,
+                )?;
+                repo::mark_dirty(&tx)?;
+            } else if normalized.format {
+                repo::upsert_subtask(
+                    &tx,
+                    &row.id,
+                    &row.todo_id,
+                    &Value::Object(next.clone()).to_string(),
+                    &row.updated_at,
+                )?;
             }
-            let body_str = current.to_string();
-            repo::upsert_subtask(conn, &id, &row.todo_id, &body_str, &now)?;
-            repo::mark_dirty(conn)?;
-            Ok(Some(current))
+            tx.commit()?;
+            Ok(Some(Value::Object(next)))
         })?;
 
     match updated {
@@ -127,17 +155,5 @@ pub async fn delete_subtask(
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::not_found(format!("subtask {} not found", id)))
-    }
-}
-
-fn merge_json_shallow(target: &mut Value, patch: &Value) {
-    let (Value::Object(t), Value::Object(p)) = (target, patch) else {
-        return;
-    };
-    for (k, v) in p {
-        if k == "id" {
-            continue;
-        }
-        t.insert(k.clone(), v.clone());
     }
 }

@@ -53,12 +53,19 @@ for DEST_DIR in "${DESTS[@]}"; do
 
     chmod +x "${DEST_DIR}/minitodo.py" 2>/dev/null || true
 
-    if [[ ! -f "${DEST_DIR}/config.toml" ]]; then
-        cp "${SRC_DIR}/config.example.toml" "${DEST_DIR}/config.toml"
-        echo "!! ${DEST_DIR}/config.toml created from example. Please edit it to fill in"
+    CONFIG="${DEST_DIR}/config.toml"
+    if [[ ! -f "${CONFIG}" ]]; then
+        # config.toml 里是 api_key：只允许当前用户读写（umask 保证创建瞬间也不是 0644）
+        (umask 077 && cp "${SRC_DIR}/config.example.toml" "${CONFIG}")
+        chmod 600 "${CONFIG}"
+        echo "!! ${CONFIG} created from example (mode 600). Please edit it to fill in"
         echo "   'endpoint' (e.g. https://minitodo.example.com) and 'api_key'."
     else
-        echo ">> ${DEST_DIR}/config.toml already exists, kept untouched."
+        echo ">> ${CONFIG} already exists, kept untouched."
+        if [[ -n "$(find "${CONFIG}" \( -perm -040 -o -perm -004 \) -print 2>/dev/null)" ]]; then
+            echo "!! ${CONFIG} is readable by other users; it contains your api_key. Consider:"
+            echo "     chmod 600 \"${CONFIG}\""
+        fi
     fi
 done
 

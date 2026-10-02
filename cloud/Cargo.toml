@@ -19,7 +19,9 @@ tower = "0.5"
 tower-http = { version = "0.6", features = ["trace"] }
 
 # HTTP client (WebDAV)
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking"] }
+# rustls-tls = webpki 内置根证书；rustls-tls-native-roots 额外信任系统证书库
+# （两者同时启用时 reqwest 会把两套根证书都装上）。自签 CA 走 config.webdav_ca_file。
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "rustls-tls-native-roots", "blocking"] }
 
 # Storage
 rusqlite = { version = "0.32", features = ["bundled", "serde_json"] }
@@ -42,7 +44,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Error handling
 anyhow = "1"
-thiserror = "1"
 
 # URL encoding for WebDAV paths
 urlencoding = "2"

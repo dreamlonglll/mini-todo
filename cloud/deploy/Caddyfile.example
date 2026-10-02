@@ -6,14 +6,14 @@ minitodo.example.com {
     encode zstd gzip
 
     # 反代到 cloud HTTP server（默认 127.0.0.1:8787）
+    # Caddy 会自动设置 X-Forwarded-For / X-Forwarded-Proto / X-Forwarded-Host 并透传 Host，
+    # 不要手写 `header_up X-Forwarded-For {remote}`：{remote} 带端口，还会覆盖掉 Caddy
+    # 自己维护的、正确的 X-Forwarded-For。
     reverse_proxy 127.0.0.1:8787 {
-        header_up Host {host}
-        header_up X-Real-IP {remote}
-        header_up X-Forwarded-For {remote}
-        header_up X-Forwarded-Proto {scheme}
+        header_up X-Real-IP {remote_host}
     }
 
-    # 仅在排查时打开访问日志
+    # 仅在排查时打开访问日志（服务自身已有不含 Authorization 的访问日志，见 journalctl）
     # log {
     #     output file /var/log/caddy/minitodo.log
     # }

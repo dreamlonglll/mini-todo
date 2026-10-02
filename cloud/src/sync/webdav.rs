@@ -1,16 +1,20 @@
 //! 云端用的 WebDAV 客户端（reqwest blocking，全进程复用一个实例）。
 //!
-//! 跨端契约 K4：
-//! - GET：有基准 ETag 用 `If-None-Match`，否则有 Last-Modified 用
-//!   `If-Modified-Since`；304 = 自基准以来未变（响应里的新校验器会回传给调用方）
-//! - PUT：前置条件由调用方选定（`If-Match` 只用于强 ETag；否则
-//!   `If-Unmodified-Since`；远端不存在时不带条件），见 `sync::push::select_precondition`
-//! - PUT 响应没有 ETag / Last-Modified 时（Apache 就是这样），调用方用一次
-//!   `PROPFIND Depth: 0` 取校验器——不要整包 GET
+//! 跨端契约 K4（按 Apache mod_dav / nginx dav 的实测行为收紧）：
+//! - GET：只用 `If-None-Match`（弱比较）；**从不发 `If-Modified-Since`**——nginx 按整秒
+//!   比较，与基准同一秒内的写入会得到 304，云端就漏掉了这次修改。没有 ETag 时普通 GET。
+//! - PUT：只用 `If-Match: "<opaque>"`（去掉 `W/`），没有 ETag 就不带前置条件；
+//!   **从不发 `If-Unmodified-Since`**——Apache 拿文件的亚秒级 mtime 与秒级日期比较，
+//!   哪怕文件两秒没动、日期就是它自己的 Last-Modified 也会 412。见 `sync::push`。
+//! - PUT 响应没有 ETag 时（nginx / Apache），调用方先 `HEAD`（nginx 只在 HEAD / GET
+//!   给 ETag），再退到 `PROPFIND Depth: 0` 的 getetag——不要整包 GET
 //! - 只有 PUT 返回 404 / 409（父目录不存在）时才 MKCOL
 //!
 //! K5：`PROPFIND Depth: 1` 列目录；multistatus 解析不依赖命名空间前缀、标签大小写
 //! 与换行（x/net/webdav、SabreDAV 输出单行 XML，nginx / Apache 输出多行）。
+//!
+//! TLS：同时信任 webpki 内置根证书与系统根证书；`config.webdav_ca_file` 可额外加入
+//! 自签 CA（见 `WebDavClient::new` 的 `extra_roots`）。
 //!
 //! **所有方法都会阻塞**：只能在阻塞上下文（`spawn_blocking` / 普通线程）里调用。
 
@@ -23,10 +27,10 @@ use std::time::Duration;
 
 use reqwest::blocking::{Client, RequestBuilder};
 use reqwest::header::{
-    HeaderMap, HeaderName, CONTENT_TYPE, ETAG, IF_MATCH, IF_MODIFIED_SINCE, IF_NONE_MATCH,
-    IF_UNMODIFIED_SINCE, LAST_MODIFIED,
+    HeaderMap, HeaderName, CONTENT_LENGTH, CONTENT_TYPE, ETAG, IF_MATCH, IF_NONE_MATCH,
+    LAST_MODIFIED,
 };
-use reqwest::{Method, StatusCode};
+use reqwest::{Certificate, Method, StatusCode};
 use tracing::warn;
 
 /// TCP / TLS 建连超时。
@@ -52,10 +56,6 @@ pub struct Validators {
 }
 
 impl Validators {
-    pub fn is_empty(&self) -> bool {
-        self.etag.is_none() && self.last_modified.is_none()
-    }
-
     fn from_headers(headers: &HeaderMap) -> Self {
         Validators {
             etag: header_string(headers, &ETAG),
@@ -73,15 +73,19 @@ fn header_string(headers: &HeaderMap, name: &HeaderName) -> Option<String> {
         .map(str::to_string)
 }
 
-fn non_empty(v: &Option<String>) -> Option<&str> {
-    v.as_deref().map(str::trim).filter(|s| !s.is_empty())
-}
-
-/// 强 ETag 才能用于 `If-Match`（RFC 7232 强比较：任何一方是弱 ETag 都不匹配）。
-/// Apache 对一秒内刚修改的文件返回 `W/"…"`，拿它做 `If-Match` 必然 412。
-pub fn is_strong_etag(etag: &str) -> bool {
+/// `If-Match` 用的 ETag 值：去掉弱标记 `W/`，只留带引号的不透明部分；空值返回 `None`。
+///
+/// `If-Match` 是强比较，原样带 `W/"…"` 永远 412。Apache 写入后约 1 秒内给弱 ETag，
+/// 其不透明部分与之后（以及 PROPFIND getetag）给出的强 ETag 相同：去掉 `W/` 之后，
+/// 这一秒内仍会 412（调用方等 1.1 秒再试），过了这一秒就能匹配。
+pub fn etag_for_if_match(etag: &str) -> Option<&str> {
     let e = etag.trim();
-    !e.is_empty() && !e.starts_with("W/") && !e.starts_with("w/")
+    let opaque = e
+        .strip_prefix("W/")
+        .or_else(|| e.strip_prefix("w/"))
+        .unwrap_or(e)
+        .trim();
+    (!opaque.is_empty()).then_some(opaque)
 }
 
 /// 条件 GET 的结果。
@@ -98,12 +102,19 @@ pub enum GetOutcome {
     },
 }
 
-/// PUT 的前置条件。
+/// PUT 的前置条件。**没有** `If-Unmodified-Since`：Apache 对它的处理不可用（见模块注释）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Precondition<'a> {
     Unconditional,
+    /// 值必须已经去掉 `W/`（见 `etag_for_if_match`）。
     IfMatch(&'a str),
-    IfUnmodifiedSince(&'a str),
+}
+
+/// `HEAD` 的结果。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HeadInfo {
+    pub validators: Validators,
+    pub content_length: Option<u64>,
 }
 
 /// PUT 的结果。412 / 404 / 409 不算错误，由调用方决定如何恢复。
@@ -140,10 +151,22 @@ pub struct WebDavClient {
 impl WebDavClient {
     /// 构造客户端。**必须在阻塞上下文里调用**：reqwest blocking 客户端构造时会
     /// 等待内部运行时线程启动，debug 构建在 async 上下文里调用会 panic。
-    pub fn new(base_url: &str, username: &str, password: &str) -> anyhow::Result<Self> {
-        let http = Client::builder()
+    ///
+    /// 根证书 = webpki 内置 + 系统证书库（reqwest `rustls-tls-native-roots`）+
+    /// `extra_roots`（`config.webdav_ca_file` 里的自签 CA）。
+    pub fn new(
+        base_url: &str,
+        username: &str,
+        password: &str,
+        extra_roots: &[Certificate],
+    ) -> anyhow::Result<Self> {
+        let mut builder = Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(DEFAULT_TIMEOUT)
+            .timeout(DEFAULT_TIMEOUT);
+        for cert in extra_roots {
+            builder = builder.add_root_certificate(cert.clone());
+        }
+        let http = builder
             .build()
             .map_err(|e| anyhow::anyhow!("初始化 reqwest 客户端失败: {}", e))?;
         Ok(Self {
@@ -164,16 +187,18 @@ impl WebDavClient {
             .basic_auth(&self.username, Some(&self.password))
     }
 
-    /// 条件 GET（sync-data 用）。`cond` 为空时是普通 GET。
-    pub fn get_conditional(&self, path: &str, cond: &Validators) -> anyhow::Result<GetOutcome> {
+    /// 条件 GET（sync-data 用）：`if_none_match` 为 `Some` 时带 `If-None-Match`（弱比较，
+    /// 弱 ETag 原样带上也能得到 304），否则是普通 GET。**从不带 `If-Modified-Since`**。
+    pub fn get_conditional(
+        &self,
+        path: &str,
+        if_none_match: Option<&str>,
+    ) -> anyhow::Result<GetOutcome> {
         let mut req = self
             .request(Method::GET, path)
             .timeout(SYNC_DATA_GET_TIMEOUT);
-        if let Some(etag) = non_empty(&cond.etag) {
-            // If-None-Match 是弱比较，弱 ETag 也能正确得到 304
+        if let Some(etag) = if_none_match.map(str::trim).filter(|s| !s.is_empty()) {
             req = req.header(IF_NONE_MATCH, etag);
-        } else if let Some(lm) = non_empty(&cond.last_modified) {
-            req = req.header(IF_MODIFIED_SINCE, lm);
         }
         let resp = req
             .send()
@@ -210,7 +235,6 @@ impl WebDavClient {
         req = match pre {
             Precondition::Unconditional => req,
             Precondition::IfMatch(etag) => req.header(IF_MATCH, etag),
-            Precondition::IfUnmodifiedSince(lm) => req.header(IF_UNMODIFIED_SINCE, lm),
         };
         let resp = req
             .body(body.to_vec())
@@ -245,6 +269,24 @@ impl WebDavClient {
                 anyhow::anyhow!("读取 PROPFIND {} 响应失败: {}", path, e)
             })?)),
             other => anyhow::bail!("PROPFIND {} 返回状态 {}", path, other),
+        }
+    }
+
+    /// `HEAD`：取单个资源的 ETag / Last-Modified / Content-Length。资源不存在返回 `Ok(None)`。
+    /// nginx dav 的 PUT 响应不带校验器、PROPFIND 也没有 getetag，只有 HEAD / GET 给 ETag。
+    pub fn head(&self, path: &str) -> anyhow::Result<Option<HeadInfo>> {
+        let resp = self
+            .request(Method::HEAD, path)
+            .send()
+            .map_err(|e| anyhow::anyhow!("WebDAV HEAD {} 失败: {}", path, e))?;
+        match resp.status() {
+            StatusCode::NOT_FOUND => Ok(None),
+            s if s.is_success() => Ok(Some(HeadInfo {
+                validators: Validators::from_headers(resp.headers()),
+                content_length: header_string(resp.headers(), &CONTENT_LENGTH)
+                    .and_then(|v| v.parse().ok()),
+            })),
+            other => anyhow::bail!("WebDAV HEAD {} 返回状态 {}", path, other.as_u16()),
         }
     }
 
@@ -712,13 +754,16 @@ mod tests {
         assert_eq!(decode_entities("plain"), "plain");
     }
 
+    /// If-Match 只发不透明部分：弱 ETag 去掉 `W/`（Apache 一秒后同一个值就是强 ETag）。
     #[test]
-    fn strong_etag_detection() {
-        assert!(is_strong_etag("\"abc\""));
-        assert!(is_strong_etag("abc"));
-        assert!(!is_strong_etag("W/\"abc\""));
-        assert!(!is_strong_etag("w/\"abc\""));
-        assert!(!is_strong_etag("  "));
+    fn if_match_value_strips_weak_marker() {
+        assert_eq!(etag_for_if_match("\"abc\""), Some("\"abc\""));
+        assert_eq!(etag_for_if_match(" \"abc\" "), Some("\"abc\""));
+        assert_eq!(etag_for_if_match("W/\"3-65cdc\""), Some("\"3-65cdc\""));
+        assert_eq!(etag_for_if_match("w/\"abc\""), Some("\"abc\""));
+        assert_eq!(etag_for_if_match("abc"), Some("abc"));
+        assert_eq!(etag_for_if_match("  "), None);
+        assert_eq!(etag_for_if_match("W/"), None);
     }
 
     #[test]

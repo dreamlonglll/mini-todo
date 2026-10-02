@@ -1,6 +1,9 @@
 //! 后台同步 worker。
 //!
-//! - pull 循环：每 `pull_interval` 秒一次；失败按指数退避 + 抖动拉长间隔（上限 5 分钟）
+//! - pull 循环：每 `pull_interval` 秒一次；失败按指数退避 + 抖动拉长间隔（上限 5 分钟）。
+//!   平时用 `If-None-Match` 条件拉取，每 `FULL_PULL_EVERY` 轮做一次无条件全量拉取兜底：
+//!   nginx 的 ETag 只有秒级精度（`mtime秒-长度`），同一秒内写入且长度相同的修改会被
+//!   304 掩盖，全量拉取保证这种修改最多晚一个周期被合并
 //! - push 循环：每 500ms 看一眼 `meta.dirty` / 图片队列（只读本地 SQLite，不触网）；
 //!   连续写入去抖 1.5s（最长攒 10s），失败指数退避 + 抖动（1s 起，上限 5 分钟）
 //! - 图片镜像循环：pull 拿到新文档后被唤醒，补下缺失图片；有下载失败时退避重试
@@ -31,6 +34,13 @@ const PUSH_MAX_DELAY: Duration = Duration::from_secs(10);
 const PUSH_BACKOFF_BASE: Duration = Duration::from_secs(1);
 /// 图片镜像失败退避的起点。
 const MIRROR_BACKOFF_BASE: Duration = Duration::from_secs(30);
+/// 每隔这么多轮成功的 pull 做一次无条件全量拉取（默认间隔 60s → 约 10 分钟一次）。
+pub const FULL_PULL_EVERY: u32 = 10;
+
+/// 第 `round` 轮（从 1 起）pull 是否做无条件全量拉取。
+pub fn is_full_pull_round(round: u32) -> bool {
+    round > 0 && round.is_multiple_of(FULL_PULL_EVERY)
+}
 
 /// 指数退避 + 抖动：`base * 2^(failures-1)`，乘以 `[0.8, 1.2)` 的抖动系数，
 /// 结果不超过 `max`。`failures == 0` 返回 `base`。`jitter` 取 `[0, 1)`。
@@ -179,11 +189,14 @@ async fn pull_loop(ctx: Arc<SyncCtx>, mut shutdown: watch::Receiver<bool>) {
     let interval = Duration::from_secs(ctx.cfg.pull_interval_secs);
     let mut backoff = Backoff::new(interval, interval.max(MAX_BACKOFF));
     let mut delay = interval;
+    let mut round: u32 = 0;
     loop {
         if sleep_or_shutdown(delay, &mut shutdown).await {
             break;
         }
-        match ctx.run_locked(pull::pull_once).await {
+        round = round.wrapping_add(1);
+        let full = is_full_pull_round(round);
+        match ctx.run_locked(move |c| pull::pull_once_with(c, full)).await {
             Ok(_) => {
                 let prev = backoff.on_success();
                 if prev > 0 {
@@ -361,6 +374,12 @@ pub async fn final_push(ctx: &Arc<SyncCtx>, budget: Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_pull_every_n_rounds() {
+        let rounds: Vec<u32> = (0..=25).filter(|r| is_full_pull_round(*r)).collect();
+        assert_eq!(rounds, vec![10, 20]);
+    }
 
     #[test]
     fn backoff_grows_exponentially_and_caps() {

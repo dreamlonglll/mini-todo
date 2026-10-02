@@ -1,5 +1,7 @@
 # minitodo skill 配置示例
 # 复制为 ~/.claude/skills/minitodo/config.toml 并填入实际值。
+# 本文件含 api_key：install.sh / install.ps1 生成的 config.toml 只有当前用户可读，手动复制时请
+# 自行 chmod 600（Windows 去掉其它用户的访问权限）。
 
 # 云端 API 的根 URL（不要带尾部 /todos 等路径，CLI 会自动拼）
 # 通常是 Caddy / nginx 反代的对外地址
@@ -8,5 +10,9 @@ endpoint = "https://minitodo.example.com"
 # 与 minitodo-cloud `config.toml` 中的 api_key 必须完全一致
 api_key = "REPLACE_ME_WITH_SAME_BEARER_AS_CLOUD"
 
-# 可选：HTTP 超时（秒），默认 10
+# 可选：HTTP 超时（秒），默认 10。`sync` 子命令至少用 90 秒（服务端要完成 WebDAV 拉取 + 推送）。
 timeout = 10
+
+# 可选：IANA 时区名，`today` 按它计算"今天"；建议与云端 / PC 的时区一致。
+# 不填则用本机时区。Windows 上使用时区名需要 `pip install tzdata`。
+# timezone = "Asia/Shanghai"

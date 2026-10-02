@@ -6,6 +6,7 @@
 //! `data_json`，列表/过滤用 SQLite JSON1 `json_extract` 完成。这样 PC 端
 //! 加新字段不影响云端代码。
 
+pub mod normalize;
 pub mod repo;
 pub mod schema;
 

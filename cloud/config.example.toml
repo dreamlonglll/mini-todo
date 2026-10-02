@@ -1,21 +1,31 @@
 # minitodo-cloud 配置示例
 # 复制为 config.toml 并填写你自己的值，然后启动服务：
 #   minitodo-cloud --config /etc/minitodo/config.toml
-# 缺少任何一个必填字段时，进程会以清晰的错误信息退出。
+# 缺少任何一个必填字段（或值不合法）时，进程会以清晰的错误信息退出。
+#
+# 本文件含 WebDAV 密码与 api_key，请收紧权限，只让服务账户可读，例如：
+#   sudo chown root:minitodo /etc/minitodo/config.toml && sudo chmod 640 /etc/minitodo/config.toml
 
 # ============================================================
 # WebDAV 上游（与 PC 端共用的同步通道）
 # ============================================================
 # WebDAV 服务器根 URL（不要带尾部 /mini-todo，路径会由程序自行拼接）
 # 例如使用 nginx-dav / Caddy webdav module / NextCloud / 坚果云
+# 必须是 http:// 或 https://。非本机地址用明文 http:// 时启动会打 warn（密码与数据明文传输）。
 webdav_url      = "https://dav.example.com/dav"
 webdav_username = "your-webdav-user"
 webdav_password = "your-webdav-pass"
+
+# 可选：额外信任的 CA 证书（PEM，可包含多张），用于自签证书的 WebDAV 服务器。
+# 系统证书库与内置的 webpki 根证书始终受信任，公网正规证书不需要配置这一项。
+# 相对路径按本配置文件所在目录解析；文件不存在或证书无效时启动直接报错。
+# webdav_ca_file = "/etc/minitodo/webdav-ca.pem"
 
 # ============================================================
 # HTTP API 鉴权与监听
 # ============================================================
 # 任意客户端访问 API 必须携带 `Authorization: Bearer <api_key>`
+# 至少 16 个字符（更短拒绝启动），少于 32 个字符启动时会打 warn。
 # 建议用 `openssl rand -hex 32` 生成
 api_key = "REPLACE_ME_WITH_LONG_RANDOM_HEX"
 
@@ -26,8 +36,9 @@ bind = "127.0.0.1:8787"
 # 时区（必须与 PC 端一致，PC 用本地时区写 SQLite）
 # ============================================================
 # 标准 IANA 时区名，例如 "Asia/Shanghai"、"UTC"、"America/Los_Angeles"
-# 程序会用对应的 FixedOffset 模拟「本地时区现在」生成
-# 与 PC 端 `datetime('now','localtime')` 完全一致的 "%Y-%m-%d %H:%M:%S" 字符串
+# 程序每次取时间都按该时区"当时"的偏移换算（夏令时切换后自动正确），生成
+# 与 PC 端 `datetime('now','localtime')` 完全一致的 "%Y-%m-%d %H:%M:%S" 字符串；
+# API 收到带 Z / ±HH:MM 的时间也会换算成这个时区的墙钟时间再保存。
 timezone = "Asia/Shanghai"
 
 # ============================================================
@@ -40,5 +51,6 @@ pull_interval = 60
 # 本地数据存放
 # ============================================================
 # SQLite 与镜像图片的存放目录。systemd 模板里默认是 /var/lib/minitodo
+# （改了这里也要同步修改 unit 文件里的 ReadWritePaths）
 data_dir   = "/var/lib/minitodo"
 images_dir = "/var/lib/minitodo/images"

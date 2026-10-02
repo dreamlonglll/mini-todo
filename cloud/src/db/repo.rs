@@ -35,6 +35,8 @@ pub mod meta_keys {
     /// 基准版本文档里除 `todos` / `tombstones` 以外的全部顶层键（JSON 对象），
     /// 远端 304 时用它重建要上传的文档，保证 `settings` / 未知顶层键原样保留。
     pub const REMOTE_ENVELOPE: &str = "remote_envelope";
+    /// 存量记录的 K6 一次性归一化已完成（见 `db::normalize`）。
+    pub const CACHE_NORMALIZED: &str = "cache_normalized_v1";
 }
 
 use meta_keys as mk;
@@ -253,33 +255,95 @@ pub fn todo_ids_without_seq(conn: &Connection) -> rusqlite::Result<Vec<String>> 
     rows.collect()
 }
 
+/// `IN (?, ?, …)` 每批最多绑定的参数个数（远低于 SQLite 的 32766 上限）。
+const IN_BATCH: usize = 500;
+
+/// 按批执行 `sql_template`（其中的 `{in}` 替换成 `?,?,…`），把每行交给 `on_row`。
+/// SQLite 没有数组绑定；分批避免超出绑定参数上限。
+fn query_in_batches<F>(
+    conn: &Connection,
+    sql_template: &str,
+    ids: &[String],
+    mut on_row: F,
+) -> rusqlite::Result<()>
+where
+    F: FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<()>,
+{
+    for chunk in ids.chunks(IN_BATCH) {
+        let placeholders = std::iter::repeat_n("?", chunk.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = sql_template.replace("{in}", &placeholders);
+        let mut stmt = conn.prepare(&sql)?;
+        let mut rows = stmt.query(rusqlite::params_from_iter(chunk.iter()))?;
+        while let Some(row) = rows.next()? {
+            on_row(row)?;
+        }
+    }
+    Ok(())
+}
+
 /// 批量取 (todo_id → seq) 映射；list_todos 拼响应时一次性 join。
 pub fn seq_map_for_todos(
     conn: &Connection,
     ids: &[String],
-) -> rusqlite::Result<std::collections::HashMap<String, i64>> {
-    let mut map = std::collections::HashMap::new();
-    if ids.is_empty() {
-        return Ok(map);
-    }
-    // SQLite 没有数组绑定，用 IN (?,?,...) 拼。
-    let placeholders = std::iter::repeat_n("?", ids.len())
-        .collect::<Vec<_>>()
-        .join(",");
-    let sql = format!(
-        "SELECT todo_id, seq FROM todo_seq WHERE todo_id IN ({})",
-        placeholders
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let id_refs: Vec<&dyn rusqlite::ToSql> =
-        ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
-    let rows = stmt.query_map(rusqlite::params_from_iter(id_refs), |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-    })?;
-    for r in rows {
-        let (id, seq) = r?;
-        map.insert(id, seq);
-    }
+) -> rusqlite::Result<HashMap<String, i64>> {
+    let mut map = HashMap::new();
+    query_in_batches(
+        conn,
+        "SELECT todo_id, seq FROM todo_seq WHERE todo_id IN ({in})",
+        ids,
+        |row| {
+            map.insert(row.get::<_, String>(0)?, row.get::<_, i64>(1)?);
+            Ok(())
+        },
+    )?;
+    Ok(map)
+}
+
+/// 一次查询取出这些 todo 的全部子任务，按 todo 分组（组内按 sortOrder、id 排序）。
+/// 列表 `withSubtasks=true` 用，避免逐条查询（审查 F4 的 N+1）。
+pub fn subtasks_for_todos(
+    conn: &Connection,
+    todo_ids: &[String],
+) -> rusqlite::Result<HashMap<String, Vec<SubtaskRow>>> {
+    let mut map: HashMap<String, Vec<SubtaskRow>> = HashMap::new();
+    query_in_batches(
+        conn,
+        "SELECT id, todo_id, data_json, updated_at FROM subtasks WHERE todo_id IN ({in})
+         ORDER BY todo_id,
+                  CAST(IFNULL(json_extract(data_json, '$.sortOrder'), 0) AS INTEGER) ASC,
+                  CAST(id AS INTEGER) ASC",
+        todo_ids,
+        |row| {
+            let r = SubtaskRow {
+                id: row.get(0)?,
+                todo_id: row.get(1)?,
+                data_json: row.get(2)?,
+                updated_at: row.get(3)?,
+            };
+            map.entry(r.todo_id.clone()).or_default().push(r);
+            Ok(())
+        },
+    )?;
+    Ok(map)
+}
+
+/// 一次查询取出这些 todo 的子任务数。
+pub fn subtask_counts_for_todos(
+    conn: &Connection,
+    todo_ids: &[String],
+) -> rusqlite::Result<HashMap<String, i64>> {
+    let mut map = HashMap::new();
+    query_in_batches(
+        conn,
+        "SELECT todo_id, COUNT(*) FROM subtasks WHERE todo_id IN ({in}) GROUP BY todo_id",
+        todo_ids,
+        |row| {
+            map.insert(row.get::<_, String>(0)?, row.get::<_, i64>(1)?);
+            Ok(())
+        },
+    )?;
     Ok(map)
 }
 
@@ -319,7 +383,8 @@ pub fn get_todo(conn: &Connection, id: &str) -> rusqlite::Result<Option<TodoRow>
 #[derive(Debug, Default, Clone)]
 pub struct ListTodosFilter {
     pub completed: Option<bool>,
-    pub priority: Option<String>,
+    /// 优先级对应的颜色（`#EF4444` / `#F59E0B` / `#10B981`）。优先级是 color 的派生值。
+    pub priority_color: Option<String>,
     pub quadrant: Option<i64>,
     pub due_date_before: Option<String>,
     pub due_date_after: Option<String>,
@@ -350,9 +415,9 @@ pub fn list_todos_filtered(
         );
         args.push(Box::new(if c { 1i64 } else { 0i64 }));
     }
-    if let Some(ref p) = filter.priority {
-        sql.push_str(" AND IFNULL(json_extract(data_json, '$.priority'), '') = ?");
-        args.push(Box::new(p.clone()));
+    if let Some(ref color) = filter.priority_color {
+        sql.push_str(&format!(" AND {} = ?", COLOR_EXPR));
+        args.push(Box::new(color.to_ascii_uppercase()));
     }
     if let Some(q) = filter.quadrant {
         sql.push_str(" AND CAST(IFNULL(json_extract(data_json, '$.quadrant'), 0) AS INTEGER) = ?");
@@ -360,13 +425,13 @@ pub fn list_todos_filtered(
     }
     if let Some(ref before) = filter.due_date_before {
         // 用 NULLIF(..., '') 把"空字符串"也当作 NULL，COALESCE 不再用空串兜底——
-        // 否则无 dueDate/endTime 的 todo 在 SQL 比较时 `'' <= '<任何日期>'` 是 TRUE，
+        // 否则无截止时间的 todo 在 SQL 比较时 `'' <= '<任何日期>'` 是 TRUE，
         // 会被错误地纳入"过期"分类（详见 due_date_before_excludes_todos_without_anchor 用例）。
-        sql.push_str(" AND COALESCE(NULLIF(json_extract(data_json, '$.dueDate'), ''), NULLIF(json_extract(data_json, '$.endTime'), '')) <= ?");
+        sql.push_str(&format!(" AND {} <= ?", DUE_EXPR));
         args.push(Box::new(before.clone()));
     }
     if let Some(ref after) = filter.due_date_after {
-        sql.push_str(" AND COALESCE(NULLIF(json_extract(data_json, '$.dueDate'), ''), NULLIF(json_extract(data_json, '$.endTime'), '')) >= ?");
+        sql.push_str(&format!(" AND {} >= ?", DUE_EXPR));
         args.push(Box::new(after.clone()));
     }
     if let Some(ref sd) = filter.start_date {
@@ -422,23 +487,26 @@ pub fn list_todos_filtered(
     rows.collect()
 }
 
+/// 截止时间：规范字段 `endTime`；旧版 API 写的 `dueDate` 只作兜底（存量归一化会把它并进
+/// `endTime`）。空串当作没有。
+const DUE_EXPR: &str = "COALESCE(NULLIF(json_extract(data_json, '$.endTime'), ''), \
+     NULLIF(json_extract(data_json, '$.dueDate'), ''))";
+
+/// PC 呈现的颜色（大写）：缺失 / null 时 PC 用 `#F59E0B`。优先级由它派生。
+const COLOR_EXPR: &str = "UPPER(COALESCE(json_extract(data_json, '$.color'), '#F59E0B'))";
+
 fn sort_expr(field: &str) -> String {
     match field {
-        "dueDate" | "endTime" => {
-            // COALESCE 支持 3 参，IFNULL 不支持
-            "COALESCE(json_extract(data_json, '$.dueDate'), json_extract(data_json, '$.endTime'), '')".to_string()
-        }
+        "dueDate" | "endTime" => format!("COALESCE({}, '')", DUE_EXPR),
         "startTime" | "startDate" => {
             "COALESCE(json_extract(data_json, '$.startTime'), json_extract(data_json, '$.startDate'), '')".to_string()
         }
         "priority" => {
-            // 让 high > medium > low：用 CASE 把字符串映射成可比的数字
-            "CASE IFNULL(json_extract(data_json, '$.priority'), '') \
-                 WHEN 'high' THEN 3 \
-                 WHEN 'medium' THEN 2 \
-                 WHEN 'low' THEN 1 \
-                 ELSE 0 END"
-                .to_string()
+            // 优先级派生自颜色：high > medium > low > 自定义颜色
+            format!(
+                "CASE {} WHEN '#EF4444' THEN 3 WHEN '#F59E0B' THEN 2 WHEN '#10B981' THEN 1 ELSE 0 END",
+                COLOR_EXPR
+            )
         }
         "quadrant" => {
             "CAST(IFNULL(json_extract(data_json, '$.quadrant'), 0) AS INTEGER)".to_string()
@@ -453,7 +521,47 @@ fn sort_expr(field: &str) -> String {
     }
 }
 
-/// 直接 upsert（无 LWW）。CRUD 写路径用。
+/// 新建 todo：普通 INSERT。主键冲突返回 `Err`（调用方换一个 id 重试，见
+/// `is_primary_key_conflict`），绝不静默覆盖已有记录。
+pub fn insert_todo(
+    conn: &Connection,
+    id: &str,
+    data_json: &str,
+    updated_at: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO todos (id, data_json, updated_at) VALUES (?1, ?2, ?3)",
+        params![id, data_json, updated_at],
+    )?;
+    Ok(())
+}
+
+/// 新建 subtask：普通 INSERT，语义同 `insert_todo`。
+pub fn insert_subtask(
+    conn: &Connection,
+    id: &str,
+    todo_id: &str,
+    data_json: &str,
+    updated_at: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO subtasks (id, todo_id, data_json, updated_at) VALUES (?1, ?2, ?3, ?4)",
+        params![id, todo_id, data_json, updated_at],
+    )?;
+    Ok(())
+}
+
+/// 是否主键 / 唯一约束冲突（新建记录时 id 撞了）。
+pub fn is_primary_key_conflict(e: &rusqlite::Error) -> bool {
+    matches!(
+        e,
+        rusqlite::Error::SqliteFailure(err, _)
+            if err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY
+                || err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+    )
+}
+
+/// 直接 upsert（无 LWW）。CRUD 更新与同步合并用。
 pub fn upsert_todo(
     conn: &Connection,
     id: &str,
@@ -486,6 +594,48 @@ pub fn delete_todo_with_children(conn: &Connection, id: &str) -> rusqlite::Resul
     Ok(n_subs)
 }
 
+/// 本地是否有任何需要同步的状态（todo / subtask / 墓碑）。远端 404 时判断要不要重新推送。
+pub fn has_any_sync_state(conn: &Connection) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM todos)
+             OR EXISTS (SELECT 1 FROM subtasks)
+             OR EXISTS (SELECT 1 FROM tombstones)",
+        [],
+        |row| row.get(0),
+    )
+}
+
+/// 会被写进 sync-data 的记录的 `id → updated_at`（与 `sync::doc::build_outgoing_doc` 的
+/// 导出范围一致：data_json 是 JSON 对象；子任务还要求父 todo 可导出）。判断"远端是否缺少
+/// 本地内容"时只能拿这个集合比较——导不出去的坏行永远不会出现在远端，算进去会每轮重推。
+pub fn exportable_timestamps(
+    conn: &Connection,
+) -> rusqlite::Result<(HashMap<String, String>, HashMap<String, String>)> {
+    const IS_OBJECT: &str = "(CASE WHEN json_valid({col}) THEN json_type({col}) END) = 'object'";
+    let todo_ok = IS_OBJECT.replace("{col}", "data_json");
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, updated_at FROM todos WHERE {}",
+        todo_ok
+    ))?;
+    let todos = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<HashMap<_, _>>>()?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT s.id, s.updated_at FROM subtasks s JOIN todos t ON t.id = s.todo_id
+         WHERE {} AND {}",
+        IS_OBJECT.replace("{col}", "s.data_json"),
+        IS_OBJECT.replace("{col}", "t.data_json")
+    ))?;
+    let subs = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<HashMap<_, _>>>()?;
+    Ok((todos, subs))
+}
+
 /// 同步合并用：`id → updated_at`（原样，比较前由调用方规范化）。
 pub fn todo_timestamps(conn: &Connection) -> rusqlite::Result<HashMap<String, String>> {
     let mut stmt = conn.prepare("SELECT id, updated_at FROM todos")?;
@@ -515,7 +665,8 @@ pub fn list_subtasks_for_todo(
 ) -> rusqlite::Result<Vec<SubtaskRow>> {
     let mut stmt = conn.prepare(
         "SELECT id, todo_id, data_json, updated_at FROM subtasks WHERE todo_id = ?1
-         ORDER BY CAST(json_extract(data_json, '$.sortOrder') AS INTEGER) ASC, id ASC",
+         ORDER BY CAST(IFNULL(json_extract(data_json, '$.sortOrder'), 0) AS INTEGER) ASC,
+                  CAST(id AS INTEGER) ASC",
     )?;
     let rows = stmt.query_map([todo_id], |row| {
         Ok(SubtaskRow {
@@ -886,6 +1037,151 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].id, "2"); // 2026-05-14 排前
         assert_eq!(rows[1].id, "1");
+    }
+
+    #[test]
+    fn priority_filter_and_sort_follow_color() {
+        let c = fresh();
+        insert_todo(&c, "1", r##"{"id":1,"title":"hi","color":"#ef4444"}"##, "t");
+        insert_todo(
+            &c,
+            "2",
+            r##"{"id":2,"title":"lo","color":"#10B981","priority":"high"}"##,
+            "t",
+        );
+        insert_todo(&c, "3", r#"{"id":3,"title":"md (PC 缺省色)"}"#, "t");
+        insert_todo(
+            &c,
+            "4",
+            r##"{"id":4,"title":"custom","color":"#3B82F6"}"##,
+            "t",
+        );
+        let titles = |f: ListTodosFilter| -> Vec<String> {
+            list_todos_filtered(&c, &f)
+                .unwrap()
+                .into_iter()
+                .map(|r| r.id)
+                .collect()
+        };
+        assert_eq!(
+            titles(ListTodosFilter {
+                priority_color: Some("#EF4444".into()),
+                ..Default::default()
+            }),
+            vec!["1"],
+            "大小写不敏感；旧的 priority 字段不再参与过滤"
+        );
+        assert_eq!(
+            titles(ListTodosFilter {
+                priority_color: Some("#F59E0B".into()),
+                ..Default::default()
+            }),
+            vec!["3"],
+            "缺 color 按 PC 缺省色 #F59E0B（medium）"
+        );
+        assert_eq!(
+            titles(ListTodosFilter {
+                sort: Some(("priority".into(), false)),
+                ..Default::default()
+            }),
+            vec!["1", "3", "2", "4"]
+        );
+    }
+
+    #[test]
+    fn due_filter_prefers_end_time_over_legacy_due_date() {
+        let c = fresh();
+        insert_todo(
+            &c,
+            "1",
+            r#"{"id":1,"endTime":"2026-05-20 23:59:00","dueDate":"2026-05-01"}"#,
+            "t",
+        );
+        insert_todo(
+            &c,
+            "2",
+            r#"{"id":2,"endTime":"","dueDate":"2026-05-02"}"#,
+            "t",
+        );
+        let rows = list_todos_filtered(
+            &c,
+            &ListTodosFilter {
+                due_date_before: Some("2026-05-10 23:59:59".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "2", "endTime 为空时才看 dueDate");
+    }
+
+    #[test]
+    fn insert_never_overwrites_existing_rows() {
+        let c = fresh();
+        super::insert_todo(&c, "1", r#"{"id":1,"title":"original"}"#, "t").unwrap();
+        let err = super::insert_todo(&c, "1", r#"{"id":1,"title":"clobber"}"#, "t").unwrap_err();
+        assert!(is_primary_key_conflict(&err), "{:?}", err);
+        assert!(get_todo(&c, "1")
+            .unwrap()
+            .unwrap()
+            .data_json
+            .contains("original"));
+        insert_subtask(&c, "9", "1", r#"{"id":9}"#, "t").unwrap();
+        let err = insert_subtask(&c, "9", "1", r#"{"id":9,"x":1}"#, "t").unwrap_err();
+        assert!(is_primary_key_conflict(&err));
+        let other = c.execute("INSERT INTO nope VALUES (1)", []).unwrap_err();
+        assert!(!is_primary_key_conflict(&other));
+    }
+
+    #[test]
+    fn exportable_timestamps_skip_rows_that_cannot_be_exported() {
+        let c = fresh();
+        insert_todo(&c, "1", r#"{"id":1}"#, "2026-05-13 10:00:00");
+        insert_todo(&c, "2", "not json", "2026-05-13 10:00:00");
+        insert_todo(&c, "3", "[1,2]", "2026-05-13 10:00:00");
+        upsert_subtask(&c, "11", "1", r#"{"id":11}"#, "2026-05-13 11:00:00").unwrap();
+        upsert_subtask(&c, "12", "1", "garbage", "t").unwrap();
+        upsert_subtask(&c, "21", "2", r#"{"id":21}"#, "t").unwrap();
+        upsert_subtask(&c, "99", "404", r#"{"id":99}"#, "t").unwrap();
+        let (todos, subs) = exportable_timestamps(&c).unwrap();
+        assert_eq!(todos.keys().collect::<Vec<_>>(), vec!["1"]);
+        assert_eq!(
+            subs.keys().collect::<Vec<_>>(),
+            vec!["11"],
+            "孤儿 / 坏行 / 父不可导出都不算"
+        );
+        assert_eq!(subs["11"], "2026-05-13 11:00:00");
+    }
+
+    #[test]
+    fn subtasks_grouped_in_one_query_with_stable_order() {
+        let c = fresh();
+        for (id, todo, order) in [
+            ("10", "1", 2),
+            ("9", "1", 1),
+            ("11", "1", 1),
+            ("20", "2", 0),
+        ] {
+            upsert_subtask(
+                &c,
+                id,
+                todo,
+                &format!(r#"{{"id":{},"sortOrder":{}}}"#, id, order),
+                "t",
+            )
+            .unwrap();
+        }
+        let ids: Vec<String> = (1..=1200).map(|n| n.to_string()).collect();
+        let grouped = subtasks_for_todos(&c, &ids).unwrap();
+        let order: Vec<&str> = grouped["1"].iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(order, vec!["9", "11", "10"], "sortOrder，再按数值 id");
+        assert_eq!(grouped["2"].len(), 1);
+        assert!(!grouped.contains_key("3"));
+        let counts = subtask_counts_for_todos(&c, &ids).unwrap();
+        assert_eq!(counts.get("1"), Some(&3));
+        assert_eq!(counts.get("2"), Some(&1));
+        assert_eq!(counts.get("3"), None);
+        assert!(subtasks_for_todos(&c, &[]).unwrap().is_empty());
     }
 
     #[test]

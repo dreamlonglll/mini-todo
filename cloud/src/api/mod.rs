@@ -6,9 +6,12 @@
 //! - `/subtasks/:id`
 //! - `/images`、`/images/:name`
 //!
-//! 中间件洋葱：外层 auth（先校验 token，401 直接短路返回）+ 内层
-//! inject_sync_headers（只有鉴权通过的响应才附 X-Sync-Status / X-Last-Sync-At；
-//! 未鉴权请求不查库、不暴露同步状态）。
+//! 中间件洋葱（外 → 内）：
+//! 1. 访问日志（tower-http `TraceLayer`）：方法、路径（不含 query）、状态码、耗时；
+//!    **从不记录请求头**（`Authorization` 里是 api_key），401 也会记录
+//! 2. auth：先校验 token，401 直接短路返回
+//! 3. inject_sync_headers：只有鉴权通过的响应才附 X-Sync-Status / X-Last-Sync-At；
+//!    未鉴权请求不查库、不暴露同步状态
 
 pub mod auth;
 pub mod error;
@@ -24,11 +27,16 @@ pub mod todos;
 mod integration_tests;
 
 use std::sync::Arc;
+use std::time::Duration;
 
+use axum::body::Body;
 use axum::extract::DefaultBodyLimit;
+use axum::http::{Request, Response};
 use axum::middleware;
 use axum::routing::{delete, get, patch, post};
 use axum::Router;
+use tower_http::trace::TraceLayer;
+use tracing::Span;
 
 use crate::config::Config;
 use crate::db::Db;
@@ -78,10 +86,41 @@ pub fn build_router(state: AppState) -> Router {
             state.clone(),
             headers::inject_sync_headers,
         ))
-        // 外层：先校验 token
+        // 中层：先校验 token
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_bearer,
         ))
+        // 最外层：访问日志（5xx 也只经 on_response 记一条，不重复报 failure）
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(access_span)
+                .on_request(())
+                .on_response(access_on_response)
+                .on_body_chunk(())
+                .on_eos(())
+                .on_failure(()),
+        )
         .with_state(state)
+}
+
+/// 访问日志 span：只带方法与路径（**不含 query**：搜索词等可能涉及隐私；也从不记录任何
+/// 请求头，`Authorization` 不会出现在日志里）。
+fn access_span(req: &Request<Body>) -> Span {
+    tracing::info_span!(
+        target: "minitodo_cloud::access",
+        "request",
+        method = %req.method(),
+        path = %req.uri().path(),
+    )
+}
+
+/// 访问日志：响应时记录状态码与耗时（在 `access_span` 里输出）。
+fn access_on_response(resp: &Response<Body>, latency: Duration, _span: &Span) {
+    tracing::info!(
+        target: "minitodo_cloud::access",
+        status = resp.status().as_u16(),
+        latency_ms = latency.as_millis() as u64,
+        "response"
+    );
 }

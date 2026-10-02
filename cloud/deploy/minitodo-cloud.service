@@ -15,13 +15,48 @@ ExecStart=/opt/minitodo-cloud/minitodo-cloud --config /etc/minitodo/config.toml
 # 失败自动重启
 Restart=on-failure
 RestartSec=3
+# 停机：SIGTERM 后服务会排空在途请求（≤10s）并限时补推一次未同步的写入（≤20s）
+TimeoutStopSec=60
 
-# 资源/权限收紧（按需调整）
+# ---------------------------------------------------------------------------
+# 文件系统：整个系统只读，只放开数据目录（与 config.toml 的 data_dir / images_dir
+# 一致；改了那里也要改这里）。数据目录按 README 用 mkdir + chown 预先建好。
+# UMask=0077：新建的 SQLite、图片文件只有服务账户可读写。
+# ---------------------------------------------------------------------------
 ReadWritePaths=/var/lib/minitodo
+UMask=0077
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
+PrivateDevices=true
+
+# ---------------------------------------------------------------------------
+# 权限：不需要任何 capability（监听 8787 这类非特权端口、只做出站 HTTPS）
+# ---------------------------------------------------------------------------
 NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=true
+LockPersonality=true
+# rustls(ring) / SQLite 都不需要可写可执行内存
+MemoryDenyWriteExecute=true
+
+# ---------------------------------------------------------------------------
+# 内核与系统资源
+# ---------------------------------------------------------------------------
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+# 只需要 IPv4/IPv6（监听 + 访问 WebDAV、DNS）与 Unix socket（journald / 本机 DNS 解析）
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
 
 # 文件描述符
 LimitNOFILE=8192

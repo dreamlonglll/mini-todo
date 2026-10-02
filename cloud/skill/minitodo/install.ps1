@@ -19,6 +19,21 @@ $ErrorActionPreference = 'Stop'
 
 $SrcDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
+# config.toml 里是 api_key：只允许当前用户访问。
+# Windows：去掉继承来的 ACE，只给当前用户完全控制；其它系统（pwsh）：chmod 600。
+function Protect-ConfigFile([string]$Path) {
+    if ($env:OS -eq 'Windows_NT') {
+        $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        & icacls $Path /inheritance:r /grant:r "${me}:(F)" | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "!! Could not restrict permissions on $Path; make it readable by the current user only."
+        }
+    }
+    else {
+        & chmod 600 $Path
+    }
+}
+
 $Dests = switch ($Target) {
     'claude'   { @(Join-Path $HOME '.claude\skills\minitodo') }
     'openclaw' { @(Join-Path $HOME '.openclaw\workspace\skills\minitodo') }
@@ -41,8 +56,9 @@ foreach ($DestDir in $Dests) {
     $ConfigPath = Join-Path $DestDir 'config.toml'
     if (-not (Test-Path $ConfigPath)) {
         Copy-Item (Join-Path $SrcDir 'config.example.toml') $ConfigPath
-        Write-Host "!! $ConfigPath created from example. Please edit it to fill in"
-        Write-Host "   'endpoint' (e.g. https://minitodo.example.com) and 'api_key'."
+        Protect-ConfigFile $ConfigPath
+        Write-Host "!! $ConfigPath created from example (readable by the current user only)."
+        Write-Host "   Please edit it to fill in 'endpoint' (e.g. https://minitodo.example.com) and 'api_key'."
     }
     else {
         Write-Host ">> $ConfigPath already exists, kept untouched."
