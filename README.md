@@ -21,11 +21,13 @@
 - 系统提醒
 
 ### 云同步（WebDAV）
-- 支持通过 WebDAV 协议进行云端数据同步（兼容坚果云、NextCloud 等）
-- 同步数据包含待办事项、子任务及图片
-- 支持定时自动同步 + 手动一键同步
-- 同步数据采用 Gzip 压缩，减少网络传输体积
-- 冲突检测与解决：当本地和远端同时修改时，用户可选择保留版本
+- 支持通过 WebDAV 协议进行云端数据同步（兼容坚果云、NextCloud、Apache / nginx 自建等）
+- 同步数据包含待办事项、子任务、图片与部分应用设置
+- 逐条合并：多台设备（以及云端 API）同时修改不同待办时都会保留，同一条待办以最后一次修改为准；
+  删除会同步到其它设备，不会被"复活"
+- 支持定时自动同步 + 手动一键同步；设置页另有"用云端覆盖本地 / 用本地覆盖云端"（带二次确认）
+- 同步在后台线程执行，不会卡住界面；同步数据采用 Gzip 压缩
+- 数据本身不加密，建议使用 https 的 WebDAV 地址；Windows 上 WebDAV 密码用系统 DPAPI 加密保存
 
 ### 日历模式
 - 月视图日历
@@ -51,7 +53,8 @@
 - 系统托盘图标（支持双击快速添加待办项）
 - 开机自启动
 - 版本更新检查
-- 数据导入/导出
+- 数据导入/导出（导入与数据库升级前自动备份到 `backups/`，保留最近 5 份）
+- 运行日志写入本地日志文件，便于排查问题
 - WebDAV 云同步配置（设置页面内集成）
 
 ### 补充
@@ -86,9 +89,9 @@ sudo xattr -rd com.apple.quarantine /Applications/Mini\ Todo.app
 ## 开发
 
 ### 环境要求
-- Node.js 18+
-- Rust 1.70+
-- Windows 10/11 或 macOS
+- Node.js 22.12+（vitest / eslint 的要求）
+- Rust 最新 stable
+- Windows 10/11 或 macOS（Linux 可编译运行，用于 CI 与端到端测试）
 
 > PC 端代码位于 `pc/` 子目录，所有开发命令都在 `pc/` 下执行。
 
@@ -113,6 +116,16 @@ npm run tauri dev
 cd pc
 npm run tauri build
 ```
+
+### 检查与测试
+
+```bash
+cd pc
+npm run typecheck && npm run lint && npm run test   # 前端类型检查 / lint / vitest 单测
+cd src-tauri && cargo clippy --all-targets -- -D warnings && cargo test
+```
+
+端到端验证（Linux，真实应用 + WebDAV + 云端 API）见 [`pc/scripts/e2e-linux/README.md`](pc/scripts/e2e-linux/README.md)。
 
 ## 技术栈
 
