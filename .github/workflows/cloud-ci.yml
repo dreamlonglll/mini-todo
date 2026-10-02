@@ -44,7 +44,7 @@ jobs:
         run: cargo test --locked --no-fail-fast
 
   skill:
-    name: Python skill syntax check
+    name: Python skill syntax check / unit tests
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -60,3 +60,6 @@ jobs:
 
       - name: Compile-check minitodo.py
         run: python -m py_compile minitodo.py
+
+      - name: Unit tests
+        run: python -m unittest -v test_minitodo

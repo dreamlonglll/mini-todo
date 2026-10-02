@@ -107,22 +107,35 @@ invoke('sync_auto_start_state', { enabled: value }).catch((e) => {
 
 ## Required Patterns
 
-<!-- Patterns that must always be used -->
-
-(To be filled by the team)
+| Concern | Use | Never |
+|---|---|---|
+| Parsing / formatting todo times | `utils/datetime.ts` (`parseDateTime`, `composeDateTime` / `normalizeDateTime` → storage form `YYYY-MM-DD HH:MM:SS`, `formatDateTime` for display) | `split('T')`, `new Date(str)` on stored strings, hand-built ISO strings |
+| Images inside Markdown | store `minitodo-image://<name>`; `toDisplayMarkdown` when loading into the editor, `toStorageMarkdown` before saving (`utils/imageRef.ts`) | persisting `asset.localhost` URLs or absolute paths |
+| Link clicks in rendered Markdown | `handleLinkClick` / `preventLinkAuxClick` from `utils/fileLink.ts` (protocol whitelist) | letting the WebView navigate, `window.open(href)` |
+| Error toasts | `notifyError(e, '<操作>失败')` from `utils/notify.ts` | bare `ElMessage.error(String(e))` |
+| `ElMessage` / `ElMessageBox` | import from `@/plugins/element` (eslint enforces) | `import { ElMessage } from 'element-plus'` |
+| Editor-like windows | `bindEditorShortcuts` from `utils/editorShortcuts.ts` (Esc closes with dirty check, Ctrl/Cmd+Enter saves, IME-safe) + a re-entry guard on save | duplicate keydown handlers per view |
+| Uploading images | `invoke('save_subtask_image', bytes, { headers: { 'x-image-ext': ext } })` | base64 JSON payloads |
+| Refreshing the list | `todoStore.fetchTodos()` / `refreshIfChanged()` | direct `invoke('get_todos')` |
 
 ---
 
 ## Testing Requirements
 
-<!-- What level of testing is expected -->
-
-(To be filled by the team)
+- Pure logic lives in `src/utils/*.ts` and gets a sibling `*.test.ts` (vitest, `npm run test`).
+  Existing suites: datetime, imageRef, fileLink, editorShortcuts, quadrant.
+- `npm run typecheck`, `npm run lint`, `npm run test` and `npx vite build` must pass (CI runs all four).
+- UI flows that cross the IPC boundary (sync, images, notifications, refresh) are covered by the
+  Linux e2e suite in `pc/scripts/e2e-linux/` — extend it when adding such a flow.
 
 ---
 
 ## Code Review Checklist
 
-<!-- What reviewers should check -->
-
-(To be filled by the team)
+- [ ] Times written to the backend come from `utils/datetime.ts` storage helpers
+- [ ] No new `v-html` / raw HTML from user content; Markdown goes through `MarkdownEditor`
+- [ ] New `<el-*>` components need no manual import (unplugin), but new function-style APIs are added to `plugins/element.ts` with their CSS
+- [ ] `components.d.ts` regenerated and committed when components are added/removed
+- [ ] Every `listen()` has its unlisten in `onUnmounted`; every `setInterval` is cleared
+- [ ] Background refreshes respect `isModalOpen`
+- [ ] No emoji icons; Element Plus Icons imported per SFC

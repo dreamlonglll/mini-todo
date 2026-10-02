@@ -30,17 +30,24 @@
 |---------|-----------|-------|
 | App startup | `onMounted` → `fetchTodos()` | Initial load |
 | Window focus | `appWindow.onFocusChanged` → `fetchTodos()` | Catches external DB modifications (e.g., scripts writing to SQLite) |
-| Polling (60s) | `setInterval` → `fetchTodos()` | Background refresh when window stays in foreground |
+| Change polling (5s) | `setInterval` → `todoStore.refreshIfChanged()` | Reads `get_change_seq` (`sync_meta.local_seq`, bumped by DB triggers on every todo/subtask write); full `get_todos` only when it differs from the seq of the loaded list |
 | Modal close | `tauri://destroyed` event → `fetchTodos()` | Editor/settings/completed window close |
-| Sync complete | `sync-completed` event → `fetchTodos()` | After WebDAV sync applies remote data |
-| Auto sync | `webdav_auto_sync` result check → `fetchTodos()` | Only when remote data was applied |
+| Sync complete | `sync-completed` event (payload `SyncReport`) → `applySyncReport()` | Emitted by the backend for manual, automatic and settings-window syncs when local data/settings changed; the same report returned by a manual `webdav_sync` call is processed only once |
 | Settings event | `todo-font-changed` event → `loadTodoFontSettings()` | Real-time cross-window style sync |
 | Settings event | `app-settings-changed` event → reload by `key` | Calendar / auto-hide / theme / auto-sync timer / update badge |
-| Data imported | `data-imported` event → `fetchTodos()` + `reloadAppSettings()` | Import and remote-apply overwrite the `settings` table too, not just todos |
+| Data imported | `data-imported` event → `fetchTodos()` + `reloadAppSettings()` | Import overwrites the `settings` table too, not just todos |
+
+### Convention: `fetchTodos()` is single-flight and drops stale results
+
+`todoStore.fetchTodos()` never runs two `get_todos` calls at once: a request made while one is in
+flight is coalesced into one follow-up fetch, and every caller awaits the final result. If a local
+mutation (complete / delete / reorder …) happened while a fetch was in flight, that fetch's result is
+discarded and re-fetched, so the list never flashes back to the pre-mutation state. New refresh
+triggers must call `fetchTodos()` / `refreshIfChanged()`, never `invoke('get_todos')` directly.
 
 ### Convention: Skip Refresh During Modal
 
-All background refresh paths (focus, polling) check `isModalOpen` before calling `fetchTodos()`. This prevents list mutations while the user is editing in a child window.
+All background refresh paths (focus, change polling, sync reports) check `isModalOpen` before refreshing. This prevents list mutations while the user is editing in a child window.
 
 ### Don't: Add fetchTodos() in Child Components
 
