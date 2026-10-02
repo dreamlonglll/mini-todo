@@ -191,7 +191,7 @@ pub(crate) fn apply_settings_json(
         };
         match kind.to_db(value) {
             Some(v) => changed |= set_setting_at(conn, db_key, &v, updated_at)?,
-            None => eprintln!("[sync] 忽略远端非法设置 {}: {}", json_key, value),
+            None => log::warn!("[sync] 忽略远端非法设置 {}: {}", json_key, value),
         }
     }
     Ok(changed)
@@ -268,8 +268,8 @@ pub fn import_data_raw(db: &Database, json_data: &str) -> Result<(), String> {
     db.with_transaction(|tx| import_records(tx, &import, &now))
         .map_err(|e| e.to_string())?;
 
-    // TODO(R2): reload_runtime_prefs —— 导入改写了 top_on_wake / auto_hide_enabled 等设置，
-    // 需要调用 crate::commands::window::reload_runtime_prefs(db) 刷新窗口模块的运行时缓存。
+    // 导入改写了 top_on_wake / auto_hide_enabled 等设置：刷新窗口模块的运行时缓存
+    crate::commands::window::reload_runtime_prefs(db);
     Ok(())
 }
 

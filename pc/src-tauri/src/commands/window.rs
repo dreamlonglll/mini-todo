@@ -1,9 +1,10 @@
+use crate::db::settings_kv::{get_bool_setting, get_setting_or, set_bool_setting, set_setting};
 use crate::db::{
     AppSettings, Database, SaveScreenConfigRequest, ScreenConfig, WindowPosition, WindowSize,
     DEFAULT_WINDOW_BG_ALPHA, DEFAULT_WINDOW_BG_COLOR,
 };
 use serde::Serialize;
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{Manager, State, WebviewWindow, Window};
@@ -44,8 +45,24 @@ static DESKTOP_OWNER: AtomicIsize = AtomicIsize::new(0);
 /// 贴边唤起时是否临时置顶。
 ///
 /// 缓存成原子变量是因为 `tick_auto_hide` 跑在后台轮询线程里，拿不到 `State<Database>`。
-/// 写入点：应用启动（`init_top_on_wake`）、`set_top_on_wake`、`set_window_fixed_mode`。
+/// 写入点：[`reload_runtime_prefs`]（启动、导入、同步应用远端设置、`save_settings`）、
+/// `set_top_on_wake`、`set_window_fixed_mode`、`set_window_desktop_mode`。
 static TOP_ON_WAKE: AtomicBool = AtomicBool::new(true);
+
+/// 运行时偏好被导入 / 同步 / `save_settings` 关掉后，窗口侧还欠一次收尾（藏起的窗口拉回、
+/// 唤起置顶撤销）。这些路径拿不到窗口，由轮询线程在下一个 tick 完成（见 [`tick_auto_hide`]）。
+static PENDING_AUTO_HIDE_RELEASE: AtomicBool = AtomicBool::new(false);
+
+/// 托盘唤起的代次：每次唤起加一。"600ms 后撤置顶"的线程只在自己仍是最新一次时才撤，
+/// 否则连点托盘时较早的线程会提前撤掉后一次唤起的置顶。
+static TRAY_WAKE_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// 主窗口 HWND 缓存（0 = 未缓存）。
+///
+/// `window_handle()` 在非主线程上要跨线程往返主线程取句柄；200ms 轮询线程每个 tick 都要用，
+/// 于是在 setup（主线程）时取一次缓存下来。句柄在主窗口生命周期内不变。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+static MAIN_HWND: AtomicIsize = AtomicIsize::new(0);
 
 /// 固定模式下期望的置顶态。
 ///
@@ -104,43 +121,61 @@ pub fn sync_auto_start_state(enabled: bool) {
     sync_tray_auto_start_checked(enabled);
 }
 
-fn get_auto_hide_enabled_value(db: &State<Database>) -> bool {
-    db.with_connection(|conn| {
-        let enabled: bool = conn
-            .query_row(
-                "SELECT value FROM settings WHERE key = 'auto_hide_enabled'",
-                [],
-                |row| {
-                    let val: String = row.get(0)?;
-                    Ok(val == "true")
-                },
-            )
-            .unwrap_or(true);
-        Ok(enabled)
-    })
-    .unwrap_or(true)
+fn get_auto_hide_enabled_value(db: &Database) -> bool {
+    db.with_connection(|conn| Ok(get_bool_setting(conn, "auto_hide_enabled", true)))
+        .unwrap_or(true)
 }
 
-fn get_top_on_wake_value(db: &State<Database>) -> bool {
-    db.with_connection(|conn| {
-        let enabled: bool = conn
-            .query_row(
-                "SELECT value FROM settings WHERE key = 'top_on_wake'",
-                [],
-                |row| {
-                    let val: String = row.get(0)?;
-                    Ok(val == "true")
-                },
-            )
-            .unwrap_or(true);
-        Ok(enabled)
-    })
-    .unwrap_or(true)
+fn get_top_on_wake_value(db: &Database) -> bool {
+    db.with_connection(|conn| Ok(get_bool_setting(conn, "top_on_wake", true)))
+        .unwrap_or(true)
 }
 
-/// 应用启动时把 `top_on_wake` 灌入原子缓存（轮询线程读不到数据库）
-pub fn init_top_on_wake(db: &State<Database>) {
-    TOP_ON_WAKE.store(get_top_on_wake_value(db), Ordering::SeqCst);
+/// 从库里刷新轮询线程用的运行时缓存：`TOP_ON_WAKE` 与贴边隐藏开关（`AUTO_HIDE_STATE.enabled`，
+/// 只在普通固定模式下生效）。
+///
+/// 应用启动、手动导入、同步应用了远端设置、`save_settings` 之后调用——这些路径会改写
+/// `top_on_wake` / `auto_hide_enabled`，不刷新的话本次会话里的行为还是旧设置。
+/// 某项被关掉时，窗口侧的收尾（拉回藏起的窗口、撤销唤起置顶）交给轮询线程下一 tick 完成。
+pub fn reload_runtime_prefs(db: &Database) {
+    let (top_on_wake, auto_hide_enabled) = db
+        .with_connection(|conn| {
+            Ok((
+                get_bool_setting(conn, "top_on_wake", true),
+                get_bool_setting(conn, "auto_hide_enabled", true),
+            ))
+        })
+        .unwrap_or((true, true));
+    let needs_release = with_auto_hide_state(|state| {
+        apply_runtime_prefs(
+            state,
+            &TOP_ON_WAKE,
+            top_on_wake,
+            auto_hide_enabled && is_fixed_mode(),
+        )
+    });
+    if needs_release {
+        PENDING_AUTO_HIDE_RELEASE.store(true, Ordering::SeqCst);
+    }
+}
+
+/// 把新的偏好写进运行时状态；返回是否有功能被关掉（窗口侧欠一次收尾）。
+/// `auto_hide_active` = 开关打开且处于普通固定模式。
+fn apply_runtime_prefs(
+    state: &mut AutoHideState,
+    top_on_wake_cell: &AtomicBool,
+    top_on_wake: bool,
+    auto_hide_active: bool,
+) -> bool {
+    let top_turned_off = top_on_wake_cell.swap(top_on_wake, Ordering::SeqCst) && !top_on_wake;
+    let was_enabled = state.enabled;
+    state.enabled = auto_hide_active;
+    if auto_hide_active && !was_enabled {
+        // 与 set_auto_hide_enabled(true) 一致：贴边计时从头开始
+        state.docked_edge = None;
+        state.edge_stick_started_at = None;
+    }
+    top_turned_off || (was_enabled && !auto_hide_active)
 }
 
 /// 窗口当前是否应保持置顶：仅在贴边唤起且开关打开时成立。
@@ -157,12 +192,7 @@ pub fn should_stay_on_top() -> bool {
 ///
 /// 注意该键描述的是文字颜色："light" 表示浅色文字，即前端的「深色主题开启」
 fn get_text_theme_value(conn: &rusqlite::Connection) -> String {
-    conn.query_row(
-        "SELECT value FROM settings WHERE key = 'text_theme'",
-        [],
-        |row| row.get(0),
-    )
-    .unwrap_or_else(|_| "dark".to_string())
+    get_setting_or(conn, "text_theme", "dark")
 }
 
 const EDGE_SNAP_THRESHOLD_PX: i32 = 10;
@@ -428,20 +458,19 @@ fn get_monitor_bounds(window: &WebviewWindow) -> Option<MonitorBounds> {
     })
 }
 
-fn should_wake_hidden_window(cursor_x: i32, cursor_y: i32, state: &AutoHideState) -> bool {
-    let (Some(edge), Some(monitor), Some(anchor), Some(size)) = (
-        state.docked_edge,
-        state.monitor_bounds,
-        state.anchor_position.as_ref(),
-        state.anchor_size.as_ref(),
-    ) else {
-        return false;
-    };
-
-    let vertical_min = anchor.y - WAKE_RANGE_PADDING_PX;
-    let vertical_max = anchor.y + size.height as i32 + WAKE_RANGE_PADDING_PX;
-    let horizontal_min = anchor.x - WAKE_RANGE_PADDING_PX;
-    let horizontal_max = anchor.x + size.width as i32 + WAKE_RANGE_PADDING_PX;
+/// 光标是否落在贴边窗口的唤起范围内：紧贴屏幕边缘、宽 `WAKE_HOTZONE_WIDTH_PX` 的热区，
+/// 沿边方向在窗口范围两侧各放宽 `WAKE_RANGE_PADDING_PX`。
+fn cursor_in_wake_range(
+    cursor_x: i32,
+    cursor_y: i32,
+    edge: DockEdge,
+    monitor: MonitorBounds,
+    window: WindowRect,
+) -> bool {
+    let vertical_min = window.y - WAKE_RANGE_PADDING_PX;
+    let vertical_max = window.bottom() + WAKE_RANGE_PADDING_PX;
+    let horizontal_min = window.x - WAKE_RANGE_PADDING_PX;
+    let horizontal_max = window.right() + WAKE_RANGE_PADDING_PX;
 
     match edge {
         DockEdge::Left => {
@@ -469,6 +498,24 @@ fn should_wake_hidden_window(cursor_x: i32, cursor_y: i32, state: &AutoHideState
                 && cursor_x <= horizontal_max
         }
     }
+}
+
+fn should_wake_hidden_window(cursor_x: i32, cursor_y: i32, state: &AutoHideState) -> bool {
+    let (Some(edge), Some(monitor), Some(anchor), Some(size)) = (
+        state.docked_edge,
+        state.monitor_bounds,
+        state.anchor_position.as_ref(),
+        state.anchor_size.as_ref(),
+    ) else {
+        return false;
+    };
+    let anchor_rect = WindowRect {
+        x: anchor.x,
+        y: anchor.y,
+        width: size.width as i32,
+        height: size.height as i32,
+    };
+    cursor_in_wake_range(cursor_x, cursor_y, edge, monitor, anchor_rect)
 }
 
 fn evaluate_auto_hide_transition(
@@ -518,8 +565,12 @@ fn evaluate_auto_hide_transition(
         return AutoHideTransition::None;
     };
 
+    // 滞回（D2）：唤起范围沿边方向比窗口宽出 WAKE_RANGE_PADDING_PX。显示态若只认窗口矩形，
+    // 光标停在这条带里时会"收起 → 立刻被唤起 → 又收起"反复抖动（每次移窗还触发前端存盘），
+    // 所以显示态把唤起范围也算作"光标在内"
     let cursor_inside = if let Some((cursor_x, cursor_y)) = cursor {
         point_in_rect(cursor_x, cursor_y, rect)
+            || cursor_in_wake_range(cursor_x, cursor_y, edge, monitor, rect)
     } else {
         state.cursor_inside_window
     };
@@ -571,8 +622,48 @@ pub fn restore_if_minimized(window: &WebviewWindow) {
     show_window(window);
 }
 
+/// 贴边隐藏已被关掉、窗口却还藏在屏幕边缘时：清掉隐藏态（同 `set_auto_hide_enabled(false)`），
+/// 返回要拉回的锚点；其它情况不动状态、返回 `None`。
+fn take_disabled_hidden_anchor(state: &mut AutoHideState) -> Option<WindowPosition> {
+    if state.enabled || !state.hidden {
+        return None;
+    }
+    let anchor = state.anchor_position.clone();
+    state.hidden = false;
+    state.docked_edge = None;
+    state.monitor_bounds = None;
+    state.anchor_size = None;
+    state.edge_stick_started_at = None;
+    anchor
+}
+
+/// [`reload_runtime_prefs`] 关掉贴边隐藏 / 唤起置顶之后的窗口收尾，与 `set_auto_hide_enabled(false)`、
+/// `set_top_on_wake(false)` 的即时处理一致：藏在屏幕边缘的窗口拉回锚点，唤起时加的置顶撤掉。
+fn release_auto_hide(window: &WebviewWindow) {
+    let restore = with_auto_hide_state(take_disabled_hidden_anchor);
+    if let Some(anchor) = restore {
+        let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
+            x: anchor.x,
+            y: anchor.y,
+        }));
+        show_window(window);
+    }
+    if !should_stay_on_top() {
+        set_window_always_on_top(window, false);
+    }
+    reassert_window_mode_state(window);
+}
+
 /// 固定模式轮询：处理贴边自动隐藏与边缘唤起
 pub fn tick_auto_hide(window: &WebviewWindow) {
+    if PENDING_AUTO_HIDE_RELEASE.swap(false, Ordering::SeqCst) {
+        release_auto_hide(window);
+    }
+    // 贴边隐藏没开时什么都不用做：以前照样取光标、窗口矩形、所在显示器（后两者在轮询线程上
+    // 都要跨线程往返主线程），每 200ms 白跑一轮（D3）
+    if !with_auto_hide_state(|state| state.enabled) {
+        return;
+    }
     let cursor = get_cursor_position();
     let Some(rect) = get_window_rect(window) else {
         return;
@@ -632,204 +723,36 @@ pub fn tick_auto_hide(window: &WebviewWindow) {
     }
 }
 
-#[tauri::command]
-pub fn get_settings(db: State<Database>) -> Result<AppSettings, String> {
-    db.with_connection(|conn| {
-        let is_fixed: bool = conn
-            .query_row(
-                "SELECT value FROM settings WHERE key = 'is_fixed'",
-                [],
-                |row| {
-                    let val: String = row.get(0)?;
-                    Ok(val == "true")
-                },
-            )
-            .unwrap_or(false);
-
-        let fixed_embed_desktop: bool = conn
-            .query_row(
-                "SELECT value FROM settings WHERE key = 'fixed_embed_desktop'",
-                [],
-                |row| {
-                    let val: String = row.get(0)?;
-                    Ok(val == "true")
-                },
-            )
-            .unwrap_or(false);
-
-        let window_position: Option<WindowPosition> = conn
-            .query_row(
-                "SELECT value FROM settings WHERE key = 'window_position'",
-                [],
-                |row| {
-                    let val: String = row.get(0)?;
-                    Ok(serde_json::from_str(&val).ok())
-                },
-            )
-            .unwrap_or(None);
-
-        let window_size: Option<WindowSize> = conn
-            .query_row(
-                "SELECT value FROM settings WHERE key = 'window_size'",
-                [],
-                |row| {
-                    let val: String = row.get(0)?;
-                    Ok(serde_json::from_str(&val).ok())
-                },
-            )
-            .unwrap_or(None);
-
-        let auto_hide_enabled: bool = conn
-            .query_row(
-                "SELECT value FROM settings WHERE key = 'auto_hide_enabled'",
-                [],
-                |row| {
-                    let val: String = row.get(0)?;
-                    Ok(val == "true")
-                },
-            )
-            .unwrap_or(true);
-
-        let top_on_wake: bool = conn
-            .query_row(
-                "SELECT value FROM settings WHERE key = 'top_on_wake'",
-                [],
-                |row| {
-                    let val: String = row.get(0)?;
-                    Ok(val == "true")
-                },
-            )
-            .unwrap_or(true);
-
-        let window_bg_color: String = conn
-            .query_row(
-                "SELECT value FROM settings WHERE key = 'window_bg_color'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap_or_else(|_| DEFAULT_WINDOW_BG_COLOR.to_string());
-
-        let window_bg_alpha: f64 = conn
-            .query_row(
-                "SELECT value FROM settings WHERE key = 'window_bg_alpha'",
-                [],
-                |row| {
-                    let val: String = row.get(0)?;
-                    Ok(val.parse::<f64>().unwrap_or(DEFAULT_WINDOW_BG_ALPHA))
-                },
-            )
-            .unwrap_or(DEFAULT_WINDOW_BG_ALPHA);
-
-        let text_theme = get_text_theme_value(conn);
-
-        let show_calendar: bool = conn
-            .query_row(
-                "SELECT value FROM settings WHERE key = 'show_calendar'",
-                [],
-                |row| {
-                    let val: String = row.get(0)?;
-                    Ok(val == "true")
-                },
-            )
-            .unwrap_or(false);
-
-        let view_mode: String = conn
-            .query_row(
-                "SELECT value FROM settings WHERE key = 'view_mode'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap_or_else(|_| "list".to_string());
-
-        let notification_type: String = conn
-            .query_row(
-                "SELECT value FROM settings WHERE key = 'notification_type'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap_or_else(|_| "system".to_string());
-
-        Ok(AppSettings {
-            is_fixed,
-            fixed_embed_desktop,
-            window_position,
-            window_size,
-            auto_hide_enabled,
-            top_on_wake,
-            window_bg_color,
-            window_bg_alpha,
-            text_theme,
-            show_calendar,
-            view_mode,
-            notification_type,
-        })
-    })
-    .map_err(|e| e.to_string())
-}
-
+/// 主窗口保存窗口状态（`appStore.saveWindowState`）：一个事务内写入，值没变的键不刷新
+/// `updated_at`——以前 `INSERT OR REPLACE` 让每次挪窗口都把参与同步的设置版本推到"现在"，
+/// 远端设置永远应用不进来，每次同步还要重传设置。写完刷新轮询线程的运行时缓存。
+///
+/// 前端不传 `show_calendar` / `view_mode` / `notification_type`（反序列化成默认值），这里也不写。
 #[tauri::command]
 pub fn save_settings(db: State<Database>, settings: AppSettings) -> Result<(), String> {
-    // 轮询线程读的是原子缓存，落库的同时要刷新，否则本次会话内改动不生效
-    TOP_ON_WAKE.store(settings.top_on_wake, Ordering::SeqCst);
-    db.with_connection(|conn| {
-        // 保存 is_fixed
-        conn.execute(
-            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('is_fixed', ?, datetime('now', 'localtime'))",
-            [if settings.is_fixed { "true" } else { "false" }],
-        )?;
+    save_settings_inner(&db, &settings)?;
+    reload_runtime_prefs(&db);
+    Ok(())
+}
 
-        // 保存 fixed_embed_desktop（前端 saveWindowState 前必须先 load 真值，否则会刷成默认 false）
-        conn.execute(
-            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('fixed_embed_desktop', ?, datetime('now', 'localtime'))",
-            [if settings.fixed_embed_desktop { "true" } else { "false" }],
-        )?;
-
-        // 保存窗口位置
+fn save_settings_inner(db: &Database, settings: &AppSettings) -> Result<(), String> {
+    db.with_transaction(|tx| -> rusqlite::Result<()> {
+        set_bool_setting(tx, "is_fixed", settings.is_fixed)?;
+        // fixed_embed_desktop：前端 saveWindowState 前必须先 load 真值，否则会刷成默认 false
+        set_bool_setting(tx, "fixed_embed_desktop", settings.fixed_embed_desktop)?;
         if let Some(pos) = &settings.window_position {
             let pos_json = serde_json::to_string(pos).unwrap_or_default();
-            conn.execute(
-                "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('window_position', ?, datetime('now', 'localtime'))",
-                [&pos_json],
-            )?;
+            set_setting(tx, "window_position", &pos_json)?;
         }
-
-        // 保存窗口尺寸
         if let Some(size) = &settings.window_size {
             let size_json = serde_json::to_string(size).unwrap_or_default();
-            conn.execute(
-                "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('window_size', ?, datetime('now', 'localtime'))",
-                [&size_json],
-            )?;
+            set_setting(tx, "window_size", &size_json)?;
         }
-
-        // 保存贴边自动隐藏设置
-        conn.execute(
-            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('auto_hide_enabled', ?, datetime('now', 'localtime'))",
-            [if settings.auto_hide_enabled { "true" } else { "false" }],
-        )?;
-
-        // 保存唤起置顶设置
-        conn.execute(
-            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('top_on_wake', ?, datetime('now', 'localtime'))",
-            [if settings.top_on_wake { "true" } else { "false" }],
-        )?;
-
-        // 保存窗口底色与透明度
-        conn.execute(
-            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('window_bg_color', ?, datetime('now', 'localtime'))",
-            [&settings.window_bg_color],
-        )?;
-        conn.execute(
-            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('window_bg_alpha', ?, datetime('now', 'localtime'))",
-            [&settings.window_bg_alpha.to_string()],
-        )?;
-
-        // 保存文本主题
-        conn.execute(
-            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('text_theme', ?, datetime('now', 'localtime'))",
-            [&settings.text_theme],
-        )?;
-
+        set_bool_setting(tx, "auto_hide_enabled", settings.auto_hide_enabled)?;
+        set_bool_setting(tx, "top_on_wake", settings.top_on_wake)?;
+        set_setting(tx, "window_bg_color", &settings.window_bg_color)?;
+        set_setting(tx, "window_bg_alpha", &settings.window_bg_alpha.to_string())?;
+        set_setting(tx, "text_theme", &settings.text_theme)?;
         Ok(())
     })
     .map_err(|e| e.to_string())
@@ -840,14 +763,8 @@ pub fn save_settings(db: State<Database>, settings: AppSettings) -> Result<(), S
 /// 供设置窗口调用：仅写 text_theme 键，不触碰窗口位置/尺寸/固定模式
 #[tauri::command]
 pub fn set_text_theme(db: State<Database>, theme: String) -> Result<(), String> {
-    db.with_connection(|conn| {
-        conn.execute(
-            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('text_theme', ?, datetime('now', 'localtime'))",
-            [&theme],
-        )?;
-        Ok(())
-    })
-    .map_err(|e| e.to_string())
+    db.with_connection(|conn| set_setting(conn, "text_theme", &theme).map(|_| ()))
+        .map_err(|e| e.to_string())
 }
 
 /// 读取文本主题（默认 "dark"，注意该值语义与深色主题开关相反，见 appStore.loadDarkTheme）
@@ -869,11 +786,33 @@ pub fn get_text_theme(db: State<Database>) -> Result<String, String> {
 fn window_hwnd(window: &WebviewWindow) -> Option<HWND> {
     use raw_window_handle::HasWindowHandle;
 
+    // 主窗口优先用 setup 时缓存的句柄：轮询线程上 window_handle() 要跨线程往返主线程（D3）
+    if window.label() == "main" {
+        let cached = MAIN_HWND.load(Ordering::SeqCst);
+        if cached != 0 && unsafe { IsWindow(HWND(cached as *mut _)) }.as_bool() {
+            return Some(HWND(cached as *mut _));
+        }
+    }
     let handle = window.window_handle().ok()?;
     let raw_window_handle::RawWindowHandle::Win32(win32_handle) = handle.as_raw() else {
         return None;
     };
     Some(HWND(win32_handle.hwnd.get() as *mut _))
+}
+
+/// setup 阶段（主线程）缓存主窗口句柄，供轮询线程使用（D3）
+pub fn remember_main_window(window: &WebviewWindow) {
+    #[cfg(target_os = "windows")]
+    {
+        MAIN_HWND.store(0, Ordering::SeqCst);
+        if let Some(hwnd) = window_hwnd(window) {
+            MAIN_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = window;
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -1054,12 +993,12 @@ fn window_class_name(hwnd: HWND) -> String {
 fn desktop_host() -> Option<HWND> {
     let shell = unsafe { GetShellWindow() };
     if shell.is_invalid() {
-        eprintln!("[desktop] GetShellWindow 为空，桌面宿主暂不可用");
+        log::warn!("[desktop] GetShellWindow 为空，桌面宿主暂不可用");
         return None;
     }
     let class_name = window_class_name(shell);
     if !is_desktop_host_class(&class_name) {
-        eprintln!(
+        log::warn!(
             "[desktop] shell 窗口类名为 {:?}（非 Progman），仍以其为 owner",
             class_name
         );
@@ -1237,12 +1176,14 @@ pub fn set_window_desktop_mode(
 ) -> Result<(), String> {
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = (app_handle, db);
-        // 前端 applyNormalMode 会无条件调一次 enabled=false，非 Windows 上当作 no-op，
-        // 否则每次切回普通模式控制台都多一条报错
+        // 嵌入桌面只有 Windows 实现。enabled=true 时回退为普通固定模式（D5）：同步过来的
+        // fixed_embed_desktop=true 会让前端在 macOS / Linux 上也走这条路，以前直接报错被吞掉，
+        // 结果前端以为已固定、后端却没固定，而开关在非 Windows 上又被隐藏、用户关不掉。
+        // enabled=false：前端 applyNormalMode 会无条件调一次，当作 no-op
         if enabled {
-            Err("桌面模式仅支持 Windows".to_string())
+            set_window_fixed_mode(app_handle, db, true)
         } else {
+            let _ = (app_handle, db);
             Ok(())
         }
     }
@@ -1320,33 +1261,42 @@ pub fn set_window_fixed_mode(
         leave_desktop_mode(&window);
     }
 
+    // 退出固定模式时贴边逻辑随之停用，遗留的置顶要一并撤销。
+    // 撤置顶必须在 IS_FIXED_MODE 置 false 之前（D1，与 set_window_desktop_mode 的退出分支对称）：
+    // 此时才走 Win32 的 HWND_NOTOPMOST；置 false 后落到 tao 通路，而贴边唤起的置顶是 Win32 打的，
+    // tao 记录的 ALWAYS_ON_TOP 本就是 false，apply_diff 什么都不做——窗口解锁后一直置顶
+    if !fixed {
+        set_window_always_on_top(&window, false);
+    }
+
     // 更新全局固定模式状态
     IS_FIXED_MODE.store(fixed, Ordering::SeqCst);
     let auto_hide_enabled = get_auto_hide_enabled_value(&db);
     TOP_ON_WAKE.store(get_top_on_wake_value(&db), Ordering::SeqCst);
 
-    // 退出固定模式时贴边逻辑随之停用，遗留的置顶要一并撤销。
-    // 此处 IS_FIXED_MODE 已置 false，走的是 tao 通路——退出固定模式本就该恢复任务栏图标
     if !fixed {
+        // 再走一次 tao 通路：tao 自己记录的置顶（普通模式下托盘唤起走 tao）若还开着一并清掉；
+        // 本就是 false 时 apply_diff 什么都不做。任务栏样式由下方排队的 reassert 恢复
         set_window_always_on_top(&window, false);
     }
 
     let restore_position = with_auto_hide_state(|state| {
+        // 藏在边缘的窗口先拉回锚点。重复进入固定模式（已固定时再调一次）也要拉：
+        // 只清 hidden 不挪窗口，窗口会卡在屏幕外，之后的贴边判断也认不出它
+        let restore = if state.hidden {
+            state.anchor_position.clone()
+        } else {
+            None
+        };
         if fixed {
             state.enabled = auto_hide_enabled;
             state.hidden = false;
             state.docked_edge = None;
             state.edge_stick_started_at = None;
-            None
         } else {
-            let restore = if state.hidden {
-                state.anchor_position.clone()
-            } else {
-                None
-            };
             *state = AutoHideState::default();
-            restore
         }
+        restore
     });
 
     if let Some(anchor) = restore_position {
@@ -1366,21 +1316,9 @@ pub fn set_window_fixed_mode(
 }
 
 /// 读取"固定模式时，嵌入桌面中"开关；缺键（旧库）按 false。
-fn get_fixed_embed_desktop_value(db: &State<Database>) -> bool {
-    db.with_connection(|conn| {
-        let enabled: bool = conn
-            .query_row(
-                "SELECT value FROM settings WHERE key = 'fixed_embed_desktop'",
-                [],
-                |row| {
-                    let val: String = row.get(0)?;
-                    Ok(val == "true")
-                },
-            )
-            .unwrap_or(false);
-        Ok(enabled)
-    })
-    .unwrap_or(false)
+fn get_fixed_embed_desktop_value(db: &Database) -> bool {
+    db.with_connection(|conn| Ok(get_bool_setting(conn, "fixed_embed_desktop", false)))
+        .unwrap_or(false)
 }
 
 #[tauri::command]
@@ -1400,15 +1338,13 @@ pub fn set_fixed_embed_desktop(
     db: State<Database>,
     enabled: bool,
 ) -> Result<(), String> {
-    db.with_connection(|conn| {
-        conn.execute(
-            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('fixed_embed_desktop', ?, datetime('now', 'localtime'))",
-            [if enabled { "true" } else { "false" }],
-        )?;
-        Ok(())
-    })
-    .map_err(|e| e.to_string())?;
+    db.with_connection(|conn| set_bool_setting(conn, "fixed_embed_desktop", enabled).map(|_| ()))
+        .map_err(|e| e.to_string())?;
 
+    if !cfg!(target_os = "windows") {
+        // 非 Windows 没有嵌入桌面：只记住偏好（同步过来的 true 也无害），窗口保持普通固定模式
+        return Ok(());
+    }
     if enabled && is_fixed_mode() {
         set_window_desktop_mode(app_handle, db, true)
     } else if !enabled && is_desktop_mode() {
@@ -1437,14 +1373,8 @@ pub fn set_auto_hide_enabled(
     db: State<Database>,
     enabled: bool,
 ) -> Result<(), String> {
-    db.with_connection(|conn| {
-        conn.execute(
-            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('auto_hide_enabled', ?, datetime('now', 'localtime'))",
-            [if enabled { "true" } else { "false" }],
-        )?;
-        Ok(())
-    })
-    .map_err(|e| e.to_string())?;
+    db.with_connection(|conn| set_bool_setting(conn, "auto_hide_enabled", enabled).map(|_| ()))
+        .map_err(|e| e.to_string())?;
 
     let restore_position = with_auto_hide_state(|state| {
         state.enabled = enabled && is_fixed_mode();
@@ -1501,14 +1431,8 @@ pub fn set_top_on_wake(
     db: State<Database>,
     enabled: bool,
 ) -> Result<(), String> {
-    db.with_connection(|conn| {
-        conn.execute(
-            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('top_on_wake', ?, datetime('now', 'localtime'))",
-            [if enabled { "true" } else { "false" }],
-        )?;
-        Ok(())
-    })
-    .map_err(|e| e.to_string())?;
+    db.with_connection(|conn| set_bool_setting(conn, "top_on_wake", enabled).map(|_| ()))
+        .map_err(|e| e.to_string())?;
 
     TOP_ON_WAKE.store(enabled, Ordering::SeqCst);
 
@@ -1534,22 +1458,9 @@ pub struct WindowBackground {
 #[tauri::command]
 pub fn get_window_background(db: State<Database>) -> Result<WindowBackground, String> {
     db.with_connection(|conn| {
-        let color: String = conn
-            .query_row(
-                "SELECT value FROM settings WHERE key = 'window_bg_color'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap_or_else(|_| DEFAULT_WINDOW_BG_COLOR.to_string());
-        let alpha: f64 = conn
-            .query_row(
-                "SELECT value FROM settings WHERE key = 'window_bg_alpha'",
-                [],
-                |row| {
-                    let val: String = row.get(0)?;
-                    Ok(val.parse::<f64>().unwrap_or(DEFAULT_WINDOW_BG_ALPHA))
-                },
-            )
+        let color = get_setting_or(conn, "window_bg_color", DEFAULT_WINDOW_BG_COLOR);
+        let alpha = get_setting_or(conn, "window_bg_alpha", "")
+            .parse::<f64>()
             .unwrap_or(DEFAULT_WINDOW_BG_ALPHA);
         Ok(WindowBackground { color, alpha })
     })
@@ -1563,21 +1474,15 @@ pub fn get_window_background(db: State<Database>) -> Result<WindowBackground, St
 #[tauri::command]
 pub fn set_window_background(db: State<Database>, color: String, alpha: f64) -> Result<(), String> {
     let alpha = alpha.clamp(0.0, 1.0);
-    db.with_connection(|conn| {
-        conn.execute(
-            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('window_bg_color', ?, datetime('now', 'localtime'))",
-            [&color],
-        )?;
-        conn.execute(
-            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('window_bg_alpha', ?, datetime('now', 'localtime'))",
-            [&alpha.to_string()],
-        )?;
+    db.with_transaction(|tx| -> rusqlite::Result<()> {
+        set_setting(tx, "window_bg_color", &color)?;
+        set_setting(tx, "window_bg_alpha", &alpha.to_string())?;
         Ok(())
     })
     .map_err(|e| e.to_string())
 }
 
-/// 显示并置顶主窗口（托盘双击 / 单击）
+/// 显示并置顶主窗口（托盘单击、重复启动程序时）
 ///
 /// 固定模式下窗口是 `WS_EX_TOOLWINDOW`，既不在任务栏也不参与 Alt+Tab，
 /// 单纯 `set_focus` 无法把它从全屏窗口后面拉出来，所以要过一次 topmost。
@@ -1627,9 +1532,14 @@ pub fn bring_main_window_to_front(app: &tauri::AppHandle) {
     // 兜底：set_position 在窗口处于最大化态时会经 apply_diff 重写 ex style
     reassert_window_mode_state(&window);
 
+    let generation = begin_tray_wake();
     let app = app.clone();
     std::thread::spawn(move || {
         std::thread::sleep(TRAY_WAKE_TOPMOST_DURATION);
+        // 期间又有新的唤起：置顶归新的那一次管，旧线程不能提前撤掉
+        if !is_latest_tray_wake(generation) {
+            return;
+        }
         if !should_stay_on_top() {
             if let Some(window) = app.get_webview_window("main") {
                 set_window_always_on_top(&window, false);
@@ -1637,6 +1547,16 @@ pub fn bring_main_window_to_front(app: &tauri::AppHandle) {
             }
         }
     });
+}
+
+/// 开始一次托盘唤起，返回它的代次
+fn begin_tray_wake() -> u64 {
+    TRAY_WAKE_GENERATION.fetch_add(1, Ordering::SeqCst) + 1
+}
+
+/// `generation` 是否仍是最近一次托盘唤起
+fn is_latest_tray_wake(generation: u64) -> bool {
+    TRAY_WAKE_GENERATION.load(Ordering::SeqCst) == generation
 }
 
 /// 读取主窗口的位置与尺寸
@@ -1793,7 +1713,7 @@ pub fn save_screen_config(
     config: SaveScreenConfigRequest,
 ) -> Result<ScreenConfig, String> {
     db.with_connection(|conn| {
-        // 使用 INSERT OR REPLACE 来保存或更新
+        // 按 config_id upsert：已存在则更新几何与固定状态
         conn.execute(
             "INSERT INTO screen_configs
              (config_id, display_name, window_x, window_y, window_width, window_height, is_fixed, updated_at)
@@ -1881,33 +1801,15 @@ pub fn update_screen_config_name(
 /// 获取是否显示日历
 #[tauri::command]
 pub fn get_show_calendar(db: State<Database>) -> Result<bool, String> {
-    db.with_connection(|conn| {
-        let show: bool = conn
-            .query_row(
-                "SELECT value FROM settings WHERE key = 'show_calendar'",
-                [],
-                |row| {
-                    let val: String = row.get(0)?;
-                    Ok(val == "true")
-                },
-            )
-            .unwrap_or(false);
-        Ok(show)
-    })
-    .map_err(|e| e.to_string())
+    db.with_connection(|conn| Ok(get_bool_setting(conn, "show_calendar", false)))
+        .map_err(|e| e.to_string())
 }
 
 /// 设置是否显示日历
 #[tauri::command]
 pub fn set_show_calendar(db: State<Database>, show: bool) -> Result<(), String> {
-    db.with_connection(|conn| {
-        conn.execute(
-            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('show_calendar', ?, datetime('now', 'localtime'))",
-            [if show { "true" } else { "false" }],
-        )?;
-        Ok(())
-    })
-    .map_err(|e| e.to_string())
+    db.with_connection(|conn| set_bool_setting(conn, "show_calendar", show).map(|_| ()))
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -2021,6 +1923,240 @@ mod tests {
 
         assert!(matches!(transition, AutoHideTransition::Restore { .. }));
         assert!(!state.hidden);
+    }
+
+    // ---- 滞回（D2）----
+
+    /// 光标停在唤起范围的 padding 带里（顶边热区内、窗口水平范围外 40px 以内）：
+    /// 隐藏态会被唤起，显示态也必须视为"在内"，否则收起 / 唤起来回抖动
+    #[test]
+    fn cursor_in_wake_padding_keeps_a_visible_window_visible() {
+        let now = Instant::now();
+        let in_padding = Some((DOCKED_RECT.right() + 20, 0));
+
+        let mut hidden = AutoHideState {
+            enabled: true,
+            hidden: true,
+            docked_edge: Some(DockEdge::Top),
+            monitor_bounds: Some(MONITOR),
+            anchor_position: Some(WindowPosition { x: 100, y: 0 }),
+            anchor_size: Some(WindowSize {
+                width: 380,
+                height: 600,
+            }),
+            ..AutoHideState::default()
+        };
+        assert!(matches!(
+            evaluate_auto_hide_transition(&mut hidden, DOCKED_RECT, MONITOR, in_padding, now),
+            AutoHideTransition::Restore { .. }
+        ));
+
+        let mut visible = docked_state(now);
+        let transition =
+            evaluate_auto_hide_transition(&mut visible, DOCKED_RECT, MONITOR, in_padding, now);
+        assert!(matches!(transition, AutoHideTransition::None));
+        assert!(!visible.hidden, "唤起范围内不收起");
+        assert_eq!(visible.edge_stick_started_at, Some(now), "计时重新开始");
+
+        // 离开唤起范围（padding 之外 / 热区之下）照常收起
+        for away in [
+            (DOCKED_RECT.right() + WAKE_RANGE_PADDING_PX + 1, 0),
+            (DOCKED_RECT.right() + 20, WAKE_HOTZONE_WIDTH_PX + 1),
+        ] {
+            let mut visible = docked_state(now);
+            assert!(
+                matches!(
+                    evaluate_auto_hide_transition(
+                        &mut visible,
+                        DOCKED_RECT,
+                        MONITOR,
+                        Some(away),
+                        now
+                    ),
+                    AutoHideTransition::Hide { .. }
+                ),
+                "{away:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn wake_range_follows_each_edge() {
+        let window = WindowRect {
+            x: 0,
+            y: 200,
+            width: 380,
+            height: 600,
+        };
+        // 左边：x 在热区内、y 在窗口范围 ± padding 内
+        assert!(cursor_in_wake_range(
+            0,
+            170,
+            DockEdge::Left,
+            MONITOR,
+            window
+        ));
+        assert!(!cursor_in_wake_range(
+            3,
+            300,
+            DockEdge::Left,
+            MONITOR,
+            window
+        ));
+        assert!(!cursor_in_wake_range(
+            0,
+            841,
+            DockEdge::Left,
+            MONITOR,
+            window
+        ));
+        // 右边
+        assert!(cursor_in_wake_range(
+            1919,
+            300,
+            DockEdge::Right,
+            MONITOR,
+            window
+        ));
+        assert!(!cursor_in_wake_range(
+            1916,
+            300,
+            DockEdge::Right,
+            MONITOR,
+            window
+        ));
+        // 底边：x 在窗口范围 ± padding 内
+        assert!(cursor_in_wake_range(
+            -40,
+            1080,
+            DockEdge::Bottom,
+            MONITOR,
+            window
+        ));
+        assert!(!cursor_in_wake_range(
+            -41,
+            1080,
+            DockEdge::Bottom,
+            MONITOR,
+            window
+        ));
+    }
+
+    // ---- 运行时偏好（导入 / 同步 / save_settings 之后刷新）----
+
+    #[test]
+    fn runtime_prefs_report_when_something_was_turned_off() {
+        let top = AtomicBool::new(true);
+        let mut state = AutoHideState {
+            enabled: true,
+            docked_edge: Some(DockEdge::Top),
+            ..AutoHideState::default()
+        };
+
+        assert!(!apply_runtime_prefs(&mut state, &top, true, true), "无变化");
+        assert!(
+            apply_runtime_prefs(&mut state, &top, false, true),
+            "唤起置顶被关"
+        );
+        assert!(!top.load(Ordering::SeqCst));
+        assert!(
+            apply_runtime_prefs(&mut state, &top, false, false),
+            "贴边隐藏被关"
+        );
+        assert!(!state.enabled);
+
+        // 重新打开：状态从头开始，不需要收尾
+        assert!(!apply_runtime_prefs(&mut state, &top, true, true));
+        assert!(state.enabled);
+        assert_eq!(state.docked_edge, None);
+        assert!(top.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn disabled_auto_hide_pulls_a_hidden_window_back_to_its_anchor() {
+        let mut state = AutoHideState {
+            enabled: false,
+            hidden: true,
+            docked_edge: Some(DockEdge::Left),
+            monitor_bounds: Some(MONITOR),
+            anchor_position: Some(WindowPosition { x: 0, y: 120 }),
+            anchor_size: Some(WindowSize {
+                width: 380,
+                height: 600,
+            }),
+            ..AutoHideState::default()
+        };
+        let anchor = take_disabled_hidden_anchor(&mut state).expect("应拉回");
+        assert_eq!((anchor.x, anchor.y), (0, 120));
+        assert!(!state.hidden);
+        assert_eq!(state.docked_edge, None);
+        assert!(
+            take_disabled_hidden_anchor(&mut state).is_none(),
+            "只拉一次"
+        );
+
+        // 仍然启用 / 没藏起来：不动
+        let mut enabled = AutoHideState {
+            enabled: true,
+            hidden: true,
+            anchor_position: Some(WindowPosition { x: 0, y: 0 }),
+            ..AutoHideState::default()
+        };
+        assert!(take_disabled_hidden_anchor(&mut enabled).is_none());
+        assert!(enabled.hidden);
+    }
+
+    // ---- 托盘唤起代次 ----
+
+    #[test]
+    fn only_the_latest_tray_wake_may_drop_the_topmost() {
+        let first = begin_tray_wake();
+        let second = begin_tray_wake();
+        assert!(second > first);
+        assert!(
+            !is_latest_tray_wake(first),
+            "旧线程不能撤掉新一次唤起的置顶"
+        );
+        assert!(is_latest_tray_wake(second));
+    }
+
+    // ---- settings 写入只在值变化时刷新时间 ----
+
+    #[test]
+    fn save_settings_only_touches_changed_keys() {
+        let db = Database::new_in_memory().unwrap();
+        let mut settings = db
+            .with_connection(|c| Ok(crate::commands::data::read_app_settings(c)))
+            .unwrap();
+        settings.window_position = Some(WindowPosition { x: 10, y: 20 });
+        settings.window_size = Some(WindowSize {
+            width: 380,
+            height: 600,
+        });
+        save_settings_inner(&db, &settings).unwrap();
+        db.with_connection(|c| {
+            c.execute("UPDATE settings SET updated_at = '2026-01-01 00:00:00'", [])
+        })
+        .unwrap();
+        let version = |db: &Database| {
+            db.with_connection(crate::commands::data::settings_version)
+                .unwrap()
+        };
+        assert_eq!(version(&db).as_deref(), Some("2026-01-01 00:00:00"));
+
+        // 只挪了窗口：参与同步的设置版本不变（以前每次挪窗口都会触发设置重传）
+        settings.window_position = Some(WindowPosition { x: 11, y: 21 });
+        save_settings_inner(&db, &settings).unwrap();
+        assert_eq!(version(&db).as_deref(), Some("2026-01-01 00:00:00"));
+        let position: String = db
+            .with_connection(|c| Ok(get_setting_or(c, "window_position", "")))
+            .unwrap();
+        assert!(position.contains("11"), "{position}");
+
+        // 真的改了设置：版本前进
+        settings.top_on_wake = !settings.top_on_wake;
+        save_settings_inner(&db, &settings).unwrap();
+        assert!(version(&db).unwrap().as_str() > "2026-01-01 00:00:00");
     }
 
     // ---- 桌面模式纯函数 ----

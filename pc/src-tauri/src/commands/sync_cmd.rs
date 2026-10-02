@@ -4,23 +4,27 @@
 //!
 //! ```text
 //! 互斥（同一时刻只允许一个同步，含强制拉取 / 推送）
-//! 最多 3 轮：
+//! 最多 4 轮：
 //!   本地有未同步变更（local_seq ≠ synced_seq，或设置版本 > 基准里的 settingsUpdatedAt）
-//!     → 无条件 GET；否则带基准（ETag / Last-Modified）的条件 GET，304 → 无变化，结束
+//!     → 无条件 GET；否则基准里有 ETag 时带 If-None-Match 的条件 GET，304 → 无变化，结束
+//!     （不用 If-Modified-Since：nginx 按整秒比较，同一秒内的写入会被漏掉）
 //!   404 → 远端为空；200 → 解析（失败直接报错，绝不上传覆盖读不懂的远端）
 //!   单事务合并：墓碑并集 → 墓碑应用到本地 → 记录级 LWW（平局保留本地）→ 远端设置（K3-5）
 //!   下载远端列出、本地缺失的图片
 //!   生成上传文档：本地 ∪ 远端（墓碑压制），保留远端的未知顶层键与本地无法识别的记录
 //!   不需要上传（无本地变更且文档与远端等价）→ 记基准，结束
-//!   先传缺失图片，再条件 PUT（强 ETag → If-Match，否则 If-Unmodified-Since）
-//!     成功 → 记基准（响应头，缺失时 PROPFIND Depth 0）、synced_seq、设置基准，结束
-//!     412 → 下一轮重新 GET + 合并；404 / 409 → 建目录后重试
-//! 3 轮都冲突 → 报错
+//!   先传缺失图片，再条件 PUT（知道 ETag → If-Match: "<opaque>"，否则不带条件；
+//!   绝不发 If-Unmodified-Since：Apache 拿亚秒 mtime 比较，永远 412）
+//!     成功 → 记基准（PUT 响应的 ETag，缺失时依次 HEAD、PROPFIND Depth 0）、synced_seq、
+//!            设置基准，结束
+//!     412 → 等待 ≥1.1s（Apache 刚写完的一秒内只给弱 ETag，If-Match 必然 412）后
+//!           下一轮无条件 GET + 合并；404 / 409 → 建目录后重试
+//! 4 轮都冲突 → 报错
 //! ```
 //!
 //! 基准（`webdav_remote_etag` / `webdav_last_modified` / `webdav_synced_settings_at`）只在
 //! "远端内容已完整合并且本地没有需要上传的东西"或"上传成功"之后才落库：永远不会把一个
-//! 没合并过的 GET 记成基准（A2 / A4）。
+//! 没合并过的 GET 记成基准（A2 / A4）。条件请求只用 ETag；Last-Modified 只作记录。
 //!
 //! 删除通过墓碑传播；正常同步里没有"缺席即删除"。手动导入走 `data::import_data_raw`。
 
@@ -35,7 +39,8 @@ use crate::db::time::{normalize_datetime, now_local, DefaultTime};
 use crate::db::{AppSettings, Database};
 use crate::services::secret;
 use crate::services::webdav::{
-    choose_put_precondition, GetOutcome, Precondition, PutOutcome, RemoteVersion, WebDavClient,
+    choose_put_precondition, GetOutcome, Precondition, PropMeta, PutOutcome, RemoteVersion,
+    WebDavClient,
 };
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
@@ -49,7 +54,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 /// 一次同步里 GET → 合并 → PUT 的最大轮数（412 重试上限）
-const MAX_ATTEMPTS: usize = 3;
+const MAX_ATTEMPTS: usize = 4;
+
+/// 412 之后、下一轮 GET 之前的等待时间。Apache mod_dav 在文件写入后约 1 秒内只给弱 ETag，
+/// 这期间 `If-Match` 一定 412；等过这一秒再取到的就是可以强匹配的 ETag。
+const CONFLICT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(1100);
 
 const REMOTE_DIR: &str = "/mini-todo";
 const SYNC_DATA_FILE: &str = "/mini-todo/sync-data.json.gz";
@@ -291,7 +300,7 @@ fn de_settings_updated_at<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Stri
         Value::String(s) => {
             let normalized = normalize_datetime(&s, DefaultTime::StartOfDay);
             if normalized.is_none() {
-                eprintln!("[sync] 忽略无法识别的 settingsUpdatedAt: {:?}", s);
+                log::warn!("[sync] 忽略无法识别的 settingsUpdatedAt: {:?}", s);
             }
             normalized
         }
@@ -316,7 +325,7 @@ fn de_tombstones<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Tombstone>, D::E
             .filter_map(|v| {
                 let parsed = sync_store::parse_tombstone(v);
                 if parsed.is_none() {
-                    eprintln!("[sync] 忽略无法识别的远端墓碑: {}", v);
+                    log::warn!("[sync] 忽略无法识别的远端墓碑: {}", v);
                 }
                 parsed
             })
@@ -507,7 +516,7 @@ async fn run_sync_command(app: AppHandle, mode: SyncMode) -> Result<SyncReport, 
 
     if report.local_changed() {
         if let Err(e) = app.emit("sync-completed", &report) {
-            eprintln!("[sync] 发送 sync-completed 事件失败: {}", e);
+            log::warn!("[sync] 发送 sync-completed 事件失败: {}", e);
         }
     }
     Ok(report)
@@ -550,15 +559,17 @@ fn run_sync_blocking(db: &Database, mode: SyncMode) -> Result<SyncReport, String
         client: &client,
         images_dir: paths::images_dir(),
         device_id: config.device_id,
+        retry_delay: CONFLICT_RETRY_DELAY,
     };
     let report = match mode {
         SyncMode::Smart => engine.sync(),
         SyncMode::ForcePull => engine.force_pull(),
         SyncMode::ForcePush => engine.force_push(),
     }?;
-    // TODO(R2): reload_runtime_prefs —— report.settings_applied 为真时远端设置改写了
-    // top_on_wake / auto_hide_enabled 等，需要调用 crate::commands::window::reload_runtime_prefs(db)
-    // 刷新窗口模块的运行时缓存。
+    if report.settings_applied {
+        // 远端设置改写了 top_on_wake / auto_hide_enabled 等：刷新窗口模块的运行时缓存
+        crate::commands::window::reload_runtime_prefs(db);
+    }
     Ok(report)
 }
 
@@ -592,6 +603,9 @@ struct LocalState {
     settings_version: Option<String>,
 }
 
+/// 上传后补基准用的远端版本探测（HEAD / PROPFIND Depth 0）
+type VersionProbe = fn(&WebDavClient, &str) -> Result<Option<PropMeta>, String>;
+
 enum PushResult {
     Done(RemoteVersion),
     Conflict,
@@ -610,6 +624,8 @@ struct SyncEngine<'a> {
     client: &'a WebDavClient,
     images_dir: PathBuf,
     device_id: String,
+    /// 412 之后的等待时间（生产环境为 [`CONFLICT_RETRY_DELAY`]）
+    retry_delay: std::time::Duration,
 }
 
 impl SyncEngine<'_> {
@@ -692,7 +708,7 @@ impl SyncEngine<'_> {
         Ok(at)
     }
 
-    /// gzip + 条件 PUT；父目录不存在时建目录重试一次；响应没带版本时 PROPFIND 补齐
+    /// gzip + 条件 PUT；父目录不存在时建目录重试一次；响应没带 ETag 时 HEAD / PROPFIND 补齐
     fn put_doc(&self, doc: &SyncData, precondition: &Precondition) -> Result<PushResult, String> {
         let json = serde_json::to_vec(doc).map_err(|e| format!("序列化同步数据失败: {}", e))?;
         let body = gzip_compress(&json)?;
@@ -711,28 +727,59 @@ impl SyncEngine<'_> {
                 .put(SYNC_DATA_FILE, body, "application/gzip", precondition)?;
         }
         match outcome {
-            PutOutcome::Ok(version) if !version.is_empty() => Ok(PushResult::Done(version)),
-            PutOutcome::Ok(_) => Ok(PushResult::Done(self.version_after_put(len))),
+            PutOutcome::Ok(version) if version.etag.is_some() => Ok(PushResult::Done(version)),
+            PutOutcome::Ok(version) => Ok(PushResult::Done(self.version_after_put(len, version))),
             PutOutcome::PreconditionFailed => Ok(PushResult::Conflict),
             PutOutcome::ParentMissing => Err("上传失败：无法创建远端目录 /mini-todo".to_string()),
         }
     }
 
-    /// PUT 响应没有 ETag / Last-Modified（Apache 即如此）时用 PROPFIND Depth 0 补齐。
+    /// PUT 响应没带 ETag 时补基准：先 HEAD（nginx dav 只有 HEAD / GET 给 ETag，PROPFIND 没有
+    /// getetag），HEAD 也没有 ETag 再 PROPFIND Depth 0（Apache 的 getetag 是强 ETag）。
     /// 大小对不上说明期间被别人写过，宁可不记基准（下次完整 GET 一次）也不记错。
-    fn version_after_put(&self, uploaded_len: u64) -> RemoteVersion {
-        match self.client.propfind_meta(SYNC_DATA_FILE) {
-            Ok(Some(meta)) if meta.content_length.is_none_or(|len| len == uploaded_len) => {
-                meta.version
+    /// Last-Modified 一并记下，但只作记录，不用于条件请求。
+    fn version_after_put(&self, uploaded_len: u64, from_put: RemoteVersion) -> RemoteVersion {
+        let mut last_modified = from_put.last_modified;
+        let probes: [(&str, VersionProbe); 2] = [
+            ("HEAD", WebDavClient::head_meta),
+            ("PROPFIND", WebDavClient::propfind_meta),
+        ];
+        for (name, probe) in probes {
+            match probe(self.client, SYNC_DATA_FILE) {
+                Ok(Some(meta)) => {
+                    if meta.content_length.is_some_and(|len| len != uploaded_len) {
+                        log::warn!("[sync] 上传后远端大小不符（期间被其它设备写入），本次不记基准");
+                        return RemoteVersion::default();
+                    }
+                    if meta.version.last_modified.is_some() {
+                        last_modified = meta.version.last_modified;
+                    }
+                    if meta.version.etag.is_some() {
+                        return RemoteVersion {
+                            etag: meta.version.etag,
+                            last_modified,
+                        };
+                    }
+                }
+                Ok(None) => {
+                    log::warn!("[sync] 上传后 {} 查不到远端文件，本次不记基准", name);
+                    return RemoteVersion::default();
+                }
+                Err(e) => log::warn!("[sync] 上传后 {} 查询远端版本失败: {}", name, e),
             }
-            Ok(_) => RemoteVersion::default(),
-            Err(e) => {
-                eprintln!(
-                    "[sync] 上传后查询远端版本失败（下次同步将完整下载一次）: {}",
-                    e
-                );
-                RemoteVersion::default()
-            }
+        }
+        // 拿不到 ETag：下次同步做一次无条件 GET（Last-Modified 不参与条件请求）
+        RemoteVersion {
+            etag: None,
+            last_modified,
+        }
+    }
+
+    /// 412 之后等一会儿再重新 GET：Apache 刚写完的一秒内只给弱 ETag，立刻重试必然再 412。
+    /// 最后一轮之后不等（马上报错）。
+    fn wait_before_retry(&self, attempt: usize) {
+        if attempt + 1 < MAX_ATTEMPTS {
+            std::thread::sleep(self.retry_delay);
         }
     }
 
@@ -747,7 +794,8 @@ impl SyncEngine<'_> {
             let cutoff = sync_store::retention_cutoff();
 
             // 本地有变更时反正要拿到远端全文来合并，直接无条件 GET
-            let conditional = (!dirty && attempt == 0 && !pre.base.is_empty()).then_some(&pre.base);
+            let conditional =
+                (!dirty && attempt == 0 && pre.base.etag.is_some()).then_some(&pre.base);
             let (remote, version) = match self.client.get(SYNC_DATA_FILE, conditional)? {
                 GetOutcome::NotModified => {
                     let at =
@@ -809,10 +857,11 @@ impl SyncEngine<'_> {
                     return Ok(report);
                 }
                 PushResult::Conflict => {
-                    eprintln!(
+                    log::warn!(
                         "[sync] 远端在合并期间被其它设备修改（412），重新合并（第 {} 次）",
                         attempt + 1
                     );
+                    self.wait_before_retry(attempt);
                 }
             }
         }
@@ -874,7 +923,7 @@ impl SyncEngine<'_> {
                     Ok(doc) => (Some(doc), version),
                     Err(e) => {
                         // 用户明确要求用本地覆盖：看不懂的远端也直接覆盖
-                        eprintln!("[sync] 强制推送：远端数据无法识别，将被本地数据覆盖: {}", e);
+                        log::warn!("[sync] 强制推送：远端数据无法识别，将被本地数据覆盖: {}", e);
                         (None, version)
                     }
                 },
@@ -915,7 +964,8 @@ impl SyncEngine<'_> {
                     return Ok(report);
                 }
                 PushResult::Conflict => {
-                    eprintln!("[sync] 强制推送遇到 412，重试（第 {} 次）", attempt + 1);
+                    log::warn!("[sync] 强制推送遇到 412，重试（第 {} 次）", attempt + 1);
+                    self.wait_before_retry(attempt);
                 }
             }
         }
@@ -1273,7 +1323,7 @@ impl<'a> ImageTransfer<'a> {
             .filter(|name| {
                 let ok = is_safe_image_name(name);
                 if !ok && !name.starts_with('.') {
-                    eprintln!("[sync] 跳过文件名不安全的本地图片: {:?}", name);
+                    log::warn!("[sync] 跳过文件名不安全的本地图片: {:?}", name);
                 }
                 ok
             })
@@ -1286,7 +1336,7 @@ impl<'a> ImageTransfer<'a> {
     fn download_missing(&mut self, names: &[String]) {
         for name in names {
             if !is_safe_image_name(name) {
-                eprintln!("[sync] 跳过文件名不安全的远端图片: {:?}", name);
+                log::warn!("[sync] 跳过文件名不安全的远端图片: {:?}", name);
                 continue;
             }
             if !self.tried_download.insert(name.clone()) {
@@ -1298,8 +1348,8 @@ impl<'a> ImageTransfer<'a> {
             }
             match self.client.download_file(&remote_image_path(name), &local) {
                 Ok(true) => self.downloaded += 1,
-                Ok(false) => eprintln!("[sync] 远端缺少图片 {}", name),
-                Err(e) => eprintln!("[sync] 下载图片 {} 失败: {}", name, e),
+                Ok(false) => log::warn!("[sync] 远端缺少图片 {}", name),
+                Err(e) => log::warn!("[sync] 下载图片 {} 失败: {}", name, e),
             }
         }
     }
@@ -1319,7 +1369,7 @@ impl<'a> ImageTransfer<'a> {
         let listing: Option<HashSet<String>> = match self.client.list_names(REMOTE_IMAGES_DIR) {
             Ok(list) => Some(list.into_iter().collect()),
             Err(e) => {
-                eprintln!("[sync] 列出远端图片失败，改为逐个检查: {}", e);
+                log::warn!("[sync] 列出远端图片失败，改为逐个检查: {}", e);
                 None
             }
         };
@@ -1334,7 +1384,7 @@ impl<'a> ImageTransfer<'a> {
                 None => match self.client.exists(&remote_image_path(&name)) {
                     Ok(present) => present,
                     Err(e) => {
-                        eprintln!("[sync] 检查远端图片 {} 失败，本次跳过: {}", name, e);
+                        log::warn!("[sync] 检查远端图片 {} 失败，本次跳过: {}", name, e);
                         continue;
                     }
                 },
@@ -1345,7 +1395,7 @@ impl<'a> ImageTransfer<'a> {
                     &self.dir.join(&name),
                     REMOTE_IMAGES_DIR,
                 ) {
-                    eprintln!("[sync] 上传图片 {} 失败: {}", name, e);
+                    log::warn!("[sync] 上传图片 {} 失败: {}", name, e);
                     continue;
                 }
                 self.uploaded += 1;
@@ -1369,6 +1419,7 @@ mod tests {
     use super::*;
     use crate::db::sync_store::insert_todo_row;
     use crate::db::Todo;
+    use crate::services::webdav::opaque_etag;
     use serde_json::json;
 
     // ------------------------------------------------------------------
@@ -1380,15 +1431,19 @@ mod tests {
         use std::io::Cursor;
         use std::sync::{Arc, Mutex};
         use std::thread::JoinHandle;
+        use std::time::{Duration, Instant};
         use tiny_http::{Header, Request, Response, Server};
 
         #[derive(Clone)]
         pub struct MockFile {
             pub body: Vec<u8>,
+            /// 强 ETag（带引号的 opaque-tag）；弱窗口内对外显示为 `W/` + 它
             pub etag: String,
             pub last_modified: String,
+            pub written_at: Instant,
         }
 
+        /// 服务端行为。默认是"理想"服务端：强 ETag、PUT 响应带校验器、条件头全检查。
         #[derive(Default)]
         pub struct State {
             pub files: HashMap<String, MockFile>,
@@ -1397,35 +1452,71 @@ mod tests {
             counter: u64,
             /// 下一次 PUT sync-data 之前，模拟另一台设备抢先写入的内容
             pub concurrent_write: Option<Vec<u8>>,
-            /// PUT 响应不带 ETag / Last-Modified（Apache 的行为）
+            /// PUT 响应不带 ETag / Last-Modified（Apache、nginx 都如此）
             pub omit_put_headers: bool,
-            /// 返回弱 ETag（Apache 对一秒内刚写过的文件就是如此）
-            pub weak_etags: bool,
-            /// 每次 PUT 收到的 (If-Match, If-Unmodified-Since)
+            /// Apache：文件写入后这段时间内 GET / HEAD 只给弱 ETag，`If-Match`（强比较）必然 412；
+            /// PROPFIND 的 getetag 始终是强 ETag
+            pub weak_window: Option<Duration>,
+            /// Apache：`If-Unmodified-Since` 拿亚秒 mtime 与秒级日期比较，一律 412
+            pub ius_always_fails: bool,
+            /// nginx：PUT 不检查 `If-Match` / `If-Unmodified-Since`
+            pub ignore_put_preconditions: bool,
+            /// nginx：PROPFIND 不返回 getetag
+            pub propfind_without_etag: bool,
+            /// HEAD 不返回 ETag（用来测 PROPFIND 兜底）
+            pub head_without_etag: bool,
+            /// nginx：文件 mtime 只到秒，取这个测试控制的"当前秒"；
+            /// ETag = `"<mtime 十六进制>-<大小十六进制>"`，`If-Modified-Since` 按整秒比较
+            pub nginx_second: Option<u64>,
+            /// 每次 PUT sync-data 收到的 (If-Match, If-Unmodified-Since)
             pub put_preconditions: Vec<(Option<String>, Option<String>)>,
+            /// 每次 GET sync-data 收到的 (If-None-Match, If-Modified-Since)
+            pub get_conditions: Vec<(Option<String>, Option<String>)>,
+        }
+
+        fn http_date(secs: u64) -> String {
+            format!(
+                "Thu, 01 Jan 2026 {:02}:{:02}:{:02} GMT",
+                secs / 3600 % 24,
+                secs / 60 % 60,
+                secs % 60
+            )
+        }
+
+        fn opaque(etag: &str) -> &str {
+            etag.trim().trim_start_matches("W/")
         }
 
         impl State {
             pub fn write(&mut self, path: &str, body: Vec<u8>) {
                 self.counter += 1;
                 let n = self.counter;
+                let (etag, last_modified) = match self.nginx_second {
+                    Some(sec) => (format!("\"{:x}-{:x}\"", sec, body.len()), http_date(sec)),
+                    None => (format!("\"v{}\"", n), http_date(n)),
+                };
                 self.files.insert(
                     path.to_string(),
                     MockFile {
                         body,
-                        etag: if self.weak_etags {
-                            format!("W/\"v{}\"", n)
-                        } else {
-                            format!("\"v{}\"", n)
-                        },
-                        last_modified: format!(
-                            "Thu, 01 Jan 2026 {:02}:{:02}:{:02} GMT",
-                            n / 3600 % 24,
-                            n / 60 % 60,
-                            n % 60
-                        ),
+                        etag,
+                        last_modified,
+                        written_at: Instant::now(),
                     },
                 );
+            }
+
+            fn in_weak_window(&self, f: &MockFile) -> bool {
+                self.weak_window.is_some_and(|w| f.written_at.elapsed() < w)
+            }
+
+            /// GET / HEAD 对外给出的 ETag
+            fn served_etag(&self, f: &MockFile) -> String {
+                if self.in_weak_window(f) {
+                    format!("W/{}", f.etag)
+                } else {
+                    f.etag.clone()
+                }
             }
         }
 
@@ -1466,12 +1557,15 @@ mod tests {
             }
         }
 
+        /// 总是带 Content-Length（HEAD 也按文件真实大小给出，tiny_http 不发 HEAD 的响应体）
         fn respond(
             code: u16,
             body: Vec<u8>,
             headers: &[(&str, &str)],
         ) -> Response<Cursor<Vec<u8>>> {
-            let mut resp = Response::from_data(body).with_status_code(code);
+            let mut resp = Response::from_data(body)
+                .with_status_code(code)
+                .with_chunked_threshold(usize::MAX);
             for (k, v) in headers {
                 resp = resp.with_header(Header::from_bytes(k.as_bytes(), v.as_bytes()).unwrap());
             }
@@ -1491,6 +1585,7 @@ mod tests {
             let if_match = header("If-Match");
             let if_none_match = header("If-None-Match");
             let if_unmodified_since = header("If-Unmodified-Since");
+            let if_modified_since = header("If-Modified-Since");
             let depth = header("Depth");
             let mut body = Vec::new();
             req.as_reader().read_to_end(&mut body).unwrap();
@@ -1500,28 +1595,34 @@ mod tests {
             let key = path.trim_end_matches('/').to_string();
 
             match method.as_str() {
-                "GET" | "HEAD" => match st.files.get(&key) {
-                    None => respond(404, Vec::new(), &[]),
-                    Some(f) if if_none_match.as_deref() == Some(f.etag.as_str()) => {
-                        respond(304, Vec::new(), &[])
+                "GET" | "HEAD" => {
+                    if method == "GET" && key.ends_with("sync-data.json.gz") {
+                        st.get_conditions
+                            .push((if_none_match.clone(), if_modified_since.clone()));
                     }
-                    Some(f) => {
-                        let data = if method == "GET" {
-                            f.body.clone()
-                        } else {
-                            Vec::new()
-                        };
-                        respond(
-                            200,
-                            data,
-                            &[("ETag", &f.etag), ("Last-Modified", &f.last_modified)],
-                        )
+                    let Some(f) = st.files.get(&key).cloned() else {
+                        return respond(404, Vec::new(), &[]);
+                    };
+                    // If-None-Match 是弱比较；If-Modified-Since 按整秒（nginx 的毛病：同一秒内的写入被判成未修改）
+                    let not_modified = match (&if_none_match, &if_modified_since) {
+                        (Some(inm), _) => opaque(inm) == opaque(&f.etag),
+                        (None, Some(ims)) => *ims == f.last_modified,
+                        (None, None) => false,
+                    };
+                    if not_modified {
+                        return respond(304, Vec::new(), &[]);
                     }
-                },
+                    let etag = st.served_etag(&f);
+                    let mut headers = vec![("Last-Modified", f.last_modified.as_str())];
+                    if !(method == "HEAD" && st.head_without_etag) {
+                        headers.push(("ETag", etag.as_str()));
+                    }
+                    respond(200, f.body.clone(), &headers)
+                }
                 "PUT" => {
-                    st.put_preconditions
-                        .push((if_match.clone(), if_unmodified_since.clone()));
                     if key.ends_with("sync-data.json.gz") {
+                        st.put_preconditions
+                            .push((if_match.clone(), if_unmodified_since.clone()));
                         if let Some(other) = st.concurrent_write.take() {
                             st.write(&key, other);
                         }
@@ -1534,18 +1635,22 @@ mod tests {
                         return respond(409, Vec::new(), &[]);
                     }
                     let current = st.files.get(&key).cloned();
-                    if let Some(expected) = &if_match {
-                        // If-Match 是强比较：弱 ETag 永远不匹配
-                        let strong_match = current
-                            .as_ref()
-                            .is_some_and(|f| !f.etag.starts_with("W/") && &f.etag == expected);
-                        if !strong_match || expected.starts_with("W/") {
-                            return respond(412, Vec::new(), &[]);
+                    if !st.ignore_put_preconditions {
+                        if let Some(expected) = &if_match {
+                            // If-Match 是强比较：弱 ETag（含弱窗口内的文件）永远不匹配
+                            let strong_match = current
+                                .as_ref()
+                                .is_some_and(|f| !st.in_weak_window(f) && f.etag == *expected);
+                            if !strong_match {
+                                return respond(412, Vec::new(), &[]);
+                            }
                         }
-                    }
-                    if let Some(expected) = &if_unmodified_since {
-                        if current.as_ref().map(|f| &f.last_modified) != Some(expected) {
-                            return respond(412, Vec::new(), &[]);
+                        if let Some(expected) = &if_unmodified_since {
+                            if st.ius_always_fails
+                                || current.as_ref().map(|f| &f.last_modified) != Some(expected)
+                            {
+                                return respond(412, Vec::new(), &[]);
+                            }
                         }
                     }
                     st.write(&key, body);
@@ -1571,10 +1676,15 @@ mod tests {
                 "PROPFIND" if depth.as_deref() == Some("0") => match st.files.get(&key) {
                     None => respond(404, Vec::new(), &[]),
                     Some(f) => {
+                        let getetag = if st.propfind_without_etag {
+                            String::new()
+                        } else {
+                            format!("<D:getetag>{}</D:getetag>", f.etag.replace('"', "&quot;"))
+                        };
                         let xml = format!(
-                            r#"<?xml version="1.0"?><D:multistatus xmlns:D="DAV:"><D:response><D:href>/dav{}</D:href><D:propstat><D:prop><D:getetag>{}</D:getetag><D:getlastmodified>{}</D:getlastmodified><D:getcontentlength>{}</D:getcontentlength></D:prop></D:propstat></D:response></D:multistatus>"#,
+                            r#"<?xml version="1.0"?><D:multistatus xmlns:D="DAV:"><D:response><D:href>/dav{}</D:href><D:propstat><D:prop>{}<D:getlastmodified>{}</D:getlastmodified><D:getcontentlength>{}</D:getcontentlength></D:prop></D:propstat></D:response></D:multistatus>"#,
                             key,
-                            f.etag.replace('"', "&quot;"),
+                            getetag,
                             f.last_modified,
                             f.body.len()
                         );
@@ -1624,6 +1734,8 @@ mod tests {
         db: Database,
         client: WebDavClient,
         dir: PathBuf,
+        /// 默认用生产值，Apache 弱 ETag 窗口的测试依赖它真的 ≥1.1s
+        retry_delay: std::time::Duration,
     }
 
     impl Fixture {
@@ -1646,6 +1758,7 @@ mod tests {
                 db: Database::new_in_memory().unwrap(),
                 client,
                 dir,
+                retry_delay: CONFLICT_RETRY_DELAY,
             }
         }
 
@@ -1655,7 +1768,30 @@ mod tests {
                 client: &self.client,
                 images_dir: self.dir.clone(),
                 device_id: "test-pc".to_string(),
+                retry_delay: self.retry_delay,
             }
+        }
+
+        /// 服务端行为开关
+        fn server(&self) -> std::sync::MutexGuard<'_, mock::State> {
+            self.mock.state.lock().unwrap()
+        }
+
+        /// 模拟另一台设备直接写远端（不经过本机）
+        fn other_device_writes(&self, doc: &Value) {
+            let mut st = self.server();
+            st.dirs.insert(REMOTE_DIR.to_string());
+            st.write(
+                SYNC_DATA_FILE,
+                gzip_compress(&serde_json::to_vec(doc).unwrap()).unwrap(),
+            );
+        }
+
+        /// 客户端是否发过基于时间的条件头（If-Modified-Since / If-Unmodified-Since）
+        fn sent_time_conditions(&self) -> bool {
+            let st = self.server();
+            st.get_conditions.iter().any(|(_, ims)| ims.is_some())
+                || st.put_preconditions.iter().any(|(_, ius)| ius.is_some())
         }
 
         fn remote(&self) -> Value {
@@ -1846,7 +1982,12 @@ mod tests {
             Some(gzip_compress(&serde_json::to_vec(&concurrent).unwrap()).unwrap());
 
         fx.clear_log();
+        let started = std::time::Instant::now();
         let report = fx.engine().sync().expect("412 后重试应成功");
+        assert!(
+            started.elapsed() >= CONFLICT_RETRY_DELAY,
+            "412 之后要等过 Apache 的弱 ETag 窗口再重试"
+        );
         assert_eq!(report.status, SyncStatus::Merged);
         assert_eq!(report.todos_inserted, 1);
         assert_eq!(fx.count(PUT_DOC), 2, "第一次 412，第二次成功");
@@ -1856,7 +1997,8 @@ mod tests {
 
     #[test]
     fn sync_gives_up_after_repeated_conflicts() {
-        let fx = Fixture::new("412-loop");
+        let mut fx = Fixture::new("412-loop");
+        fx.retry_delay = std::time::Duration::from_millis(10);
         fx.set_remote(&doc(vec![]));
         add_local_todo(&fx.db, 1, "本地", "2026-09-01 10:00:00");
         let blob = gzip_compress(&serde_json::to_vec(&doc(vec![])).unwrap()).unwrap();
@@ -1909,51 +2051,166 @@ mod tests {
     }
 
     #[test]
-    fn put_without_version_headers_falls_back_to_propfind() {
-        let fx = Fixture::new("propfind");
-        fx.mock.state.lock().unwrap().omit_put_headers = true;
+    fn retry_policy_outlasts_apache_weak_etag_window() {
+        const {
+            assert!(CONFLICT_RETRY_DELAY.as_millis() >= 1100);
+            assert!(MAX_ATTEMPTS >= 4);
+        }
+    }
+
+    /// PUT 响应不带校验器：先 HEAD 取 ETag（nginx 只有 HEAD 给），HEAD 也没有再 PROPFIND
+    #[test]
+    fn put_without_version_headers_uses_head_then_propfind() {
+        let fx = Fixture::new("put-no-validators");
+        fx.server().omit_put_headers = true;
         add_local_todo(&fx.db, 1, "本地", "2026-09-01 10:00:00");
 
         fx.engine().sync().unwrap();
-        assert!(fx
-            .log()
-            .contains(&"PROPFIND /mini-todo/sync-data.json.gz".to_string()));
-        let current_etag = fx.mock.state.lock().unwrap().files[SYNC_DATA_FILE]
-            .etag
-            .clone();
+        assert_eq!(fx.count("HEAD /mini-todo/sync-data.json.gz"), 1);
+        assert_eq!(
+            fx.count("PROPFIND /mini-todo/sync-data.json.gz"),
+            0,
+            "HEAD 已给出 ETag，不必再 PROPFIND"
+        );
+        let current_etag = fx.server().files[SYNC_DATA_FILE].etag.clone();
         assert_eq!(setting(&fx.db, KEY_REMOTE_ETAG), current_etag);
+        assert!(!setting(&fx.db, KEY_LAST_MODIFIED).is_empty());
 
         fx.clear_log();
         assert_eq!(fx.engine().sync().unwrap().status, SyncStatus::NoChanges);
         assert_eq!(fx.count(PUT_DOC), 0);
+
+        // HEAD 也不给 ETag → PROPFIND getetag 兜底
+        fx.server().head_without_etag = true;
+        add_local_todo(&fx.db, 2, "再改", "2026-09-02 10:00:00");
+        fx.clear_log();
+        fx.engine().sync().unwrap();
+        assert_eq!(fx.count("HEAD /mini-todo/sync-data.json.gz"), 1);
+        assert_eq!(fx.count("PROPFIND /mini-todo/sync-data.json.gz"), 1);
+        let current_etag = fx.server().files[SYNC_DATA_FILE].etag.clone();
+        assert_eq!(setting(&fx.db, KEY_REMOTE_ETAG), current_etag);
+        assert!(!fx.sent_time_conditions());
     }
 
+    /// Apache mod_dav：If-Unmodified-Since 对没动过的文件也 412；刚写完的一秒内只给弱 ETag，
+    /// 期间 If-Match 也 412；PUT 响应不带校验器；PROPFIND 给强 ETag。
+    /// 实测故障：另一个写入方不到 1 秒前刚改过远端时，同步 3 次 412 后报错。
     #[test]
-    fn weak_etags_use_if_unmodified_since_end_to_end() {
-        let fx = Fixture::new("weak-etag");
-        fx.mock.state.lock().unwrap().weak_etags = true;
-        fx.set_remote(&doc(vec![todo_json(2, "远端", "2026-09-02 10:00:00")]));
+    fn apache_like_server_recovers_from_a_write_in_the_last_second() {
+        // 弱 ETag 窗口与重试间隔按同一比例放大（真实值 1s / 1.1s，见上一个测试），
+        // 留足余量，测试机繁忙时也不会因为调度延迟而误判
+        let weak_window = std::time::Duration::from_secs(2);
+        let mut fx = Fixture::new("apache");
+        fx.retry_delay = weak_window + std::time::Duration::from_millis(100);
+        {
+            let mut st = fx.server();
+            st.weak_window = Some(weak_window);
+            st.ius_always_fails = true;
+            st.omit_put_headers = true;
+        }
+        // 另一台设备刚刚写入（还在弱 ETag 窗口内）
+        fx.other_device_writes(&doc(vec![todo_json(2, "远端", "2026-09-02 10:00:00")]));
         add_local_todo(&fx.db, 1, "本地", "2026-09-01 10:00:00");
 
-        fx.engine().sync().expect("弱 ETag 下首次同步");
-        add_local_todo(&fx.db, 3, "再改一次", "2026-09-03 10:00:00");
-        fx.engine().sync().expect("弱 ETag 下再次上传");
+        let started = std::time::Instant::now();
+        let report = fx.engine().sync().expect("弱 ETag 窗口过后重试应成功");
+        assert!(started.elapsed() >= fx.retry_delay);
+        assert_eq!(report.status, SyncStatus::Merged);
+        assert_eq!(remote_ids(&fx.remote()), vec![1, 2]);
+        let preconditions = fx.server().put_preconditions.clone();
+        assert_eq!(
+            preconditions,
+            vec![
+                (Some("\"v1\"".to_string()), None),
+                (Some("\"v1\"".to_string()), None)
+            ],
+            "弱 ETag 去掉 W/ 发 If-Match；窗口内 412，等过窗口后同一个 ETag 成功"
+        );
+        let current = fx.server().files[SYNC_DATA_FILE].etag.clone();
+        assert_eq!(
+            opaque_etag(&setting(&fx.db, KEY_REMOTE_ETAG)),
+            current,
+            "PUT 不带校验器：基准来自 HEAD"
+        );
 
-        let preconditions = fx.mock.state.lock().unwrap().put_preconditions.clone();
-        let doc_puts: Vec<_> = preconditions
-            .iter()
-            .filter(|(m, u)| m.is_some() || u.is_some())
-            .collect();
-        assert_eq!(doc_puts.len(), 2);
-        for (if_match, if_unmodified_since) in doc_puts {
-            assert_eq!(if_match, &None, "弱 ETag 绝不能用 If-Match");
-            assert!(if_unmodified_since.is_some());
-        }
-        assert_eq!(remote_ids(&fx.remote()), vec![1, 2, 3]);
-
-        // 未变化时弱 ETag 的条件 GET 仍能 304
+        // 本机刚写完时 HEAD 给的是弱 ETag；以它为基准的条件 GET 照样 304（弱比较）
+        fx.db
+            .with_connection(|c| {
+                set_setting(c, KEY_REMOTE_ETAG, &format!("W/{}", current)).map(|_| ())
+            })
+            .unwrap();
         fx.clear_log();
         assert_eq!(fx.engine().sync().unwrap().status, SyncStatus::NoChanges);
+        assert_eq!(fx.count(PUT_DOC), 0);
+        assert!(!fx.sent_time_conditions(), "绝不发基于时间的条件头");
+    }
+
+    /// nginx dav：PUT 不带校验器且不检查条件头；PROPFIND 没有 getetag；只有 HEAD / GET 给强 ETag；
+    /// If-Modified-Since 按整秒比较。实测故障：基准只有 Last-Modified 时，
+    /// 同一秒内的远端修改被 If-Modified-Since 判成 304，变更漏掉。
+    #[test]
+    fn nginx_like_server_does_not_miss_writes_in_the_same_second() {
+        let fx = Fixture::new("nginx");
+        {
+            let mut st = fx.server();
+            st.nginx_second = Some(1_000);
+            st.omit_put_headers = true;
+            st.ignore_put_preconditions = true;
+            st.propfind_without_etag = true;
+        }
+        add_local_todo(&fx.db, 1, "本地", "2026-09-01 10:00:00");
+        fx.engine().sync().expect("首次上传");
+        let base = setting(&fx.db, KEY_REMOTE_ETAG);
+        assert_eq!(
+            base,
+            fx.server().files[SYNC_DATA_FILE].etag,
+            "基准 ETag 来自 HEAD"
+        );
+        assert_eq!(fx.count("PROPFIND /mini-todo/sync-data.json.gz"), 0);
+
+        // 同一秒内另一台设备写入：Last-Modified 不变，ETag 随大小变化
+        let mut other = fx.remote();
+        other["todos"].as_array_mut().unwrap().push(todo_json(
+            9,
+            "同一秒的修改",
+            "2026-09-09 10:00:00",
+        ));
+        fx.other_device_writes(&other);
+        assert_eq!(
+            fx.server().files[SYNC_DATA_FILE].last_modified,
+            setting(&fx.db, KEY_LAST_MODIFIED),
+            "前提：Last-Modified 与基准相同"
+        );
+
+        let report = fx.engine().sync().expect("同步");
+        assert_eq!(report.status, SyncStatus::Pulled);
+        assert!(local_titles(&fx.db).iter().any(|(id, _)| *id == 9));
+        let conditions = fx.server().get_conditions.clone();
+        assert_eq!(
+            conditions.last(),
+            Some(&(Some(base), None)),
+            "只带 If-None-Match，不带 If-Modified-Since"
+        );
+        assert!(!fx.sent_time_conditions());
+    }
+
+    /// 只有 Last-Modified 的旧基准（R1 之前 / 不给 ETag 的服务端）：做无条件 GET，不发 IMS
+    #[test]
+    fn base_without_etag_downloads_unconditionally() {
+        let fx = Fixture::new("lm-only-base");
+        add_local_todo(&fx.db, 1, "本地", "2026-09-01 10:00:00");
+        fx.engine().sync().unwrap();
+        fx.db
+            .with_connection(|c| set_setting(c, KEY_REMOTE_ETAG, "").map(|_| ()))
+            .unwrap();
+        fx.clear_log();
+        assert_eq!(fx.engine().sync().unwrap().status, SyncStatus::NoChanges);
+        assert_eq!(
+            fx.server().get_conditions.last(),
+            Some(&(None, None)),
+            "没有 ETag 就不带条件"
+        );
+        assert_eq!(fx.count(PUT_DOC), 0);
     }
 
     #[test]
@@ -2047,6 +2304,91 @@ mod tests {
         fx.clear_log();
         assert_eq!(fx.engine().sync().unwrap().status, SyncStatus::NoChanges);
         assert_eq!(fx.count(PUT_DOC), 0);
+    }
+
+    /// 强制推送：远端独有的待办 / 子任务一律写墓碑（含整数 entityId），并落到本地墓碑表，
+    /// 其它设备与 cloud 据此删除它们。远端记录的 updatedAt 比本机时钟还新（另一端时钟偏快 /
+    /// 时区配置不同）时，墓碑时间取它，保证 deletedAt >= updatedAt 能压住。
+    #[test]
+    fn force_push_tombstones_every_remote_only_record() {
+        let fx = Fixture::new("force-push-tombs");
+        let mut remote_shared = todo_json(1, "两边都有", "2026-09-01 10:00:00");
+        remote_shared["subtasks"] = json!([
+            {"id": 11, "parentId": 1, "title": "两边都有的子任务", "content": null,
+             "completed": false, "sortOrder": 0,
+             "createdAt": "2026-09-01 10:00:00", "updatedAt": "2026-09-01 10:00:00"},
+            {"id": 12, "parentId": 1, "title": "远端独有子任务", "content": null,
+             "completed": false, "sortOrder": 1,
+             "createdAt": "2026-09-01 10:00:00", "updatedAt": "2099-01-01 08:00:00"}
+        ]);
+        let mut remote_only = todo_json(1_759_400_000_000_123, "云端新建", "2099-01-01 08:00:00");
+        remote_only["subtasks"] = json!([
+            {"id": 1_759_400_000_000_456_i64, "parentId": 1_759_400_000_000_123_i64,
+             "title": "云端子任务", "content": null, "completed": false, "sortOrder": 0,
+             "createdAt": "2026-09-01 10:00:00", "updatedAt": "2026-09-01 10:00:00"}
+        ]);
+        fx.set_remote(&doc(vec![remote_shared, remote_only]));
+
+        add_local_todo(&fx.db, 1, "两边都有", "2026-09-01 10:00:00");
+        fx.db
+            .with_transaction(|tx| {
+                tx.execute(
+                    "INSERT INTO subtasks (id, parent_id, title, created_at, updated_at)
+                     VALUES (11, 1, '两边都有的子任务', '2026-09-01 10:00:00', '2026-09-01 10:00:00')",
+                    [],
+                )
+            })
+            .unwrap();
+
+        fx.engine().force_push().expect("强制推送");
+        let remote = fx.remote();
+        assert_eq!(remote_ids(&remote), vec![1]);
+        let subs: Vec<i64> = remote["todos"][0]["subtasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(subs, vec![11]);
+
+        let mut tombs: Vec<(String, i64, String)> = remote["tombstones"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| {
+                assert!(t["entityId"].is_i64(), "entityId 必须是整数: {t}");
+                (
+                    t["entityType"].as_str().unwrap().to_string(),
+                    t["entityId"].as_i64().unwrap(),
+                    t["deletedAt"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        tombs.sort();
+        let keys: Vec<(&str, i64)> = tombs.iter().map(|(t, id, _)| (t.as_str(), *id)).collect();
+        assert_eq!(
+            keys,
+            vec![
+                ("subtask", 12),
+                ("subtask", 1_759_400_000_000_456),
+                ("todo", 1_759_400_000_000_123)
+            ]
+        );
+        for (kind, id, deleted_at) in &tombs {
+            assert_eq!(deleted_at.len(), 19, "规范时间格式: {deleted_at}");
+            if *id == 12 || *id == 1_759_400_000_000_123 {
+                assert!(
+                    deleted_at.as_str() >= "2099-01-01 08:00:00",
+                    "{kind}#{id} 的墓碑必须压得住它的 updatedAt"
+                );
+            }
+        }
+
+        let local_tombs = fx
+            .db
+            .with_connection(|c| sync_store::list_tombstones(c, "2000-01-01 00:00:00"))
+            .unwrap();
+        assert_eq!(local_tombs.len(), 3, "墓碑同时落到本地墓碑表");
     }
 
     #[test]

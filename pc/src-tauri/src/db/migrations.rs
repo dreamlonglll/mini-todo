@@ -1,10 +1,15 @@
 use rusqlite::{Connection, Result, Transaction, TransactionBehavior};
+use std::collections::BTreeSet;
 
 /// 执行单个迁移，并把"迁移体 + 版本号 INSERT"包进同一个事务。
 ///
 /// 迁移中途失败（多语句迁移尤其容易）时整体回滚，数据库停留在上一个版本，
 /// 下次启动可以安全重跑；否则会出现"前半截 DDL 已生效、版本号没记上"，
 /// 重跑时在已变更的 schema 上再次报错，用户陷入"启动即失败"的死循环。
+///
+/// 提交前做 `PRAGMA foreign_key_check`：迁移新引入了外键违规（典型是重建表时漏拷 / 错拷
+/// 数据）就报错回滚。迁移前就存在的违规（例如外部工具在外键关闭时删过待办留下的孤儿子任务）
+/// 不算在这次迁移头上，否则这类用户会永远无法升级。
 ///
 /// `run_migrations` 只拿得到 `&Connection`（`Database::with_connection` 的约束），
 /// 用不了需要 `&mut` 的 `conn.transaction()`，因此走 `Transaction::new_unchecked`；
@@ -14,9 +19,76 @@ where
     F: FnOnce(&Connection) -> Result<()>,
 {
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let before = foreign_key_violations(&tx)?;
     f(&tx)?;
+    let introduced: Vec<FkViolation> = foreign_key_violations(&tx)?
+        .difference(&before)
+        .cloned()
+        .collect();
+    if !introduced.is_empty() {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY),
+            Some(format!(
+                "迁移 v{} 破坏了外键约束，已回滚：{}",
+                version,
+                describe_violations(&introduced)
+            )),
+        ));
+    }
     tx.execute("INSERT INTO migrations (version) VALUES (?1)", [version])?;
     tx.commit()
+}
+
+/// `PRAGMA foreign_key_check` 的一行：(子表, 子表 rowid, 父表, 外键序号)
+type FkViolation = (String, Option<i64>, String, i64);
+
+fn foreign_key_violations(conn: &Connection) -> Result<BTreeSet<FkViolation>> {
+    let mut stmt = conn.prepare("PRAGMA foreign_key_check")?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+    rows.collect()
+}
+
+fn describe_violations(violations: &[FkViolation]) -> String {
+    const SHOWN: usize = 5;
+    let mut text = violations
+        .iter()
+        .take(SHOWN)
+        .map(|(table, rowid, parent, _)| match rowid {
+            Some(rowid) => format!("{}#{} → {}", table, rowid, parent),
+            None => format!("{} → {}", table, parent),
+        })
+        .collect::<Vec<_>>()
+        .join("，");
+    if violations.len() > SHOWN {
+        text.push_str(&format!(" 等共 {} 处", violations.len()));
+    }
+    text
+}
+
+/// 启动路径的迁移入口（C5）。
+///
+/// 迁移期间关闭外键：`PRAGMA foreign_keys` 在事务内是 no-op，只能在事务外改。外键开着时，
+/// 将来"重建表"式迁移（建新表 → 拷数据 → DROP 旧表 → 改名）里 DROP todos 会把 subtasks
+/// 级联删光。每个迁移提交前各自做外键检查（见 [`apply_migration`]）；全部完成后再整体检查一遍——
+/// 此时剩下的只可能是迁移前就存在的违规，记日志后照常打开外键。
+pub fn migrate(conn: &Connection) -> Result<()> {
+    conn.execute_batch("PRAGMA foreign_keys = OFF")?;
+    let migrated = run_migrations(conn);
+    let remaining = migrated.as_ref().ok().map(|_| foreign_key_violations(conn));
+    // 不论成败都恢复外键（失败时调用方会放弃这个连接，恢复也无害）
+    let restored = conn.execute_batch("PRAGMA foreign_keys = ON");
+    migrated?;
+    restored?;
+    if let Some(remaining) = remaining {
+        let remaining: Vec<FkViolation> = remaining?.into_iter().collect();
+        if !remaining.is_empty() {
+            log::warn!(
+                "[db] 数据库里有迁移前就存在的外键违规（不影响使用）：{}",
+                describe_violations(&remaining)
+            );
+        }
+    }
+    Ok(())
 }
 
 type MigrationFn = fn(&Connection) -> Result<()>;
@@ -82,7 +154,7 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
 }
 
 /// 依次应用 `(当前版本, target]` 区间内的迁移；每个迁移各自一个事务（见 `apply_migration`）。
-fn run_migrations_to(conn: &Connection, target: i32) -> Result<()> {
+pub(crate) fn run_migrations_to(conn: &Connection, target: i32) -> Result<()> {
     debug_assert_eq!(MIGRATIONS.last().map(|(v, _)| *v), Some(LATEST_VERSION));
     let current = current_version(conn)?;
     for &(version, migration) in MIGRATIONS {
@@ -832,6 +904,72 @@ mod tests {
 
         assert!(table_exists(&conn, "probe"));
         assert_eq!(max_version(&conn), 99);
+    }
+
+    /// 迁移新引入外键违规：报错并整体回滚，版本号不推进。
+    #[test]
+    fn migration_introducing_fk_violations_is_rolled_back() {
+        let conn = fresh_conn();
+        run_migrations(&conn).expect("迁移失败");
+        conn.execute_batch("PRAGMA foreign_keys = OFF").unwrap();
+
+        let err = apply_migration(&conn, 99, |c| {
+            c.execute("CREATE TABLE probe (id INTEGER PRIMARY KEY)", [])?;
+            // 模拟重建表时漏拷父表数据：子任务指向不存在的待办
+            c.execute(
+                "INSERT INTO subtasks (id, parent_id, title) VALUES (1, 12345, '孤儿')",
+                [],
+            )?;
+            Ok(())
+        })
+        .expect_err("应检测到外键违规");
+        let message = err.to_string();
+        assert!(
+            message.contains("v99") && message.contains("subtasks"),
+            "{message}"
+        );
+        assert!(!table_exists(&conn, "probe"), "整个迁移回滚");
+        assert_eq!(max_version(&conn), LATEST_VERSION);
+        let orphans: i64 = conn
+            .query_row("SELECT COUNT(*) FROM subtasks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(orphans, 0);
+    }
+
+    /// 迁移前就存在的外键违规不阻止升级（只记日志），迁移后外键重新打开。
+    #[test]
+    fn preexisting_fk_violations_do_not_block_migrations() {
+        let conn = fresh_conn();
+        run_migrations_to(&conn, 27).expect("迁移到 v27 失败");
+        conn.execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             INSERT INTO subtasks (id, parent_id, title) VALUES (5, 999, '外部工具留下的孤儿');",
+        )
+        .unwrap();
+
+        migrate(&conn).expect("已有的孤儿记录不应阻止升级");
+        assert_eq!(max_version(&conn), LATEST_VERSION);
+        let fk: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(fk, 1, "迁移结束后外键重新打开");
+        assert_eq!(foreign_key_violations(&conn).unwrap().len(), 1);
+    }
+
+    /// 启动路径（外键关闭下迁移）同样能把全新库迁到最新版本，并以外键开启的状态交付。
+    #[test]
+    fn migrate_entry_point_runs_with_foreign_keys_off_then_restores_them() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).expect("全新库迁移失败");
+        assert_eq!(max_version(&conn), LATEST_VERSION);
+        let fk: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(fk, 1);
+        assert!(foreign_key_violations(&conn).unwrap().is_empty());
+        // 二次调用是无操作
+        migrate(&conn).unwrap();
+        assert_eq!(max_version(&conn), LATEST_VERSION);
     }
 
     /// 全部迁移逐个包事务后，全新库仍能一次性迁到最新版本。

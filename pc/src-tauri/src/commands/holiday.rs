@@ -37,10 +37,7 @@ struct HolidayCnDay {
 
 /// 获取节假日缓存目录
 fn get_cache_dir() -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("mini-todo")
-        .join("holidays")
+    crate::db::paths::app_data_dir().join("holidays")
 }
 
 /// 获取指定年份的缓存文件路径
@@ -119,9 +116,9 @@ pub async fn fetch_holidays(year: i32) -> Result<Vec<HolidayInfo>, String> {
         }
         Err(network_err) => {
             // 网络获取失败，尝试从本地缓存读取
-            eprintln!("Network fetch failed for year {}: {}", year, network_err);
+            log::warn!("Network fetch failed for year {}: {}", year, network_err);
             if let Some(cached) = read_cache(year) {
-                eprintln!("Using cached holiday data for year {}", year);
+                log::info!("Using cached holiday data for year {}", year);
                 Ok(cached)
             } else {
                 Err(format!(

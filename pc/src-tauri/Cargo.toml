@@ -24,6 +24,12 @@ tauri-plugin-notification = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-autostart = "2"
+# 两个插件锁在 tauri 2.9 线：更新的版本要求 tauri >= 2.10 / 2.12，会连带升级 tao / wry，
+# 而窗口模式（window.rs）依赖 tao 0.34 的 apply_diff 行为、需要在 Windows 上重新做 e2e 验证
+tauri-plugin-single-instance = "~2.3.7"
+tauri-plugin-log = "~2.8.0"
+log = "0.4"
+encoding_rs = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
@@ -35,19 +41,10 @@ reqwest = { version = "0.12", features = ["json", "blocking"] }
 urlencoding = "2"
 flate2 = "1.1.9"
 zip = { version = "2", default-features = false, features = ["deflate"] }
-aes-gcm = "0.10"
-sha2 = "0.10"
-rand = "0.8"
-machine-uid = "0.5"
-notify = "7"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Dwm", "Win32_Graphics_DirectWrite", "Win32_Security_Cryptography"] }
-winreg = "0.55"
 raw-window-handle = "0.6"
-
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
 
 [dev-dependencies]
 tiny_http = "0.12"

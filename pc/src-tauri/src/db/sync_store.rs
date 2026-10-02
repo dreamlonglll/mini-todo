@@ -273,6 +273,15 @@ pub fn value_id(v: &Value) -> Option<i64> {
     }
 }
 
+/// 取记录的 `updatedAt`，只接受能识别的时间（规范化后）；无法识别 / 缺失时为空串。
+/// 用在要写进墓碑的场合：原样的乱码时间不能进墓碑表（会破坏按时间清理与比较）。
+fn canonical_updated_at(v: &Value) -> String {
+    v.get("updatedAt")
+        .and_then(Value::as_str)
+        .and_then(|raw| normalize_datetime(raw, DefaultTime::StartOfDay))
+        .unwrap_or_default()
+}
+
 /// 取记录的 `updatedAt`（规范化后；无法识别时原样；缺失时为空串）
 pub fn value_updated_at(v: &Value) -> String {
     match v.get("updatedAt").and_then(Value::as_str) {
@@ -629,7 +638,7 @@ where
             Ok(true)
         }
         Err(e) if e.sqlite_error_code() == Some(ErrorCode::ConstraintViolation) => {
-            eprintln!("[sync] 跳过无法落库的远端记录 {}: {}", what, e);
+            log::warn!("[sync] 跳过无法落库的远端记录 {}: {}", what, e);
             Ok(false)
         }
         Err(e) => Err(e),
@@ -688,7 +697,7 @@ pub fn merge_remote(
     for rt in remote {
         let Some(todo_id) = rt.id else {
             stats.records_skipped += 1 + rt.subtasks.len() as u32;
-            eprintln!(
+            log::warn!(
                 "[sync] 跳过缺少 id 的远端待办: {}",
                 rt.error.as_deref().unwrap_or("")
             );
@@ -723,7 +732,7 @@ pub fn merge_remote(
             None if is_suppressed(&tombs, EntityKind::Todo, todo_id, &rt.updated_at) => {}
             None => {
                 stats.records_skipped += 1;
-                eprintln!(
+                log::warn!(
                     "[sync] 跳过无法识别的远端待办 #{}: {}",
                     todo_id,
                     rt.error.as_deref().unwrap_or("")
@@ -738,7 +747,7 @@ pub fn merge_remote(
                 // 父待办已删除时随父丢弃；否则跳过计数
                 if parent_exists || !parent_tombstoned {
                     stats.records_skipped += 1;
-                    eprintln!(
+                    log::warn!(
                         "[sync] 跳过无法识别的远端子任务 {:?}（待办 #{}）: {}",
                         rs.id,
                         todo_id,
@@ -878,7 +887,7 @@ pub fn force_pull_replace(
             },
             None => {
                 stats.records_skipped += 1;
-                eprintln!(
+                log::warn!(
                     "[sync] 强制拉取：跳过无法识别的远端待办 #{}: {}",
                     todo_id,
                     rt.error.as_deref().unwrap_or("")
@@ -928,7 +937,8 @@ pub fn force_pull_replace(
 
 /// 强制推送（K7 `webdav_force_push`）前的本地准备：让即将上传的本地版本在所有设备上胜出。
 ///
-/// - 远端独有的待办 / 子任务（含无法识别的）→ 生成墓碑（deleted_at = now）
+/// - 远端独有的待办 / 子任务（含无法识别的）→ 生成墓碑（deleted_at = now；远端记录的
+///   updatedAt 比 now 还新——另一端时钟偏快或时区配置不同——时取它，保证墓碑压得住）
 /// - 远端版本比本地新、或远端墓碑会压制本地记录 → 把本地记录的 updated_at 推到
 ///   "至少 now、且严格晚于远端那个时间戳"，避免其它设备按 LWW 留下自己的旧版本
 ///
@@ -954,7 +964,12 @@ pub fn force_push_prepare(
     for rv in remote_todos {
         if let Some(id) = value_id(rv) {
             match local_todos.get(&id) {
-                None => record_tombstone(tx, EntityKind::Todo, id, now)?,
+                None => record_tombstone(
+                    tx,
+                    EntityKind::Todo,
+                    id,
+                    &deletion_time(now, &canonical_updated_at(rv)),
+                )?,
                 Some(local) => {
                     let remote_ts = value_updated_at(rv);
                     if remote_ts > *local {
@@ -966,7 +981,12 @@ pub fn force_push_prepare(
         for sv in value_subtasks(rv) {
             let Some(sid) = value_id(sv) else { continue };
             match local_subtasks.get(&sid) {
-                None => record_tombstone(tx, EntityKind::Subtask, sid, now)?,
+                None => record_tombstone(
+                    tx,
+                    EntityKind::Subtask,
+                    sid,
+                    &deletion_time(now, &canonical_updated_at(sv)),
+                )?,
                 Some(local) => {
                     let remote_ts = value_updated_at(sv);
                     if remote_ts > *local {

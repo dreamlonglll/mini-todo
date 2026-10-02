@@ -44,7 +44,7 @@ pub fn snapshot_to(conn: &Connection, dir: &Path, reason: &str) -> Result<PathBu
 
     if let Err(e) = prune(dir, KEEP_BACKUPS) {
         // 清理失败不影响本次备份结果
-        eprintln!("[backup] 清理旧备份失败: {}", e);
+        log::warn!("[backup] 清理旧备份失败: {}", e);
     }
     Ok(file)
 }

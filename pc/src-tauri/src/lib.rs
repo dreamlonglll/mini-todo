@@ -4,32 +4,48 @@ mod services;
 
 use db::Database;
 use services::NotificationService;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager};
 use tauri_plugin_autostart::ManagerExt;
 
-// 记录上次点击时间（用于双击检测）
-static LAST_CLICK_TIME: AtomicU64 = AtomicU64::new(0);
-const DOUBLE_CLICK_THRESHOLD_MS: u64 = 500;
 use commands::{
     close_all_notification_windows, close_notification_window, create_subtask, create_todo,
     delete_screen_config, delete_subtask, delete_todo, export_data, export_data_to_file,
-    fetch_holidays, get_auto_hide_enabled, get_fixed_embed_desktop, get_images_dir,
-    get_notification_type, get_screen_config, get_settings, get_show_calendar, get_subtask,
-    get_sync_settings, get_system_fonts, get_text_theme, get_todo_font_family, get_todo_font_size,
-    get_todos, get_top_on_wake, get_window_background, get_window_persist_state, import_data,
-    import_data_from_file, import_subtasks_from_paths, is_desktop_mode, is_fixed_mode,
-    list_screen_configs, reorder_subtasks, reorder_todos, reset_window, save_screen_config,
-    save_settings, save_subtask_image, save_sync_settings, set_auto_hide_cursor_inside,
-    set_auto_hide_enabled, set_fixed_embed_desktop, set_notification_type, set_show_calendar,
-    set_text_theme, set_todo_font_family, set_todo_font_size, set_top_on_wake,
-    set_window_background, set_window_desktop_mode, set_window_fixed_mode, sync_auto_start_state,
-    update_screen_config_name, update_subtask, update_todo, webdav_force_pull, webdav_force_push,
-    webdav_sync, webdav_test_connection,
+    fetch_holidays, get_auto_hide_enabled, get_change_seq, get_fixed_embed_desktop, get_images_dir,
+    get_notification_type, get_screen_config, get_setting, get_show_calendar, get_subtask,
+    get_sync_settings, get_system_fonts, get_text_theme, get_todo, get_todo_font_family,
+    get_todo_font_size, get_todos, get_top_on_wake, get_window_background,
+    get_window_persist_state, import_data, import_data_from_file, import_subtasks_from_paths,
+    is_desktop_mode, is_fixed_mode, list_screen_configs, reorder_subtasks, reorder_todos,
+    reset_window, save_screen_config, save_settings, save_subtask_image, save_sync_settings,
+    set_auto_hide_cursor_inside, set_auto_hide_enabled, set_fixed_embed_desktop,
+    set_notification_type, set_setting, set_show_calendar, set_text_theme, set_todo_font_family,
+    set_todo_font_size, set_top_on_wake, set_window_background, set_window_desktop_mode,
+    set_window_fixed_mode, sync_auto_start_state, update_screen_config_name, update_subtask,
+    update_todo, webdav_force_pull, webdav_force_push, webdav_sync, webdav_test_connection,
 };
+
+/// 开机自启动时附带的命令行参数（见 autostart 插件初始化）
+const AUTOSTART_ARG: &str = "--autostart";
+
+/// 托盘左键连点去抖：双击会先后触发两次单击抬起事件，第二下不必再唤起一遍
+const TRAY_CLICK_DEBOUNCE: Duration = Duration::from_millis(300);
+
+/// 上一次被处理的托盘左键点击时间（`Instant` 单调递增，不受系统时钟回拨影响）
+static LAST_TRAY_CLICK: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// 这次托盘点击是否需要处理；处理时记下时间
+fn accept_tray_click(last: &Mutex<Option<Instant>>, now: Instant) -> bool {
+    let mut last = last.lock().unwrap_or_else(|e| e.into_inner());
+    let accept = last.is_none_or(|prev| now.saturating_duration_since(prev) >= TRAY_CLICK_DEBOUNCE);
+    if accept {
+        *last = Some(now);
+    }
+    accept
+}
 
 #[cfg(target_os = "windows")]
 fn setup_window_rounded_corners(window: &tauri::WebviewWindow) {
@@ -61,44 +77,115 @@ fn setup_macos_transparent_webview(window: &tauri::WebviewWindow) {
 
     // 把 WKWebView 底色置空，让 CSS 控制最终显示：深色模式透明透出桌面，浅色模式由 .app-container 填白。
     if let Err(e) = window.set_background_color(Some(Color(0, 0, 0, 0))) {
-        eprintln!(
+        log::warn!(
             "Failed to set macOS webview background transparent: {:?}",
             e
         );
     }
 }
 
+/// 日志：应用日志目录下的 `mini-todo.log`（约 2MB 轮转、保留 1 份旧日志）+ 标准输出，Info 级。
+///
+/// release 版是 Windows 子系统程序，没有控制台，以前 `eprintln!` 的同步 / 迁移日志全部丢失（C4）。
+/// Windows 上日志目录为 `%LOCALAPPDATA%\com.tauri-app.mini-todo\logs`。
+fn log_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
+    use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
+
+    tauri_plugin_log::Builder::new()
+        .targets([
+            Target::new(TargetKind::LogDir { file_name: None }),
+            Target::new(TargetKind::Stdout),
+        ])
+        .level(log::LevelFilter::Info)
+        .max_file_size(2 * 1024 * 1024)
+        .rotation_strategy(RotationStrategy::KeepSome(1))
+        .timezone_strategy(TimezoneStrategy::UseLocal)
+        .build()
+}
+
+/// 打开数据库；失败时不 panic：记日志、提示用户（Windows 弹框，其它平台写 stderr）后以退出码 1 结束。
+///
+/// 放在 setup 里（日志插件已初始化）而不是 Builder 之前：迁移 / 备份的日志才能落盘，
+/// 重复启动的第二个实例也会在单实例插件里先退出，不会去碰数据库。
+fn open_database_or_exit() -> Database {
+    match Database::new() {
+        Ok(database) => database,
+        Err(e) => {
+            let path = db::paths::db_path();
+            log::error!("[db] 数据库初始化失败（{}）: {}", path.display(), e);
+            show_fatal_error(&format!(
+                "Mini Todo 无法打开数据库，程序将退出。\n\n数据库位置：{}\n错误：{}\n\n升级前的自动备份在同目录的 backups 文件夹中。",
+                path.display(),
+                e
+            ));
+            std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn show_fatal_error(message: &str) {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+
+    let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+    let text = wide(message);
+    let caption = wide("Mini Todo");
+    unsafe {
+        MessageBoxW(
+            HWND::default(),
+            PCWSTR(text.as_ptr()),
+            PCWSTR(caption.as_ptr()),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn show_fatal_error(message: &str) {
+    // 这里刻意直接写 stderr：日志之外，终端启动时用户也要能看到
+    eprintln!("{}", message);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // 初始化数据库
-    let database = Database::new().expect("Failed to initialize database");
-
     tauri::Builder::default()
+        // 单实例必须第一个注册：重复启动的进程在这里就退出，不会初始化其它插件、打开数据库，
+        // 也不会再起一套提醒调度与同步循环（以前每条提醒弹两次、两个同步互相 412）
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            // 开机自启动拉起的重复实例不打扰用户
+            if argv.iter().any(|arg| arg == AUTOSTART_ARG) {
+                return;
+            }
+            log::info!("[app] 检测到重复启动，唤起已运行的窗口");
+            commands::bring_main_window_to_front(app);
+        }))
+        .plugin(log_plugin())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            Some(vec!["--autostart"]),
+            Some(vec![AUTOSTART_ARG]),
         ))
-        .manage(database)
         .setup(|app| {
-            // 轮询线程拿不到 State<Database>，启动时先把 top_on_wake 灌进原子缓存
-            commands::init_top_on_wake(&app.state::<Database>());
+            // 第一件事：管理数据库状态。setup 跑在主线程，返回前前端的任何 IPC 都处理不了，
+            // 所以命令不会在 State<Database> 就位之前被调用
+            let database = open_database_or_exit();
+            // 轮询线程拿不到 State<Database>，启动时先把 top_on_wake 等灌进运行时缓存
+            commands::reload_runtime_prefs(&database);
+            app.manage(database);
 
-            #[cfg(target_os = "windows")]
-            {
-                if let Some(window) = app.get_webview_window("main") {
-                    setup_window_rounded_corners(&window);
-                }
-            }
+            if let Some(window) = app.get_webview_window("main") {
+                commands::remember_main_window(&window);
 
-            #[cfg(target_os = "macos")]
-            {
-                if let Some(window) = app.get_webview_window("main") {
-                    setup_macos_transparent_webview(&window);
-                }
+                #[cfg(target_os = "windows")]
+                setup_window_rounded_corners(&window);
+
+                #[cfg(target_os = "macos")]
+                setup_macos_transparent_webview(&window);
             }
 
             // 创建系统托盘菜单项
@@ -121,7 +208,7 @@ pub fn run() {
                 let enabled = autolaunch.is_enabled().unwrap_or(false);
                 if enabled {
                     if let Err(e) = autolaunch.enable() {
-                        eprintln!("Failed to refresh autostart entry: {e}");
+                        log::warn!("Failed to refresh autostart entry: {e}");
                     }
                 }
                 enabled
@@ -203,7 +290,7 @@ pub fn run() {
                                 autolaunch.enable()
                             };
                             if let Err(e) = result {
-                                eprintln!("Failed to toggle autostart: {e}");
+                                log::warn!("Failed to toggle autostart: {e}");
                             }
                             // 不依赖 CheckMenuItem 的自动翻转：它只翻显示不看结果，
                             // 与设置面板交叉操作或 enable/disable 失败时会显示反转，
@@ -218,31 +305,16 @@ pub fn run() {
                     }
                 })
                 .on_tray_icon_event(|tray: &tauri::tray::TrayIcon, event| {
+                    // 左键单击：把主窗口显示并抬到最前（issue #10）。固定模式下窗口不在任务栏，
+                    // 托盘是唯一入口；新建待办在右键菜单里。以前的"双击"分支与单击做的事完全一样，已合并
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
                         button_state: MouseButtonState::Up,
                         ..
                     } = event
                     {
-                        let now = SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap()
-                            .as_millis() as u64;
-                        let last_click = LAST_CLICK_TIME.swap(now, Ordering::SeqCst);
-
-                        let app = tray.app_handle();
-
-                        // 检测双击
-                        if now - last_click < DOUBLE_CLICK_THRESHOLD_MS {
-                            // 双击：把主窗口显示并抬到最前（issue #10）
-                            // 固定模式下窗口不在任务栏，托盘是唯一入口，"叫回窗口"比"新建待办"更常用；
-                            // 新建待办仍保留在托盘右键菜单里
-                            commands::bring_main_window_to_front(app);
-                            // 重置时间避免连续触发
-                            LAST_CLICK_TIME.store(0, Ordering::SeqCst);
-                        } else {
-                            // 单击：显示/聚焦主窗口
-                            commands::bring_main_window_to_front(app);
+                        if accept_tray_click(&LAST_TRAY_CLICK, Instant::now()) {
+                            commands::bring_main_window_to_front(tray.app_handle());
                         }
                     }
                 })
@@ -279,6 +351,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // TODO 命令
             get_todos,
+            get_todo,
+            get_change_seq,
             create_todo,
             update_todo,
             delete_todo,
@@ -294,8 +368,10 @@ pub fn run() {
             get_subtask,
             save_subtask_image,
             // 窗口设置命令
-            get_settings,
             save_settings,
+            // 白名单设置项（视图模式）
+            get_setting,
+            set_setting,
             get_text_theme,
             set_text_theme,
             set_window_fixed_mode,
@@ -353,4 +429,27 @@ pub fn run() {
         .run(|_app_handle, _event| {
             // 事件监听（保留空实现）
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tray_clicks_are_debounced_with_a_monotonic_clock() {
+        let last = Mutex::new(None);
+        let t0 = Instant::now();
+        assert!(accept_tray_click(&last, t0), "第一下总是处理");
+        assert!(
+            !accept_tray_click(&last, t0 + Duration::from_millis(120)),
+            "双击的第二下不重复唤起"
+        );
+        assert!(accept_tray_click(&last, t0 + TRAY_CLICK_DEBOUNCE));
+        // 时间"倒退"（理论上 Instant 不会，但不能因此 panic 或永久拒绝）
+        assert!(!accept_tray_click(&last, t0));
+        assert!(accept_tray_click(
+            &last,
+            t0 + TRAY_CLICK_DEBOUNCE * 2 + Duration::from_millis(1)
+        ));
+    }
 }

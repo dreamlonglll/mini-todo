@@ -2,17 +2,23 @@
 //!
 //! - 超时：连接 10s、单请求总计 60s（图片按大小放宽）；不跟随重定向（PUT 被 301/302
 //!   改写成 GET 会被误判为上传成功）
-//! - 条件 GET：有 ETag 用 `If-None-Match`，否则有 Last-Modified 用 `If-Modified-Since`；304 → 未变
-//! - 条件 PUT：基准 ETag 为**强** ETag 时用 `If-Match`；弱 ETag（`W/"…"`，Apache 对一秒内
-//!   刚写过的文件就返回弱 ETag，强比较永远 412）或没有 ETag 时用 `If-Unmodified-Since`；
+//! - 条件 GET：只用 `If-None-Match`（服务端按弱比较判断，基准是弱 ETag 也可以）；304 → 未变。
+//!   **不用** `If-Modified-Since`：nginx dav 按整秒比较，与基准同一秒内的写入会被判成 304，
+//!   变更就此漏掉。没有 ETag 基准时做无条件 GET
+//! - 条件 PUT：只用 `If-Match: "<opaque>"`（去掉 `W/` 前缀）；没有 ETag 基准时不带前置条件，
+//!   靠"写前先 GET 合并"保护。**绝不**发 `If-Unmodified-Since`：Apache mod_dav 拿亚秒级的
+//!   mtime 和秒级的日期比较，对两秒前就没再动过的文件也返回 412。
+//!   Apache 刚写完的一秒内只给弱 ETag，此时 `If-Match` 也会 412，调用方隔 ≥1.1s 重试即可。
 //!   412 → [`PutOutcome::PreconditionFailed`]，404 / 409（父目录不存在）→ [`PutOutcome::ParentMissing`]
 //! - 有的服务端（nginx dav、Caddy/x/net/webdav）根本不检查条件头，调用方必须"写前先 GET 合并"，
 //!   不能只指望 412
+//! - PUT 响应常常不带校验器（Apache、nginx）：先 HEAD 取 ETag（nginx 只有 HEAD 给 ETag），
+//!   再退化为 PROPFIND Depth 0 的 getetag（Apache 的 PROPFIND 给强 ETag）
 //! - PROPFIND：Depth 0 取 getetag / getlastmodified / getcontentlength；Depth 1 列目录，
 //!   XML 解析不依赖命名空间前缀、大小写与换行
 
 use reqwest::blocking::{Client, RequestBuilder, Response};
-use reqwest::header::{CONTENT_TYPE, ETAG, LAST_MODIFIED};
+use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE, ETAG, LAST_MODIFIED};
 use reqwest::{Method, StatusCode};
 use std::path::Path;
 use std::time::Duration;
@@ -26,17 +32,11 @@ const MIN_TRANSFER_BYTES_PER_SEC: u64 = 50 * 1024;
 const PROPFIND_BODY: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <D:propfind xmlns:D="DAV:"><D:prop><D:resourcetype/><D:getetag/><D:getlastmodified/><D:getcontentlength/></D:prop></D:propfind>"#;
 
-/// 远端文件版本（条件请求的基准）
+/// 远端文件版本（条件请求的基准）。条件请求只用 `etag`；`last_modified` 只作记录。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RemoteVersion {
     pub etag: Option<String>,
     pub last_modified: Option<String>,
-}
-
-impl RemoteVersion {
-    pub fn is_empty(&self) -> bool {
-        self.etag.is_none() && self.last_modified.is_none()
-    }
 }
 
 /// PROPFIND Depth 0 结果
@@ -70,28 +70,35 @@ pub enum PutOutcome {
     ParentMissing,
 }
 
-/// PUT 前置条件
+/// PUT 前置条件。没有 `If-Unmodified-Since` 这一项是有意的（见模块文档）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Precondition {
     None,
+    /// `If-Match` 的值：去掉 `W/` 前缀后的带引号 opaque-tag
     IfMatch(String),
-    IfUnmodifiedSince(String),
 }
 
 pub fn is_weak_etag(etag: &str) -> bool {
     etag.starts_with("W/") || etag.starts_with("w/")
 }
 
-/// K4：按基准选择 PUT 前置条件。强 ETag → `If-Match`；弱 / 无 ETag → `If-Unmodified-Since`；
-/// 都没有 → 不带条件。
-pub fn choose_put_precondition(base: &RemoteVersion) -> Precondition {
-    if let Some(etag) = base.etag.as_deref().map(str::trim) {
-        if !etag.is_empty() && !is_weak_etag(etag) {
-            return Precondition::IfMatch(etag.to_string());
-        }
+/// ETag 的 opaque-tag 部分：去掉弱标记 `W/` 与首尾空白（`W/"abc"` → `"abc"`）
+pub fn opaque_etag(etag: &str) -> &str {
+    let etag = etag.trim();
+    match etag.get(..2) {
+        Some("W/") | Some("w/") => etag[2..].trim_start(),
+        _ => etag,
     }
-    match base.last_modified.as_deref().map(str::trim) {
-        Some(lm) if !lm.is_empty() => Precondition::IfUnmodifiedSince(lm.to_string()),
+}
+
+/// K4：按基准选择 PUT 前置条件。知道 ETag（强弱都行）→ `If-Match: "<opaque>"`；
+/// 不知道 → 不带条件。Last-Modified 不参与。
+///
+/// 弱 ETag 也去掉 `W/` 发强比较：Apache 只在文件刚写完的一秒内给弱 ETag，过了这一秒同一个
+/// opaque-tag 就能强匹配；若恰好落在这一秒内会得到 412，调用方隔 ≥1.1s 重新 GET 合并后重试。
+pub fn choose_put_precondition(base: &RemoteVersion) -> Precondition {
+    match base.etag.as_deref().map(opaque_etag) {
+        Some(tag) if !tag.is_empty() => Precondition::IfMatch(tag.to_string()),
         _ => Precondition::None,
     }
 }
@@ -114,7 +121,7 @@ impl WebDavClient {
             return Err("WebDAV 地址必须以 http:// 或 https:// 开头".to_string());
         }
         if lower.starts_with("http://") {
-            eprintln!("[webdav] 警告：使用明文 http:// 连接 WebDAV，密码与数据可能被窃听");
+            log::warn!("[webdav] 警告：使用明文 http:// 连接 WebDAV，密码与数据可能被窃听");
         }
 
         let client = Client::builder()
@@ -207,23 +214,20 @@ impl WebDavClient {
         }
     }
 
-    /// GET；`base` 非空时带条件头，未变化返回 [`GetOutcome::NotModified`]
+    /// GET；`base` 里有 ETag 时带 `If-None-Match`，未变化返回 [`GetOutcome::NotModified`]。
+    /// 只有 Last-Modified 的基准不带条件（不用 `If-Modified-Since`，见模块文档）。
     pub fn get(
         &self,
         remote_path: &str,
         base: Option<&RemoteVersion>,
     ) -> Result<GetOutcome, String> {
         let mut req = self.request(Method::GET, &self.full_url(remote_path));
-        if let Some(base) = base {
-            if let Some(etag) = base.etag.as_deref().filter(|e| !e.trim().is_empty()) {
-                req = req.header("If-None-Match", etag.trim());
-            } else if let Some(lm) = base
-                .last_modified
-                .as_deref()
-                .filter(|l| !l.trim().is_empty())
-            {
-                req = req.header("If-Modified-Since", lm.trim());
-            }
+        if let Some(etag) = base
+            .and_then(|b| b.etag.as_deref())
+            .map(str::trim)
+            .filter(|e| !e.is_empty())
+        {
+            req = req.header("If-None-Match", etag);
         }
         let resp = Self::send(req, "下载")?;
         match resp.status().as_u16() {
@@ -244,6 +248,28 @@ impl WebDavClient {
         }
     }
 
+    /// HEAD：取文件的 ETag / Last-Modified / Content-Length；404 → `Ok(None)`。
+    /// PUT 响应没带 ETag 时用它补基准（nginx dav 只有 HEAD / GET 给 ETag）。
+    pub fn head_meta(&self, remote_path: &str) -> Result<Option<PropMeta>, String> {
+        let resp = Self::send(
+            self.request(Method::HEAD, &self.full_url(remote_path)),
+            "查询文件信息",
+        )?;
+        match resp.status() {
+            s if s.is_success() => Ok(Some(PropMeta {
+                version: version_from_headers(&resp),
+                // HEAD 没有响应体，reqwest 的 content_length() 不可靠，直接读头
+                content_length: resp
+                    .headers()
+                    .get(CONTENT_LENGTH)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.trim().parse().ok()),
+            })),
+            StatusCode::NOT_FOUND => Ok(None),
+            s => Err(format!("查询文件信息失败，状态码: {}", s.as_u16())),
+        }
+    }
+
     /// PUT bytes，按 `precondition` 附条件头
     pub fn put(
         &self,
@@ -257,12 +283,8 @@ impl WebDavClient {
             .request(Method::PUT, &self.full_url(remote_path))
             .header(CONTENT_TYPE, content_type)
             .timeout(timeout);
-        match precondition {
-            Precondition::None => {}
-            Precondition::IfMatch(etag) => req = req.header("If-Match", etag.as_str()),
-            Precondition::IfUnmodifiedSince(lm) => {
-                req = req.header("If-Unmodified-Since", lm.as_str())
-            }
+        if let Precondition::IfMatch(etag) = precondition {
+            req = req.header("If-Match", etag.as_str());
         }
         let resp = Self::send(req.body(data), "上传")?;
         match resp.status().as_u16() {
@@ -651,40 +673,61 @@ mod tests {
             )),
             Precondition::IfMatch("\"3-65cdc\"".to_string())
         );
+        assert_eq!(
+            choose_put_precondition(&v(Some("  \"x\"  "), None)),
+            Precondition::IfMatch("\"x\"".to_string()),
+            "首尾空白去掉"
+        );
     }
 
+    /// Apache 刚写完的一秒内给弱 ETag：去掉 W/ 发 If-Match（过了这一秒就能强匹配），
+    /// 绝不退回 If-Unmodified-Since（Apache 拿亚秒 mtime 比较，永远 412）
     #[test]
-    fn weak_etag_falls_back_to_if_unmodified_since() {
+    fn weak_etag_uses_if_match_with_opaque_tag() {
         let lm = "Wed, 01 Jan 2026 00:00:00 GMT";
         assert_eq!(
             choose_put_precondition(&v(Some("W/\"3-65cdc\""), Some(lm))),
-            Precondition::IfUnmodifiedSince(lm.to_string())
+            Precondition::IfMatch("\"3-65cdc\"".to_string())
         );
         assert_eq!(
-            choose_put_precondition(&v(Some("w/\"x\""), Some(lm))),
-            Precondition::IfUnmodifiedSince(lm.to_string())
+            choose_put_precondition(&v(Some("w/\"x\""), None)),
+            Precondition::IfMatch("\"x\"".to_string())
         );
     }
 
+    /// 没有 ETag：不带前置条件（Last-Modified 不参与），靠写前 GET 合并保护
     #[test]
-    fn missing_etag_uses_last_modified_or_nothing() {
+    fn missing_etag_sends_no_precondition() {
         let lm = "Wed, 01 Jan 2026 00:00:00 GMT";
         assert_eq!(
             choose_put_precondition(&v(None, Some(lm))),
-            Precondition::IfUnmodifiedSince(lm.to_string())
-        );
-        assert_eq!(
-            choose_put_precondition(&v(Some("  "), Some(""))),
             Precondition::None
         );
         assert_eq!(
-            choose_put_precondition(&v(Some("W/\"x\""), None)),
+            choose_put_precondition(&v(Some("  "), Some(lm))),
+            Precondition::None
+        );
+        assert_eq!(
+            choose_put_precondition(&v(Some("W/"), None)),
             Precondition::None
         );
         assert_eq!(
             choose_put_precondition(&RemoteVersion::default()),
             Precondition::None
         );
+    }
+
+    #[test]
+    fn opaque_etag_strips_weak_marker() {
+        assert_eq!(opaque_etag("W/\"abc\""), "\"abc\"");
+        assert_eq!(opaque_etag("w/\"abc\""), "\"abc\"");
+        assert_eq!(opaque_etag(" \"abc\" "), "\"abc\"");
+        assert_eq!(
+            opaque_etag("\"W/abc\""),
+            "\"W/abc\"",
+            "引号内的 W/ 不是弱标记"
+        );
+        assert_eq!(opaque_etag(""), "");
     }
 
     const MULTILINE: &str = r#"<?xml version="1.0" encoding="utf-8"?>

@@ -1,6 +1,9 @@
+use crate::db::time::{format_canonical, parse_local_datetime_with, DefaultTime};
 use crate::db::Database;
 use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, NaiveTime};
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::async_runtime;
 use tauri::Manager;
@@ -10,27 +13,143 @@ use tauri_plugin_notification::NotificationExt;
 
 // 通知窗口计数器（用于生成唯一的窗口标签）
 static NOTIFICATION_COUNTER: AtomicU32 = AtomicU32::new(0);
-// 当前显示的通知窗口数量（用于堆叠计算）
-static ACTIVE_NOTIFICATIONS: AtomicU32 = AtomicU32::new(0);
 
-// 通知窗口尺寸
-const NOTIFICATION_WIDTH: u32 = 320;
-const NOTIFICATION_HEIGHT: u32 = 120;
-const NOTIFICATION_MARGIN: u32 = 20;
-const NOTIFICATION_SPACING: u32 = 10;
-
-/// 活动通知计数安全递减，返回递减后的值。
+/// 正在显示的应用内通知窗口占用的堆叠槽位。
 ///
-/// 计数为 0 时保持 0：u32 下溢会让下一条通知的 y 坐标
-/// （`screen_height - ... - active_count * 130`）算术溢出，
-/// debug 构建直接 panic、release 构建窗口飞出屏幕。
-fn decrement_active(counter: &AtomicU32) -> u32 {
-    counter
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
-            Some(current.saturating_sub(1))
-        })
-        .map(|prev| prev.saturating_sub(1))
-        .unwrap_or(0)
+/// 新通知取最小的空闲槽位，窗口销毁时归还：中间某条先关掉后，下一条补进它的空位，
+/// 不会叠在仍在显示的通知上（单纯计数做不到这一点）。
+static NOTIFICATION_SLOTS: Mutex<BTreeSet<u32>> = Mutex::new(BTreeSet::new());
+
+// 通知窗口尺寸与间距（逻辑像素）
+const NOTIFICATION_WIDTH: f64 = 320.0;
+const NOTIFICATION_HEIGHT: f64 = 120.0;
+const NOTIFICATION_MARGIN: f64 = 20.0;
+const NOTIFICATION_SPACING: f64 = 10.0;
+
+/// 取一个空闲槽位（最小的未占用编号）
+fn acquire_slot(slots: &Mutex<BTreeSet<u32>>) -> u32 {
+    let mut taken = slots.lock().unwrap_or_else(|e| e.into_inner());
+    let slot = (0..).find(|n| !taken.contains(n)).unwrap_or(0);
+    taken.insert(slot);
+    slot
+}
+
+/// 归还槽位；归还未占用的槽位是无害的空操作（窗口销毁事件重复触发也不会出错）
+fn release_slot(slots: &Mutex<BTreeSet<u32>>, slot: u32) {
+    slots
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&slot);
+}
+
+/// 显示器工作区（逻辑像素，已扣除任务栏）
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct WorkArea {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+/// 第 `slot` 个通知窗口的左上角逻辑坐标：从工作区右下角往上堆叠，
+/// 一列放不下就往左开新列；整个工作区都放满时从头复用位置（取模），永远落在工作区内。
+/// 全程浮点运算，不会出现 u32 下溢。
+fn notification_position(area: WorkArea, slot: u32) -> (f64, f64) {
+    let row_step = NOTIFICATION_HEIGHT + NOTIFICATION_SPACING;
+    let col_step = NOTIFICATION_WIDTH + NOTIFICATION_SPACING;
+    let rows = ((area.height - 2.0 * NOTIFICATION_MARGIN + NOTIFICATION_SPACING) / row_step)
+        .floor()
+        .max(1.0) as u32;
+    let cols = ((area.width - 2.0 * NOTIFICATION_MARGIN + NOTIFICATION_SPACING) / col_step)
+        .floor()
+        .max(1.0) as u32;
+    let slot = slot % rows.saturating_mul(cols).max(1);
+    let (col, row) = (slot / rows, slot % rows);
+
+    let x = area.x + area.width - NOTIFICATION_MARGIN - NOTIFICATION_WIDTH - col as f64 * col_step;
+    let y =
+        area.y + area.height - NOTIFICATION_MARGIN - NOTIFICATION_HEIGHT - row as f64 * row_step;
+    (x, y)
+}
+
+/// 解析 `notify_at`：兼容规范空格格式与旧的 `T` 格式（K1）；仅日期按 09:00 处理
+fn parse_notify_at(s: &str) -> Option<NaiveDateTime> {
+    parse_local_datetime_with(s, DefaultTime::Notify)
+}
+
+/// 待发送通知的待办
+struct PendingNotification {
+    id: i64,
+    title: String,
+    description: Option<String>,
+    repeat_enabled: bool,
+    repeat_type: Option<String>,
+    repeat_interval: i32,
+    repeat_weekdays: Option<String>,
+    repeat_month_day: Option<i32>,
+    notify_at: Option<String>,
+}
+
+const PENDING_COLUMNS: &str = "id, title, description, repeat_enabled, repeat_type, \
+     repeat_interval, repeat_weekdays, repeat_month_day, notify_at";
+
+/// 重复提醒相关列类型不对时按"未设置"处理：坏掉的可选字段不该让整条提醒发不出去
+fn pending_from_row(row: &rusqlite::Row) -> rusqlite::Result<PendingNotification> {
+    Ok(PendingNotification {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        description: row.get::<_, Option<String>>(2)?,
+        repeat_enabled: row.get::<_, i32>(3).unwrap_or(0) != 0,
+        repeat_type: row.get(4).unwrap_or(None),
+        repeat_interval: row.get(5).unwrap_or(1),
+        repeat_weekdays: row.get(6).unwrap_or(None),
+        repeat_month_day: row.get(7).unwrap_or(None),
+        notify_at: row.get(8).unwrap_or(None),
+    })
+}
+
+/// 到点（扣除提前量）且未通知的提醒。
+/// notify_before 在 v1 建表时可空：NULL 按 0 处理，否则整条比较恒为 NULL、永不提醒。
+fn due_reminders_sql() -> String {
+    format!(
+        "SELECT {PENDING_COLUMNS} FROM todos
+         WHERE completed = 0
+           AND notified = 0
+           AND notify_at IS NOT NULL
+           AND datetime(notify_at, '-' || COALESCE(notify_before, 0) || ' minutes')
+               <= datetime('now', 'localtime')
+         ORDER BY datetime(notify_at) ASC, id ASC"
+    )
+}
+
+/// 启动补发：已过点、未通知的重复提醒
+fn missed_repeats_sql() -> String {
+    format!(
+        "SELECT {PENDING_COLUMNS} FROM todos
+         WHERE completed = 0
+           AND repeat_enabled = 1
+           AND notified = 0
+           AND notify_at IS NOT NULL
+           AND datetime(notify_at) <= datetime('now', 'localtime')
+         ORDER BY datetime(notify_at) ASC, id ASC"
+    )
+}
+
+/// 跑一条查询待发送提醒的 SQL；单行读取失败只记日志并跳过，不影响其它提醒
+fn query_pending(db: &Database, sql: &str) -> Result<Vec<PendingNotification>, String> {
+    db.with_connection(|conn| {
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map([], pending_from_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            match row {
+                Ok(todo) => out.push(todo),
+                Err(e) => log::error!("[notify] 读取待提醒的待办失败: {}", e),
+            }
+        }
+        Ok(out)
+    })
+    .map_err(|e| e.to_string())
 }
 
 pub struct NotificationService;
@@ -44,13 +163,13 @@ impl NotificationService {
 
             // 启动时补发一次错过的重复提醒
             if let Err(e) = Self::catch_up_missed_repeats(&app_handle) {
-                eprintln!("补发错过的重复提醒失败: {}", e);
+                log::error!("[notify] 补发错过的重复提醒失败: {}", e);
             }
 
             loop {
                 Self::sleep_until_next_minute().await;
                 if let Err(e) = Self::check_and_send_notifications(&app_handle) {
-                    eprintln!("通知检查失败: {}", e);
+                    log::error!("[notify] 通知检查失败: {}", e);
                 }
             }
         });
@@ -79,86 +198,56 @@ impl NotificationService {
         tokio::time::sleep(Duration::new(wait_secs, wait_nanos)).await;
     }
 
-    /// 检查并发送到期的通知
+    /// 检查并发送到期的通知。逐条处理：一条失败只记日志，不影响同一轮的其它提醒。
     fn check_and_send_notifications(app_handle: &tauri::AppHandle) -> Result<(), String> {
         let db = app_handle.state::<Database>();
-
-        // 获取通知类型设置
         let notification_type = Self::get_notification_type(&db);
 
-        // 获取需要通知的待办
-        let todos = Self::get_pending_notifications(&db)?;
+        for todo in query_pending(&db, &due_reminders_sql())? {
+            Self::deliver(app_handle, &db, &notification_type, &todo);
+        }
+        Ok(())
+    }
 
-        for todo in todos {
-            // 根据设置发送不同类型的通知
-            match notification_type.as_str() {
-                "app" => {
-                    Self::send_app_notification(app_handle, &todo.title, &todo.description)?;
-                }
-                _ => {
-                    Self::send_system_notification(app_handle, &todo.title, &todo.description)?;
-                }
-            }
-
-            if todo.repeat_enabled {
-                Self::advance_repeat(&db, &todo)?;
-            } else {
-                Self::mark_as_notified(&db, todo.id)?;
-            }
+    /// 发出一条提醒并推进它的状态。
+    ///
+    /// 发送失败：只记日志、不推进，下一分钟重试（什么都没弹出来，不会刷屏）。
+    /// 推进失败：记日志；重复提醒的时间无法解析时直接标记已通知，避免每分钟弹一次。
+    fn deliver(
+        app_handle: &tauri::AppHandle,
+        db: &Database,
+        notification_type: &str,
+        todo: &PendingNotification,
+    ) {
+        let sent = match notification_type {
+            "app" => Self::send_app_notification(app_handle, &todo.title, &todo.description),
+            _ => Self::send_system_notification(app_handle, &todo.title, &todo.description),
+        };
+        if let Err(e) = sent {
+            log::error!("[notify] 待办 #{} 的提醒发送失败: {}", todo.id, e);
+            return;
         }
 
-        Ok(())
+        let advanced = if todo.repeat_enabled {
+            Self::advance_repeat(db, todo)
+        } else {
+            Self::mark_as_notified(db, todo.id)
+        };
+        if let Err(e) = advanced {
+            log::error!("[notify] 更新待办 #{} 的提醒状态失败: {}", todo.id, e);
+        }
     }
 
     /// 获取通知类型设置
     fn get_notification_type(db: &Database) -> String {
         db.with_connection(|conn| {
-            let result: String = conn
-                .query_row(
-                    "SELECT value FROM settings WHERE key = 'notification_type'",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap_or_else(|_| "system".to_string());
-            Ok(result)
+            Ok(crate::db::settings_kv::get_setting_or(
+                conn,
+                "notification_type",
+                "system",
+            ))
         })
         .unwrap_or_else(|_| "system".to_string())
-    }
-
-    /// 获取需要发送通知的待办列表
-    fn get_pending_notifications(db: &Database) -> Result<Vec<PendingNotification>, String> {
-        db.with_connection(|conn| {
-            let mut stmt = conn.prepare(
-                r#"
-                SELECT id, title, description, repeat_enabled, repeat_type, repeat_interval,
-                       repeat_weekdays, repeat_month_day, notify_at
-                FROM todos
-                WHERE completed = 0
-                  AND notified = 0
-                  AND notify_at IS NOT NULL
-                  AND datetime(notify_at, '-' || notify_before || ' minutes') <= datetime('now', 'localtime')
-                "#
-            )?;
-
-            let todos = stmt.query_map([], |row| {
-                Ok(PendingNotification {
-                    id: row.get(0)?,
-                    title: row.get(1)?,
-                    description: row.get::<_, Option<String>>(2)?,
-                    repeat_enabled: row.get::<_, i32>(3).unwrap_or(0) != 0,
-                    repeat_type: row.get(4).unwrap_or(None),
-                    repeat_interval: row.get(5).unwrap_or(1),
-                    repeat_weekdays: row.get(6).unwrap_or(None),
-                    repeat_month_day: row.get(7).unwrap_or(None),
-                    notify_at: row.get(8).unwrap_or(None),
-                })
-            })?
-            .filter_map(|r| r.ok())
-            .collect();
-
-            Ok(todos)
-        })
-        .map_err(|e| e.to_string())
     }
 
     /// 发送系统通知
@@ -190,40 +279,26 @@ impl NotificationService {
         let counter = NOTIFICATION_COUNTER.fetch_add(1, Ordering::SeqCst);
         let window_label = format!("notification_{}", counter);
 
-        // 获取当前活动通知数量，用于计算堆叠位置
-        let active_count = ACTIVE_NOTIFICATIONS.fetch_add(1, Ordering::SeqCst);
-
-        // 获取主显示器信息以计算窗口位置
-        let (screen_width, screen_height) = Self::get_primary_screen_size(app_handle);
-
-        // 计算窗口位置（右下角堆叠）
-        // 新通知在上方，旧通知在下方
-        let x = screen_width - NOTIFICATION_WIDTH - NOTIFICATION_MARGIN;
-        let y = screen_height
-            - NOTIFICATION_HEIGHT
-            - NOTIFICATION_MARGIN
-            - (active_count * (NOTIFICATION_HEIGHT + NOTIFICATION_SPACING));
+        // 右下角堆叠：新通知占最小的空闲槽位
+        let slot = acquire_slot(&NOTIFICATION_SLOTS);
+        let (x, y) = notification_position(Self::primary_work_area(app_handle), slot);
 
         // URL 编码标题和描述
         let encoded_title = urlencoding::encode(title);
         let encoded_desc = urlencoding::encode(description.as_deref().unwrap_or("待办事项提醒"));
         let encoded_label = urlencoding::encode(&window_label);
 
-        // 创建通知窗口
         let url = format!(
             "index.html#/notification?title={}&description={}&label={}",
             encoded_title, encoded_desc, encoded_label
         );
 
-        let window_label_clone = window_label.clone();
-        let app_handle_clone = app_handle.clone();
-
-        // 在主线程创建窗口
+        // position / inner_size 都是逻辑像素
         let mut window_builder =
             WebviewWindowBuilder::new(app_handle, &window_label, WebviewUrl::App(url.into()))
                 .title("通知")
-                .inner_size(NOTIFICATION_WIDTH as f64, NOTIFICATION_HEIGHT as f64)
-                .position(x as f64, y as f64)
+                .inner_size(NOTIFICATION_WIDTH, NOTIFICATION_HEIGHT)
+                .position(x, y)
                 .decorations(false)
                 .always_on_top(true)
                 .resizable(false)
@@ -236,36 +311,57 @@ impl NotificationService {
             window_builder = window_builder.transparent(true);
         }
 
-        let _ = window_builder.build().map_err(|e| e.to_string())?;
-
-        // 监听窗口销毁事件，减少活动通知计数。
-        // `Destroyed` 是窗口生命周期的权威信号，计数只在这里减一次；
-        // 早期版本这里还会 emit `notification-closed-{label}` 并额外注册一个
-        // listener 再减一次，导致每关一个窗口计数减 2、从 0 下溢到 u32::MAX，
-        // 后续通知的 y 坐标计算随之溢出（debug panic / release 位置错乱）。
-        if let Some(window) = app_handle_clone.get_webview_window(&window_label_clone) {
-            window.on_window_event(move |event| {
-                if let tauri::WindowEvent::Destroyed = event {
-                    decrement_active(&ACTIVE_NOTIFICATIONS);
-                }
-            });
+        match window_builder.build() {
+            Ok(window) => {
+                // `Destroyed` 是窗口生命周期的权威信号，槽位只在这里归还
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::Destroyed = event {
+                        release_slot(&NOTIFICATION_SLOTS, slot);
+                    }
+                });
+                Ok(())
+            }
+            Err(e) => {
+                release_slot(&NOTIFICATION_SLOTS, slot);
+                Err(e.to_string())
+            }
         }
-
-        Ok(())
     }
 
-    /// 获取主显示器尺寸
-    fn get_primary_screen_size(app_handle: &tauri::AppHandle) -> (u32, u32) {
-        // 尝试获取主显示器
-        if let Some(monitor) = app_handle.primary_monitor().ok().flatten() {
-            return (monitor.size().width, monitor.size().height);
+    /// 主显示器工作区（逻辑像素）。
+    ///
+    /// `work_area` 已扣掉任务栏；它和 `size` 都是物理像素，而窗口构建器的 `position`
+    /// 接受逻辑像素，必须除以缩放比例——直接用物理值时 1080p@125% 的通知整个落在屏幕外。
+    fn primary_work_area(app_handle: &tauri::AppHandle) -> WorkArea {
+        let Some(monitor) = app_handle.primary_monitor().ok().flatten() else {
+            return WorkArea {
+                x: 0.0,
+                y: 0.0,
+                width: 1920.0,
+                height: 1080.0,
+            };
+        };
+        let scale = if monitor.scale_factor() > 0.0 {
+            monitor.scale_factor()
+        } else {
+            1.0
+        };
+        let work_area = monitor.work_area();
+        // 个别平台拿不到工作区（返回 0 尺寸）时退回整块显示器
+        let (position, size) = if work_area.size.width > 0 && work_area.size.height > 0 {
+            (work_area.position, work_area.size)
+        } else {
+            (*monitor.position(), *monitor.size())
+        };
+        WorkArea {
+            x: position.x as f64 / scale,
+            y: position.y as f64 / scale,
+            width: size.width as f64 / scale,
+            height: size.height as f64 / scale,
         }
-
-        // 回退到默认值
-        (1920, 1080)
     }
 
-    /// 标记待办为已通知
+    /// 标记待办为已通知。刷新 updated_at：提醒状态要随同步传播到其它设备。
     fn mark_as_notified(db: &Database, todo_id: i64) -> Result<(), String> {
         db.with_connection(|conn| {
             conn.execute(
@@ -277,34 +373,42 @@ impl NotificationService {
         .map_err(|e| e.to_string())
     }
 
-    /// 推进重复提醒到下一次
+    /// 推进重复提醒到下一次（规范时间格式落库）。
+    ///
+    /// `notify_at` 无法解析时标记已通知并返回错误：否则它每分钟都会被选中、弹一次。
+    /// 月重复没有 `repeat_month_day` 时以当前 `notify_at` 的日为锚点，并把锚点写回
+    /// `repeat_month_day`：否则 31 号推进到 2 月 28 号后，锚点就永久漂移成 28 号。
     fn advance_repeat(db: &Database, todo: &PendingNotification) -> Result<(), String> {
-        let notify_at_str = match &todo.notify_at {
-            Some(s) => s.clone(),
-            None => return Self::mark_as_notified(db, todo.id),
+        let Some(notify_at) = todo.notify_at.as_deref() else {
+            return Self::mark_as_notified(db, todo.id);
+        };
+        let Some(current) = parse_notify_at(notify_at) else {
+            Self::mark_as_notified(db, todo.id)?;
+            return Err(format!(
+                "无法解析重复提醒时间 {:?}，已停止该提醒（重新编辑提醒时间即可恢复）",
+                notify_at
+            ));
         };
 
-        let current_dt = NaiveDateTime::parse_from_str(&notify_at_str, "%Y-%m-%dT%H:%M:%S")
-            .or_else(|_| NaiveDateTime::parse_from_str(&notify_at_str, "%Y-%m-%dT%H:%M"))
-            .map_err(|e| format!("解析 notify_at 失败: {}", e))?;
-
         let now = Local::now().naive_local();
-        let next = Self::calc_next_occurrence(current_dt, now, todo);
+        let Some(next) = Self::calc_next_occurrence(current, now, todo) else {
+            return Self::mark_as_notified(db, todo.id);
+        };
+        let anchor_day = (todo.repeat_type.as_deref() == Some("monthly")
+            && todo.repeat_month_day.is_none())
+        .then(|| current.day() as i32);
 
-        match next {
-            Some(next_dt) => {
-                let next_str = next_dt.format("%Y-%m-%dT%H:%M:%S").to_string();
-                db.with_connection(|conn| {
-                    conn.execute(
-                        "UPDATE todos SET notify_at = ?, notified = 0, updated_at = datetime('now', 'localtime') WHERE id = ?",
-                        rusqlite::params![next_str, todo.id],
-                    )?;
-                    Ok(())
-                })
-                .map_err(|e| e.to_string())
-            }
-            None => Self::mark_as_notified(db, todo.id),
-        }
+        db.with_connection(|conn| {
+            conn.execute(
+                "UPDATE todos SET notify_at = ?1, notified = 0,
+                        repeat_month_day = COALESCE(repeat_month_day, ?2),
+                        updated_at = datetime('now', 'localtime')
+                 WHERE id = ?3",
+                rusqlite::params![format_canonical(&next), anchor_day, todo.id],
+            )?;
+            Ok(())
+        })
+        .map_err(|e| e.to_string())
     }
 
     /// 计算下一次重复时间（循环推进直到 > now）
@@ -316,6 +420,8 @@ impl NotificationService {
         let repeat_type = todo.repeat_type.as_deref()?;
         let interval = todo.repeat_interval.max(1);
         let time = from.time();
+        // 月重复的锚点日在整个推进过程中保持不变（31 号 → 2 月 28 号 → 3 月 31 号）
+        let month_day = todo.repeat_month_day.unwrap_or(from.day() as i32);
         let mut candidate = from;
 
         for _ in 0..366 * 5 {
@@ -324,7 +430,7 @@ impl NotificationService {
                 "weekly" => {
                     Self::next_weekly(candidate, interval, todo.repeat_weekdays.as_deref(), time)?
                 }
-                "monthly" => Self::next_monthly(candidate, interval, todo.repeat_month_day, time)?,
+                "monthly" => Self::next_monthly(candidate, interval, month_day, time)?,
                 _ => return None,
             };
             if candidate > now {
@@ -372,14 +478,14 @@ impl NotificationService {
         Some(NaiveDateTime::new(date, time))
     }
 
-    /// 月模式：跳到下 N 个月的指定日
+    /// 月模式：跳到下 N 个月的锚点日（该月没有这一天时取月末）
     fn next_monthly(
         current: NaiveDateTime,
         interval: i32,
-        month_day: Option<i32>,
+        month_day: i32,
         time: NaiveTime,
     ) -> Option<NaiveDateTime> {
-        let target_day = month_day.unwrap_or(current.day() as i32).clamp(1, 31) as u32;
+        let target_day = month_day.clamp(1, 31) as u32;
         let mut month = current.month() as i32 + interval;
         let mut year = current.year();
 
@@ -398,60 +504,14 @@ impl NotificationService {
         Some(NaiveDateTime::new(date, time))
     }
 
-    /// 启动时补发错过的重复提醒
+    /// 启动时补发错过的重复提醒（逐条处理，规则同 [`Self::deliver`]）
     fn catch_up_missed_repeats(app_handle: &tauri::AppHandle) -> Result<(), String> {
         let db = app_handle.state::<Database>();
         let notification_type = Self::get_notification_type(&db);
 
-        let overdue = db
-            .with_connection(|conn| {
-                let mut stmt = conn.prepare(
-                    r#"
-                SELECT id, title, description, repeat_enabled, repeat_type, repeat_interval,
-                       repeat_weekdays, repeat_month_day, notify_at
-                FROM todos
-                WHERE completed = 0
-                  AND repeat_enabled = 1
-                  AND notified = 0
-                  AND notify_at IS NOT NULL
-                  AND datetime(notify_at) <= datetime('now', 'localtime')
-                "#,
-                )?;
-
-                let todos: Vec<PendingNotification> = stmt
-                    .query_map([], |row| {
-                        Ok(PendingNotification {
-                            id: row.get(0)?,
-                            title: row.get(1)?,
-                            description: row.get::<_, Option<String>>(2)?,
-                            repeat_enabled: row.get::<_, i32>(3).unwrap_or(0) != 0,
-                            repeat_type: row.get(4).unwrap_or(None),
-                            repeat_interval: row.get(5).unwrap_or(1),
-                            repeat_weekdays: row.get(6).unwrap_or(None),
-                            repeat_month_day: row.get(7).unwrap_or(None),
-                            notify_at: row.get(8).unwrap_or(None),
-                        })
-                    })?
-                    .filter_map(|r| r.ok())
-                    .collect();
-
-                Ok(todos)
-            })
-            .map_err(|e| e.to_string())?;
-
-        for todo in &overdue {
-            match notification_type.as_str() {
-                "app" => {
-                    let _ = Self::send_app_notification(app_handle, &todo.title, &todo.description);
-                }
-                _ => {
-                    let _ =
-                        Self::send_system_notification(app_handle, &todo.title, &todo.description);
-                }
-            }
-            Self::advance_repeat(&db, todo)?;
+        for todo in query_pending(&db, &missed_repeats_sql())? {
+            Self::deliver(app_handle, &db, &notification_type, &todo);
         }
-
         Ok(())
     }
 }
@@ -475,33 +535,367 @@ fn last_day_of_month(year: i32, month: u32) -> u32 {
 mod tests {
     use super::*;
 
-    #[test]
-    fn decrement_active_subtracts_one() {
-        let counter = AtomicU32::new(2);
+    fn dt(s: &str) -> NaiveDateTime {
+        NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").expect("测试时间格式")
+    }
 
-        assert_eq!(decrement_active(&counter), 1);
-        assert_eq!(decrement_active(&counter), 0);
-        assert_eq!(counter.load(Ordering::SeqCst), 0);
+    fn rule(
+        kind: &str,
+        interval: i32,
+        weekdays: Option<&str>,
+        month_day: Option<i32>,
+    ) -> PendingNotification {
+        PendingNotification {
+            id: 1,
+            title: "t".to_string(),
+            description: None,
+            repeat_enabled: true,
+            repeat_type: Some(kind.to_string()),
+            repeat_interval: interval,
+            repeat_weekdays: weekdays.map(str::to_string),
+            repeat_month_day: month_day,
+            notify_at: None,
+        }
+    }
+
+    /// 从 `from` 推进一次（now 取 from 本身）
+    fn next(from: &str, todo: &PendingNotification) -> String {
+        let from = dt(from);
+        NotificationService::calc_next_occurrence(from, from, todo)
+            .map(|d| format_canonical(&d))
+            .unwrap_or_default()
+    }
+
+    // ---- 槽位 ----
+
+    #[test]
+    fn slots_take_the_lowest_free_index() {
+        let slots = Mutex::new(BTreeSet::new());
+        assert_eq!(acquire_slot(&slots), 0);
+        assert_eq!(acquire_slot(&slots), 1);
+        assert_eq!(acquire_slot(&slots), 2);
+        release_slot(&slots, 1);
+        assert_eq!(acquire_slot(&slots), 1, "中间关掉的空位被复用");
+        assert_eq!(acquire_slot(&slots), 3);
     }
 
     #[test]
-    fn decrement_active_never_underflows() {
-        let counter = AtomicU32::new(0);
-
-        assert_eq!(decrement_active(&counter), 0);
-        assert_eq!(counter.load(Ordering::SeqCst), 0);
+    fn releasing_a_free_slot_is_a_no_op() {
+        let slots = Mutex::new(BTreeSet::new());
+        release_slot(&slots, 7);
+        assert_eq!(acquire_slot(&slots), 0);
+        release_slot(&slots, 0);
+        release_slot(&slots, 0);
+        assert!(slots.lock().unwrap().is_empty());
     }
-}
 
-/// 待发送通知的待办
-struct PendingNotification {
-    id: i64,
-    title: String,
-    description: Option<String>,
-    repeat_enabled: bool,
-    repeat_type: Option<String>,
-    repeat_interval: i32,
-    repeat_weekdays: Option<String>,
-    repeat_month_day: Option<i32>,
-    notify_at: Option<String>,
+    // ---- 通知窗口位置 ----
+
+    /// 1920×1080@125% 去掉 48px 任务栏后的逻辑工作区
+    const AREA_125: WorkArea = WorkArea {
+        x: 0.0,
+        y: 0.0,
+        width: 1536.0,
+        height: 825.6,
+    };
+
+    fn assert_inside(area: WorkArea, (x, y): (f64, f64)) {
+        assert!(
+            x >= area.x && x + NOTIFICATION_WIDTH <= area.x + area.width,
+            "x={x}"
+        );
+        assert!(
+            y >= area.y && y + NOTIFICATION_HEIGHT <= area.y + area.height,
+            "y={y}"
+        );
+    }
+
+    #[test]
+    fn first_notification_sits_in_the_bottom_right_of_the_work_area() {
+        let (x, y) = notification_position(AREA_125, 0);
+        assert_eq!(x, 1536.0 - 20.0 - 320.0);
+        assert!((y - (825.6 - 20.0 - 120.0)).abs() < 1e-9);
+        assert_inside(AREA_125, (x, y));
+    }
+
+    #[test]
+    fn notifications_stack_upwards_then_wrap_into_new_columns() {
+        // 825.6 高：每列放得下 (825.6 - 40 + 10) / 130 = 6 个
+        let (x0, y0) = notification_position(AREA_125, 0);
+        let (x1, y1) = notification_position(AREA_125, 1);
+        assert_eq!(x1, x0);
+        assert!((y0 - y1 - 130.0).abs() < 1e-9, "向上堆叠");
+
+        let (x6, y6) = notification_position(AREA_125, 6);
+        assert_eq!(x6, x0 - 330.0, "第 7 个换到左边一列");
+        assert_eq!(y6, y0);
+
+        for slot in 0..200 {
+            assert_inside(AREA_125, notification_position(AREA_125, slot));
+        }
+    }
+
+    #[test]
+    fn offset_and_tiny_work_areas_stay_on_screen() {
+        // 任务栏在顶部 / 左侧：工作区原点不是 (0, 0)
+        let area = WorkArea {
+            x: 40.0,
+            y: 30.0,
+            width: 1000.0,
+            height: 700.0,
+        };
+        for slot in 0..50 {
+            assert_inside(area, notification_position(area, slot));
+        }
+        // 放不下一整个窗口的极小工作区：不 panic，坐标有限
+        let tiny = WorkArea {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 50.0,
+        };
+        let (x, y) = notification_position(tiny, u32::MAX);
+        assert!(x.is_finite() && y.is_finite());
+    }
+
+    // ---- notify_at 解析 ----
+
+    #[test]
+    fn notify_at_accepts_canonical_and_legacy_formats() {
+        for s in [
+            "2026-05-01 09:30:00",
+            "2026-05-01T09:30:00",
+            "2026-05-01T09:30",
+            "2026-05-01 09:30",
+        ] {
+            assert_eq!(parse_notify_at(s), Some(dt("2026-05-01 09:30:00")), "{s}");
+        }
+        assert_eq!(
+            parse_notify_at("2026-05-01"),
+            Some(dt("2026-05-01 09:00:00"))
+        );
+        assert_eq!(parse_notify_at("garbage"), None);
+    }
+
+    // ---- 重复提醒推进 ----
+
+    #[test]
+    fn daily_repeats_and_rolls_over_the_year() {
+        let daily = rule("daily", 1, None, None);
+        assert_eq!(next("2026-05-01 09:00:00", &daily), "2026-05-02 09:00:00");
+        assert_eq!(next("2026-12-31 21:15:00", &daily), "2027-01-01 21:15:00");
+        let every3 = rule("daily", 3, None, None);
+        assert_eq!(next("2026-02-27 08:00:00", &every3), "2026-03-02 08:00:00");
+    }
+
+    #[test]
+    fn skips_missed_occurrences_up_to_now() {
+        let daily = rule("daily", 1, None, None);
+        let got = NotificationService::calc_next_occurrence(
+            dt("2026-05-01 09:00:00"),
+            dt("2026-05-10 12:00:00"),
+            &daily,
+        );
+        assert_eq!(got, Some(dt("2026-05-11 09:00:00")));
+    }
+
+    #[test]
+    fn weekly_multiple_days_and_intervals() {
+        // 2026-05-04 是周一
+        let mwf = rule("weekly", 1, Some("1,3,5"), None);
+        assert_eq!(next("2026-05-04 09:00:00", &mwf), "2026-05-06 09:00:00");
+        assert_eq!(next("2026-05-06 09:00:00", &mwf), "2026-05-08 09:00:00");
+        assert_eq!(next("2026-05-08 09:00:00", &mwf), "2026-05-11 09:00:00");
+
+        // 隔周一、三：本周三之后跳过一整周
+        let biweekly = rule("weekly", 2, Some("3,1"), None);
+        assert_eq!(
+            next("2026-05-04 09:00:00", &biweekly),
+            "2026-05-06 09:00:00"
+        );
+        assert_eq!(
+            next("2026-05-06 09:00:00", &biweekly),
+            "2026-05-18 09:00:00"
+        );
+
+        // 跨年：2026-12-31 是周四
+        let fri = rule("weekly", 1, Some("5"), None);
+        assert_eq!(next("2026-12-31 07:00:00", &fri), "2027-01-01 07:00:00");
+
+        // 星期全部非法时按整周推进
+        let bogus = rule("weekly", 1, Some("0,8,x"), None);
+        assert_eq!(next("2026-05-04 09:00:00", &bogus), "2026-05-11 09:00:00");
+    }
+
+    #[test]
+    fn monthly_clamps_to_month_end_without_drifting() {
+        // 没有 repeat_month_day：以 notify_at 的日（31 号）为锚点
+        let monthly = rule("monthly", 1, None, None);
+        assert_eq!(next("2026-01-31 09:00:00", &monthly), "2026-02-28 09:00:00");
+        // 一次推进多个月时锚点不漂移：1/31 → 2/28 → 3/31
+        let got = NotificationService::calc_next_occurrence(
+            dt("2026-01-31 09:00:00"),
+            dt("2026-03-01 00:00:00"),
+            &monthly,
+        );
+        assert_eq!(got, Some(dt("2026-03-31 09:00:00")));
+
+        // 锚点写回 repeat_month_day 后，从 2 月 28 号继续推进仍回到 31 号
+        let pinned = rule("monthly", 1, None, Some(31));
+        assert_eq!(next("2026-02-28 09:00:00", &pinned), "2026-03-31 09:00:00");
+        assert_eq!(next("2026-03-31 09:00:00", &pinned), "2026-04-30 09:00:00");
+    }
+
+    #[test]
+    fn monthly_handles_leap_years_intervals_and_year_rollover() {
+        let on31 = rule("monthly", 1, None, Some(31));
+        assert_eq!(
+            next("2028-01-31 09:00:00", &on31),
+            "2028-02-29 09:00:00",
+            "闰年"
+        );
+        assert_eq!(
+            next("2100-01-31 09:00:00", &on31),
+            "2100-02-28 09:00:00",
+            "整百年非闰"
+        );
+        assert_eq!(
+            next("2000-01-31 09:00:00", &on31),
+            "2000-02-29 09:00:00",
+            "整四百年闰"
+        );
+
+        let on15 = rule("monthly", 1, None, Some(15));
+        assert_eq!(
+            next("2026-12-15 08:00:00", &on15),
+            "2027-01-15 08:00:00",
+            "跨年"
+        );
+
+        let every2 = rule("monthly", 2, None, Some(30));
+        assert_eq!(next("2026-11-30 08:00:00", &every2), "2027-01-30 08:00:00");
+        assert_eq!(next("2026-12-30 08:00:00", &every2), "2027-02-28 08:00:00");
+
+        let every13 = rule("monthly", 13, None, Some(1));
+        assert_eq!(next("2026-05-01 08:00:00", &every13), "2027-06-01 08:00:00");
+    }
+
+    // ---- 落库（内存库）----
+
+    fn insert_reminder(db: &Database, id: i64, notify_at: &str, extra: &str) {
+        db.with_connection(|c| {
+            c.execute(
+                &format!(
+                    "INSERT INTO todos (id, title, notify_at, created_at, updated_at{})
+                     VALUES (?1, 't', ?2, '2026-01-01 00:00:00', '2026-01-01 00:00:00'{})",
+                    if extra.is_empty() {
+                        ""
+                    } else {
+                        ", repeat_enabled, repeat_type"
+                    },
+                    if extra.is_empty() {
+                        String::new()
+                    } else {
+                        format!(", 1, '{extra}'")
+                    }
+                ),
+                rusqlite::params![id, notify_at],
+            )
+            .map(|_| ())
+        })
+        .unwrap();
+    }
+
+    fn row_state(db: &Database, id: i64) -> (Option<String>, bool, Option<i32>, String) {
+        db.with_connection(|c| {
+            c.query_row(
+                "SELECT notify_at, notified, repeat_month_day, updated_at FROM todos WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get::<_, i32>(1)? != 0, r.get(2)?, r.get(3)?)),
+            )
+        })
+        .unwrap()
+    }
+
+    fn pending(db: &Database, id: i64) -> PendingNotification {
+        query_pending(
+            db,
+            &format!("SELECT {PENDING_COLUMNS} FROM todos WHERE id = {id}"),
+        )
+        .unwrap()
+        .pop()
+        .expect("待办存在")
+    }
+
+    #[test]
+    fn due_query_treats_null_notify_before_as_zero_and_orders_by_time() {
+        let db = Database::new_in_memory().unwrap();
+        insert_reminder(&db, 1, "2020-01-02 09:00:00", "");
+        insert_reminder(&db, 2, "2020-01-01T09:00:00", "");
+        insert_reminder(&db, 3, "2999-01-01 09:00:00", "");
+        db.with_connection(|c| c.execute("UPDATE todos SET notify_before = NULL", []))
+            .unwrap();
+
+        let due: Vec<i64> = query_pending(&db, &due_reminders_sql())
+            .unwrap()
+            .iter()
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(
+            due,
+            vec![2, 1],
+            "NULL 提前量按 0；按提醒时间排序；未来的不选"
+        );
+    }
+
+    #[test]
+    fn advancing_a_legacy_monthly_reminder_writes_canonical_time_and_pins_the_anchor() {
+        let db = Database::new_in_memory().unwrap();
+        insert_reminder(&db, 1, "2026-01-31T09:00", "monthly");
+        let todo = pending(&db, 1);
+        assert!(todo.repeat_enabled);
+
+        NotificationService::advance_repeat(&db, &todo).expect("推进");
+        let (notify_at, notified, month_day, updated_at) = row_state(&db, 1);
+        let notify_at = notify_at.unwrap();
+        assert_eq!(notify_at.len(), 19, "规范格式: {notify_at}");
+        assert!(!notify_at.contains('T'));
+        assert!(notify_at.ends_with(" 09:00:00"));
+        let next = dt(&notify_at);
+        assert!(next > Local::now().naive_local());
+        assert_eq!(
+            next.day(),
+            31.min(last_day_of_month(next.year(), next.month()))
+        );
+        assert!(!notified, "重复提醒推进后等待下一次");
+        assert_eq!(month_day, Some(31), "锚点日写回，之后不再漂移");
+        assert!(
+            updated_at.as_str() > "2026-01-01 00:00:00",
+            "推进要随同步传播"
+        );
+    }
+
+    #[test]
+    fn unparsable_repeat_time_is_marked_notified_instead_of_firing_every_minute() {
+        let db = Database::new_in_memory().unwrap();
+        insert_reminder(&db, 1, "next tuesday", "daily");
+        let todo = pending(&db, 1);
+        assert!(NotificationService::advance_repeat(&db, &todo).is_err());
+        let (notify_at, notified, _, _) = row_state(&db, 1);
+        assert_eq!(
+            notify_at.as_deref(),
+            Some("next tuesday"),
+            "原值保留，便于用户重新编辑"
+        );
+        assert!(notified);
+    }
+
+    #[test]
+    fn unknown_or_missing_repeat_type_has_no_next_occurrence() {
+        let unknown = rule("yearly", 1, None, None);
+        assert_eq!(next("2026-05-01 09:00:00", &unknown), "");
+        let mut missing = rule("daily", 1, None, None);
+        missing.repeat_type = None;
+        assert_eq!(next("2026-05-01 09:00:00", &missing), "");
+    }
 }
