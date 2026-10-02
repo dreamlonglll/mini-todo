@@ -8,6 +8,10 @@
 //! 未知字段）；补丁不改变任何内容时（例如把读到的对象原样写回）不刷新 `updatedAt`、
 //! 不标脏——否则一次无意义的回写会在 LWW 里压过 PC 还没同步上来的编辑。
 //!
+//! 时间戳（与 PC 同一规则）：改写已有记录时 `updatedAt = max(now, 旧值 + 1 秒)`，同一条记录的
+//! 版本严格递增（`time::bump_updated_at`；新建记录直接用 now）；DELETE 的墓碑
+//! `deletedAt = max(now, 记录的 updatedAt)`（`time::deletion_time`），保证压得住被删的版本。
+//!
 //! 读取：响应附加派生字段 `priority`（由 color 映射）与 cloud 短码 `seq`，都不入库。
 
 use std::collections::HashMap;
@@ -27,7 +31,7 @@ use super::ids::{insert_with_fresh_id, new_id};
 use super::AppState;
 use crate::db::repo::{self, ListTodosFilter, SubtaskRow};
 use crate::model::{self, Priority, WriteMode};
-use crate::time::{now_local_string, parse_datetime};
+use crate::time::{bump_updated_at, deletion_time, now_local_string, parse_datetime};
 
 const TOMBSTONE_TODO: &str = "todo";
 
@@ -265,8 +269,20 @@ pub async fn patch_todo(
 
             let changed = normalized.semantic || next != base;
             if changed {
-                next.insert("updatedAt".into(), json!(now));
-                repo::upsert_todo(&tx, &id, &Value::Object(next.clone()).to_string(), &now)?;
+                // 新版本必须严格晚于旧版本（同一秒内两次 PATCH / 记录来自时钟偏快的一端），
+                // 否则 LWW 平局保持本地，另一端会留下旧版本
+                let updated_at = bump_updated_at(
+                    &now,
+                    &[&row.updated_at, model::json_updated_at(&base).unwrap_or("")],
+                    tz,
+                );
+                next.insert("updatedAt".into(), json!(updated_at));
+                repo::upsert_todo(
+                    &tx,
+                    &id,
+                    &Value::Object(next.clone()).to_string(),
+                    &updated_at,
+                )?;
                 repo::mark_dirty(&tx)?;
             } else if normalized.format {
                 // 只有表示形式变了：原地改写，不刷新 updatedAt、不标脏
@@ -296,28 +312,39 @@ pub async fn delete_todo(
     State(state): State<AppState>,
     Path(raw_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let now = now_local_string(state.config.timezone);
+    let tz = state.config.timezone;
+    let now = now_local_string(tz);
     let removed = state.db.with_conn(|conn| -> rusqlite::Result<bool> {
         let tx = conn.transaction()?;
-        let id = match resolve_todo_ref(&tx, &raw_id)? {
-            Some(id) => id,
-            None => {
-                tx.commit()?;
-                return Ok(false);
-            }
+        let Some(id) = resolve_todo_ref(&tx, &raw_id)? else {
+            return Ok(false);
         };
-        // 先收集子任务 id：`delete_todo_cascade` 会把 subtasks 一起删掉，
+        let Some(row) = repo::get_todo(&tx, &id)? else {
+            return Ok(false);
+        };
+        // 先收集子任务：`delete_todo_cascade` 会把 subtasks 一起删掉，
         // 若放在 cascade 之后再 query 就拿不到任何 id，导致 subtask tombstones 漏写。
-        let sub_ids: Vec<String> = tx
-            .prepare("SELECT id FROM subtasks WHERE todo_id = ?1")?
-            .query_map([&id], |r| r.get::<_, String>(0))?
-            .collect::<rusqlite::Result<_>>()?;
+        let subs = repo::list_subtasks_for_todo(&tx, &id)?;
 
         let existed = repo::delete_todo_cascade(&tx, &id)?;
         if existed {
-            repo::add_tombstone(&tx, TOMBSTONE_TODO, &id, &now)?;
-            for sid in sub_ids {
-                repo::add_tombstone(&tx, "subtask", &sid, &now)?;
+            // 墓碑时间 = max(now, 记录的 updatedAt)（与 PC 一致）：记录比本端"现在"还新时，
+            // 只写 now 压不住它，推送前合并远端就会把它插回来
+            let json_ts = model::data_json_updated_at(&row.data_json);
+            let deleted_at = deletion_time(
+                &now,
+                &[&row.updated_at, json_ts.as_deref().unwrap_or("")],
+                tz,
+            );
+            repo::add_tombstone(&tx, TOMBSTONE_TODO, &id, &deleted_at)?;
+            for sub in subs {
+                let json_ts = model::data_json_updated_at(&sub.data_json);
+                let deleted_at = deletion_time(
+                    &now,
+                    &[&sub.updated_at, json_ts.as_deref().unwrap_or("")],
+                    tz,
+                );
+                repo::add_tombstone(&tx, "subtask", &sub.id, &deleted_at)?;
             }
             repo::delete_seq(&tx, &id)?;
             repo::mark_dirty(&tx)?;

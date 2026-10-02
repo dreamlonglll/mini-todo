@@ -104,6 +104,19 @@ pub fn todo_view(mut v: Value, seq: Option<i64>) -> Value {
     v
 }
 
+/// 记录 JSON 里的 `updatedAt`（字符串时）。
+pub fn json_updated_at(obj: &Map<String, Value>) -> Option<&str> {
+    obj.get("updatedAt").and_then(Value::as_str)
+}
+
+/// `data_json` 原文里的 `updatedAt`；不是 JSON 对象或没有该字段时为 `None`。
+pub fn data_json_updated_at(data_json: &str) -> Option<String> {
+    match serde_json::from_str::<Value>(data_json) {
+        Ok(Value::Object(obj)) => json_updated_at(&obj).map(str::to_string),
+        _ => None,
+    }
+}
+
 // =============================================================================
 // 象限
 // =============================================================================

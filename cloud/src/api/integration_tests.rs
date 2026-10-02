@@ -2483,3 +2483,365 @@ async fn pushed_records_deserialize_into_pc_model() {
         "仅格式修正不刷新 updatedAt"
     );
 }
+
+// =============================================================================
+// 记录时间戳：同一条记录的版本严格递增；墓碑压得住比本端时钟还新的记录
+// =============================================================================
+
+/// 本地墙钟 + `minutes` 分钟（规范格式）。模拟另一端时钟偏快 / 时区配置不一致写出的时间戳。
+fn local_plus_minutes(fx: &Fixture, minutes: i64) -> String {
+    (chrono::Utc::now() + chrono::TimeDelta::minutes(minutes))
+        .with_timezone(&fx.state.config.timezone)
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string()
+}
+
+/// 规范时间 + 1 秒。
+fn plus_one_second(ts: &str) -> String {
+    let t = chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S").unwrap();
+    (t + chrono::TimeDelta::seconds(1))
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string()
+}
+
+/// 另一个副本（PC 或另一台云端）：独立的 SQLite，按 K3 合并收到的文档。
+fn replica() -> (Db, TempDir) {
+    let tmp = TempDir::new().unwrap();
+    let db = Db::open(&tmp.path().join("replica.db")).unwrap();
+    (db, tmp)
+}
+
+fn replica_merge(db: &Db, todos: Vec<Value>) {
+    let doc = crate::sync::doc::RemoteDoc::from_value(
+        json!({"version": "4.0", "todos": todos, "tombstones": []}),
+    )
+    .unwrap();
+    db.with_conn(|c| {
+        let tx = c.transaction().unwrap();
+        crate::sync::merge::apply_remote_doc(
+            &tx,
+            &doc,
+            "Asia/Shanghai".parse().unwrap(),
+            "2000-01-01 00:00:00",
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    });
+}
+
+fn replica_title(db: &Db, table_todo: bool, id: &str) -> String {
+    db.with_conn(|c| {
+        let raw = if table_todo {
+            repo::get_todo(c, id).unwrap().unwrap().data_json
+        } else {
+            repo::get_subtask(c, id).unwrap().unwrap().data_json
+        };
+        serde_json::from_str::<Value>(&raw).unwrap()["title"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    })
+}
+
+/// e2e（nginx 场景）回归：云端在一秒内对同一条 todo PATCH 两次，旧实现两个版本拿到同一个
+/// `updatedAt`；已经合并了第一个版本的 PC 把第二个版本当成平局保留本地，第二次修改永远传不
+/// 过去。现在每次改写都是 `max(now, 旧值 + 1s)`：版本严格递增，第二个版本能合并进去。
+#[tokio::test]
+async fn successive_patches_get_strictly_increasing_updated_at_and_propagate() {
+    let fx = fixture();
+    let t = create_todo(&fx, json!({"title": "v0"})).await;
+    let id = todo_id_path(&t);
+    let u0 = t["updatedAt"].as_str().unwrap().to_string();
+    let (_, _, raw) = send(
+        &fx.router,
+        req(
+            Method::POST,
+            &format!("/todos/{}/subtasks", id),
+            Some(json!({"title": "s0"})),
+        ),
+    )
+    .await;
+    let sub = json_body(&raw);
+    let sid = sub["id"].as_i64().unwrap().to_string();
+    let su0 = sub["updatedAt"].as_str().unwrap().to_string();
+
+    let mut todo_versions = Vec::new();
+    let mut sub_versions = Vec::new();
+    for title in ["v1", "v2"] {
+        let (status, _, raw) = send(
+            &fx.router,
+            req(
+                Method::PATCH,
+                &format!("/todos/{}", id),
+                Some(json!({"title": title})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let resp = json_body(&raw);
+        let mut stored = stored_todo(&fx, &id);
+        assert_eq!(stored["updatedAt"], resp["updatedAt"]);
+        let column = fx
+            .state
+            .db
+            .with_conn(|c| repo::get_todo(c, &id).unwrap().unwrap().updated_at);
+        assert_eq!(json!(column), stored["updatedAt"], "列与 JSON 一致");
+        stored["subtasks"] = json!([]);
+        todo_versions.push(stored);
+
+        let (status, _, raw) = send(
+            &fx.router,
+            req(
+                Method::PATCH,
+                &format!("/subtasks/{}", sid),
+                Some(json!({"title": format!("s-{}", title)})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        sub_versions.push(json_body(&raw));
+    }
+    let ts = |v: &Value| v["updatedAt"].as_str().unwrap().to_string();
+    let (u1, u2) = (ts(&todo_versions[0]), ts(&todo_versions[1]));
+    assert!(
+        u0 < u1 && u1 < u2,
+        "todo 版本必须严格递增: {u0} / {u1} / {u2}"
+    );
+    let (su1, su2) = (ts(&sub_versions[0]), ts(&sub_versions[1]));
+    assert!(
+        su0 < su1 && su1 < su2,
+        "subtask 版本必须严格递增: {su0} / {su1} / {su2}"
+    );
+
+    // 另一端先合并了第一个版本，再收到第二个版本：第二个版本必须生效（不是平局）
+    let (other, _tmp) = replica();
+    let with_sub = |mut todo: Value, sub: &Value| {
+        todo["subtasks"] = json!([sub]);
+        todo
+    };
+    replica_merge(
+        &other,
+        vec![with_sub(todo_versions[0].clone(), &sub_versions[0])],
+    );
+    assert_eq!(replica_title(&other, true, &id), "v1");
+    assert_eq!(replica_title(&other, false, &sid), "s-v1");
+    replica_merge(
+        &other,
+        vec![with_sub(todo_versions[1].clone(), &sub_versions[1])],
+    );
+    assert_eq!(replica_title(&other, true, &id), "v2");
+    assert_eq!(replica_title(&other, false, &sid), "s-v2");
+}
+
+/// 记录来自时钟偏快的一端（`updatedAt` 比云端"现在"还新）：PATCH 的新版本仍要晚于它，
+/// 否则 PC 合并时按 LWW 留下自己的旧版本，AI 的修改被静默丢弃。
+#[tokio::test]
+async fn patch_of_record_newer_than_local_clock_still_wins_on_the_pc() {
+    use crate::sync::mock_dav::MockDav;
+    let mock = MockDav::start();
+    let fx = fixture_with_webdav(Some(&mock.base_url));
+    let future = local_plus_minutes(&fx, 120);
+    let pc_record = json!({
+        "id": 1, "title": "pc", "color": "#10B981", "quadrant": 4,
+        "createdAt": "2026-05-01 08:00:00", "updatedAt": future,
+        "subtasks": [{"id": 11, "parentId": 1, "title": "pc-sub",
+                      "createdAt": "2026-05-01 08:00:00", "updatedAt": future}]
+    });
+    mock.put_doc(&json!({
+        "version": "4.0", "deviceId": "pc", "updatedAt": "2026-10-02T10:00:00+08:00",
+        "todos": [pc_record.clone()],
+        "settings": {"isFixed": false, "windowPosition": null, "windowSize": null},
+        "images": [], "tombstones": []
+    }));
+    let (status, _, _) = send(&fx.router, req(Method::POST, "/sync/pull", None)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _, raw) = send(
+        &fx.router,
+        req(Method::PATCH, "/todos/1", Some(json!({"title": "ai"}))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json_body(&raw)["updatedAt"],
+        json!(plus_one_second(&future))
+    );
+    let (status, _, raw) = send(
+        &fx.router,
+        req(
+            Method::PATCH,
+            "/subtasks/11",
+            Some(json!({"title": "ai-sub"})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json_body(&raw)["updatedAt"],
+        json!(plus_one_second(&future))
+    );
+
+    let (status, _, body) = send(&fx.router, req(Method::POST, "/sync/push", None)).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let remote = mock.doc().unwrap();
+    let uploaded = remote["todos"][0].clone();
+    assert_eq!(uploaded["title"], "ai");
+    assert_eq!(uploaded["subtasks"][0]["title"], "ai-sub");
+
+    // PC 手里是自己的版本：合并云端上传的文档后必须采用 AI 的修改
+    let (pc, _tmp) = replica();
+    replica_merge(&pc, vec![pc_record]);
+    replica_merge(&pc, vec![uploaded]);
+    assert_eq!(replica_title(&pc, true, "1"), "ai");
+    assert_eq!(replica_title(&pc, false, "11"), "ai-sub");
+}
+
+/// 删除比云端"现在"还新的记录：墓碑时间取 `max(now, updatedAt)`（与 PC 一致）。旧实现用
+/// now 写墓碑，推送前合并远端时远端的同一版本不受压制、被原样插回来，删除被静默撤销。
+#[tokio::test]
+async fn delete_of_record_newer_than_local_clock_is_not_resurrected() {
+    use crate::sync::mock_dav::MockDav;
+    let mock = MockDav::start();
+    let fx = fixture_with_webdav(Some(&mock.base_url));
+    let future = local_plus_minutes(&fx, 120);
+    let doc = |extra: Vec<Value>| {
+        let mut todos = vec![
+            json!({"id": 1, "title": "doomed", "createdAt": "2026-05-01 08:00:00",
+                   "updatedAt": future,
+                   "subtasks": [{"id": 11, "parentId": 1, "title": "doomed-sub",
+                                 "createdAt": "2026-05-01 08:00:00", "updatedAt": future}]}),
+            json!({"id": 2, "title": "keeps sub", "createdAt": "2026-05-01 08:00:00",
+                   "updatedAt": "2026-05-01 08:00:00",
+                   "subtasks": [{"id": 21, "parentId": 2, "title": "lone sub",
+                                 "createdAt": "2026-05-01 08:00:00", "updatedAt": future}]}),
+        ];
+        todos.extend(extra);
+        json!({
+            "version": "4.0", "deviceId": "pc", "updatedAt": "2026-10-02T10:00:00+08:00",
+            "todos": todos,
+            "settings": {"isFixed": false, "windowPosition": null, "windowSize": null},
+            "images": [], "tombstones": []
+        })
+    };
+    mock.put_doc(&doc(vec![]));
+    let (status, _, _) = send(&fx.router, req(Method::POST, "/sync/pull", None)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    for path in ["/todos/1", "/subtasks/21"] {
+        let (status, _, _) = send(&fx.router, req(Method::DELETE, path, None)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{}", path);
+    }
+    let mut stones = fx.state.db.with_conn(|c| repo::list_tombstones(c).unwrap());
+    stones.sort();
+    assert_eq!(
+        stones,
+        vec![
+            ("subtask".to_string(), "11".to_string(), future.clone()),
+            ("subtask".to_string(), "21".to_string(), future.clone()),
+            ("todo".to_string(), "1".to_string(), future.clone()),
+        ],
+        "墓碑时间 >= 记录的 updatedAt"
+    );
+
+    // 远端在此期间又被 PC 改过（推送前的 GET 拿到 200、真的合并远端）：删除不能被撤销
+    mock.put_doc(&doc(vec![json!({"id": 3, "title": "new on pc",
+        "createdAt": "2026-05-01 08:00:00", "updatedAt": "2026-05-01 08:00:00", "subtasks": []})]));
+    let (status, _, body) = send(&fx.router, req(Method::POST, "/sync/push", None)).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    for (path, gone) in [("/todos/1", true), ("/todos/2", false), ("/todos/3", false)] {
+        let (status, _, _) = send(&fx.router, req(Method::GET, path, None)).await;
+        let expected = if gone {
+            StatusCode::NOT_FOUND
+        } else {
+            StatusCode::OK
+        };
+        assert_eq!(status, expected, "{}", path);
+    }
+    assert!(fx
+        .state
+        .db
+        .with_conn(|c| repo::get_subtask(c, "21").unwrap())
+        .is_none());
+
+    let remote = mock.doc().unwrap();
+    let ids: Vec<i64> = remote["todos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids, vec![2, 3], "被删除的 todo 不会被推回远端");
+    assert_eq!(remote["todos"][0]["subtasks"], json!([]));
+    let tomb = |kind: &str, id: i64| {
+        remote["tombstones"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["entityType"] == kind && t["entityId"] == id)
+            .map(|t| t["deletedAt"].clone())
+    };
+    assert_eq!(tomb("todo", 1), Some(json!(future)));
+    assert_eq!(tomb("subtask", 21), Some(json!(future)));
+}
+
+/// 手动 `/sync/pull`、`/sync` 无条件 GET：nginx 的 ETag 只有秒级精度，同一秒内写入且压缩后
+/// 长度相同的修改在条件 GET 下是 304。用户显式要求同步时不能被这个盲区挡住（后台轮询每
+/// 10 轮才做一次全量拉取）。
+#[tokio::test]
+async fn manual_pull_bypasses_nginx_same_second_etag_blind_spot() {
+    use crate::sync::mock_dav::MockDav;
+    use crate::sync::{gzip, SYNC_DATA_FILE};
+    let mock = MockDav::start_nginx();
+    let fx = fixture_with_webdav(Some(&mock.base_url));
+    let padded = |title: &str, updated_at: &str, pad: &str| {
+        let doc = json!({
+            "version": "4.0", "deviceId": "pc", "updatedAt": "2026-10-02T10:00:00+08:00",
+            "todos": [{"id": 1, "title": title, "createdAt": "2026-10-01 08:00:00",
+                       "updatedAt": updated_at, "subtasks": []}],
+            "settings": {"isFixed": false, "windowPosition": null, "windowSize": null},
+            "images": [], "tombstones": [], "pad": pad
+        });
+        gzip(doc.to_string().as_bytes()).unwrap()
+    };
+    let pad_a = "q7Zk3mWv9Xp2LrT8";
+    let gz_a = padded("AAAA", "2026-10-01 10:00:00", pad_a);
+    // 在一组确定性的填充串里找压缩后长度与 gz_a 相同的版本（gzip 输出是确定性的）
+    let pad_src = "q7Zk3mWv9Xp2LrT8aB4cD5eF6gH7iJ8kL9mN0oP1qR2sT3uV4wX5yZ6";
+    let same_len = |title: &str, updated_at: &str| {
+        (0..pad_src.len())
+            .flat_map(|start| (0..96).map(move |n| (start, n)))
+            .map(|(start, n)| {
+                let pad: String = pad_src.chars().cycle().skip(start).take(n).collect();
+                padded(title, updated_at, &pad)
+            })
+            .find(|gz| gz.len() == gz_a.len())
+            .expect("测试前提：能构造出压缩后长度相同的文档")
+    };
+    let gz_b = same_len("BBBB", "2026-10-01 11:00:00");
+    let gz_c = same_len("CCCC", "2026-10-01 12:00:00");
+
+    let title = |fx: &Fixture| stored_todo(fx, "1")["title"].as_str().unwrap().to_string();
+    mock.with(|s| s.write(SYNC_DATA_FILE, gz_a));
+    let (status, _, _) = send(&fx.router, req(Method::POST, "/sync/pull", None)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(title(&fx), "AAAA");
+
+    // 同一秒、同长度的新版本：ETag 不变
+    let same_second = mock.with(|s| s.modified_of(SYNC_DATA_FILE)).unwrap();
+    mock.with(|s| s.write_at(SYNC_DATA_FILE, gz_b, same_second));
+    let (status, _, body) = send(&fx.router, req(Method::POST, "/sync/pull", None)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json_body(&body)["changed"], true);
+    assert_eq!(title(&fx), "BBBB");
+
+    let same_second = mock.with(|s| s.modified_of(SYNC_DATA_FILE)).unwrap();
+    mock.with(|s| s.write_at(SYNC_DATA_FILE, gz_c, same_second));
+    let (status, _, body) = send(&fx.router, req(Method::POST, "/sync", None)).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert_eq!(title(&fx), "CCCC");
+    assert!(mock
+        .requests()
+        .iter()
+        .filter(|r| r.method == "GET" && r.path == SYNC_DATA_FILE)
+        .all(|r| r.if_none_match.is_none()));
+}

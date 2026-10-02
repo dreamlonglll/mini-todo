@@ -16,7 +16,8 @@ Usage examples:
   python minitodo.py update C3 title="Renamed" endTime="2026-05-20 18:00"
 
 Exit codes: 0 ok (including a degraded /health) · 2 config / usage error ·
-3 network error · 4 HTTP error from the server (message on stderr).
+3 network error · 4 HTTP error from the server, or `sync` partially failed
+(message on stderr).
 """
 
 from __future__ import annotations
@@ -371,7 +372,7 @@ def build_update_body(assignments: list[str]) -> dict[str, Any]:
         if key == "quadrant":
             body[key] = _quadrant_to_int(value.strip())
         else:
-            body[key] = _coerce_value(value)
+            body[key] = _coerce_field(key, value)
     if not body:
         die("update 至少需要一个 key=value")
     return body
@@ -570,6 +571,42 @@ def _quadrant_to_int(s: str) -> int:
     return _QUADRANT_ALIASES[key]
 
 
+# 服务端按字段类型严格校验（K6）。这些字段的值是字符串：`update` 里原样保留，不做自动推断——
+# 否则 `title=2026` 会变成整数 2026、`repeatWeekdays=3` 变成整数 3，服务端直接 400。
+# 只有 null / none 表示清空。
+_STRING_FIELDS = frozenset(
+    {
+        "title",
+        "description",
+        "notes",
+        "content",
+        "color",
+        "priority",
+        "notifyAt",
+        "startTime",
+        "endTime",
+        "dueDate",
+        "repeatType",
+        "repeatWeekdays",
+    }
+)
+
+
+def _coerce_field(key: str, raw: str) -> Any:
+    """按字段类型解析 `update` 的 value：字符串字段原样保留，其它字段走 `_coerce_value`。"""
+    if key in _STRING_FIELDS:
+        if raw.strip().lower() in ("null", "none"):
+            return None
+        # repeatWeekdays 也接受数组写法 [1,3,5]
+        if key == "repeatWeekdays" and raw.strip().startswith("["):
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                pass
+        return raw
+    return _coerce_value(raw)
+
+
 def _coerce_value(raw: str) -> Any:
     """把字符串 value 尽量解析为 bool / int / null / json。"""
     low = raw.lower()
@@ -709,7 +746,19 @@ def main(argv: list[str] | None = None) -> int:
     assert handler is not None
     result = handler(client, args)
     print_result(result, args.json)
+    if args.command == "sync" and sync_failed(result):
+        # `POST /sync` 部分失败时服务端回 207（2xx），详情已经输出；退出码要能让脚本 / cron
+        # 发现失败（与 `sync pull` / `sync push` 失败时的 HTTP 500 → 4 一致）
+        sys.stderr.write(
+            f"同步未完全成功：pull={result.get('pull')}, push={result.get('push')}\n"
+        )
+        return 4
     return 0
+
+
+def sync_failed(result: Any) -> bool:
+    """`/sync` 的响应里 pull 或 push 报告了 error。"""
+    return isinstance(result, dict) and "error" in (result.get("pull"), result.get("push"))
 
 
 if __name__ == "__main__":

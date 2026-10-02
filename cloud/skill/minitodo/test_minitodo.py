@@ -131,6 +131,25 @@ class BodyBuilderTests(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             minitodo.build_update_body(["quadrant=soon"])
 
+    def test_update_keeps_string_fields_as_strings(self) -> None:
+        # 服务端严格校验类型：字符串字段不能被自动推断成数字 / 布尔（否则 400）
+        body = minitodo.build_update_body(
+            ["title=2026", "description=true", "repeatWeekdays=3", "color=#EF4444",
+             "endTime=2026-05-20", "notes=007", "priority=low", "repeatInterval=2",
+             "repeatMonthDay=null", "notified=false"]
+        )
+        self.assertEqual(
+            body,
+            {"title": "2026", "description": "true", "repeatWeekdays": "3", "color": "#EF4444",
+             "endTime": "2026-05-20", "notes": "007", "priority": "low", "repeatInterval": 2,
+             "repeatMonthDay": None, "notified": False},
+        )
+        # 字符串字段写 null 仍然是清空；repeatWeekdays 也接受数组写法
+        self.assertEqual(
+            minitodo.build_update_body(["description=null", "notifyAt=None", "repeatWeekdays=[1,3,5]"]),
+            {"description": None, "notifyAt": None, "repeatWeekdays": [1, 3, 5]},
+        )
+
 
 class TimezoneTests(unittest.TestCase):
     def test_today_uses_configured_zone(self) -> None:
@@ -225,6 +244,32 @@ class ClientTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
+    def _run(self, srv: FakeServer, argv: list[str]) -> tuple[int, str, str]:
+        with tempfile.TemporaryDirectory() as d:
+            cfg = Path(d) / "config.toml"
+            cfg.write_text(f'endpoint = "{srv.url}"\napi_key = "{"k" * 32}"\n', encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()) as out, \
+                    contextlib.redirect_stderr(io.StringIO()) as err:
+                code = minitodo.main(["--config", str(cfg), *argv])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_partial_sync_failure_exits_4(self) -> None:
+        # POST /sync 部分失败回 207（2xx）：详情照常输出，但退出码必须让脚本发现失败
+        srv = FakeServer(
+            [(207, {"pull": "ok", "push": "error", "pushError": "WebDAV PUT 返回状态 507"}),
+             (200, {"pull": "ok", "push": "ok"})]
+        )
+        try:
+            code, out, err = self._run(srv, ["sync", "--json"])
+            self.assertEqual(code, 4)
+            self.assertIn("507", out)
+            self.assertIn("push=error", err)
+            code, _, _ = self._run(srv, ["sync", "--json"])
+            self.assertEqual(code, 0)
+            self.assertEqual([r["method"] for r in srv.requests], ["POST", "POST"], "POST 不重试")
+        finally:
+            srv.close()
+
     def test_help_and_end_to_end_today(self) -> None:
         with contextlib.redirect_stdout(io.StringIO()) as out, self.assertRaises(SystemExit) as cm:
             minitodo.main(["--help"])

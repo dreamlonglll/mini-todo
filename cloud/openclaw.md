@@ -170,7 +170,7 @@ skill 端硬编码筛选逻辑。
 
 ### 5.A todos JSON 字段速查（临期提醒只看这几个字段）
 
-返回 JSON 是 PC 端 todo 原样透传（KV-style，PC 加字段云端自动透传）。
+返回 JSON 的字段与 PC 端 todo 模型一致，外加 cloud 派生的 `priority`（由颜色映射）与短码 `seq`。
 临期提醒判断只用到下面这一组：
 
 | 字段 | 类型 | 用途 |
@@ -178,9 +178,9 @@ skill 端硬编码筛选逻辑。
 | `seq` | int（≥ 1） | **cloud-only 短码**。推送 / 用户反馈用 `#C{seq}` 引用，简短易读 |
 | `id` | int（i64） | 跨设备唯一稳定的内部 id；推送优先用 `#C{seq}`，缺时降级 `#{id}` |
 | `title` | 字符串 | 任务名称 |
-| `priority` | `"high"`/`"medium"`/`"low"`/null | 映射 高/中/低 |
+| `priority` | `"high"`/`"medium"`/`"low"`/null | 映射 高/中/低（由 `color` 派生，自定义颜色为 null） |
 | `startTime` | `YYYY-MM-DD HH:MM:SS`/空 | 开始时间（仅展示，不参与临期判断） |
-| `endTime` 或 `dueDate` | `YYYY-MM-DD HH:MM:SS`/空 | 结束/截止时间；非重复任务的临期依据 |
+| `endTime`（旧数据里可能叫 `dueDate`） | `YYYY-MM-DD HH:MM:SS`/空 | 结束/截止时间；非重复任务的临期依据 |
 | `notifyAt` | `YYYY-MM-DD HH:MM:SS`/空 | 下一次提醒时间；**重复任务的临期依据**（PC 触发后只更新它） |
 | `repeatEnabled` | bool | 是否开启重复 |
 | `repeatType` | `"daily"`/`"weekly"`/`"monthly"`/null | 重复类型 |

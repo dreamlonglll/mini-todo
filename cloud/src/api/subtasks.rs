@@ -16,7 +16,7 @@ use super::todos::ensure_todo_exists;
 use super::AppState;
 use crate::db::repo;
 use crate::model::{self, WriteMode};
-use crate::time::now_local_string;
+use crate::time::{bump_updated_at, deletion_time, now_local_string};
 
 const TOMBSTONE_SUBTASK: &str = "subtask";
 
@@ -104,13 +104,19 @@ pub async fn patch_subtask(
             crate::util::merge_json_shallow(&mut next, &patch);
 
             if normalized.semantic || next != base {
-                next.insert("updatedAt".into(), json!(now));
+                // 新版本严格晚于旧版本（见 time::bump_updated_at）
+                let updated_at = bump_updated_at(
+                    &now,
+                    &[&row.updated_at, model::json_updated_at(&base).unwrap_or("")],
+                    tz,
+                );
+                next.insert("updatedAt".into(), json!(updated_at));
                 repo::upsert_subtask(
                     &tx,
                     &row.id,
                     &row.todo_id,
                     &Value::Object(next.clone()).to_string(),
-                    &now,
+                    &updated_at,
                 )?;
                 repo::mark_dirty(&tx)?;
             } else if normalized.format {
@@ -140,12 +146,23 @@ pub async fn delete_subtask(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let now = now_local_string(state.config.timezone);
+    let tz = state.config.timezone;
+    let now = now_local_string(tz);
     let removed = state.db.with_conn(|conn| -> rusqlite::Result<bool> {
         let tx = conn.transaction()?;
-        let existed = repo::delete_subtask(&tx, &id)?;
+        let Some(row) = repo::get_subtask(&tx, &id)? else {
+            return Ok(false);
+        };
+        let existed = repo::delete_subtask(&tx, &row.id)?;
         if existed {
-            repo::add_tombstone(&tx, TOMBSTONE_SUBTASK, &id, &now)?;
+            // 墓碑时间 = max(now, 记录的 updatedAt)（与 PC 一致，见 time::deletion_time）
+            let json_ts = model::data_json_updated_at(&row.data_json);
+            let deleted_at = deletion_time(
+                &now,
+                &[&row.updated_at, json_ts.as_deref().unwrap_or("")],
+                tz,
+            );
+            repo::add_tombstone(&tx, TOMBSTONE_SUBTASK, &row.id, &deleted_at)?;
             repo::mark_dirty(&tx)?;
         }
         tx.commit()?;

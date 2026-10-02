@@ -68,7 +68,8 @@ pip install tzdata           # 仅 Windows 且在 config.toml 里配置了 timez
 - `--json` 输出原始 JSON（AI 解析时务必使用）
 
 退出码：`0` 成功（包括 `health` 报告同步降级）；`2` 配置 / 参数错误；`3` 网络错误（GET 已自动
-重试 2 次）；`4` 服务端返回错误（stderr 是 `HTTP <状态码>: <detail>`）。
+重试 2 次）；`4` 服务端返回错误（stderr 是 `HTTP <状态码>: <detail>`），或 `sync` 的 pull / push
+有一个失败（服务端回 207，JSON 照常输出）。
 
 ### 子命令
 
@@ -92,7 +93,9 @@ pip install tzdata           # 仅 Windows 且在 config.toml 里配置了 timez
 - `--due`：规范格式 `YYYY-MM-DD HH:MM:SS`；也可写 `YYYY-MM-DD`（= 当天 `23:59:00`）或
   `YYYY-MM-DD HH:MM`；带 `Z` / `±HH:MM` 时区后缀的值由服务端换算成它配置的时区。
 - `--priority high|medium|low`：服务端映射成 PC 的颜色（见下方字段表）；同时给 `--color` 时以颜色为准。
-- `update` 的 value 自动尝试解析为 `true` / `false` / `null` / 数字 / JSON，剩下当字符串；
+- `update` 的 value 按字段类型解析：字符串字段（`title` / `description` / `notes` / `color` /
+  `priority` / 时间字段 / `repeatType` / `repeatWeekdays`）原样当字符串（`title=2026` 就是标题
+  "2026"），写 `null` 清空；其它字段自动解析 `true` / `false` / `null` / 数字 / JSON；
   `quadrant=` 接受别名（`urgent_important` 等）；字段名必须是下方字段表里的（或别名），
   否则服务端返回 400 并列出允许的字段。
 
@@ -127,8 +130,8 @@ body 是 JSON（`Content-Type: application/json`）。
 | `DELETE /subtasks/:id` | 删除子任务 |
 | `GET /images/:name` | 取图片 bytes |
 | `POST /images` | multipart 上传，`file` 字段；返回 `{name}` |
-| `POST /sync` | 手动触发 pull + push；全部成功 200，部分失败 207；返回 `{pull, push, pullError?, pushError?}` |
-| `POST /sync/pull` | 仅 pull；返回 `{status, changed, repushScheduled, todosUpserted, ...}` |
+| `POST /sync` | 手动触发 pull + push（pull 总是重新下载完整文档，不走缓存校验）；全部成功 200，部分失败 207；返回 `{pull, push, pullError?, pushError?}` |
+| `POST /sync/pull` | 仅 pull（同样总是重新下载完整文档）；返回 `{status, changed, repushScheduled, todosUpserted, ...}` |
 | `POST /sync/push` | 仅 push；返回 `{status, pushed, attempts, dirtyCleared, ...}` |
 
 排序字段白名单：`dueDate`（= `endTime`）/ `startTime` / `priority`（high > medium > low >

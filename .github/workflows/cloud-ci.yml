@@ -61,5 +61,8 @@ jobs:
       - name: Compile-check minitodo.py
         run: python -m py_compile minitodo.py
 
+      - name: Install runtime dependency
+        run: python -m pip install requests
+
       - name: Unit tests
         run: python -m unittest -v test_minitodo

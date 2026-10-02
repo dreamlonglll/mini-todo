@@ -6,6 +6,9 @@
 //!
 //! 错误：完整错误链写服务端日志；响应里是 `util::public_error_message` 脱敏后的消息
 //! （WebDAV 状态码 / 连接错误照常给出，本地 SQLite / 文件系统错误只说"本地存储错误"）。
+//!
+//! 手动拉取一律**无条件 GET**（不带 `If-None-Match`）：用户 / AI 显式要求"拿最新数据"时不能
+//! 被 nginx 秒级 ETag 的盲区（同一秒内写入且长度相同 → 304）挡住；后台轮询才用条件 GET。
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -47,7 +50,7 @@ pub async fn post_sync(State(state): State<AppState>) -> (StatusCode, Json<SyncR
     let (pull_res, push_res) = match state
         .sync
         .run_locked(|ctx| {
-            let p = pull::pull_once(ctx).map(|_| ());
+            let p = pull::pull_once_with(ctx, true).map(|_| ());
             let s = push::push_once(ctx).map(|_| ());
             Ok((p, s))
         })
@@ -84,7 +87,7 @@ pub async fn post_sync_pull(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let r = state
         .sync
-        .run_locked(pull::pull_once)
+        .run_locked(|ctx| pull::pull_once_with(ctx, true))
         .await
         .map_err(|e| sync_failed("pull", e))?;
     Ok(Json(json!({

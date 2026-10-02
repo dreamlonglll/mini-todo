@@ -292,12 +292,15 @@ pub fn remote_lacks_local_state(
     if !doc.has_tombstones_key() {
         return Ok(false);
     }
+    // 墓碑按数值 id 比较：写出的墓碑 `entityId` 一律是整数（`Tombstone::to_value`），
+    // 本地 id 不是整数的墓碑根本导不出去，算进来会让每次 pull 都判定"远端缺墓碑"而无限重推
     let (remote_tombs, _) = doc.tombstones(tz);
-    let mut remote_deleted: HashMap<(EntityType, String), String> = HashMap::new();
+    let mut remote_deleted: HashMap<(EntityType, i64), String> = HashMap::new();
     for t in remote_tombs {
-        let entry = remote_deleted
-            .entry((t.entity_type, t.entity_id))
-            .or_default();
+        let Ok(id) = t.entity_id.parse::<i64>() else {
+            continue;
+        };
+        let entry = remote_deleted.entry((t.entity_type, id)).or_default();
         if t.deleted_at > *entry {
             *entry = t.deleted_at;
         }
@@ -306,12 +309,16 @@ pub fn remote_lacks_local_state(
         let Some(t) = EntityType::parse(&typ) else {
             continue;
         };
+        // 与 `Tombstone::to_value` 的判定完全一致
+        let Ok(num_id) = id.parse::<i64>() else {
+            continue;
+        };
         let local = canon_ts(Some(&deleted_at), tz);
         if local.is_empty() || local.as_str() < recheck_cutoff {
             continue;
         }
         if remote_deleted
-            .get(&(t, id.clone()))
+            .get(&(t, num_id))
             .is_none_or(|remote| local > *remote)
         {
             debug!(target: "minitodo_cloud::sync", "remote lacks local tombstone {}:{}", typ, id);
@@ -846,6 +853,34 @@ mod tests {
             repo::upsert_todo(c, "8", "corrupt", "2026-05-13 10:00:00").unwrap();
         });
         assert!(!lacks(&db, &doc(vec![t], vec![]), CUTOFF));
+    }
+
+    /// 本地 id 不是整数的墓碑导不出去（`Tombstone::to_value` 只写整数 entityId）：不能因此判定
+    /// 远端落后，否则每次拿到新文档都会标脏重推，永不收敛。数值 id 照常比较（远端字符串 "7"
+    /// 与本地 7 是同一条）。
+    #[test]
+    fn unexportable_local_tombstones_do_not_trigger_repush() {
+        let (db, _tmp) = fresh_db();
+        let t = todo_value(1, "p", "2026-05-13 10:00:00");
+        let full = doc(vec![t.clone()], vec![]);
+        merge(&db, &full);
+        db.with_conn(|c| repo::add_tombstone(c, "todo", "abc", "2026-05-13 12:00:00").unwrap());
+        assert!(!lacks(&db, &full, CUTOFF), "导不出去的墓碑不算远端缺失");
+        let out = db.with_conn(|c| {
+            crate::sync::doc::build_outgoing_doc(c, &serde_json::Map::new(), vec![], tz(), CUTOFF)
+                .unwrap()
+        });
+        assert_eq!(out["tombstones"], json!([]), "确实不会写出");
+
+        db.with_conn(|c| repo::add_tombstone(c, "subtask", "7", "2026-05-13 12:00:00").unwrap());
+        assert!(lacks(&db, &full, CUTOFF));
+        let with_tomb = doc(
+            vec![t],
+            vec![
+                json!({"entityType": "subtask", "entityId": "7", "deletedAt": "2026-05-13T12:00:00"}),
+            ],
+        );
+        assert!(!lacks(&db, &with_tomb, CUTOFF));
     }
 
     /// 墓碑集合：同键取较大 deletedAt；保留期外的远端墓碑不导入，本地过期墓碑被清理。

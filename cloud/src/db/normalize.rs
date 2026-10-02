@@ -19,7 +19,7 @@ use tracing::warn;
 
 use crate::db::repo::{self, meta_keys as mk};
 use crate::model;
-use crate::time::now_local_string;
+use crate::time::{bump_updated_at, now_local_string};
 
 /// 一次归一化的统计。
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -71,10 +71,17 @@ pub fn normalize_all(conn: &Connection, tz: Tz) -> rusqlite::Result<NormalizeRep
             report.corrupt_rows += 1;
             continue;
         };
+        let previous = model::json_updated_at(&obj).map(str::to_string);
         let out = model::normalize_stored_todo(&mut obj, tz, &row.id, &row.updated_at);
         if out.semantic {
-            obj.insert("updatedAt".into(), json!(now));
-            repo::upsert_todo(conn, &row.id, &Value::Object(obj).to_string(), &now)?;
+            // 修复后的版本必须严格晚于被修复的版本（见 time::bump_updated_at）
+            let updated_at = bump_updated_at(
+                &now,
+                &[&row.updated_at, previous.as_deref().unwrap_or("")],
+                tz,
+            );
+            obj.insert("updatedAt".into(), json!(updated_at));
+            repo::upsert_todo(conn, &row.id, &Value::Object(obj).to_string(), &updated_at)?;
             report.todos_repaired += 1;
         } else if out.format {
             repo::upsert_todo(
@@ -93,16 +100,22 @@ pub fn normalize_all(conn: &Connection, tz: Tz) -> rusqlite::Result<NormalizeRep
             report.corrupt_rows += 1;
             continue;
         };
+        let previous = model::json_updated_at(&obj).map(str::to_string);
         let out =
             model::normalize_stored_subtask(&mut obj, tz, &row.id, &row.todo_id, &row.updated_at);
         if out.semantic {
-            obj.insert("updatedAt".into(), json!(now));
+            let updated_at = bump_updated_at(
+                &now,
+                &[&row.updated_at, previous.as_deref().unwrap_or("")],
+                tz,
+            );
+            obj.insert("updatedAt".into(), json!(updated_at));
             repo::upsert_subtask(
                 conn,
                 &row.id,
                 &row.todo_id,
                 &Value::Object(obj).to_string(),
-                &now,
+                &updated_at,
             )?;
             report.subtasks_repaired += 1;
         } else if out.format {

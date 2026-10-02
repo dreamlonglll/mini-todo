@@ -44,6 +44,46 @@ pub fn days_ago_local_string(tz: Tz, days: i64) -> String {
         .to_string()
 }
 
+/// 改写**已有**记录时的新 `updatedAt`（规范格式）：`max(now, previous + 1 秒)`。
+///
+/// LWW 只有秒级精度且平局保持本地：同一秒内两次改写若拿到同一个 `updatedAt`，已经合并了
+/// 第一个版本的一端会把第二个版本当成平局、留下旧值，第二次改写永远传不过去；本端时钟比
+/// 记录的时间戳慢（另一端时钟偏快 / 时区配置不一致）时，新版本甚至比旧版本"旧"，推送前合并
+/// 远端时直接被旧版本覆盖。取 `previous + 1s` 让同一条记录的版本严格递增（PC 端同一规则）。
+///
+/// `previous` 是这条记录现有的时间戳（`updated_at` 列、`data_json.updatedAt`），无法解析的
+/// 忽略；都无法解析时返回 `now`。只用于改写已有记录：新建记录直接用 `now`，合并远端记录
+/// 保留远端的时间戳。
+pub fn bump_updated_at(now: &str, previous: &[&str], tz: Tz) -> String {
+    let floor = previous
+        .iter()
+        .filter_map(|p| parse_datetime(p, tz, NaiveTime::MIN))
+        .max()
+        .and_then(|p| p.checked_add_signed(TimeDelta::seconds(1)));
+    match (floor, parse_datetime(now, tz, NaiveTime::MIN)) {
+        (Some(floor), Some(now_dt)) if floor > now_dt => floor.format(CANONICAL_FORMAT).to_string(),
+        _ => now.to_string(),
+    }
+}
+
+/// 删除墓碑的 `deletedAt`（与 PC `sync_store::deletion_time` 一致）：`max(now, 记录的 updatedAt)`。
+///
+/// 墓碑只压制 `updatedAt <= deletedAt` 的版本（K3-2）。记录的时间戳比本端"现在"还新时
+/// （另一端时钟偏快 / 时区配置不一致），用 `now` 写的墓碑压不住它：推送前合并远端时，远端的
+/// 同一版本会被原样插回来，删除被静默撤销。`record_times` 里无法解析的值忽略。
+pub fn deletion_time(now: &str, record_times: &[&str], tz: Tz) -> String {
+    let latest = record_times
+        .iter()
+        .filter_map(|p| parse_datetime(p, tz, NaiveTime::MIN))
+        .max();
+    match (latest, parse_datetime(now, tz, NaiveTime::MIN)) {
+        (Some(latest), Some(now_dt)) if latest > now_dt => {
+            latest.format(CANONICAL_FORMAT).to_string()
+        }
+        _ => now.to_string(),
+    }
+}
+
 /// UNIX 秒 → 本地墙钟规范字符串（`/health` 展示 `dirtySince` 等用）。
 pub fn epoch_to_local_string(secs: i64, tz: Tz) -> Option<String> {
     DateTime::<Utc>::from_timestamp(secs, 0)
@@ -324,6 +364,63 @@ mod tests {
         assert_eq!(
             epoch_to_local_string(0, shanghai()).as_deref(),
             Some("1970-01-01 08:00:00")
+        );
+    }
+
+    #[test]
+    fn bump_updated_at_is_strictly_increasing_per_record() {
+        let tz = shanghai();
+        // 时钟已经走过旧版本：就用 now
+        assert_eq!(
+            bump_updated_at("2026-05-13 10:00:05", &["2026-05-13 10:00:00"], tz),
+            "2026-05-13 10:00:05"
+        );
+        // 同一秒内再次改写：旧版本 + 1 秒（否则两个版本时间戳相同，平局保持本地会吞掉第二次改写）
+        assert_eq!(
+            bump_updated_at("2026-05-13 10:00:00", &["2026-05-13 10:00:00"], tz),
+            "2026-05-13 10:00:01"
+        );
+        // 记录来自时钟偏快的一端（比本端 now 还新）：仍然严格大于旧版本
+        assert_eq!(
+            bump_updated_at(
+                "2026-05-13 10:00:00",
+                &["2026-05-13 10:30:00", "2026-05-13T11:00:00"],
+                tz
+            ),
+            "2026-05-13 11:00:01",
+            "取所有候选里最新的那个，非规范形态也能解析"
+        );
+        // 跨日进位
+        assert_eq!(
+            bump_updated_at("2026-05-13 10:00:00", &["2026-12-31 23:59:59"], tz),
+            "2027-01-01 00:00:00"
+        );
+        // 旧时间戳缺失 / 无法解析 → now
+        assert_eq!(
+            bump_updated_at("2026-05-13 10:00:00", &["", "garbage"], tz),
+            "2026-05-13 10:00:00"
+        );
+        assert_eq!(
+            bump_updated_at("2026-05-13 10:00:00", &[], tz),
+            "2026-05-13 10:00:00"
+        );
+    }
+
+    #[test]
+    fn deletion_time_covers_records_newer_than_now() {
+        let tz = shanghai();
+        assert_eq!(
+            deletion_time("2026-05-13 10:00:00", &["2026-05-13 09:00:00"], tz),
+            "2026-05-13 10:00:00"
+        );
+        // 记录比 now 新：墓碑取记录的时间戳（deletedAt >= updatedAt 才压得住）
+        assert_eq!(
+            deletion_time("2026-05-13 10:00:00", &["2026-05-13T10:00:30"], tz),
+            "2026-05-13 10:00:30"
+        );
+        assert_eq!(
+            deletion_time("2026-05-13 10:00:00", &["garbage"], tz),
+            "2026-05-13 10:00:00"
         );
     }
 
