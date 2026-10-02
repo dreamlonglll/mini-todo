@@ -34,7 +34,7 @@ pub async fn create_subtask(
         .ok_or_else(|| ApiError::bad_request("title is required"))?
         .to_string();
 
-    let now = now_local_string(state.config.timezone_offset);
+    let now = now_local_string(state.config.timezone);
     let id_str = new_id_string();
 
     // 同一事务内解析父 todo ref（支持 C 短码）+ 写 subtask。
@@ -77,7 +77,7 @@ pub async fn patch_subtask(
     if !body.is_object() {
         return Err(ApiError::bad_request("body must be a JSON object"));
     }
-    let now = now_local_string(state.config.timezone_offset);
+    let now = now_local_string(state.config.timezone);
 
     let updated: Option<Value> = state
         .db
@@ -112,7 +112,7 @@ pub async fn delete_subtask(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let now = now_local_string(state.config.timezone_offset);
+    let now = now_local_string(state.config.timezone);
     let removed = state.db.with_conn(|conn| -> rusqlite::Result<bool> {
         let tx = conn.transaction()?;
         let existed = repo::delete_subtask(&tx, &id)?;

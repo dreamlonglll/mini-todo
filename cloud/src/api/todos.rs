@@ -172,7 +172,7 @@ pub async fn create_todo(
         .ok_or_else(|| ApiError::bad_request("title is required"))?
         .to_string();
 
-    let now = now_local_string(state.config.timezone_offset);
+    let now = now_local_string(state.config.timezone);
     let id_str = new_id_string();
 
     let mut obj = body.as_object().cloned().unwrap_or_default();
@@ -222,7 +222,7 @@ pub async fn patch_todo(
         return Err(ApiError::bad_request("body must be a JSON object"));
     }
 
-    let now = now_local_string(state.config.timezone_offset);
+    let now = now_local_string(state.config.timezone);
 
     let updated: Option<Value> = state
         .db
@@ -262,7 +262,7 @@ pub async fn delete_todo(
     State(state): State<AppState>,
     Path(raw_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let now = now_local_string(state.config.timezone_offset);
+    let now = now_local_string(state.config.timezone);
     let removed = state.db.with_conn(|conn| -> rusqlite::Result<bool> {
         let tx = conn.transaction()?;
         let id = match resolve_todo_ref(&tx, &raw_id)? {

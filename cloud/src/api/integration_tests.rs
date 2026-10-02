@@ -2,9 +2,10 @@
 //! 请求，覆盖鉴权、健康检查、todos / subtasks / images 全部 CRUD 路径，外加
 //! 过滤、排序、分页、merge PATCH、cascade DELETE、tombstones、X-Sync-Status header。
 //!
-//! 这些测试**不**起 tokio 后台 worker（pull/push/images bootstrap），所以
-//! 全程不会触碰真实网络；`Db` 用临时目录里的 SQLite 文件、`images_dir` 也用
-//! tempdir，测试结束自动清理。
+//! 这些测试**不**起后台 worker（pull / push / 图片镜像），不触碰外部网络：默认
+//! WebDAV 地址不可达（127.0.0.1:0）；需要真走同步流程的用例连本进程内的 mock
+//! WebDAV（`crate::sync::mock_dav`）。`Db` 用临时目录里的 SQLite 文件、`images_dir`
+//! 也用 tempdir，测试结束自动清理。
 
 use std::sync::Arc;
 
@@ -36,19 +37,29 @@ struct Fixture {
 }
 
 fn fixture() -> Fixture {
+    fixture_with_webdav(None)
+}
+
+/// `webdav_url = None` 时指向不可达地址（127.0.0.1:0）；传入 mock WebDAV 的地址
+/// 则 `/sync*` 端点会真的走一遍同步流程。
+fn fixture_with_webdav(webdav_url: Option<&str>) -> Fixture {
     let tmp = TempDir::new().expect("tempdir");
     let data_dir = tmp.path().join("data");
     let images_dir = tmp.path().join("images");
     std::fs::create_dir_all(&data_dir).unwrap();
     std::fs::create_dir_all(&images_dir).unwrap();
 
-    let cfg = Arc::new(Config::for_tests(API_KEY, data_dir.clone(), images_dir));
+    let mut cfg = Config::for_tests(API_KEY, data_dir.clone(), images_dir);
+    if let Some(url) = webdav_url {
+        cfg.webdav_url = url.to_string();
+    }
+    let cfg = Arc::new(cfg);
     let db = Db::open(&data_dir.join("data.db")).expect("open db");
 
     let state = AppState {
-        config: cfg,
+        config: cfg.clone(),
         db: db.clone(),
-        sync_lock: crate::sync::new_sync_lock(),
+        sync: crate::sync::SyncCtx::new(cfg, db),
     };
     let router = build_router(state.clone());
     Fixture {
@@ -109,15 +120,16 @@ fn req_no_auth(method: Method, uri: &str) -> Request<Body> {
 // =============================================================================
 
 #[tokio::test]
-async fn auth_missing_token_returns_401_with_sync_header() {
+async fn auth_missing_token_returns_401_without_sync_header() {
     let fx = fixture();
     let (status, headers, body) = send(&fx.router, req_no_auth(Method::GET, "/health")).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-    // 即使是 401 也要有 X-Sync-Status（外层 middleware 注入）
+    // 鉴权是最外层：401 短路返回，不查库、不暴露同步状态
     assert!(
-        headers.contains_key("x-sync-status"),
-        "401 response must still carry x-sync-status header"
+        !headers.contains_key("x-sync-status"),
+        "401 response must not carry x-sync-status header"
     );
+    assert!(!headers.contains_key("x-last-sync-at"));
     let v = json_body(&body);
     assert_eq!(v["error"], "unauthorized");
 }
@@ -153,8 +165,10 @@ async fn auth_non_bearer_scheme_returns_401() {
 #[tokio::test]
 async fn auth_correct_token_passes() {
     let fx = fixture();
-    let (status, _, _) = send(&fx.router, req(Method::GET, "/health", None)).await;
+    let (status, headers, _) = send(&fx.router, req(Method::GET, "/todos", None)).await;
     assert_eq!(status, StatusCode::OK);
+    // 鉴权通过的响应才带同步状态头
+    assert!(headers.contains_key("x-sync-status"));
 }
 
 // =============================================================================
@@ -165,11 +179,16 @@ async fn auth_correct_token_passes() {
 async fn health_offline_when_no_pull() {
     let fx = fixture();
     let (status, headers, body) = send(&fx.router, req(Method::GET, "/health", None)).await;
-    assert_eq!(status, StatusCode::OK);
+    // 从未成功拉取 → 降级 → 503，并带出排查字段
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     let v = json_body(&body);
-    assert_eq!(v["status"], "healthy");
+    assert_eq!(v["status"], "degraded");
     assert_eq!(v["sync"], "offline");
+    assert_eq!(v["pull"], "offline");
+    assert_eq!(v["push"], "healthy");
     assert!(v["lastPullAt"].is_null());
+    assert_eq!(v["dirty"], false);
+    assert_eq!(v["imageQueueLength"], 0);
     assert_eq!(headers.get("x-sync-status").unwrap(), "offline");
     // offline 时附 Warning header
     assert!(headers.contains_key("warning"));
@@ -178,7 +197,7 @@ async fn health_offline_when_no_pull() {
 #[tokio::test]
 async fn health_healthy_after_meta_set() {
     let fx = fixture();
-    let now = now_local_string(fx.state.config.timezone_offset);
+    let now = now_local_string(fx.state.config.timezone);
     fx.state
         .db
         .with_conn(|conn| repo::set_meta(conn, "last_pull_at", &now).unwrap());
@@ -186,6 +205,7 @@ async fn health_healthy_after_meta_set() {
     let (status, headers, body) = send(&fx.router, req(Method::GET, "/health", None)).await;
     assert_eq!(status, StatusCode::OK);
     let v = json_body(&body);
+    assert_eq!(v["status"], "healthy");
     assert_eq!(v["sync"], "healthy");
     assert_eq!(v["lastPullAt"], json!(now));
     assert_eq!(headers.get("x-sync-status").unwrap(), "healthy");
@@ -1242,7 +1262,7 @@ async fn pull_backfill_assigns_seq_to_pc_origin_todo() {
     // 模拟"PC 端创建的 todo 通过 pull 进入 cloud SQLite"：直接 upsert_todo，
     // 不走 API（API 才会 assign_seq）。然后调 backfill 验证它能被分配 seq。
     let fx = fixture();
-    let now = now_local_string(fx.state.config.timezone_offset);
+    let now = now_local_string(fx.state.config.timezone);
     fx.state.db.with_conn(|conn| {
         repo::upsert_todo(conn, "42", r#"{"id":42,"title":"from PC"}"#, &now).unwrap();
     });
@@ -1506,6 +1526,109 @@ async fn demo_print_todos_responses() {
         "\n==== POST 删除后新建（验证 seq 不复用）====\n{}",
         serde_json::to_string_pretty(&v).unwrap()
     );
+}
+
+/// 删掉当前最大短码的 todo 后，新 todo 也不复用那个短码（seq 高水位）。
+#[tokio::test]
+async fn seq_does_not_recycle_after_deleting_max() {
+    let fx = fixture();
+    let _ = create_todo(&fx, json!({"title": "a"})).await; // seq=1
+    let _ = create_todo(&fx, json!({"title": "b"})).await; // seq=2
+    let (status, _, _) = send(&fx.router, req(Method::DELETE, "/todos/C2", None)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let c = create_todo(&fx, json!({"title": "c"})).await;
+    assert_eq!(c["seq"], 3, "删除最大号后也不能复用");
+    let (status, _, _) = send(&fx.router, req(Method::GET, "/todos/C2", None)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "旧短码不能指向新 todo");
+}
+
+/// push 积压太久（WebDAV 写不进去）→ 即使 pull 正常也降级：503 + 带出排查字段。
+#[tokio::test]
+async fn health_degraded_when_push_backlog_is_old() {
+    let fx = fixture();
+    let now = now_local_string(fx.state.config.timezone);
+    let long_ago = (chrono::Utc::now().timestamp() - 600).to_string();
+    fx.state.db.with_conn(|conn| {
+        repo::set_meta(conn, "last_pull_at", &now).unwrap();
+        repo::mark_dirty(conn).unwrap();
+        repo::set_meta(conn, "dirty_since", &long_ago).unwrap();
+        repo::set_meta(conn, "last_push_error", "WebDAV PUT 返回状态 507").unwrap();
+        repo::enqueue_dirty_image(conn, "a.png").unwrap();
+    });
+    let (status, headers, body) = send(&fx.router, req(Method::GET, "/health", None)).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    let v = json_body(&body);
+    assert_eq!(v["status"], "degraded");
+    assert_eq!(v["pull"], "healthy");
+    assert_eq!(v["push"], "offline");
+    assert_eq!(v["sync"], "offline");
+    assert_eq!(v["dirty"], true);
+    assert!(v["dirtySince"].is_string());
+    assert_eq!(v["lastPushError"], "WebDAV PUT 返回状态 507");
+    assert_eq!(v["imageQueueLength"], 1);
+    assert_eq!(headers.get("x-sync-status").unwrap(), "offline");
+    // 其它端点的同步头同样反映 push 积压
+    let (_, headers, _) = send(&fx.router, req(Method::GET, "/todos", None)).await;
+    assert_eq!(headers.get("x-sync-status").unwrap(), "offline");
+}
+
+/// `/sync*` 端点真的走一遍同步：API 写入 → push 到 mock WebDAV；DELETE 写出墓碑；
+/// PC 的修改经 `/sync/pull` 合并回来。
+#[tokio::test]
+async fn sync_endpoints_round_trip_through_mock_webdav() {
+    use crate::sync::mock_dav::MockDav;
+    let mock = MockDav::start();
+    let fx = fixture_with_webdav(Some(&mock.base_url));
+
+    let a = create_todo(&fx, json!({"title": "from AI"})).await;
+    let b = create_todo(&fx, json!({"title": "to delete"})).await;
+    let (status, _, body) = send(&fx.router, req(Method::POST, "/sync/push", None)).await;
+    assert_eq!(status, StatusCode::OK);
+    let v = json_body(&body);
+    assert_eq!(v["pushed"], true);
+    assert_eq!(v["dirtyCleared"], true);
+    let remote = mock.doc().expect("sync-data uploaded");
+    assert_eq!(remote["todos"].as_array().unwrap().len(), 2);
+
+    let (status, _, _) = send(
+        &fx.router,
+        req(
+            Method::DELETE,
+            &format!("/todos/{}", todo_id_path(&b)),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _, body) = send(&fx.router, req(Method::POST, "/sync", None)).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let remote = mock.doc().unwrap();
+    let todos = remote["todos"].as_array().unwrap();
+    assert_eq!(todos.len(), 1);
+    assert_eq!(todos[0]["id"], a["id"]);
+    assert!(remote["tombstones"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["entityType"] == "todo" && t["entityId"] == b["id"]));
+
+    // PC 在远端改了标题 → /sync/pull 合并回来
+    let mut pc = remote.clone();
+    pc["todos"][0]["title"] = json!("edited on PC");
+    pc["todos"][0]["updatedAt"] = json!("2999-01-01 00:00:00");
+    mock.put_doc(&pc);
+    let (status, _, body) = send(&fx.router, req(Method::POST, "/sync/pull", None)).await;
+    assert_eq!(status, StatusCode::OK);
+    let v = json_body(&body);
+    assert_eq!(v["changed"], true);
+    assert_eq!(v["todosUpserted"], 1);
+    let (_, headers, body) = send(
+        &fx.router,
+        req(Method::GET, &format!("/todos/{}", todo_id_path(&a)), None),
+    )
+    .await;
+    assert_eq!(json_body(&body)["title"], "edited on PC");
+    assert_eq!(headers.get("x-sync-status").unwrap(), "healthy");
 }
 
 #[tokio::test]

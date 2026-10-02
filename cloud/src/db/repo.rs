@@ -5,7 +5,39 @@
 //! `meta(key, value)`）。所有过滤 / 排序通过 SQLite JSON1 函数对 `data_json`
 //! 做提取。
 
+use std::collections::{HashMap, HashSet};
+
 use rusqlite::{params, Connection, OptionalExtension};
+
+/// `meta` 表里用到的键。集中在一处，避免 worker / API / 健康检查各写各的字符串。
+pub mod meta_keys {
+    /// `"true"` 表示有本地写入还没推到 WebDAV。
+    pub const DIRTY: &str = "dirty";
+    /// 每次 `mark_dirty` 递增；push 用它判断推送窗口期内是否又有新写入。
+    pub const DIRTY_GENERATION: &str = "dirty_generation";
+    /// 第一次变脏的时刻（UNIX 秒）；清 dirty 时一并删除。健康检查算积压时长用。
+    pub const DIRTY_SINCE: &str = "dirty_since";
+    /// 待上传图片队列（JSON 字符串数组）。
+    pub const DIRTY_IMAGES: &str = "dirty_images";
+    /// 图片队列第一次被 worker 观察到非空的时刻（UNIX 秒）；队列清空时删除。
+    pub const IMAGE_QUEUE_SINCE: &str = "image_queue_since";
+    /// `C{seq}` 短码的单调高水位：删掉最大号的 todo 后也不复用。
+    pub const SEQ_HWM: &str = "seq_hwm";
+    /// 最近一次成功从 WebDAV 拉取并合并（或确认未变）的本地墙钟时间。
+    pub const LAST_PULL_AT: &str = "last_pull_at";
+    pub const LAST_PULL_ERROR: &str = "last_pull_error";
+    /// 最近一次成功把 sync-data PUT 到 WebDAV 的本地墙钟时间。
+    pub const LAST_PUSH_OK_AT: &str = "last_push_ok_at";
+    pub const LAST_PUSH_ERROR: &str = "last_push_error";
+    /// 同步"基准"（跨端契约 K4）：最近一次**已完整合并或成功写入**的远端版本的校验器。
+    pub const BASE_ETAG: &str = "base_etag";
+    pub const BASE_LAST_MODIFIED: &str = "base_last_modified";
+    /// 基准版本文档里除 `todos` / `tombstones` 以外的全部顶层键（JSON 对象），
+    /// 远端 304 时用它重建要上传的文档，保证 `settings` / 未知顶层键原样保留。
+    pub const REMOTE_ENVELOPE: &str = "remote_envelope";
+}
+
+use meta_keys as mk;
 
 /// 单条 todo 在 SQLite 中的快照：`data_json` 是 PC 端 todo 对象的 JSON 原样存储。
 #[derive(Debug, Clone)]
@@ -13,6 +45,7 @@ pub struct TodoRow {
     #[allow(dead_code)]
     pub id: String,
     pub data_json: String,
+    #[allow(dead_code)]
     pub updated_at: String,
 }
 
@@ -24,6 +57,7 @@ pub struct SubtaskRow {
     #[allow(dead_code)]
     pub todo_id: String,
     pub data_json: String,
+    #[allow(dead_code)]
     pub updated_at: String,
 }
 
@@ -50,46 +84,135 @@ pub fn set_meta(conn: &Connection, key: &str, value: &str) -> rusqlite::Result<(
     Ok(())
 }
 
+pub fn delete_meta(conn: &Connection, key: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM meta WHERE key = ?1", [key])?;
+    Ok(())
+}
+
+/// 键不存在时才写入（`dirty_since` 这类"第一次发生时刻"用）。
+pub fn set_meta_if_absent(conn: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO NOTHING",
+        params![key, value],
+    )?;
+    Ok(())
+}
+
+/// 当前是否 dirty。
+pub fn is_dirty(conn: &Connection) -> rusqlite::Result<bool> {
+    Ok(get_meta(conn, mk::DIRTY)?.as_deref() == Some("true"))
+}
+
 /// 标脏：置 `dirty=true` 并把 `dirty_generation` 计数 +1。
 ///
 /// 所有写路径（todos / subtasks / images 的增删改）都必须走这里。generation
 /// 是 push worker 的并发判据：push 开始时记下 `g0`，PUT 成功后仅当计数仍为
 /// `g0` 才清 dirty；否则说明推送窗口期内又有新写入，dirty 保留给下一轮。
+/// 第一次变脏时顺带记录 `dirty_since`（UNIX 秒，SQLite 自己取时间，调用方不必
+/// 关心时区），供健康检查计算积压时长。
 pub fn mark_dirty(conn: &Connection) -> rusqlite::Result<()> {
-    set_meta(conn, "dirty", "true")?;
+    set_meta(conn, mk::DIRTY, "true")?;
     let next = get_dirty_generation(conn)? + 1;
-    set_meta(conn, "dirty_generation", &next.to_string())?;
+    set_meta(conn, mk::DIRTY_GENERATION, &next.to_string())?;
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, CAST(strftime('%s', 'now') AS TEXT))
+         ON CONFLICT(key) DO NOTHING",
+        [mk::DIRTY_SINCE],
+    )?;
     Ok(())
 }
 
 /// 读 `dirty_generation` 计数；键不存在或值非法均视为 0。
 pub fn get_dirty_generation(conn: &Connection) -> rusqlite::Result<i64> {
-    Ok(get_meta(conn, "dirty_generation")?
+    Ok(get_meta(conn, mk::DIRTY_GENERATION)?
         .and_then(|s| s.parse::<i64>().ok())
         .unwrap_or(0))
+}
+
+/// PUT 成功后的收尾：generation 仍等于 `g0` 才置 dirty=false（并删 `dirty_since`），
+/// 返回是否清除。
+///
+/// generation 变了说明推送窗口期内又有新写入（这些改动不在刚 PUT 的快照里），
+/// dirty 必须保留给下一轮。读 + 判 + 写在同一个连接调用序列里完成，调用方持有
+/// `Db` 的 Mutex，与写路径的 `mark_dirty` 互斥。
+pub fn clear_dirty_if_unchanged(conn: &Connection, g0: i64) -> rusqlite::Result<bool> {
+    if get_dirty_generation(conn)? != g0 {
+        return Ok(false);
+    }
+    set_meta(conn, mk::DIRTY, "false")?;
+    delete_meta(conn, mk::DIRTY_SINCE)?;
+    Ok(true)
+}
+
+// =============================================================================
+// 待上传图片队列（meta.dirty_images，JSON 字符串数组）
+//
+// 读改写都在调用方持有的同一个连接调用序列里完成（`Db::with_conn` 的 Mutex 保证
+// 与其它写入互斥）。push worker 上传期间**不**持锁，所以上传结束后必须重新读取
+// 队列、只移除这次真正处理掉的名字——不能拿上传前读到的快照整体覆盖，否则上传
+// 期间新入队的图片会丢（审查 A8）。
+// =============================================================================
+
+/// 读出队列；值损坏时视为空队列（不让一条坏数据卡死整个 push）。
+pub fn dirty_image_queue(conn: &Connection) -> rusqlite::Result<Vec<String>> {
+    Ok(get_meta(conn, mk::DIRTY_IMAGES)?
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+        .unwrap_or_default())
+}
+
+/// 入队（已在队列中则忽略）。
+pub fn enqueue_dirty_image(conn: &Connection, name: &str) -> rusqlite::Result<()> {
+    let mut queue = dirty_image_queue(conn)?;
+    if !queue.iter().any(|n| n == name) {
+        queue.push(name.to_string());
+    }
+    write_image_queue(conn, &queue)
+}
+
+/// 从**当前**队列中移除 `done` 里的名字，返回剩余队列。
+pub fn remove_dirty_images(
+    conn: &Connection,
+    done: &HashSet<String>,
+) -> rusqlite::Result<Vec<String>> {
+    let remaining: Vec<String> = dirty_image_queue(conn)?
+        .into_iter()
+        .filter(|n| !done.contains(n))
+        .collect();
+    write_image_queue(conn, &remaining)?;
+    Ok(remaining)
+}
+
+fn write_image_queue(conn: &Connection, queue: &[String]) -> rusqlite::Result<()> {
+    let raw = serde_json::to_string(queue).unwrap_or_else(|_| "[]".to_string());
+    set_meta(conn, mk::DIRTY_IMAGES, &raw)
 }
 
 /// 给 `todo_id` 分配 / 取得 cloud-only 短码 `seq`。
 ///
 /// - 已分配 → 返回现有 seq（幂等，多次调用不重复分配）。
-/// - 未分配 → 取 `MAX(seq)+1` 作为新 seq（首条为 1），写入 `todo_seq` 表。
+/// - 未分配 → 取 `max(高水位, MAX(seq)) + 1`（首条为 1），写入 `todo_seq` 表并推高水位。
+///
+/// 高水位存在 `meta.seq_hwm`：只增不减，所以删掉当前最大号的 todo 之后新 todo
+/// 也不会复用那个号（早期 `MAX(seq)+1` 会复用，AI 拿旧短码操作就会打到新 todo 上）。
 ///
 /// 详见 `schema.rs` 中 `todo_seq` 注释：seq 不进 data_json，cloud 独立维护。
 pub fn assign_seq(conn: &Connection, todo_id: &str) -> rusqlite::Result<i64> {
     if let Some(seq) = get_seq(conn, todo_id)? {
         return Ok(seq);
     }
-    let next: i64 = conn
-        .query_row(
-            "SELECT COALESCE(MAX(seq), 0) + 1 FROM todo_seq",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(1);
+    let max_in_table: i64 =
+        conn.query_row("SELECT COALESCE(MAX(seq), 0) FROM todo_seq", [], |row| {
+            row.get(0)
+        })?;
+    let hwm = get_meta(conn, mk::SEQ_HWM)?
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(0);
+    let next = max_in_table.max(hwm) + 1;
     conn.execute(
         "INSERT INTO todo_seq (todo_id, seq) VALUES (?1, ?2)",
         params![todo_id, next],
     )?;
+    set_meta(conn, mk::SEQ_HWM, &next.to_string())?;
     Ok(next)
 }
 
@@ -113,7 +236,7 @@ pub fn get_todo_id_by_seq(conn: &Connection, seq: i64) -> rusqlite::Result<Optio
     .optional()
 }
 
-/// 删除 todo 时连带清理 `todo_seq`。seq 不复用——后续新 todo 仍是 max+1。
+/// 删除 todo 时连带清理 `todo_seq`。seq 不复用——高水位见 `assign_seq`。
 pub fn delete_seq(conn: &Connection, todo_id: &str) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM todo_seq WHERE todo_id = ?1", [todo_id])?;
     Ok(())
@@ -347,31 +470,43 @@ pub fn upsert_todo(
     Ok(())
 }
 
-/// per-record LWW upsert：仅在远端 `updated_at` ≥ 本地（或本地不存在）时写入。
-/// 返回是否实际写入。
-pub fn upsert_todo_if_newer(
-    conn: &Connection,
-    id: &str,
-    data_json: &str,
-    updated_at: &str,
-) -> rusqlite::Result<bool> {
-    let existing = get_todo(conn, id)?;
-    let should_write = match existing {
-        Some(row) => updated_at >= row.updated_at.as_str(),
-        None => true,
-    };
-    if !should_write {
-        return Ok(false);
-    }
-    upsert_todo(conn, id, data_json, updated_at)?;
-    Ok(true)
-}
-
 /// 删除 todo 及其全部 subtasks（同一事务内）。
 pub fn delete_todo_cascade(conn: &Connection, id: &str) -> rusqlite::Result<bool> {
     let n_t = conn.execute("DELETE FROM todos WHERE id = ?1", [id])?;
     conn.execute("DELETE FROM subtasks WHERE todo_id = ?1", [id])?;
     Ok(n_t > 0)
+}
+
+/// 同步合并用：删除 todo + 全部 subtasks + `todo_seq` 行，返回删掉的 subtask 数。
+/// 不写墓碑（墓碑由调用方按 K3 规则维护）。
+pub fn delete_todo_with_children(conn: &Connection, id: &str) -> rusqlite::Result<usize> {
+    let n_subs = conn.execute("DELETE FROM subtasks WHERE todo_id = ?1", [id])?;
+    conn.execute("DELETE FROM todo_seq WHERE todo_id = ?1", [id])?;
+    conn.execute("DELETE FROM todos WHERE id = ?1", [id])?;
+    Ok(n_subs)
+}
+
+/// 同步合并用：`id → updated_at`（原样，比较前由调用方规范化）。
+pub fn todo_timestamps(conn: &Connection) -> rusqlite::Result<HashMap<String, String>> {
+    let mut stmt = conn.prepare("SELECT id, updated_at FROM todos")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    rows.collect()
+}
+
+/// 同步合并用：`id → (todo_id, updated_at)`。
+pub fn subtask_timestamps(
+    conn: &Connection,
+) -> rusqlite::Result<HashMap<String, (String, String)>> {
+    let mut stmt = conn.prepare("SELECT id, todo_id, updated_at FROM subtasks")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            (row.get::<_, String>(1)?, row.get::<_, String>(2)?),
+        ))
+    })?;
+    rows.collect()
 }
 
 pub fn list_subtasks_for_todo(
@@ -436,25 +571,6 @@ pub fn upsert_subtask(
     Ok(())
 }
 
-pub fn upsert_subtask_if_newer(
-    conn: &Connection,
-    id: &str,
-    todo_id: &str,
-    data_json: &str,
-    updated_at: &str,
-) -> rusqlite::Result<bool> {
-    let existing = get_subtask(conn, id)?;
-    let should_write = match existing {
-        Some(row) => updated_at >= row.updated_at.as_str(),
-        None => true,
-    };
-    if !should_write {
-        return Ok(false);
-    }
-    upsert_subtask(conn, id, todo_id, data_json, updated_at)?;
-    Ok(true)
-}
-
 pub fn delete_subtask(conn: &Connection, id: &str) -> rusqlite::Result<bool> {
     let n = conn.execute("DELETE FROM subtasks WHERE id = ?1", [id])?;
     Ok(n > 0)
@@ -488,16 +604,12 @@ pub fn all_subtasks(conn: &Connection) -> rusqlite::Result<Vec<SubtaskRow>> {
 }
 
 /// 删除 id 不在 `keep` 集合内的 todos + 对应 subtasks + todo_seq。
-/// 供 pull 孤儿清理使用。
-pub fn delete_todos_not_in(
-    conn: &Connection,
-    keep: &std::collections::HashSet<String>,
-) -> rusqlite::Result<usize> {
+/// 仅供 pull 的旧协议兼容路径（远端文档没有 `tombstones` 键且本地不 dirty）使用。
+pub fn delete_todos_not_in(conn: &Connection, keep: &HashSet<String>) -> rusqlite::Result<usize> {
     let mut stmt = conn.prepare("SELECT id FROM todos")?;
     let local_ids: Vec<String> = stmt
         .query_map([], |row| row.get::<_, String>(0))?
-        .filter_map(|r| r.ok())
-        .collect();
+        .collect::<rusqlite::Result<_>>()?;
 
     let mut n = 0usize;
     for id in &local_ids {
@@ -511,16 +623,15 @@ pub fn delete_todos_not_in(
     Ok(n)
 }
 
-/// 删除 id 不在 `keep` 集合内的 subtasks。
+/// 删除 id 不在 `keep` 集合内的 subtasks（旧协议兼容路径用）。
 pub fn delete_subtasks_not_in(
     conn: &Connection,
-    keep: &std::collections::HashSet<String>,
+    keep: &HashSet<String>,
 ) -> rusqlite::Result<usize> {
     let mut stmt = conn.prepare("SELECT id FROM subtasks")?;
     let local_ids: Vec<String> = stmt
         .query_map([], |row| row.get::<_, String>(0))?
-        .filter_map(|r| r.ok())
-        .collect();
+        .collect::<rusqlite::Result<_>>()?;
 
     let mut n = 0usize;
     for id in &local_ids {
@@ -533,9 +644,11 @@ pub fn delete_subtasks_not_in(
 }
 
 // =============================================================================
-// Tombstones（软删除标记，push worker merge 用）
+// Tombstones（软删除标记，K2/K3：双向传播）
 // =============================================================================
 
+/// 写入墓碑；同键已存在时保留较大的 `deleted_at`（K3-4：墓碑集合同键取较大值）。
+/// `deleted_at` 必须是规范格式，字符串比较即时间比较。
 pub fn add_tombstone(
     conn: &Connection,
     entity_type: &str,
@@ -544,7 +657,8 @@ pub fn add_tombstone(
 ) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT INTO tombstones (entity_type, entity_id, deleted_at) VALUES (?1, ?2, ?3)
-         ON CONFLICT(entity_type, entity_id) DO UPDATE SET deleted_at = excluded.deleted_at",
+         ON CONFLICT(entity_type, entity_id) DO UPDATE
+         SET deleted_at = MAX(tombstones.deleted_at, excluded.deleted_at)",
         params![entity_type, entity_id, deleted_at],
     )?;
     Ok(())
@@ -572,7 +686,7 @@ pub fn has_tombstone(
     Ok(count > 0)
 }
 
-/// 清理早于 `cutoff_local` 的 tombstones。push worker 每次 PUT 成功后调用。
+/// 清理早于 `cutoff_local` 的 tombstones（保留期 30 天，合并与 PUT 成功后调用）。
 pub fn purge_tombstones_before(conn: &Connection, cutoff_local: &str) -> rusqlite::Result<usize> {
     let n = conn.execute(
         "DELETE FROM tombstones WHERE deleted_at < ?1",
@@ -827,5 +941,108 @@ mod tests {
         let c = fresh();
         set_meta(&c, "dirty_generation", "not-a-number").unwrap();
         assert_eq!(get_dirty_generation(&c).unwrap(), 0);
+    }
+
+    #[test]
+    fn mark_dirty_records_dirty_since_once_and_clear_removes_it() {
+        let c = fresh();
+        mark_dirty(&c).unwrap();
+        let since = get_meta(&c, mk::DIRTY_SINCE).unwrap().expect("dirty_since");
+        assert!(since.parse::<i64>().is_ok());
+        set_meta(&c, mk::DIRTY_SINCE, "123").unwrap();
+        mark_dirty(&c).unwrap();
+        assert_eq!(
+            get_meta(&c, mk::DIRTY_SINCE).unwrap().as_deref(),
+            Some("123"),
+            "已经脏着时不能刷新起始时间"
+        );
+        let g = get_dirty_generation(&c).unwrap();
+        assert!(clear_dirty_if_unchanged(&c, g).unwrap());
+        assert!(!is_dirty(&c).unwrap());
+        assert_eq!(get_meta(&c, mk::DIRTY_SINCE).unwrap(), None);
+    }
+
+    /// `C{seq}` 高水位：删掉当前最大号后新 todo 也不复用（旧实现 MAX(seq)+1 会复用）。
+    #[test]
+    fn seq_never_reuses_deleted_max() {
+        let c = fresh();
+        assert_eq!(assign_seq(&c, "a").unwrap(), 1);
+        assert_eq!(assign_seq(&c, "b").unwrap(), 2);
+        assert_eq!(assign_seq(&c, "b").unwrap(), 2, "幂等");
+        delete_seq(&c, "b").unwrap();
+        assert_eq!(assign_seq(&c, "c").unwrap(), 3);
+        delete_seq(&c, "a").unwrap();
+        delete_seq(&c, "c").unwrap();
+        assert_eq!(assign_seq(&c, "d").unwrap(), 4, "表清空后仍从高水位继续");
+        assert_eq!(get_meta(&c, mk::SEQ_HWM).unwrap().as_deref(), Some("4"));
+    }
+
+    /// 旧库没有 seq_hwm：从表里现有最大值起步。
+    #[test]
+    fn seq_hwm_bootstraps_from_existing_table() {
+        let c = fresh();
+        c.execute_batch("INSERT INTO todo_seq (todo_id, seq) VALUES ('x', 7)")
+            .unwrap();
+        assert_eq!(assign_seq(&c, "y").unwrap(), 8);
+    }
+
+    #[test]
+    fn image_queue_remove_keeps_names_added_meanwhile() {
+        let c = fresh();
+        assert!(dirty_image_queue(&c).unwrap().is_empty());
+        enqueue_dirty_image(&c, "a.png").unwrap();
+        enqueue_dirty_image(&c, "a.png").unwrap();
+        assert_eq!(dirty_image_queue(&c).unwrap(), vec!["a.png"]);
+        // 上传 a.png 期间又来了 b.png
+        enqueue_dirty_image(&c, "b.png").unwrap();
+        let done: HashSet<String> = ["a.png".to_string()].into_iter().collect();
+        assert_eq!(remove_dirty_images(&c, &done).unwrap(), vec!["b.png"]);
+        assert_eq!(dirty_image_queue(&c).unwrap(), vec!["b.png"]);
+        // 损坏的队列值视为空队列
+        set_meta(&c, mk::DIRTY_IMAGES, "not json").unwrap();
+        assert!(dirty_image_queue(&c).unwrap().is_empty());
+    }
+
+    #[test]
+    fn add_tombstone_keeps_latest_deleted_at() {
+        let c = fresh();
+        add_tombstone(&c, "todo", "1", "2026-05-13 10:00:00").unwrap();
+        add_tombstone(&c, "todo", "1", "2026-05-12 10:00:00").unwrap();
+        assert_eq!(list_tombstones(&c).unwrap()[0].2, "2026-05-13 10:00:00");
+        add_tombstone(&c, "todo", "1", "2026-05-14 10:00:00").unwrap();
+        assert_eq!(list_tombstones(&c).unwrap()[0].2, "2026-05-14 10:00:00");
+    }
+
+    #[test]
+    fn delete_todo_with_children_removes_subtasks_and_seq() {
+        let c = fresh();
+        insert_todo(&c, "1", r#"{"id":1}"#, "2026-05-13 10:00:00");
+        upsert_subtask(&c, "11", "1", r#"{"id":11}"#, "2026-05-13 10:00:00").unwrap();
+        upsert_subtask(&c, "12", "1", r#"{"id":12}"#, "2026-05-13 10:00:00").unwrap();
+        assign_seq(&c, "1").unwrap();
+        assert_eq!(delete_todo_with_children(&c, "1").unwrap(), 2);
+        assert!(get_todo(&c, "1").unwrap().is_none());
+        assert_eq!(count_subtasks_for_todo(&c, "1").unwrap(), 0);
+        assert_eq!(get_seq(&c, "1").unwrap(), None);
+        assert!(tombstone_free(&c));
+    }
+
+    fn tombstone_free(c: &Connection) -> bool {
+        list_tombstones(c).unwrap().is_empty()
+    }
+
+    #[test]
+    fn timestamp_indexes() {
+        let c = fresh();
+        insert_todo(&c, "1", r#"{"id":1}"#, "2026-05-13 10:00:00");
+        upsert_subtask(&c, "11", "1", r#"{"id":11}"#, "2026-05-13 11:00:00").unwrap();
+        assert_eq!(
+            todo_timestamps(&c).unwrap().get("1").map(String::as_str),
+            Some("2026-05-13 10:00:00")
+        );
+        assert_eq!(
+            subtask_timestamps(&c).unwrap().get("11"),
+            Some(&("1".to_string(), "2026-05-13 11:00:00".to_string()))
+        );
     }
 }

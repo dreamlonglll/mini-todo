@@ -1,135 +1,226 @@
-//! Pull worker：定期 GET `/mini-todo/sync-data.json.gz`，per-record LWW
-//! 合并进本地 SQLite。
+//! Pull：条件 GET `/mini-todo/sync-data.json.gz`，按 K3 合并进本地 SQLite。
 //!
-//! - `pull_once`：单次拉取 + 合并 + seq 回填
-//! - `start_pull_loop`：tokio 后台 spawn 的轮询循环（间隔 `pull_interval_secs`）
-//! - 合并后做孤儿清理：远端不再出现的 todo/subtask 在本地删除（连带 `todo_seq`）；
-//!   `meta.dirty == "true"` 时跳过清理，保护 API 本地新建还没 push 的记录
-//! - 推送在 `push.rs` 的 push worker 负责
+//! "基准"（跨端契约 K4）= 最近一次**已完整合并或成功写入**的远端版本的
+//! `(ETag, Last-Modified)`，连同该版本的"信封"（除记录外的顶层键）一起存在
+//! meta 里。只有在合并事务里才会把一次 GET 的校验器记为基准——内容没合并的
+//! GET 结果绝不记为基准（旧版 push 把 PUT 后再 GET 的 ETag 记下来、缓存却没
+//! 更新，之后 pull 永远 304，即审查 A4）。
+//!
+//! - `fetch_and_merge`：pull 与 push 共用的"条件 GET + 合并"一步
+//! - `pull_once`：一次 pull（含 seq 回填、错误记录）
+//! - 后台循环见 `sync::worker`
 
-use std::io::Read as _;
-use std::sync::Arc;
-use std::time::Duration;
+use serde_json::{Map, Value};
+use tracing::{debug, info, warn};
 
-use flate2::read::GzDecoder;
-use serde::Deserialize;
-use tracing::{error, info, warn};
+use crate::db::repo::{self, meta_keys as mk};
+use crate::db::Db;
+use crate::sync::doc::{RemoteDoc, TOMBSTONE_RETENTION_DAYS};
+use crate::sync::merge::{self, MergeStats};
+use crate::sync::webdav::{GetOutcome, Validators};
+use crate::sync::{gunzip, SyncCtx, SYNC_DATA_FILE};
+use crate::time::{days_ago_local_string, now_local_string};
 
-use crate::config::Config;
-use crate::db::{repo, Db};
-use crate::sync::webdav::WebDavClient;
-use crate::sync::SyncLock;
-use crate::time::now_local_string;
-
-/// 远端 `/mini-todo` 同步目录路径。
-const REMOTE_DIR: &str = "/mini-todo";
-const SYNC_DATA_FILE: &str = "/mini-todo/sync-data.json.gz";
-
-/// 与 `pc::commands::sync_cmd::SyncData` 对齐的反序列化结构。
-///
-/// - 字段 camelCase（与 PC 端 `#[serde(rename_all = "camelCase")]` 一致）
-/// - todos 中含嵌套 `subtasks`（PC 端导出时也把 subtask 嵌进去）
-/// - settings / 未知字段全部以 `serde_json::Value` 透传，保持 schema 漂移宽容
-/// - `serde` 默认忽略未知字段，因此 v3.0 旧数据也能解析
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-#[allow(dead_code)] // version / device_id / images 等元信息字段暂未读取，保留以完整映射 sync-data 结构
-pub struct SyncData {
-    #[serde(default)]
-    pub version: String,
-    #[serde(default)]
-    pub device_id: String,
-    #[serde(default)]
-    pub updated_at: String,
-    #[serde(default)]
-    pub todos: Vec<serde_json::Value>,
-    #[serde(default)]
-    pub settings: serde_json::Value,
-    #[serde(default)]
-    pub images: Vec<String>,
-}
-
-/// 主入口：拉一次 + 合并；返回是否成功拿到远端数据。
-///
-/// 304 → 视为成功但跳过解码；调用方读 `meta.last_pull_at` 已被更新即可。
-/// 404 → 远端还没有 sync-data，返回成功但 `data` 为空；进程继续工作。
-pub fn pull_once(cfg: &Config, db: &Db) -> anyhow::Result<()> {
-    pull_once_inner(cfg, db)?;
-    // 不管远端是否变化，本地都可能有从 PC 端同步来的、还没分配 cloud 短码
-    // `seq` 的 todo。每次 pull tick 末尾扫一遍 `todo_seq` LEFT JOIN 缺失行，
-    // 给它们补 seq。开销 O(N) 且只命中没 seq 的，N 一般 < 1000，可忽略。
-    let backfilled = backfill_missing_seq(db).map_err(|e| anyhow::anyhow!("回填 seq: {}", e))?;
-    if backfilled > 0 {
-        info!(target: "minitodo_cloud::pull", "backfilled {} todo seq(s)", backfilled);
+/// 读取基准。没有信封时视为没有基准（304 时无法重建上传文档，必须全量 GET）。
+pub(crate) fn load_base(conn: &rusqlite::Connection) -> rusqlite::Result<Validators> {
+    if repo::get_meta(conn, mk::REMOTE_ENVELOPE)?.is_none() {
+        return Ok(Validators::default());
     }
-    Ok(())
-}
-
-fn pull_once_inner(cfg: &Config, db: &Db) -> anyhow::Result<()> {
-    let client = WebDavClient::new(&cfg.webdav_url, &cfg.webdav_username, &cfg.webdav_password)?;
-    let _ = client.ensure_dir(REMOTE_DIR);
-
-    let last_etag = db
-        .with_conn(|conn| repo::get_meta(conn, "last_etag"))
-        .map_err(|e| anyhow::anyhow!("读 meta.last_etag 失败: {}", e))?;
-    let res = client.get(SYNC_DATA_FILE, last_etag.as_deref())?;
-
-    let now = now_local_string(cfg.timezone_offset);
-
-    match res.status_code {
-        304 => {
-            // 远端无变化，只刷新 last_pull_at
-            db.with_conn(|conn| -> rusqlite::Result<()> {
-                repo::set_meta(conn, "last_pull_at", &now)?;
-                Ok(())
-            })
-            .map_err(|e| anyhow::anyhow!("写 meta 失败: {}", e))?;
-            info!(target: "minitodo_cloud::pull", "remote unchanged (304)");
-            return Ok(());
-        }
-        404 => {
-            // 远端还没创建过 sync-data；不算 error
-            db.with_conn(|conn| -> rusqlite::Result<()> {
-                repo::set_meta(conn, "last_pull_at", &now)?;
-                Ok(())
-            })
-            .map_err(|e| anyhow::anyhow!("写 meta 失败: {}", e))?;
-            warn!(target: "minitodo_cloud::pull", "remote sync-data.json.gz 尚不存在（404）");
-            return Ok(());
-        }
-        200 => {}
-        other => anyhow::bail!("pull 收到意外状态 {}", other),
-    }
-
-    let bytes = res.bytes.unwrap_or_default();
-    let json = gunzip(&bytes)?;
-    let data: SyncData =
-        serde_json::from_str(&json).map_err(|e| anyhow::anyhow!("解析 sync-data 失败: {}", e))?;
-
-    let (todo_n, sub_n) = merge_into_sqlite(db, &data)?;
-    let settings_str = data.settings.to_string();
-
-    db.with_conn(|conn| -> rusqlite::Result<()> {
-        repo::set_meta(conn, "last_pull_at", &now)?;
-        if let Some(etag) = res.etag.as_deref() {
-            repo::set_meta(conn, "last_etag", etag)?;
-        }
-        if let Some(lm) = res.last_modified.as_deref() {
-            repo::set_meta(conn, "last_modified", lm)?;
-        }
-        // settings 整 JSON 存一行。当前只写不读（push 合并时用的是远端 GET 回来的
-        // settings），保留作调试快照 / 未来 /settings 端点的数据源。
-        repo::set_setting(conn, "all", &settings_str)?;
-        Ok(())
+    Ok(Validators {
+        etag: repo::get_meta(conn, mk::BASE_ETAG)?.filter(|s| !s.is_empty()),
+        last_modified: repo::get_meta(conn, mk::BASE_LAST_MODIFIED)?.filter(|s| !s.is_empty()),
     })
-    .map_err(|e| anyhow::anyhow!("写 meta/settings 失败: {}", e))?;
+}
 
-    info!(
-        target: "minitodo_cloud::pull",
-        "pull ok: {} todos merged, {} subtasks merged, last_modified={:?}",
-        todo_n, sub_n, res.last_modified
-    );
+/// 读取基准版本的信封（没有则为空对象）。
+pub(crate) fn load_envelope(conn: &rusqlite::Connection) -> rusqlite::Result<Map<String, Value>> {
+    Ok(repo::get_meta(conn, mk::REMOTE_ENVELOPE)?
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|v| match v {
+            Value::Object(m) => Some(m),
+            _ => None,
+        })
+        .unwrap_or_default())
+}
+
+/// 写入基准校验器。缺失的校验器删除对应键（不留陈旧值）。
+pub(crate) fn store_validators(
+    conn: &rusqlite::Connection,
+    v: &Validators,
+) -> rusqlite::Result<()> {
+    match v.etag.as_deref() {
+        Some(etag) => repo::set_meta(conn, mk::BASE_ETAG, etag)?,
+        None => repo::delete_meta(conn, mk::BASE_ETAG)?,
+    }
+    match v.last_modified.as_deref() {
+        Some(lm) => repo::set_meta(conn, mk::BASE_LAST_MODIFIED, lm)?,
+        None => repo::delete_meta(conn, mk::BASE_LAST_MODIFIED)?,
+    }
     Ok(())
+}
+
+/// 写入基准（校验器 + 信封）。
+pub(crate) fn store_base(
+    conn: &rusqlite::Connection,
+    v: &Validators,
+    envelope: &Map<String, Value>,
+) -> rusqlite::Result<()> {
+    store_validators(conn, v)?;
+    let raw = serde_json::to_string(envelope).unwrap_or_else(|_| "{}".to_string());
+    repo::set_meta(conn, mk::REMOTE_ENVELOPE, &raw)
+}
+
+/// `fetch_and_merge` 的结果。
+#[derive(Debug, Default)]
+pub(crate) struct Fetched {
+    /// 远端 sync-data 是否存在（304 / 200 → true，404 → false）。
+    pub remote_exists: bool,
+    /// 是否拿到并合并了新内容（200）。
+    pub changed: bool,
+    /// 本次 200 响应里的 ETag（检测服务端错误处理 If-Match 用）。
+    pub fetched_etag: Option<String>,
+    pub stats: MergeStats,
+}
+
+/// 条件 GET + 合并。`force_full` 时不带条件头（412 之后用，保证拿到最新内容与校验器）。
+///
+/// - 304：远端仍是基准版本；响应若带新的校验器（Apache 的弱 ETag 一秒后变强）就刷新基准
+/// - 404：远端不存在；清空基准校验器（信封保留，重建文档时还能带上 settings）
+/// - 200：解析失败直接报错（绝不上传覆盖读不懂的远端）；合并 + 记录基准在同一事务里提交
+pub(crate) fn fetch_and_merge(ctx: &SyncCtx, force_full: bool) -> anyhow::Result<Fetched> {
+    let dav = ctx.dav()?;
+    let tz = ctx.cfg.timezone;
+    let base = ctx
+        .db
+        .with_conn(|c| load_base(c))
+        .map_err(|e| anyhow::anyhow!("读同步基准失败: {}", e))?;
+    let cond = if force_full {
+        Validators::default()
+    } else {
+        base.clone()
+    };
+
+    let outcome = dav.get_conditional(SYNC_DATA_FILE, &cond)?;
+    let now = now_local_string(tz);
+    match outcome {
+        GetOutcome::NotModified(fresh) => {
+            if cond.is_empty() {
+                anyhow::bail!("WebDAV 对无条件 GET 返回了 304");
+            }
+            // 只有按 ETag 做的条件请求（If-None-Match）得到的 304 才能证明"当前版本就是
+            // 基准版本"，此时采用响应里更新的校验器（例如 Apache 的弱 ETag 一秒后变强）。
+            // If-Modified-Since 只有秒级精度，同一秒内的另一次写入也会得到 304，那时响应
+            // 里的 ETag 描述的是没合并过的版本，不能采用。
+            let refreshed = if cond.etag.is_some() {
+                Validators {
+                    etag: fresh.etag.or(base.etag),
+                    last_modified: fresh.last_modified.or(base.last_modified),
+                }
+            } else {
+                base
+            };
+            ctx.db
+                .with_conn(|c| -> rusqlite::Result<()> {
+                    store_validators(c, &refreshed)?;
+                    mark_pull_ok(c, &now)
+                })
+                .map_err(|e| anyhow::anyhow!("写 meta 失败: {}", e))?;
+            debug!(target: "minitodo_cloud::pull", "remote unchanged (304)");
+            Ok(Fetched {
+                remote_exists: true,
+                ..Default::default()
+            })
+        }
+        GetOutcome::NotFound => {
+            ctx.db
+                .with_conn(|c| -> rusqlite::Result<()> {
+                    store_validators(c, &Validators::default())?;
+                    mark_pull_ok(c, &now)
+                })
+                .map_err(|e| anyhow::anyhow!("写 meta 失败: {}", e))?;
+            debug!(target: "minitodo_cloud::pull", "remote sync-data.json.gz 尚不存在（404）");
+            Ok(Fetched::default())
+        }
+        GetOutcome::Fetched { body, validators } => {
+            let json = gunzip(&body)?;
+            let doc = RemoteDoc::parse(&json)?;
+            let cutoff = days_ago_local_string(tz, TOMBSTONE_RETENTION_DAYS);
+            let settings_snapshot = doc.settings().cloned().unwrap_or(Value::Null).to_string();
+            let stats = ctx
+                .db
+                .with_conn(|c| -> rusqlite::Result<MergeStats> {
+                    let tx = c.transaction()?;
+                    let stats = merge::apply_remote_doc(&tx, &doc, tz, &cutoff)?;
+                    store_base(&tx, &validators, &doc.envelope())?;
+                    // settings 整 JSON 存一行，只作调试快照（上传时用的是信封里的 settings）
+                    repo::set_setting(&tx, "all", &settings_snapshot)?;
+                    mark_pull_ok(&tx, &now)?;
+                    tx.commit()?;
+                    Ok(stats)
+                })
+                .map_err(|e| anyhow::anyhow!("合并远端 sync-data 失败: {}", e))?;
+            backfill_missing_seq(&ctx.db).map_err(|e| anyhow::anyhow!("回填 seq: {}", e))?;
+            ctx.request_image_mirror();
+            info!(
+                target: "minitodo_cloud::pull",
+                "merged remote: todos +{} -{}, subtasks +{} -{}, tombstones +{}, skipped {}{}",
+                stats.todos_upserted,
+                stats.todos_deleted,
+                stats.subtasks_upserted,
+                stats.subtasks_deleted,
+                stats.tombstones_applied,
+                stats.records_skipped,
+                if stats.legacy_cleanup { " (legacy cleanup)" } else { "" }
+            );
+            Ok(Fetched {
+                remote_exists: true,
+                changed: true,
+                fetched_etag: validators.etag,
+                stats,
+            })
+        }
+    }
+}
+
+fn mark_pull_ok(conn: &rusqlite::Connection, now: &str) -> rusqlite::Result<()> {
+    repo::set_meta(conn, mk::LAST_PULL_AT, now)?;
+    repo::delete_meta(conn, mk::LAST_PULL_ERROR)
+}
+
+/// 一次 pull 的结果。
+#[derive(Debug, Default)]
+pub struct PullReport {
+    pub remote_exists: bool,
+    pub changed: bool,
+    pub stats: MergeStats,
+}
+
+/// 单次 pull：条件 GET + 合并 + seq 回填。失败时把错误写进 `meta.last_pull_error`。
+/// 只能在阻塞上下文、同步锁内调用（见 `SyncCtx::run_locked`）。
+pub fn pull_once(ctx: &SyncCtx) -> anyhow::Result<PullReport> {
+    let res = fetch_and_merge(ctx, false).and_then(|f| {
+        // 不管远端是否变化，本地都可能有还没分配 cloud 短码的 todo（例如旧版本遗留），
+        // 每次 pull 末尾扫一遍补上；开销 O(N) 且只命中没 seq 的。
+        let n = backfill_missing_seq(&ctx.db).map_err(|e| anyhow::anyhow!("回填 seq: {}", e))?;
+        if n > 0 {
+            info!(target: "minitodo_cloud::pull", "backfilled {} todo seq(s)", n);
+        }
+        Ok(PullReport {
+            remote_exists: f.remote_exists,
+            changed: f.changed,
+            stats: f.stats,
+        })
+    });
+    if let Err(e) = &res {
+        let msg = format!("{:#}", e);
+        if let Err(db_err) = ctx
+            .db
+            .with_conn(|c| repo::set_meta(c, mk::LAST_PULL_ERROR, &msg))
+        {
+            warn!(target: "minitodo_cloud::pull", "记录 last_pull_error 失败: {}", db_err);
+        }
+    }
+    res
 }
 
 /// 扫 todos 表，给在 `todo_seq` 中无对应行的 todo 分配 seq。
@@ -142,309 +233,4 @@ pub(crate) fn backfill_missing_seq(db: &Db) -> rusqlite::Result<usize> {
         }
         Ok(ids.len())
     })
-}
-
-/// 后台 spawn 的轮询循环。
-pub fn start_pull_loop(cfg: Arc<Config>, db: Db, sync_lock: SyncLock) {
-    let interval = Duration::from_secs(cfg.pull_interval_secs);
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(interval).await;
-            let cfg_ref = cfg.clone();
-            let db_ref = db.clone();
-            // 在 async 层拿锁、持有到 blocking 段结束（不能在 blocking 线程里
-            // 做 async 锁操作），与 push tick / POST /sync 串行。
-            let _guard = sync_lock.lock().await;
-            let res = tokio::task::spawn_blocking(move || pull_once(&cfg_ref, &db_ref)).await;
-            match res {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => error!(target: "minitodo_cloud::pull", "pull tick failed: {:#}", e),
-                Err(join_err) => {
-                    error!(target: "minitodo_cloud::pull", "pull task panicked: {}", join_err)
-                }
-            }
-        }
-    });
-}
-
-/// per-record LWW merge + 孤儿清理。
-///
-/// 1. 远端 record.updated_at ≥ 本地 → upsert；反之保留本地
-/// 2. merge 完毕后，删除"本地有但远端没有"的 todos/subtasks（孤儿清理）
-///    — 当 `meta.dirty == "true"` 时跳过清理，保护 cloud API 本地新建还没 push 的记录
-fn merge_into_sqlite(db: &Db, data: &SyncData) -> anyhow::Result<(usize, usize)> {
-    db.with_conn(|conn| -> rusqlite::Result<(usize, usize)> {
-        let tx = conn.transaction()?;
-
-        // dirty flag 必须在事务内读，防止事务开始后 API handler 新建 todo
-        // 设 dirty=true 但清理逻辑仍按旧的 dirty=false 执行。
-        //
-        // 读失败时按"可能有未推送的本地新建"处理：跳过清理并打日志。
-        // 宁可留孤儿（下次 pull 会再清），不可误删本地记录。
-        let skip_cleanup = match repo::get_meta(&tx, "dirty") {
-            Ok(v) => v.as_deref() == Some("true"),
-            Err(e) => {
-                warn!(
-                    target: "minitodo_cloud::pull",
-                    "读 meta.dirty 失败，本轮跳过孤儿清理: {}", e
-                );
-                true
-            }
-        };
-
-        let mut todo_n = 0usize;
-        let mut sub_n = 0usize;
-
-        let mut remote_todo_ids: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
-        let mut remote_subtask_ids: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
-
-        for todo in &data.todos {
-            let id = match extract_id(todo) {
-                Some(v) => v,
-                None => continue,
-            };
-            remote_todo_ids.insert(id.clone());
-
-            let updated_at = todo
-                .get("updatedAt")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-
-            if let Some(subtasks) = todo.get("subtasks").and_then(|v| v.as_array()) {
-                for sub in subtasks {
-                    let sid = match extract_id(sub) {
-                        Some(v) => v,
-                        None => continue,
-                    };
-                    remote_subtask_ids.insert(sid.clone());
-                    let sub_updated = sub
-                        .get("updatedAt")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let body = sub.to_string();
-                    if repo::upsert_subtask_if_newer(&tx, &sid, &id, &body, &sub_updated)? {
-                        sub_n += 1;
-                    }
-                }
-            }
-
-            let body = todo.to_string();
-            if repo::upsert_todo_if_newer(&tx, &id, &body, &updated_at)? {
-                todo_n += 1;
-            }
-        }
-
-        if !skip_cleanup {
-            repo::delete_todos_not_in(&tx, &remote_todo_ids)?;
-            repo::delete_subtasks_not_in(&tx, &remote_subtask_ids)?;
-        }
-
-        tx.commit()?;
-        Ok((todo_n, sub_n))
-    })
-    .map_err(|e| anyhow::anyhow!("merge_into_sqlite 失败: {}", e))
-}
-
-/// PC 端 todo / subtask 的 `id` 是 i64；这里统一转字符串便于 PK 处理。
-/// 复用 `crate::util::id_string`（同一份逻辑也在 push / api 用）。
-use crate::util::id_string as extract_id;
-
-fn gunzip(data: &[u8]) -> anyhow::Result<String> {
-    let mut dec = GzDecoder::new(data);
-    let mut out = String::new();
-    dec.read_to_string(&mut out)
-        .map_err(|e| anyhow::anyhow!("gunzip 失败: {}", e))?;
-    Ok(out)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::TempDir;
-
-    fn fresh_db() -> (Db, TempDir) {
-        let tmp = TempDir::new().expect("tempdir");
-        let db = Db::open(&tmp.path().join("data.db")).expect("open db");
-        (db, tmp)
-    }
-
-    fn todo_value(id: i64, title: &str, updated_at: &str) -> serde_json::Value {
-        serde_json::json!({
-            "id": id,
-            "title": title,
-            "updatedAt": updated_at,
-            "subtasks": []
-        })
-    }
-
-    fn subtask_value(id: i64, parent_id: i64, title: &str, updated_at: &str) -> serde_json::Value {
-        serde_json::json!({
-            "id": id,
-            "parentId": parent_id,
-            "title": title,
-            "updatedAt": updated_at
-        })
-    }
-
-    fn sync_data(todos: Vec<serde_json::Value>) -> SyncData {
-        SyncData {
-            version: "4.0".to_string(),
-            device_id: "test".to_string(),
-            updated_at: String::new(),
-            todos,
-            settings: serde_json::Value::Null,
-            images: Vec::new(),
-        }
-    }
-
-    fn todo_title(db: &Db, id: &str) -> Option<String> {
-        db.with_conn(|conn| {
-            repo::get_todo(conn, id).unwrap().map(|row| {
-                serde_json::from_str::<serde_json::Value>(&row.data_json).unwrap()["title"]
-                    .as_str()
-                    .unwrap()
-                    .to_string()
-            })
-        })
-    }
-
-    #[test]
-    fn merge_cleanup_removes_remote_missing_todos_and_seq() {
-        let (db, _tmp) = fresh_db();
-        merge_into_sqlite(
-            &db,
-            &sync_data(vec![
-                todo_value(1, "留", "2026-01-01 10:00:00"),
-                todo_value(2, "删", "2026-01-01 10:00:00"),
-            ]),
-        )
-        .unwrap();
-        db.with_conn(|conn| repo::assign_seq(conn, "2").unwrap());
-
-        merge_into_sqlite(
-            &db,
-            &sync_data(vec![todo_value(1, "留", "2026-01-01 10:00:00")]),
-        )
-        .unwrap();
-
-        assert!(todo_title(&db, "1").is_some());
-        assert!(todo_title(&db, "2").is_none());
-        // 清理必须连带 todo_seq，否则 seq 会被下一个新 todo 复用出错
-        db.with_conn(|conn| {
-            assert_eq!(repo::get_seq(conn, "2").unwrap(), None);
-        });
-    }
-
-    #[test]
-    fn merge_cleanup_removes_orphan_subtasks() {
-        let (db, _tmp) = fresh_db();
-        let mut t = todo_value(1, "父", "2026-01-01 10:00:00");
-        t["subtasks"] = serde_json::json!([
-            subtask_value(11, 1, "留", "2026-01-01 10:00:00"),
-            subtask_value(12, 1, "删", "2026-01-01 10:00:00"),
-        ]);
-        merge_into_sqlite(&db, &sync_data(vec![t])).unwrap();
-
-        let mut t2 = todo_value(1, "父", "2026-01-01 10:00:00");
-        t2["subtasks"] = serde_json::json!([subtask_value(11, 1, "留", "2026-01-01 10:00:00")]);
-        merge_into_sqlite(&db, &sync_data(vec![t2])).unwrap();
-
-        db.with_conn(|conn| {
-            assert!(repo::get_subtask(conn, "11").unwrap().is_some());
-            assert!(repo::get_subtask(conn, "12").unwrap().is_none());
-        });
-    }
-
-    /// dirty=true 表示 cloud API 有本地新建还没 push 的记录，此时跳过清理，
-    /// 避免"远端还没见过的新记录"被当孤儿删掉。
-    #[test]
-    fn merge_cleanup_skipped_when_dirty() {
-        let (db, _tmp) = fresh_db();
-        merge_into_sqlite(
-            &db,
-            &sync_data(vec![
-                todo_value(1, "A", "2026-01-01 10:00:00"),
-                todo_value(2, "本地新建", "2026-01-01 10:00:00"),
-            ]),
-        )
-        .unwrap();
-        db.with_conn(|conn| repo::set_meta(conn, "dirty", "true").unwrap());
-
-        merge_into_sqlite(
-            &db,
-            &sync_data(vec![todo_value(1, "A", "2026-01-01 10:00:00")]),
-        )
-        .unwrap();
-
-        assert!(todo_title(&db, "2").is_some(), "dirty 时不得清理本地记录");
-    }
-
-    /// 读 dirty 出错（这里用 DROP TABLE meta 注入 DB 错误）时同样跳过清理：
-    /// 早期 `get_meta` 把错误吞成 `None`，会被误判成"不脏"而删掉本地新记录。
-    #[test]
-    fn merge_cleanup_skipped_when_dirty_read_fails() {
-        let (db, _tmp) = fresh_db();
-        merge_into_sqlite(
-            &db,
-            &sync_data(vec![
-                todo_value(1, "A", "2026-01-01 10:00:00"),
-                todo_value(2, "本地新建", "2026-01-01 10:00:00"),
-            ]),
-        )
-        .unwrap();
-        // 注入 DB 错误：meta 表没了，get_meta 必然返回 Err
-        db.with_conn(|conn| conn.execute_batch("DROP TABLE meta"))
-            .unwrap();
-
-        merge_into_sqlite(
-            &db,
-            &sync_data(vec![todo_value(1, "A", "2026-01-01 10:00:00")]),
-        )
-        .unwrap();
-
-        assert!(
-            todo_title(&db, "2").is_some(),
-            "读 dirty 失败时不得清理本地记录"
-        );
-    }
-
-    #[test]
-    fn merge_lww_keeps_newer_local() {
-        let (db, _tmp) = fresh_db();
-        merge_into_sqlite(
-            &db,
-            &sync_data(vec![todo_value(1, "本地较新", "2026-01-05 10:00:00")]),
-        )
-        .unwrap();
-
-        merge_into_sqlite(
-            &db,
-            &sync_data(vec![todo_value(1, "远端较旧", "2026-01-02 10:00:00")]),
-        )
-        .unwrap();
-
-        assert_eq!(todo_title(&db, "1").as_deref(), Some("本地较新"));
-    }
-
-    #[test]
-    fn merge_lww_applies_newer_remote() {
-        let (db, _tmp) = fresh_db();
-        merge_into_sqlite(
-            &db,
-            &sync_data(vec![todo_value(1, "旧", "2026-01-01 10:00:00")]),
-        )
-        .unwrap();
-
-        merge_into_sqlite(
-            &db,
-            &sync_data(vec![todo_value(1, "新", "2026-01-03 10:00:00")]),
-        )
-        .unwrap();
-
-        assert_eq!(todo_title(&db, "1").as_deref(), Some("新"));
-    }
 }

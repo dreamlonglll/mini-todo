@@ -1,559 +1,372 @@
-//! Push worker：1s tick 扫 `meta.dirty`；若 dirty，把云端 SQLite 当前快照
-//! merge 进远端 `sync-data.json.gz` 并条件 PUT 回去。
+//! Push：把云端本地写入推到 WebDAV（跨端契约 K4 / K5）。
 //!
-//! 同时挂一个图片 push：扫 `meta.dirty_images`（JSON 数组），逐个 PUT 到
-//! WebDAV `/mini-todo/images/`。
+//! 流程（整段在同步锁内、阻塞线程里执行）：
+//! 1. **先传图片**（`meta.dirty_images` 队列），失败的留在队列里下轮重试
+//! 2. sync-data（仅当 `meta.dirty`）：
+//!    - 写前**总是**先条件 GET 并按 K3 合并进本地 SQLite（与 pull 同一实现，
+//!      合并与记录基准同一事务）。服务端忽略条件头（nginx dav / Caddy webdav）
+//!      时，丢更新窗口也只剩 GET→PUT 的几秒
+//!    - 用"合并后的本地状态 + 基准信封"构造文档：未知顶层键、`settings`、
+//!      `settingsUpdatedAt` 原样保留
+//!    - 条件 PUT：基准是强 ETag 才用 `If-Match`（Apache 一秒内的弱 ETag 做
+//!      `If-Match` 必然 412）；否则用 `If-Unmodified-Since`；远端不存在不带条件
+//!    - 412 → 无条件重新 GET → 合并 → 重试（≤3 次）；404/409 → MKCOL 后重试一次
+//!    - 成功 → 基准取 PUT 响应的 ETag/Last-Modified，都没有（Apache）就用一次
+//!      `PROPFIND Depth: 0`，**不整包 GET**；本地缓存此时已经等于刚上传的文档
+//!      （合并结果先落库再导出），不会出现"基准指向缓存里没有的内容"（审查 A4）
+//!    - dirty 只在 `dirty_generation` 没变时清除（推送窗口期内的新写入留给下一轮）
 
 use std::collections::HashSet;
-use std::io::Write as _;
-use std::sync::Arc;
-use std::time::Duration;
 
-use flate2::write::GzEncoder;
-use flate2::Compression;
-use serde::Serialize;
-use serde_json::{json, Value};
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
-use crate::config::Config;
-use crate::db::{repo, Db};
-use crate::sync::webdav::WebDavClient;
-use crate::sync::SyncLock;
-use crate::time::now_local_string;
+use crate::db::repo::{self, meta_keys as mk};
+use crate::sync::doc::{self, envelope_images, TOMBSTONE_RETENTION_DAYS};
+use crate::sync::images::{self, ImagePushReport};
+use crate::sync::pull::{fetch_and_merge, load_base, load_envelope, store_base};
+use crate::sync::webdav::{is_strong_etag, Precondition, PutOutcome, Validators, WebDavClient};
+use crate::sync::{gzip, SyncCtx, REMOTE_DIR, SYNC_DATA_FILE};
+use crate::time::{days_ago_local_string, now_local_string};
 
-const REMOTE_DIR: &str = "/mini-todo";
-const REMOTE_IMAGES_DIR: &str = "/mini-todo/images";
-const SYNC_DATA_FILE: &str = "/mini-todo/sync-data.json.gz";
+/// sync-data PUT 最多尝试次数（412 重试上限）。
+pub const MAX_PUT_ATTEMPTS: u32 = 3;
 
-/// 一次 sync-data 推送的结果。
-enum PushOutcome {
-    /// PUT 成功落到远端。
-    Pushed,
-    /// 412：远端被别人改过，本轮放弃；dirty 保持 true 等下一轮重试。
-    Retry,
+/// 一次 push 的结果。
+#[derive(Debug, Default)]
+pub struct PushReport {
+    pub images: ImagePushReport,
+    /// sync-data 是否成功 PUT。
+    pub pushed: bool,
+    /// sync-data PUT 尝试次数。
+    pub attempts: u32,
+    /// 是否清除了 dirty（推送窗口期内有新写入时不清）。
+    pub dirty_cleared: bool,
 }
 
-/// 后台 spawn 的 push 循环（1s tick）。
-pub fn start_push_loop(cfg: Arc<Config>, db: Db, sync_lock: SyncLock) {
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            let cfg_ref = cfg.clone();
-            let db_ref = db.clone();
-            // 在 async 层拿锁、持有到 blocking 段结束（不能在 blocking 线程里
-            // 做 async 锁操作），与 pull tick / POST /sync 串行。
-            let _guard = sync_lock.lock().await;
-            let res = tokio::task::spawn_blocking(move || push_tick(&cfg_ref, &db_ref)).await;
-            match res {
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => error!(target: "minitodo_cloud::push", "push tick failed: {:#}", e),
-                Err(join_err) => {
-                    error!(target: "minitodo_cloud::push", "push task panicked: {}", join_err)
-                }
-            }
-        }
-    });
-}
-
-/// 单次 tick：检查 dirty / dirty_images 并处理。
+/// 选择 PUT 的前置条件（K4）。
 ///
-/// dirty 的清除时机：**PUT 成功之后**，且仅当 `dirty_generation` 相比本轮开始
-/// 时没有变化。早期版本在推送前就置 dirty=false，慢速网络窗口期内并发的 pull
-/// 会把本地新建、还没推上去的记录当孤儿删掉（进程在此期间崩溃亦然）。
-pub fn push_tick(cfg: &Config, db: &Db) -> anyhow::Result<()> {
-    // === dirty sync-data ===
-    let dirty = db
-        .with_conn(|conn| repo::get_meta(conn, "dirty"))
-        .map_err(|e| anyhow::anyhow!("读 meta.dirty 失败: {}", e))?;
-    if dirty.as_deref() == Some("true") {
-        // 记录本轮起始 generation；dirty 不预清，失败 / 崩溃路径天然保持 true。
-        let g0 = db
-            .with_conn(|conn| repo::get_dirty_generation(conn))
-            .map_err(|e| anyhow::anyhow!("读 meta.dirty_generation 失败: {}", e))?;
-        if let PushOutcome::Pushed = do_push_sync_data(cfg, db)? {
-            clear_dirty_if_unchanged(db, g0)?;
+/// - 远端不存在 → 不带条件
+/// - 基准 ETag 是强 ETag（且服务端没被证实错误处理 If-Match）→ `If-Match`
+/// - 否则有 Last-Modified → `If-Unmodified-Since`
+/// - 什么都没有 → 不带条件
+pub fn select_precondition(
+    remote_exists: bool,
+    base: &Validators,
+    if_match_allowed: bool,
+) -> Precondition<'_> {
+    if !remote_exists {
+        return Precondition::Unconditional;
+    }
+    if if_match_allowed {
+        if let Some(etag) = base.etag.as_deref().filter(|e| is_strong_etag(e)) {
+            return Precondition::IfMatch(etag.trim());
         }
     }
-
-    // === dirty images ===
-    push_dirty_images(cfg, db)?;
-    Ok(())
-}
-
-/// PUT 成功后的收尾：generation 仍等于 `g0` 才置 dirty=false，返回是否清除。
-///
-/// generation 变了说明推送窗口期内又有新写入（这些改动不在刚 PUT 的快照里），
-/// dirty 必须保留给下一轮。读 + 判 + 写在同一个 `with_conn` 闭包内完成，与
-/// 写路径的 `mark_dirty` 互斥（`Db` 的 Mutex 保证）。
-fn clear_dirty_if_unchanged(db: &Db, g0: i64) -> rusqlite::Result<bool> {
-    db.with_conn(|conn| -> rusqlite::Result<bool> {
-        if repo::get_dirty_generation(conn)? != g0 {
-            return Ok(false);
-        }
-        repo::set_meta(conn, "dirty", "false")?;
-        Ok(true)
-    })
-}
-
-fn do_push_sync_data(cfg: &Config, db: &Db) -> anyhow::Result<PushOutcome> {
-    let client = WebDavClient::new(&cfg.webdav_url, &cfg.webdav_username, &cfg.webdav_password)?;
-    let _ = client.ensure_dir(REMOTE_DIR);
-    let _ = client.ensure_dir(REMOTE_IMAGES_DIR);
-
-    // 1) 读远端最新快照（注意：不用 If-None-Match——这里要拿到 last_modified
-    //    并基于它构建合并 + 后续条件 PUT）
-    let res = client.get(SYNC_DATA_FILE, None)?;
-    let (remote_data, remote_last_modified) = match res.status_code {
-        200 => {
-            let bytes = res.bytes.unwrap_or_default();
-            let json = gunzip(&bytes)?;
-            let v: Value = serde_json::from_str(&json)
-                .map_err(|e| anyhow::anyhow!("解析远端 sync-data 失败: {}", e))?;
-            (v, res.last_modified)
-        }
-        404 => (json!({}), None), // 远端还没有，第一次 PUT
-        other => anyhow::bail!("push 阶段 GET 收到状态 {}", other),
-    };
-
-    // 2) merge 本地快照进 remote_data
-    let local_snapshot = build_local_snapshot(cfg, db)?;
-    let merged = merge_sync_data(&remote_data, &local_snapshot, db, cfg)?;
-
-    // 3) gzip + 条件 PUT
-    let payload = serde_json::to_vec(&merged)?;
-    let compressed = gzip(&payload)?;
-
-    let put = client.put(
-        SYNC_DATA_FILE,
-        &compressed,
-        "application/gzip",
-        remote_last_modified.as_deref(),
-    )?;
-    match put.status_code {
-        200 | 201 | 204 => {
-            // 成功：更新 meta.last_pull_at + last_modified（重读拿到新值最准；
-            // 这里简化为「PUT 后立刻 GET 一次 HEAD-ish」即重新 GET 拿 Last-Modified）。
-            // 但额外 GET 会浪费一次往返；用现有 If-Unmodified-Since（如果有）+ 当前墙钟兜底
-            let after_get = client.get(SYNC_DATA_FILE, None).ok();
-            let new_lm = after_get.as_ref().and_then(|g| g.last_modified.clone());
-
-            let now_local = now_local_string(cfg.timezone_offset);
-            db.with_conn(|conn| -> rusqlite::Result<()> {
-                repo::set_meta(conn, "last_pull_at", &now_local)?;
-                if let Some(lm) = new_lm.as_deref() {
-                    repo::set_meta(conn, "last_modified", lm)?;
-                }
-                if let Some(ref etag) = after_get.and_then(|g| g.etag) {
-                    repo::set_meta(conn, "last_etag", etag)?;
-                }
-                // 清理超过 7 天的 tombstone（用 PC 风格本地时间字符串比较；
-                // chrono 算 7 天前的本地时间）
-                let cutoff = chrono::Utc::now()
-                    .with_timezone(&cfg.timezone_offset)
-                    .checked_sub_signed(chrono::Duration::days(7))
-                    .map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string());
-                if let Some(c) = cutoff {
-                    let _ = repo::purge_tombstones_before(conn, &c);
-                }
-                Ok(())
-            })?;
-            info!(target: "minitodo_cloud::push", "push ok");
-            Ok(PushOutcome::Pushed)
-        }
-        412 => {
-            // 远端被别人改过：本轮不算推送成功，dirty 保持 true，下轮重试
-            warn!(target: "minitodo_cloud::push", "412 precondition failed; will retry");
-            Ok(PushOutcome::Retry)
-        }
-        other => {
-            anyhow::bail!("push PUT 收到状态 {}", other);
-        }
-    }
-}
-
-/// 本地 SQLite 全部 todos + subtasks 序列化成一个简化的 "snapshot" 形式：
-/// 每条 todo 的 `data_json` 反序列化为 Value，并把 subtasks 嵌入。
-#[derive(Debug, Clone, Serialize)]
-struct LocalSnapshot {
-    todos: Vec<Value>,
-    images: Vec<String>,
-}
-
-type TodoTuple = (String, Value, String);
-type SubtaskTuple = (Value, String);
-type SnapshotRaw = (
-    Vec<TodoTuple>,
-    std::collections::HashMap<String, Vec<SubtaskTuple>>,
-);
-
-fn build_local_snapshot(cfg: &Config, db: &Db) -> anyhow::Result<LocalSnapshot> {
-    let (todos, subtasks_by_todo) = db.with_conn(|conn| -> rusqlite::Result<SnapshotRaw> {
-        let todo_rows = repo::all_todos(conn)?;
-        let mut todos_acc: Vec<TodoTuple> = Vec::with_capacity(todo_rows.len());
-        for r in todo_rows {
-            let v: Value =
-                serde_json::from_str(&r.data_json).unwrap_or_else(|_| json!({"id": r.id}));
-            todos_acc.push((r.id.clone(), v, r.updated_at));
-        }
-        let sub_rows = repo::all_subtasks(conn)?;
-        let mut sub_map: std::collections::HashMap<String, Vec<SubtaskTuple>> =
-            std::collections::HashMap::new();
-        for r in sub_rows {
-            let v: Value =
-                serde_json::from_str(&r.data_json).unwrap_or_else(|_| json!({"id": r.id}));
-            sub_map
-                .entry(r.todo_id.clone())
-                .or_default()
-                .push((v, r.updated_at));
-        }
-        Ok((todos_acc, sub_map))
-    })?;
-
-    let mut out_todos = Vec::with_capacity(todos.len());
-    for (id, mut v, _ts) in todos {
-        let mut subs_vals: Vec<Value> = subtasks_by_todo
-            .get(&id)
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(sv, _)| sv)
-            .collect();
-        // 保持顺序：按 sortOrder asc
-        subs_vals.sort_by_key(|s| s.get("sortOrder").and_then(|v| v.as_i64()).unwrap_or(0));
-        v["subtasks"] = Value::Array(subs_vals);
-        out_todos.push(v);
-    }
-    // todos 按 sortOrder asc
-    out_todos.sort_by_key(|t| t.get("sortOrder").and_then(|v| v.as_i64()).unwrap_or(0));
-
-    // 本地 images 目录文件列表
-    let mut images = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&cfg.images_dir) {
-        for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                images.push(name.to_string());
-            }
-        }
-    }
-    images.sort();
-
-    Ok(LocalSnapshot {
-        todos: out_todos,
-        images,
-    })
-}
-
-/// per-record LWW merge：本地 + 远端 → 合并 SyncData。
-///
-/// - todos & nested subtasks：updatedAt 大的胜
-/// - 本地有 tombstone → 把对应 record 从合并结果中剔除
-/// - 远端 settings 总是优先（云端不写 settings）
-fn merge_sync_data(
-    remote: &Value,
-    local: &LocalSnapshot,
-    db: &Db,
-    cfg: &Config,
-) -> anyhow::Result<Value> {
-    // 收集本地 tombstones
-    let (todo_tombs, subtask_tombs) = db.with_conn(
-        |conn| -> rusqlite::Result<(HashSet<String>, HashSet<String>)> {
-            let mut t = HashSet::new();
-            let mut s = HashSet::new();
-            for (typ, id, _ts) in repo::list_tombstones(conn)? {
-                match typ.as_str() {
-                    "todo" => {
-                        t.insert(id);
-                    }
-                    "subtask" => {
-                        s.insert(id);
-                    }
-                    _ => {}
-                }
-            }
-            Ok((t, s))
-        },
-    )?;
-
-    // 远端 todos & subtasks
-    let remote_todos = remote
-        .get("todos")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    // 按 id 索引 local todos
-    let mut local_by_id: std::collections::HashMap<String, Value> =
-        std::collections::HashMap::new();
-    for t in &local.todos {
-        if let Some(id) = id_string(t) {
-            local_by_id.insert(id, t.clone());
-        }
-    }
-
-    // 输出 todos：以 union(id) 为基准
-    let mut all_ids: Vec<String> = local_by_id.keys().cloned().collect();
-    for r in &remote_todos {
-        if let Some(id) = id_string(r) {
-            if !all_ids.contains(&id) {
-                all_ids.push(id);
-            }
-        }
-    }
-
-    let mut out_todos: Vec<Value> = Vec::new();
-    for id in &all_ids {
-        if todo_tombs.contains(id) {
-            // 本地已删除，丢弃
-            continue;
-        }
-        let remote_t = remote_todos
-            .iter()
-            .find(|t| id_string(t).as_deref() == Some(id));
-        let local_t = local_by_id.get(id);
-        let merged_todo = match (remote_t, local_t) {
-            (Some(r), Some(l)) => {
-                if updated_at(l) >= updated_at(r) {
-                    // 本地更新或同时：以本地为主体，但子任务还要 union-merge
-                    let mut base = l.clone();
-                    let merged_subs =
-                        merge_subtasks_into(remote_subs(r), local_subs(l), &subtask_tombs);
-                    base["subtasks"] = Value::Array(merged_subs);
-                    base
-                } else {
-                    let mut base = r.clone();
-                    let merged_subs =
-                        merge_subtasks_into(remote_subs(r), local_subs(l), &subtask_tombs);
-                    base["subtasks"] = Value::Array(merged_subs);
-                    base
-                }
-            }
-            (Some(r), None) => {
-                // 本地没有 + 远端有：可能本地没 pull 过；保留远端
-                let mut base = r.clone();
-                let merged_subs = merge_subtasks_into(remote_subs(r), Vec::new(), &subtask_tombs);
-                base["subtasks"] = Value::Array(merged_subs);
-                base
-            }
-            (None, Some(l)) => {
-                let mut base = l.clone();
-                let merged_subs = merge_subtasks_into(Vec::new(), local_subs(l), &subtask_tombs);
-                base["subtasks"] = Value::Array(merged_subs);
-                base
-            }
-            (None, None) => continue, // 不可能命中（id 来源于其中之一）
-        };
-        out_todos.push(merged_todo);
-    }
-
-    // settings：远端优先。若远端为空（首次部署，云端 push 比 PC 第一次 PUT 还早
-    // 的边角场景），写入一个最小合法的 PC AppSettings——`is_fixed` / `window_position`
-    // / `window_size` 在 PC 端不带 `serde(default)`，缺失会导致 PC import 失败。
-    let settings = match remote.get("settings") {
-        Some(v) if !v.is_null() && v.is_object() => v.clone(),
-        _ => default_app_settings_value(),
-    };
-
-    // images：远端 ∪ 本地
-    let mut images: HashSet<String> = local.images.iter().cloned().collect();
-    if let Some(arr) = remote.get("images").and_then(|v| v.as_array()) {
-        for v in arr {
-            if let Some(s) = v.as_str() {
-                images.insert(s.to_string());
-            }
-        }
-    }
-    let mut images_vec: Vec<String> = images.into_iter().collect();
-    images_vec.sort();
-
-    // 元信息
-    let now_iso = chrono::Utc::now()
-        .with_timezone(&cfg.timezone_offset)
-        .format("%Y-%m-%dT%H:%M:%S%:z")
-        .to_string();
-    let version = remote
-        .get("version")
-        .and_then(|v| v.as_str())
-        .unwrap_or("4.0")
-        .to_string();
-    let device_id = remote
-        .get("deviceId")
-        .and_then(|v| v.as_str())
-        .unwrap_or("cloud")
-        .to_string();
-
-    Ok(json!({
-        "version": version,
-        "deviceId": device_id,
-        "updatedAt": now_iso,
-        "todos": out_todos,
-        "settings": settings,
-        "images": images_vec,
-    }))
-}
-
-fn remote_subs(t: &Value) -> Vec<Value> {
-    t.get("subtasks")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default()
-}
-
-fn local_subs(t: &Value) -> Vec<Value> {
-    t.get("subtasks")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default()
-}
-
-fn merge_subtasks_into(
-    remote_subs: Vec<Value>,
-    local_subs: Vec<Value>,
-    subtask_tombs: &HashSet<String>,
-) -> Vec<Value> {
-    let mut by_id: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
-    for s in remote_subs {
-        if let Some(id) = id_string(&s) {
-            if subtask_tombs.contains(&id) {
-                continue;
-            }
-            by_id.insert(id, s);
-        }
-    }
-    for s in local_subs {
-        let Some(id) = id_string(&s) else { continue };
-        if subtask_tombs.contains(&id) {
-            by_id.remove(&id);
-            continue;
-        }
-        match by_id.get(&id) {
-            Some(existing) if updated_at(existing) >= updated_at(&s) => {}
-            _ => {
-                by_id.insert(id, s);
-            }
-        }
-    }
-    let mut out: Vec<Value> = by_id.into_values().collect();
-    out.sort_by_key(|s| s.get("sortOrder").and_then(|v| v.as_i64()).unwrap_or(0));
-    out
-}
-
-// 复用 util 模块的实现，保持三处（push / pull / api）行为一致。
-use crate::util::id_string;
-
-fn updated_at(v: &Value) -> &str {
-    v.get("updatedAt").and_then(|x| x.as_str()).unwrap_or("")
-}
-
-/// 远端 sync-data 不存在或没有 settings 时使用的最小合法对象。
-/// 与 `pc/src-tauri/src/db/models.rs::AppSettings` 的必填字段对齐，剩下字段
-/// 都有 `serde(default)` 兜底，PC 反序列化时会自动填默认值。
-fn default_app_settings_value() -> Value {
-    json!({
-        "isFixed": false,
-        "windowPosition": null,
-        "windowSize": null,
-    })
-}
-
-fn gzip(data: &[u8]) -> anyhow::Result<Vec<u8>> {
-    let mut enc = GzEncoder::new(Vec::new(), Compression::default());
-    enc.write_all(data)
-        .map_err(|e| anyhow::anyhow!("gzip write: {}", e))?;
-    enc.finish()
-        .map_err(|e| anyhow::anyhow!("gzip finish: {}", e))
-}
-
-fn gunzip(data: &[u8]) -> anyhow::Result<String> {
-    use std::io::Read as _;
-    let mut dec = flate2::read::GzDecoder::new(data);
-    let mut out = String::new();
-    dec.read_to_string(&mut out)
-        .map_err(|e| anyhow::anyhow!("gunzip: {}", e))?;
-    Ok(out)
-}
-
-// =============================================================================
-// 图片 push
-// =============================================================================
-
-fn push_dirty_images(cfg: &Config, db: &Db) -> anyhow::Result<()> {
-    let raw = db
-        .with_conn(|conn| repo::get_meta(conn, "dirty_images"))
-        .map_err(|e| anyhow::anyhow!("读 meta.dirty_images 失败: {}", e))?;
-    let names: Vec<String> = raw
+    match base
+        .last_modified
         .as_deref()
-        .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
-        .unwrap_or_default();
-    if names.is_empty() {
-        return Ok(());
-    }
-
-    let client = WebDavClient::new(&cfg.webdav_url, &cfg.webdav_username, &cfg.webdav_password)?;
-    let _ = client.ensure_dir(REMOTE_IMAGES_DIR);
-
-    let mut remaining: Vec<String> = Vec::new();
-    for name in &names {
-        let local_path = cfg.images_dir.join(name);
-        if !local_path.exists() {
-            // 本地不见了，跳过；不挂回 dirty
-            warn!(target: "minitodo_cloud::push", "dirty image {} missing locally, drop", name);
-            continue;
-        }
-        let bytes = match std::fs::read(&local_path) {
-            Ok(b) => b,
-            Err(e) => {
-                warn!(target: "minitodo_cloud::push", "read {} failed: {}", local_path.display(), e);
-                remaining.push(name.clone());
-                continue;
-            }
-        };
-        let ct = guess_image_content_type(name);
-        let remote_path = format!("{}/{}", REMOTE_IMAGES_DIR, name);
-        match client.put(&remote_path, &bytes, ct, None) {
-            Ok(put) if (200..300).contains(&put.status_code) => {
-                info!(target: "minitodo_cloud::push", "uploaded image {}", name);
-            }
-            Ok(put) => {
-                warn!(target: "minitodo_cloud::push", "PUT {} returned {}", name, put.status_code);
-                remaining.push(name.clone());
-            }
-            Err(e) => {
-                warn!(target: "minitodo_cloud::push", "PUT {} failed: {:#}", name, e);
-                remaining.push(name.clone());
-            }
-        }
-    }
-
-    db.with_conn(|conn| -> rusqlite::Result<()> {
-        let new_raw = serde_json::to_string(&remaining).unwrap_or_else(|_| "[]".to_string());
-        repo::set_meta(conn, "dirty_images", &new_raw)?;
-        Ok(())
-    })?;
-
-    Ok(())
-}
-
-fn guess_image_content_type(name: &str) -> &'static str {
-    match std::path::Path::new(name)
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_ascii_lowercase())
-        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
     {
-        Some("png") => "image/png",
-        Some("jpg") | Some("jpeg") => "image/jpeg",
-        Some("webp") => "image/webp",
-        Some("gif") => "image/gif",
-        Some("bmp") => "image/bmp",
-        Some("svg") => "image/svg+xml",
-        _ => "application/octet-stream",
+        Some(lm) => Precondition::IfUnmodifiedSince(lm),
+        None => Precondition::Unconditional,
+    }
+}
+
+/// 单次 push。失败时把错误写进 `meta.last_push_error`，成功（含无事可做）时清除它
+/// ——`/health` 展示的是"当前还没解决的推送问题"。
+/// 只能在阻塞上下文、同步锁内调用（见 `SyncCtx::run_locked`）。
+pub fn push_once(ctx: &SyncCtx) -> anyhow::Result<PushReport> {
+    let res = push_inner(ctx);
+    let recorded = match &res {
+        Ok(_) => ctx
+            .db
+            .with_conn(|c| repo::delete_meta(c, mk::LAST_PUSH_ERROR)),
+        Err(e) => {
+            let msg = format!("{:#}", e);
+            ctx.db
+                .with_conn(|c| repo::set_meta(c, mk::LAST_PUSH_ERROR, &msg))
+        }
+    };
+    if let Err(db_err) = recorded {
+        warn!(target: "minitodo_cloud::push", "记录 last_push_error 失败: {}", db_err);
+    }
+    res
+}
+
+fn push_inner(ctx: &SyncCtx) -> anyhow::Result<PushReport> {
+    let mut report = PushReport::default();
+
+    // K5：先传图片，再传 sync-data。图片失败不阻塞记录同步。
+    let images_res = images::push_dirty_images(ctx);
+    // 这次传上去的图片若在上一版 sync-data 构造时还在队列里，就没进 `images` 清单
+    // （旧版 PC 只按清单下载图片），所以哪怕记录没变也要刷新一次 sync-data。
+    let uploaded_any = images_res.as_ref().is_ok_and(|r| r.uploaded > 0);
+
+    let (dirty, g0) = ctx
+        .db
+        .with_conn(|c| -> rusqlite::Result<(bool, i64)> {
+            Ok((repo::is_dirty(c)?, repo::get_dirty_generation(c)?))
+        })
+        .map_err(|e| anyhow::anyhow!("读 meta.dirty 失败: {}", e))?;
+    if dirty || uploaded_any {
+        push_sync_data(ctx, g0, &mut report)?;
+    }
+
+    let images = images_res?;
+    if !images.failed.is_empty() {
+        // 失败的图片留在队列里；返回错误让 worker 退避重试并记录 last_push_error
+        anyhow::bail!(
+            "{} 张图片上传失败: {}",
+            images.failed.len(),
+            images.failed.join(", ")
+        );
+    }
+    report.images = images;
+    Ok(report)
+}
+
+fn push_sync_data(ctx: &SyncCtx, g0: i64, report: &mut PushReport) -> anyhow::Result<()> {
+    let dav = ctx.dav()?;
+    let tz = ctx.cfg.timezone;
+    let mut force_full = false;
+    let mut sent_if_match: Option<String> = None;
+
+    for attempt in 1..=MAX_PUT_ATTEMPTS {
+        report.attempts = attempt;
+
+        // 1) 写前先（条件）GET 并合并
+        let fetched = fetch_and_merge(ctx, force_full)?;
+        if let (Some(sent), Some(seen)) =
+            (sent_if_match.as_deref(), fetched.fetched_etag.as_deref())
+        {
+            if sent == seen.trim() {
+                // 远端根本没变，服务端却拒绝了 If-Match：它对 If-Match 的处理不可靠
+                ctx.mark_if_match_unreliable();
+            }
+        }
+
+        // 2) 合并后的本地状态 + 基准信封 → 要上传的文档
+        let cutoff = days_ago_local_string(tz, TOMBSTONE_RETENTION_DAYS);
+        let local_images = images::list_local_images(&ctx.cfg.images_dir);
+        let (base, doc) = ctx
+            .db
+            .with_conn(|c| -> rusqlite::Result<_> {
+                let base = load_base(c)?;
+                let envelope = load_envelope(c)?;
+                // 还在上传队列里的图片远端可能还没有，不列进清单（远端清单里已有的照列）
+                let pending: HashSet<String> = repo::dirty_image_queue(c)?.into_iter().collect();
+                let images = doc::normalize_image_list(
+                    local_images
+                        .into_iter()
+                        .filter(|n| !pending.contains(n))
+                        .chain(envelope_images(&envelope)),
+                );
+                let doc = doc::build_outgoing_doc(c, &envelope, images, tz, &cutoff)?;
+                Ok((base, doc))
+            })
+            .map_err(|e| anyhow::anyhow!("构造 sync-data 失败: {}", e))?;
+        let payload = gzip(&serde_json::to_vec(&doc)?)?;
+
+        // 3) 条件 PUT
+        let pre = select_precondition(fetched.remote_exists, &base, !ctx.if_match_unreliable());
+        sent_if_match = match pre {
+            Precondition::IfMatch(etag) => Some(etag.to_string()),
+            _ => None,
+        };
+        let mut outcome = dav.put(SYNC_DATA_FILE, &payload, "application/gzip", pre)?;
+        if let PutOutcome::ParentMissing(status) = outcome {
+            info!(
+                target: "minitodo_cloud::push",
+                "PUT sync-data 返回 {}，创建远端目录后重试", status
+            );
+            dav.ensure_dir(REMOTE_DIR)?;
+            outcome = dav.put(SYNC_DATA_FILE, &payload, "application/gzip", pre)?;
+        }
+
+        match outcome {
+            PutOutcome::Stored(from_put) => {
+                let validators = validators_after_put(dav, from_put, payload.len());
+                let mut envelope = doc;
+                envelope.remove("todos");
+                envelope.remove("tombstones");
+                let now = now_local_string(tz);
+                let cleared = ctx
+                    .db
+                    .with_conn(|c| -> rusqlite::Result<bool> {
+                        let tx = c.transaction()?;
+                        store_base(&tx, &validators, &envelope)?;
+                        repo::set_meta(&tx, mk::LAST_PUSH_OK_AT, &now)?;
+                        repo::delete_meta(&tx, mk::LAST_PUSH_ERROR)?;
+                        repo::purge_tombstones_before(&tx, &cutoff)?;
+                        let cleared = repo::clear_dirty_if_unchanged(&tx, g0)?;
+                        tx.commit()?;
+                        Ok(cleared)
+                    })
+                    .map_err(|e| anyhow::anyhow!("PUT 成功后写 meta 失败: {}", e))?;
+                report.pushed = true;
+                report.dirty_cleared = cleared;
+                info!(
+                    target: "minitodo_cloud::push",
+                    "push ok ({} bytes, attempt {}, precondition {:?}{})",
+                    payload.len(),
+                    attempt,
+                    pre,
+                    if cleared { "" } else { ", new writes pending" }
+                );
+                return Ok(());
+            }
+            PutOutcome::PreconditionFailed => {
+                info!(
+                    target: "minitodo_cloud::push",
+                    "PUT sync-data 412（第 {} 次），远端已被其它写入方修改，重新拉取合并后重试",
+                    attempt
+                );
+                force_full = true;
+            }
+            PutOutcome::ParentMissing(status) => {
+                anyhow::bail!(
+                    "PUT sync-data 返回 {}：远端目录不存在，MKCOL 后仍失败",
+                    status
+                )
+            }
+        }
+    }
+    anyhow::bail!("多次重试后仍冲突（连续 {} 次 412）", MAX_PUT_ATTEMPTS)
+}
+
+/// PUT 响应里的校验器是否足以做下一次条件 PUT：有强 ETag（可用 If-Match）或有
+/// Last-Modified（可用 If-Unmodified-Since）。只有弱 ETag 或什么都没有（Apache）时
+/// 需要再 PROPFIND 一次。
+fn put_validators_sufficient(v: &Validators) -> bool {
+    v.etag.as_deref().is_some_and(is_strong_etag) || v.last_modified.is_some()
+}
+
+/// PUT 成功后确定新的基准校验器：优先用 PUT 响应头；不够用时（Apache 什么都不给）
+/// 用一次 `PROPFIND Depth: 0` 补齐，**不整包 GET**。PROPFIND 报告的长度与刚上传的
+/// 不一致说明远端已被别人覆盖，此时不记录基准（下次全量拉取合并）——宁可多一次 GET
+/// 也不把没合并过的版本当作基准。
+fn validators_after_put(
+    dav: &WebDavClient,
+    from_put: Validators,
+    payload_len: usize,
+) -> Validators {
+    if put_validators_sufficient(&from_put) {
+        return from_put;
+    }
+    match dav.propfind_meta(SYNC_DATA_FILE) {
+        Ok(Some(entry)) => {
+            if entry
+                .content_length
+                .is_some_and(|n| n != payload_len as u64)
+            {
+                warn!(
+                    target: "minitodo_cloud::push",
+                    "PROPFIND 返回的长度 {:?} 与刚上传的 {} 不一致，远端可能已被覆盖；不记录基准",
+                    entry.content_length,
+                    payload_len
+                );
+                return Validators::default();
+            }
+            Validators {
+                etag: entry.etag.or(from_put.etag),
+                last_modified: entry.last_modified.or(from_put.last_modified),
+            }
+        }
+        Ok(None) => {
+            warn!(target: "minitodo_cloud::push", "PUT 成功后 PROPFIND 返回 404；不记录基准");
+            Validators::default()
+        }
+        Err(e) => {
+            warn!(
+                target: "minitodo_cloud::push",
+                "PUT 成功后 PROPFIND 失败，不记录基准（下次全量拉取）: {:#}", e
+            );
+            Validators::default()
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
+    use crate::db::Db;
+    use std::sync::Arc;
     use tempfile::TempDir;
+
+    fn v(etag: Option<&str>, lm: Option<&str>) -> Validators {
+        Validators {
+            etag: etag.map(str::to_string),
+            last_modified: lm.map(str::to_string),
+        }
+    }
+
+    const LM: &str = "Fri, 02 Oct 2026 08:00:00 GMT";
+
+    #[test]
+    fn precondition_none_when_remote_absent() {
+        assert_eq!(
+            select_precondition(false, &v(Some("\"a\""), Some(LM)), true),
+            Precondition::Unconditional
+        );
+    }
+
+    #[test]
+    fn precondition_prefers_if_match_for_strong_etag() {
+        assert_eq!(
+            select_precondition(true, &v(Some("\"a\""), Some(LM)), true),
+            Precondition::IfMatch("\"a\"")
+        );
+        assert_eq!(
+            select_precondition(true, &v(Some("\"a\""), None), true),
+            Precondition::IfMatch("\"a\"")
+        );
+    }
+
+    /// Apache 一秒内刚修改的文件给弱 ETag；弱 ETag 做 If-Match 必然 412，必须退回 LM。
+    #[test]
+    fn precondition_falls_back_to_lm_for_weak_etag() {
+        assert_eq!(
+            select_precondition(true, &v(Some("W/\"3-65cdc\""), Some(LM)), true),
+            Precondition::IfUnmodifiedSince(LM)
+        );
+        assert_eq!(
+            select_precondition(true, &v(Some("W/\"3-65cdc\""), None), true),
+            Precondition::Unconditional
+        );
+    }
+
+    #[test]
+    fn put_response_validators_sufficiency() {
+        assert!(put_validators_sufficient(&v(Some("\"a\""), None)));
+        assert!(put_validators_sufficient(&v(None, Some(LM))));
+        assert!(put_validators_sufficient(&v(Some("W/\"a\""), Some(LM))));
+        // 只有弱 ETag：下一次 PUT 既不能 If-Match 也没有 LM，必须 PROPFIND 补齐
+        assert!(!put_validators_sufficient(&v(Some("W/\"a\""), None)));
+        // Apache：PUT 响应什么都没有
+        assert!(!put_validators_sufficient(&v(None, None)));
+    }
+
+    #[test]
+    fn precondition_uses_lm_without_etag_or_when_if_match_unreliable() {
+        assert_eq!(
+            select_precondition(true, &v(None, Some(LM)), true),
+            Precondition::IfUnmodifiedSince(LM)
+        );
+        assert_eq!(
+            select_precondition(true, &v(Some("\"a\""), Some(LM)), false),
+            Precondition::IfUnmodifiedSince(LM)
+        );
+        assert_eq!(
+            select_precondition(true, &v(None, Some("  ")), true),
+            Precondition::Unconditional
+        );
+        assert_eq!(
+            select_precondition(true, &v(None, None), true),
+            Precondition::Unconditional
+        );
+    }
 
     fn fresh_db() -> (Db, TempDir) {
         let tmp = TempDir::new().expect("tempdir");
@@ -566,8 +379,7 @@ mod tests {
             .expect("读 dirty")
     }
 
-    /// 推送窗口期内（g0 已读、dirty 还没清）又有写入 → PUT 成功也不能清 dirty，
-    /// 否则这批新写入永远不会被推上去（且随后的 pull 会把它们当孤儿删掉）。
+    /// 推送窗口期内（g0 已读、dirty 还没清）又有写入 → PUT 成功也不能清 dirty。
     #[test]
     fn clear_dirty_keeps_flag_when_write_lands_during_push() {
         let (db, _tmp) = fresh_db();
@@ -575,18 +387,17 @@ mod tests {
         let g0 = db
             .with_conn(|conn| repo::get_dirty_generation(conn))
             .unwrap();
-
         // 慢速 PUT 期间，API 写路径又标了一次脏
         db.with_conn(|conn| repo::mark_dirty(conn)).unwrap();
-
         assert!(
-            !clear_dirty_if_unchanged(&db, g0).unwrap(),
+            !db.with_conn(|c| repo::clear_dirty_if_unchanged(c, g0))
+                .unwrap(),
             "generation 变了就不该清 dirty"
         );
         assert_eq!(dirty_flag(&db).as_deref(), Some("true"));
     }
 
-    /// 推送期间无写入 → PUT 成功后正常清 dirty。
+    /// 推送期间无写入 → PUT 成功后正常清 dirty（连同 dirty_since）。
     #[test]
     fn clear_dirty_clears_flag_when_no_write_during_push() {
         let (db, _tmp) = fresh_db();
@@ -594,113 +405,49 @@ mod tests {
         let g0 = db
             .with_conn(|conn| repo::get_dirty_generation(conn))
             .unwrap();
-
-        assert!(clear_dirty_if_unchanged(&db, g0).unwrap());
+        assert!(db
+            .with_conn(|c| repo::clear_dirty_if_unchanged(c, g0))
+            .unwrap());
         assert_eq!(dirty_flag(&db).as_deref(), Some("false"));
+        assert_eq!(
+            db.with_conn(|c| repo::get_meta(c, mk::DIRTY_SINCE))
+                .unwrap(),
+            None
+        );
     }
 
-    /// PUT 失败（WebDAV 不可达）→ dirty 必须保持 true 留给下一轮。
-    /// 新语义下 dirty 全程没被清过，失败路径不需要任何"复位"动作。
+    /// WebDAV 不可达 → push 报错、dirty 保持 true、错误写进 last_push_error。
     #[test]
-    fn push_tick_keeps_dirty_when_put_fails() {
+    fn push_once_keeps_dirty_when_webdav_unreachable() {
         let (db, tmp) = fresh_db();
         db.with_conn(|conn| repo::mark_dirty(conn)).unwrap();
-
         // Config::for_tests 的 webdav_url 指向 127.0.0.1:0，必然连不上
         let cfg = Config::for_tests(
             "test-api-key-1234567890abcdef",
             tmp.path().join("data"),
             tmp.path().join("images"),
         );
-        assert!(
-            push_tick(&cfg, &db).is_err(),
-            "WebDAV 不可达时 push_tick 必须报错"
-        );
+        let ctx = SyncCtx::new(Arc::new(cfg), db.clone());
+        assert!(push_once(&ctx).is_err(), "WebDAV 不可达时 push 必须报错");
         assert_eq!(dirty_flag(&db).as_deref(), Some("true"));
+        let err = db
+            .with_conn(|c| repo::get_meta(c, mk::LAST_PUSH_ERROR))
+            .unwrap();
+        assert!(err.is_some_and(|e| !e.is_empty()));
     }
 
+    /// 不 dirty、图片队列空 → push 是 no-op，不触网。
     #[test]
-    fn merge_subtasks_lww_keeps_newer() {
-        let remote = vec![json!({"id": 1, "title": "old", "updatedAt": "2026-05-13 10:00:00"})];
-        let local = vec![json!({"id": 1, "title": "new", "updatedAt": "2026-05-13 11:00:00"})];
-        let tombs = HashSet::new();
-        let out = merge_subtasks_into(remote, local, &tombs);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0]["title"].as_str(), Some("new"));
-    }
-
-    #[test]
-    fn merge_subtasks_lww_keeps_remote_when_newer() {
-        let remote =
-            vec![json!({"id": 1, "title": "remote-new", "updatedAt": "2026-05-13 12:00:00"})];
-        let local =
-            vec![json!({"id": 1, "title": "local-old", "updatedAt": "2026-05-13 11:00:00"})];
-        let tombs = HashSet::new();
-        let out = merge_subtasks_into(remote, local, &tombs);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0]["title"].as_str(), Some("remote-new"));
-    }
-
-    #[test]
-    fn merge_subtasks_tombstone_removes() {
-        let remote = vec![json!({"id": 1, "title": "remote", "updatedAt": "2026-05-13 12:00:00"})];
-        let local = vec![];
-        let mut tombs = HashSet::new();
-        tombs.insert("1".to_string());
-        let out = merge_subtasks_into(remote, local, &tombs);
-        assert!(out.is_empty(), "tombstone should suppress remote record");
-    }
-
-    #[test]
-    fn merge_subtasks_union_when_disjoint() {
-        let remote = vec![json!({"id": 1, "title": "a", "updatedAt": "2026-05-13 10:00:00"})];
-        let local = vec![json!({"id": 2, "title": "b", "updatedAt": "2026-05-13 10:00:00"})];
-        let tombs = HashSet::new();
-        let out = merge_subtasks_into(remote, local, &tombs);
-        assert_eq!(out.len(), 2);
-        let ids: std::collections::HashSet<_> = out.iter().filter_map(id_string).collect();
-        assert!(ids.contains("1"));
-        assert!(ids.contains("2"));
-    }
-
-    #[test]
-    fn id_string_handles_numeric_and_string() {
-        assert_eq!(id_string(&json!({"id": 42})), Some("42".to_string()));
-        assert_eq!(id_string(&json!({"id": "abc"})), Some("abc".to_string()));
-        assert_eq!(id_string(&json!({})), None);
-    }
-
-    #[test]
-    fn updated_at_default_empty() {
-        assert_eq!(updated_at(&json!({})), "");
-        assert_eq!(updated_at(&json!({"updatedAt": "x"})), "x");
-    }
-
-    #[test]
-    fn gzip_roundtrip() {
-        let body = b"hello, world!";
-        let compressed = gzip(body).unwrap();
-        let decompressed = gunzip(&compressed).unwrap();
-        assert_eq!(decompressed.as_bytes(), body);
-    }
-
-    #[test]
-    fn guess_content_type_matches_extension() {
-        assert_eq!(guess_image_content_type("a.png"), "image/png");
-        assert_eq!(guess_image_content_type("b.JPG"), "image/jpeg");
-        assert_eq!(
-            guess_image_content_type("c.bin"),
-            "application/octet-stream"
+    fn push_once_is_noop_when_clean() {
+        let (db, tmp) = fresh_db();
+        let cfg = Config::for_tests(
+            "test-api-key-1234567890abcdef",
+            tmp.path().join("data"),
+            tmp.path().join("images"),
         );
-    }
-
-    #[test]
-    fn default_settings_has_required_fields() {
-        // PC 端 AppSettings 必填字段：isFixed / windowPosition / windowSize
-        // 这些在 PC `serde` 反序列化时没有 default，缺失会导致 import 失败。
-        let v = default_app_settings_value();
-        assert!(v.get("isFixed").is_some());
-        assert!(v.get("windowPosition").is_some());
-        assert!(v.get("windowSize").is_some());
+        let ctx = SyncCtx::new(Arc::new(cfg), db);
+        let report = push_once(&ctx).expect("clean push must not touch the network");
+        assert!(!report.pushed);
+        assert_eq!(report.attempts, 0);
     }
 }

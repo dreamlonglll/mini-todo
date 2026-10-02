@@ -1,4 +1,8 @@
 //! `/sync` 手动触发 WebDAV 同步。
+//!
+//! 与后台 pull / push worker 共用同步锁，语义是"排队等待"而非"拒绝并发"。
+//! 锁以 owned guard 的形式交给阻塞线程（`SyncCtx::run_locked`）：客户端中途断开、
+//! handler future 被丢弃时，已经开始的同步仍持锁跑完，互斥不会提前失效。
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -22,25 +26,21 @@ pub struct SyncResp {
 }
 
 pub async fn post_sync(State(state): State<AppState>) -> (StatusCode, Json<SyncResp>) {
-    let cfg = state.config.clone();
-    let db = state.db.clone();
-
-    // 与后台 pull / push worker 串行：语义是"排队等待"而非"拒绝并发"。
-    // 锁在 async 层获取、持有到 blocking 段结束。
-    let _guard = state.sync_lock.lock().await;
-
-    let (pull_res, push_res) = tokio::task::spawn_blocking(move || {
-        let p = pull::pull_once(&cfg, &db);
-        let s = push::push_tick(&cfg, &db);
-        (p, s)
-    })
-    .await
-    .unwrap_or_else(|e| {
-        (
-            Err(anyhow::anyhow!("panic: {}", e)),
-            Err(anyhow::anyhow!("panic: {}", e)),
-        )
-    });
+    let (pull_res, push_res) = match state
+        .sync
+        .run_locked(|ctx| {
+            let p = pull::pull_once(ctx).map(|_| ());
+            let s = push::push_once(ctx).map(|_| ());
+            Ok((p, s))
+        })
+        .await
+    {
+        Ok(pair) => pair,
+        Err(e) => {
+            let msg = format!("{:#}", e);
+            (Err(anyhow::anyhow!(msg.clone())), Err(anyhow::anyhow!(msg)))
+        }
+    };
 
     let pull_ok = pull_res.is_ok();
     let push_ok = push_res.is_ok();
@@ -64,29 +64,38 @@ pub async fn post_sync(State(state): State<AppState>) -> (StatusCode, Json<SyncR
 pub async fn post_sync_pull(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let cfg = state.config.clone();
-    let db = state.db.clone();
-    let _guard = state.sync_lock.lock().await;
-
-    tokio::task::spawn_blocking(move || pull::pull_once(&cfg, &db))
+    let r = state
+        .sync
+        .run_locked(pull::pull_once)
         .await
-        .map_err(|e| ApiError::internal(format!("task panic: {}", e)))?
         .map_err(|e| ApiError::internal(format!("pull failed: {:#}", e)))?;
-
-    Ok(Json(json!({"status": "ok"})))
+    Ok(Json(json!({
+        "status": "ok",
+        "remoteExists": r.remote_exists,
+        "changed": r.changed,
+        "todosUpserted": r.stats.todos_upserted,
+        "todosDeleted": r.stats.todos_deleted,
+        "subtasksUpserted": r.stats.subtasks_upserted,
+        "subtasksDeleted": r.stats.subtasks_deleted,
+        "tombstonesApplied": r.stats.tombstones_applied,
+        "recordsSkipped": r.stats.records_skipped,
+    })))
 }
 
 pub async fn post_sync_push(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let cfg = state.config.clone();
-    let db = state.db.clone();
-    let _guard = state.sync_lock.lock().await;
-
-    tokio::task::spawn_blocking(move || push::push_tick(&cfg, &db))
+    let r = state
+        .sync
+        .run_locked(push::push_once)
         .await
-        .map_err(|e| ApiError::internal(format!("task panic: {}", e)))?
         .map_err(|e| ApiError::internal(format!("push failed: {:#}", e)))?;
-
-    Ok(Json(json!({"status": "ok"})))
+    Ok(Json(json!({
+        "status": "ok",
+        "pushed": r.pushed,
+        "attempts": r.attempts,
+        "dirtyCleared": r.dirty_cleared,
+        "imagesUploaded": r.images.uploaded,
+        "imagesDropped": r.images.dropped,
+    })))
 }

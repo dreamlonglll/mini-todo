@@ -5,7 +5,6 @@
 
 use std::path::{Path, PathBuf};
 
-use chrono::FixedOffset;
 use chrono_tz::Tz;
 use serde::Deserialize;
 
@@ -17,14 +16,12 @@ pub struct Config {
     pub webdav_password: String,
     pub api_key: String,
     pub bind: String,
-    /// IANA 时区，例如 `Asia/Shanghai`。保留原始 `Tz`（而不只存换算后的
-    /// offset）是为了未来支持 DST 时区时能随时重新计算 offset；当前运行时
-    /// 只读 `timezone_offset`，故 allow。
-    #[allow(dead_code)]
-    pub timezone: Tz,
-    /// `timezone` 当前时刻对应的 `FixedOffset`，用于生成与 PC SQLite
+    /// IANA 时区，例如 `Asia/Shanghai`。用于生成与 PC SQLite
     /// `datetime('now','localtime')` 完全一致的时间戳字符串。
-    pub timezone_offset: FixedOffset,
+    ///
+    /// 只存 `Tz`、不缓存换算后的偏移：每次取时间都按当时的偏移重新换算
+    /// （见 `crate::time`），DST 时区切换后仍正确。
+    pub timezone: Tz,
     pub pull_interval_secs: u64,
     pub data_dir: PathBuf,
     pub images_dir: PathBuf,
@@ -99,8 +96,6 @@ impl Config {
                 raw.timezone
             )
         })?;
-        let timezone_offset = crate::time::offset_for_tz_now(tz);
-
         Ok(Config {
             webdav_url: raw.webdav_url.trim_end_matches('/').to_string(),
             webdav_username: raw.webdav_username,
@@ -108,7 +103,6 @@ impl Config {
             api_key: raw.api_key,
             bind: raw.bind,
             timezone: tz,
-            timezone_offset,
             pull_interval_secs: raw.pull_interval,
             data_dir: raw.data_dir,
             images_dir: raw.images_dir,
@@ -121,7 +115,6 @@ impl Config {
     #[cfg(test)]
     pub fn for_tests(api_key: &str, data_dir: PathBuf, images_dir: PathBuf) -> Self {
         let tz: Tz = "Asia/Shanghai".parse().unwrap();
-        let timezone_offset = crate::time::offset_for_tz_now(tz);
         Config {
             webdav_url: "http://127.0.0.1:0/dav".to_string(),
             webdav_username: "u".to_string(),
@@ -129,7 +122,6 @@ impl Config {
             api_key: api_key.to_string(),
             bind: "127.0.0.1:0".to_string(),
             timezone: tz,
-            timezone_offset,
             pull_interval_secs: 60,
             data_dir,
             images_dir,

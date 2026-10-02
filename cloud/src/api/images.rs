@@ -123,15 +123,9 @@ pub async fn upload_image(
     std::fs::write(&full, &bytes)
         .map_err(|e| ApiError::internal(format!("write {} failed: {}", full.display(), e)))?;
 
-    // 写 dirty_images：JSON 数组形式存进 meta
+    // 入 dirty_images 上传队列（队列格式与并发约束见 repo::enqueue_dirty_image）
     state.db.with_conn(|conn| -> rusqlite::Result<()> {
-        let raw = repo::get_meta(conn, "dirty_images")?.unwrap_or_else(|| "[]".to_string());
-        let mut arr: Vec<String> = serde_json::from_str(&raw).unwrap_or_default();
-        if !arr.iter().any(|n| n == &name) {
-            arr.push(name.clone());
-        }
-        let new_raw = serde_json::to_string(&arr).unwrap_or_else(|_| "[]".to_string());
-        repo::set_meta(conn, "dirty_images", &new_raw)?;
+        repo::enqueue_dirty_image(conn, &name)?;
         repo::mark_dirty(conn)?;
         Ok(())
     })?;
