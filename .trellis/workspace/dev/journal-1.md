@@ -691,3 +691,79 @@ Session 13 引入的 reassert_fixed_taskbar_style 是「先破坏、再补回」
 ### Next Steps
 
 - None - task complete
+
+
+## Session 20: 全面优化：同步链路重写、安全与性能修复、云端校验与 Linux e2e
+
+**Date**: 2026-10-02
+**Task**: 全面优化：同步链路重写、安全与性能修复、云端校验与 Linux e2e
+**Branch**: `claude/zen-cray-ieqgzr`
+
+### Summary
+
+按分析报告完成全面优化：PC/cloud 同步协议重写为记录级 LWW + 墓碑 + 只用 If-Match 的写前合并，修复同日新建被删、javascript: 链接执行、重复提醒卡死、日历漏显示、图片路径穿越、高 DPI 通知出屏等缺陷；cloud 写入契约校验与部署加固；Element Plus 按需与增量刷新；CI 与 Linux e2e 套件（最终 37/37 通过）；版本升至 2.5.0 / cloud 0.3.0
+
+### Main Changes
+
+按分析报告做的全面优化（任务 `10-02-full-optimization`），三条并行链：PC Rust（R1 同步核心、R2 后端杂项 + 窗口）、
+PC 前端（D1 正确性 / 安全 / 同步 UI、D2 性能 / 清理 / 测试）、cloud（E1 同步 worker、E2 API 校验 + Skill + 部署），
+每个单元实现后由 trellis-check 独立审查并修复。
+
+- 同步协议重写：记录级 LWW + 墓碑（随 sync-data 双向传播，30 天）+ 写前 GET 合并 + 只用 If-Match / If-None-Match；
+  变更计数 `sync_meta`；设置按 `settingsUpdatedAt` LWW；未知顶层键保留；强制拉取 / 推送；单同步互斥；spawn_blocking
+- 时间格式统一 `YYYY-MM-DD HH:MM:SS`（PC / cloud / 前端同一套解析规则）；本机写入 `updated_at = max(now, 旧值 + 1s)`
+- 安全：链接协议白名单、CSP（禁 eval）、asset 范围收窄、图片保存防穿越 + raw body、WebDAV 密码 DPAPI、cloud 错误不外泄
+- 提醒：空格格式重复提醒推进、单条失败隔离、应用内通知按 work area / 缩放 / 实际尺寸定位
+- 生命周期：单实例、日志落盘、迁移 / 导入前 VACUUM INTO 备份、v28 迁移
+- 前端：Element Plus 按需引入、日历懒加载、变更计数轮询 + 单飞 fetchTodos、vitest 单测
+- cloud：K6 写入字段契约、别名映射、存量归一化、push 去抖 / 退避、墓碑、图片镜像、/health 503、优雅停机、部署加固
+- 工程化：PC CI（Windows + Linux clippy / test、前端检查）、cloud CI 加 Skill 单测、Linux e2e 套件（Xvfb + tauri-driver +
+  Apache / nginx WebDAV + cloud + Skill）
+- 文档：CLAUDE.md、README、cloud/README、新增 `.trellis/spec/backend/sync-protocol.md`，更新前端规范与 cross-layer 指南
+- 版本：PC 2.5.0、cloud 0.3.0
+
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `c3c2e43` | (see git log) |
+| `0f26d14` | (see git log) |
+| `1b74466` | (see git log) |
+| `5248b8d` | (see git log) |
+| `9582927` | (see git log) |
+| `7d62b5d` | (see git log) |
+| `24a13c0` | (see git log) |
+| `b86191a` | (see git log) |
+| `26c7d5c` | (see git log) |
+| `d757ce1` | (see git log) |
+| `3921c9e` | (see git log) |
+| `060877e` | (see git log) |
+| `f36b762` | (see git log) |
+| `ae0fe2c` | (see git log) |
+| `be13914` | (see git log) |
+| `4b43e03` | (see git log) |
+| `fb4d14a` | (see git log) |
+| `b73b6ea` | (see git log) |
+| `2beb4b6` | (see git log) |
+| `75d6e05` | (see git log) |
+| `3fa6dd6` | (see git log) |
+
+### Testing
+
+- [OK] pc/src-tauri：fmt、clippy -D warnings（Linux + x86_64-pc-windows-gnu）、cargo test 161 通过
+- [OK] pc 前端：typecheck、lint、vitest 86、npm run build 通过
+- [OK] cloud：fmt、clippy、cargo test 264 通过；Skill 单测 17 通过
+- [OK] Linux e2e（真实应用 + Apache / nginx WebDAV + cloud + Skill）：37/37 通过
+- [OK] 旧版二进制上复现 6 个关键缺陷（A1 / B1 / A6 / E1 / B2 / C2），新版对应用例全部通过
+  （详见 archive/2026-10/10-02-full-optimization/research/e2e-results.md）
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 在 Windows 上用 pc/scripts/e2e/ 复验窗口模式（嵌入桌面 / 固定模式）与系统通知，本环境无法覆盖 Win32 行为
+- 多设备请同时升级到 PC 2.5.0 / cloud 0.3.0（旧版仍是整库覆盖式同步）
+- 留待后续：window.rs 拆分、多显示器、按窗口拆 capabilities、updater、端到端加密、字段级合并、WebDAV 响应大小上限

@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 19
-- **Last Active**: 2026-09-13
+- **Total Sessions**: 20
+- **Last Active**: 2026-10-02
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~693 | Active |
+| `journal-1.md` | ~762 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 20 | 2026-10-02 | 全面优化：同步链路重写、安全与性能修复、云端校验与 Linux e2e | `c3c2e43`, `0f26d14`, `1b74466`, `5248b8d`, `9582927`, `7d62b5d`, `24a13c0`, `b86191a`, `26c7d5c`, `d757ce1`, `3921c9e`, `060877e`, `f36b762`, `ae0fe2c`, `be13914`, `4b43e03`, `fb4d14a`, `b73b6ea`, `2beb4b6`, `75d6e05`, `3fa6dd6` | `claude/zen-cray-ieqgzr` |
 | 19 | 2026-09-13 | 桌面模式 e2e 验收、改为固定模式嵌入桌面开关并收尾 | `d71a1c4`, `572deec`, `cf0d885`, `1887d6f`, `9927eac`, `1a60d3b` | `feat/desktop-embed-mode` |
 | 18 | 2026-08-31 | 修复 issue #11 两处功能缺陷并发布 v2.3.8 | `e5335ba`, `b012dd2`, `1d8d0b5` | `main` |
 | 17 | 2026-08-16 | 修复 4 个 bug 级缺陷（导入事务/迁移事务/通知计数/云端竞态） | `0f67cd7`, `0cd454c`, `a8c7927`, `4e7c25d` | `main` |
