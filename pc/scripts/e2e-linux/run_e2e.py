@@ -547,6 +547,35 @@ def suite_sync(kind: str) -> None:
             check("失败" not in msg, f"sync button error: {msg}")
             return f"toast: {msg}"
         res.run(f"S10[{kind}] UI sync button shows a result toast", s10)
+
+        def s11():
+            # 秒级 LWW + "平局保留本地"：同一条记录在同一秒内连改两次，第二版必须严格晚于第一版
+            # （updated_at = max(now, 旧值 + 1s)），否则已拿到第一版的另一端会永远留着第一版
+            full = {"full": True}  # 手动同步语义：无条件 GET，排除 nginx 秒级 ETag 的干扰
+            t = app.invoke("create_todo", {"data": {"title": f"{tag}-mono", "color": "#10B981", "quadrant": 4}})
+            app.invoke("webdav_sync", full)
+            cloud_call(cloud, "/sync/pull")
+            stamps = []
+            for v in ("v1", "v2"):
+                app.invoke("update_todo", {"id": t["id"], "data": {"title": f"{tag}-mono-{v}"}})
+                stamps.append(s.query("SELECT updated_at FROM todos WHERE id=?", (t["id"],))[0]["updated_at"])
+                app.invoke("webdav_sync", full)
+                cloud_call(cloud, "/sync/pull")
+            check(stamps[1] > stamps[0], f"PC versions not strictly increasing: {stamps}")
+            r = cloud.api("GET", f"/todos/{t['id']}")
+            check(r.ok and r.json()["title"] == f"{tag}-mono-v2", f"cloud kept {r.json().get('title')!r}")
+            api_stamps = []
+            for v in ("ai1", "ai2"):
+                r = cloud.api("PATCH", f"/todos/{t['id']}", json={"title": f"{tag}-mono-{v}"})
+                check(r.ok, f"PATCH {v}: {r.status_code} {r.text[:200]}")
+                api_stamps.append(r.json()["updatedAt"])
+                cloud_call(cloud, "/sync/push")
+                app.invoke("webdav_sync", full)
+            check(api_stamps[1] > api_stamps[0], f"cloud versions not strictly increasing: {api_stamps}")
+            row = s.query("SELECT title FROM todos WHERE id=?", (t["id"],))[0]
+            check(row["title"] == f"{tag}-mono-ai2", f"PC kept {row['title']!r}")
+            return f"PC {stamps[0]} -> {stamps[1]}; cloud {api_stamps[0]} -> {api_stamps[1]}; both sides converge on v2"
+        res.run(f"S11[{kind}] back-to-back edits get strictly newer versions on both sides", s11)
     finally:
         app.quit()
         cloud.stop()
