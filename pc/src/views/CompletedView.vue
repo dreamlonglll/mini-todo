@@ -5,13 +5,28 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { currentMonitor, primaryMonitor } from '@tauri-apps/api/window'
-import dayjs from 'dayjs'
+import { ElMessageBox } from 'element-plus'
 import type { Todo } from '@/types'
+import { formatDateTime, normalizeDateTime } from '@/utils/datetime'
+import { notifyError } from '@/utils/notify'
 
 const appWindow = getCurrentWindow()
 const searchQuery = ref('')
 const completedTodos = ref<Todo[]>([])
 let unlisteners: UnlistenFn[] = []
+
+// 编辑器窗口打开期间（模态）：与主窗口一致，期间不允许再开新窗口，点击本窗口会把编辑器带回前台
+const isModalOpen = ref(false)
+let activeModalWindow: WebviewWindow | null = null
+
+async function bringModalToFront() {
+  if (!isModalOpen.value || !activeModalWindow) return
+  try {
+    await activeModalWindow.setFocus()
+  } catch (e) {
+    console.warn('Failed to focus modal window:', e)
+  }
+}
 
 const filteredTodos = computed(() => {
   const q = searchQuery.value.trim().toLowerCase()
@@ -23,7 +38,13 @@ const filteredTodos = computed(() => {
 })
 
 function formatTime(time: string) {
-  return dayjs(time).format('MM-DD HH:mm')
+  return formatDateTime(time, 'MM-DD HH:mm', 'notify') ?? time
+}
+
+// 排序键：规范化后的时间字符串（规范格式可直接按字典序比较；无法识别时退回原文）
+function sortKey(todo: Todo): string {
+  const time = todo.updatedAt || todo.createdAt
+  return normalizeDateTime(time) ?? time
 }
 
 async function loadCompletedTodos() {
@@ -31,13 +52,9 @@ async function loadCompletedTodos() {
     const todos = await invoke<Todo[]>('get_todos')
     completedTodos.value = todos
       .filter(t => t.completed)
-      .sort((a, b) => {
-        const timeA = a.updatedAt || a.createdAt
-        const timeB = b.updatedAt || b.createdAt
-        return timeB.localeCompare(timeA)
-      })
+      .sort((a, b) => sortKey(b).localeCompare(sortKey(a)))
   } catch (e) {
-    console.error('Failed to load completed todos:', e)
+    notifyError(e, '加载已完成待办失败')
   }
 }
 
@@ -47,25 +64,46 @@ async function handleRestore(todo: Todo) {
     await invoke('update_todo', { id: todo.id, data: { completed: false } })
     await loadCompletedTodos()
   } catch (e) {
-    console.error('Failed to restore todo:', e)
+    notifyError(e, '恢复待办失败')
   }
 }
 
 async function handleDelete(todo: Todo) {
+  // 与主列表 TodoItem 一致：删除前二次确认
+  try {
+    await ElMessageBox.confirm(
+      `确定要删除待办"${todo.title}"吗？`,
+      '删除确认',
+      {
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+        type: 'warning'
+      }
+    )
+  } catch {
+    // 用户取消
+    return
+  }
+
   try {
     await invoke('delete_todo', { id: todo.id })
     await loadCompletedTodos()
   } catch (e) {
-    console.error('Failed to delete todo:', e)
+    notifyError(e, '删除待办失败')
   }
 }
 
 async function openEditor(todo: Todo) {
+  // 模态守卫：已有编辑器窗口时不再打开第二个
+  if (isModalOpen.value) return
+
   // 与主视图一致：点击已有待办默认进入只读详情
   const url = `#/editor?id=${todo.id}&mode=view`
   const label = `editor-${Date.now()}`
 
   try {
+    isModalOpen.value = true
+
     const editorWidth = 1080
     const editorHeight = 600
     let x: number, y: number
@@ -97,13 +135,25 @@ async function openEditor(todo: Todo) {
       resizable: true,
       decorations: false,
       transparent: false,
+      // 与主窗口打开编辑器一致：以本窗口为父窗口，编辑器始终在其之上
+      parent: appWindow,
     })
+    activeModalWindow = webview
 
     webview.once('tauri://destroyed', async () => {
+      isModalOpen.value = false
+      activeModalWindow = null
       await loadCompletedTodos()
     })
+
+    webview.once('tauri://error', () => {
+      isModalOpen.value = false
+      activeModalWindow = null
+    })
   } catch (e) {
-    console.error('Failed to open editor:', e)
+    isModalOpen.value = false
+    activeModalWindow = null
+    notifyError(e, '打开编辑器失败')
   }
 }
 
@@ -127,6 +177,14 @@ onMounted(async () => {
     await loadCompletedTodos()
   })
   unlisteners.push(unlisten)
+
+  // 编辑器打开期间本窗口获得焦点（被点击）时，把编辑器带回前台
+  const unlistenFocus = await appWindow.onFocusChanged(async ({ payload: focused }) => {
+    if (focused && isModalOpen.value) {
+      await bringModalToFront()
+    }
+  })
+  unlisteners.push(unlistenFocus)
 })
 
 onBeforeUnmount(() => {
@@ -136,6 +194,9 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="completed-window">
+    <!-- 模态遮罩：编辑器窗口打开时阻止操作 -->
+    <div v-if="isModalOpen" class="modal-overlay" @mousedown="bringModalToFront"></div>
+
     <div class="title-bar" data-tauri-drag-region="deep" @mousedown="onTitleBarMouseDown">
       <div class="title-text">
         <span>已完成</span>
@@ -214,6 +275,17 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.3);
+  z-index: 999;
+  cursor: not-allowed;
+}
+
 .completed-window {
   display: flex;
   flex-direction: column;

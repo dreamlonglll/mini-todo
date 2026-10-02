@@ -6,6 +6,11 @@ import { getCurrentWindow, PhysicalPosition, PhysicalSize, availableMonitors, pr
 import type { WindowPosition, WindowSize, WindowMode, ScreenConfig, SaveScreenConfigRequest, MonitorInfo } from '@/types'
 import { DEFAULT_BG_COLOR, DEFAULT_BG_ALPHA } from '@/types'
 import { hexToRgbChannels } from '@/utils/color'
+import { notifyError } from '@/utils/notify'
+
+// "嵌入桌面"依赖 Win32 桌面宿主，仅 Windows 支持。fixed_embed_desktop 会随同步 / 导入
+// 来到 macOS、Linux，而那里设置页根本不显示这个开关、用户也关不掉，所以非 Windows 上一律忽略它
+const IS_WINDOWS = /windows/i.test(navigator.userAgent)
 
 // 当前应用版本（从系统读取）
 export const APP_VERSION = ref<string>('')
@@ -55,7 +60,7 @@ export const useAppStore = defineStore('app', () => {
   // Win+D 不最小化），贴边隐藏 / 唤起置顶不再生效；关闭则是原来的固定模式
   const fixedEmbedDesktop = ref(false)
   // 当前窗口是否真的嵌在桌面里（主窗口的 body.fixed-mode 类要排除这种情况：嵌入桌面保留圆角与描边）
-  const isEmbeddedInDesktop = computed(() => isFixed.value && fixedEmbedDesktop.value)
+  const isEmbeddedInDesktop = computed(() => IS_WINDOWS && isFixed.value && fixedEmbedDesktop.value)
   // 窗口底色与背景透明度（仅深色主题下生效）
   const windowBgColor = ref(DEFAULT_BG_COLOR)
   const windowBgAlpha = ref(DEFAULT_BG_ALPHA)
@@ -300,7 +305,7 @@ export const useAppStore = defineStore('app', () => {
       await invoke('set_show_calendar', { show })
     } catch (e) {
       // 写库失败时回滚，避免开关显示与数据库不一致
-      console.error('Failed to set show calendar:', e)
+      notifyError(e, '设置日历显示失败')
       showCalendar.value = oldValue
     }
   }
@@ -349,7 +354,7 @@ export const useAppStore = defineStore('app', () => {
       autoHideEnabled.value = enabled
       await invoke('set_auto_hide_enabled', { enabled })
     } catch (e) {
-      console.error('Failed to set auto hide enabled:', e)
+      notifyError(e, '设置贴边自动隐藏失败')
       autoHideEnabled.value = oldValue
     }
   }
@@ -361,7 +366,7 @@ export const useAppStore = defineStore('app', () => {
       topOnWake.value = enabled
       await invoke('set_top_on_wake', { enabled })
     } catch (e) {
-      console.error('Failed to set top on wake:', e)
+      notifyError(e, '设置唤起置顶失败')
       topOnWake.value = oldValue
     }
   }
@@ -384,7 +389,7 @@ export const useAppStore = defineStore('app', () => {
       fixedEmbedDesktop.value = enabled
       await invoke('set_fixed_embed_desktop', { enabled })
     } catch (e) {
-      console.error('Failed to set fixed embed desktop:', e)
+      notifyError(e, '设置嵌入桌面失败')
       fixedEmbedDesktop.value = oldValue
     }
   }
@@ -404,24 +409,24 @@ export const useAppStore = defineStore('app', () => {
       // 保存窗口状态到屏幕配置表和 settings 表
       await saveWindowState()
     } catch (e) {
-      console.error('Failed to toggle fixed mode:', e)
+      notifyError(e, '切换固定模式失败')
     }
   }
 
   // 应用固定模式（仅锁定行为，不含主题）
   //
   // 开了"嵌入桌面"就走桌面模式命令（owner=Progman、常驻 Z 序底部），否则是普通固定模式；
-  // 两个后端命令互斥，各自会先退出另一方
+  // 两个后端命令互斥，各自会先退出另一方。非 Windows 不支持嵌入桌面，始终走普通固定模式
   async function applyFixedMode() {
     try {
       await appWindow.setResizable(false)
-      if (fixedEmbedDesktop.value) {
+      if (IS_WINDOWS && fixedEmbedDesktop.value) {
         await invoke('set_window_desktop_mode', { enabled: true })
       } else {
         await invoke('set_window_fixed_mode', { fixed: true })
       }
     } catch (e) {
-      console.error('Failed to apply fixed mode:', e)
+      notifyError(e, '进入固定模式失败')
     }
   }
 
@@ -435,7 +440,7 @@ export const useAppStore = defineStore('app', () => {
       await invoke('set_window_fixed_mode', { fixed: false })
       await invoke('set_window_desktop_mode', { enabled: false })
     } catch (e) {
-      console.error('Failed to apply normal mode:', e)
+      notifyError(e, '退出固定模式失败')
     }
   }
 
@@ -461,7 +466,7 @@ export const useAppStore = defineStore('app', () => {
       applyThemeClass()
       await invoke('set_text_theme', { theme: enabled ? 'light' : 'dark' })
     } catch (e) {
-      console.error('Failed to set dark theme:', e)
+      notifyError(e, '设置深色主题失败')
       isDarkTheme.value = oldValue
       applyThemeClass()
     }
@@ -496,7 +501,7 @@ export const useAppStore = defineStore('app', () => {
       applyWindowBackground()
       await invoke('set_window_background', { color, alpha })
     } catch (e) {
-      console.error('Failed to set window background:', e)
+      notifyError(e, '设置界面底色失败')
       windowBgColor.value = oldColor
       windowBgAlpha.value = oldAlpha
       applyWindowBackground()

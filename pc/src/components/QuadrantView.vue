@@ -5,7 +5,7 @@ import { useTodoStore, useAppStore } from '@/stores'
 import TodoItem from './TodoItem.vue'
 import type { Todo, QuadrantType } from '@/types'
 import { QUADRANT_INFO, QUADRANTS } from '@/types'
-import { resolveQuadrantColor } from '@/utils/quadrant'
+import { mergeQuadrantOrder, resolveQuadrantColor } from '@/utils/quadrant'
 
 const emit = defineEmits<{
   (e: 'edit', todo: Todo): void
@@ -25,16 +25,27 @@ const quadrantLists = ref<Record<QuadrantType, Todo[]>>({
   [QUADRANTS.NOT_URGENT_NOT_IMPORTANT]: [],
 })
 
+// 拖拽落库进行中：期间 store 会多次回流（象限更新、排序），先不按 store 重建本地列表，
+// 保持用户拖放后的样子，落库结束后再统一按 store 重建一次
+let dragPersisting = 0
+
+// 按 store 重建本地四象限列表
+function syncFromStore() {
+  const data = todoStore.todosByQuadrant
+  quadrantLists.value = {
+    [QUADRANTS.IMPORTANT_URGENT]: [...data[QUADRANTS.IMPORTANT_URGENT]],
+    [QUADRANTS.IMPORTANT_NOT_URGENT]: [...data[QUADRANTS.IMPORTANT_NOT_URGENT]],
+    [QUADRANTS.URGENT_NOT_IMPORTANT]: [...data[QUADRANTS.URGENT_NOT_IMPORTANT]],
+    [QUADRANTS.NOT_URGENT_NOT_IMPORTANT]: [...data[QUADRANTS.NOT_URGENT_NOT_IMPORTANT]],
+  }
+}
+
 // 同步 store 数据到本地
 watch(
   () => todoStore.todosByQuadrant,
-  (newData) => {
-    quadrantLists.value = {
-      [QUADRANTS.IMPORTANT_URGENT]: [...newData[QUADRANTS.IMPORTANT_URGENT]],
-      [QUADRANTS.IMPORTANT_NOT_URGENT]: [...newData[QUADRANTS.IMPORTANT_NOT_URGENT]],
-      [QUADRANTS.URGENT_NOT_IMPORTANT]: [...newData[QUADRANTS.URGENT_NOT_IMPORTANT]],
-      [QUADRANTS.NOT_URGENT_NOT_IMPORTANT]: [...newData[QUADRANTS.NOT_URGENT_NOT_IMPORTANT]],
-    }
+  () => {
+    if (dragPersisting > 0) return
+    syncFromStore()
   },
   { immediate: true, deep: true }
 )
@@ -47,25 +58,44 @@ const quadrantConfig = computed(() => [
   { ...QUADRANT_INFO[3], position: 'bottom-right' },
 ])
 
-// 拖拽变更处理（当元素被添加到象限时）
-async function onDragChange(quadrantId: QuadrantType, evt: any) {
-  // 处理添加的元素（从其他象限拖入）
-  if (evt.added) {
-    const todo = evt.added.element as Todo
-    if (todo.quadrant !== quadrantId) {
-      // 颜色跟随象限，除非用户手动挑过颜色（与编辑窗口同一套策略）
-      const nextColor = resolveQuadrantColor(todo.color, todo.quadrant, quadrantId)
-      await todoStore.updateTodoQuadrant(todo.id, quadrantId, nextColor)
-      // 同时更新本地对象，避免等待 store 回流
-      todo.quadrant = quadrantId
-      todo.color = nextColor
+// vuedraggable 的 change 事件负载
+interface DragChangeEvent {
+  added?: { element: Todo; newIndex: number }
+  removed?: { element: Todo; oldIndex: number }
+  moved?: { element: Todo; oldIndex: number; newIndex: number }
+}
+
+// 拖拽变更处理
+//
+// vuedraggable 的 change：象限内移动 → moved；跨象限 → 目标象限 added + 源象限 removed。
+// 源象限移走一项不改变其余待办的相对顺序，只需处理 moved / added。
+async function onDragChange(quadrantId: QuadrantType, evt: DragChangeEvent) {
+  if (!evt.added && !evt.moved) return
+
+  // 拖放结果在第一个 await 之前取好：之后 store 回流会改动这些列表
+  const quadrantIds = quadrantLists.value[quadrantId].map(t => t.id)
+  const globalIds = todoStore.pendingTodos.map(t => t.id)
+
+  dragPersisting++
+  try {
+    // 处理添加的元素（从其他象限拖入）
+    if (evt.added) {
+      const todo = evt.added.element
+      if (todo.quadrant !== quadrantId) {
+        // 颜色跟随象限，除非用户手动挑过颜色（与编辑窗口同一套策略）
+        const nextColor = resolveQuadrantColor(todo.color, todo.quadrant, quadrantId)
+        const ok = await todoStore.updateTodoQuadrant(todo.id, quadrantId, nextColor)
+        // 失败时 store 未变：跳过排序，finally 里按 store 重建，待办退回原象限
+        if (!ok) return
+      }
     }
-  }
-  
-  // 重新排序当前象限内的待办
-  const ids = quadrantLists.value[quadrantId].map(t => t.id)
-  if (ids.length > 0) {
-    await todoStore.reorderTodos(ids)
+
+    // 只调整本象限内部的先后，合并回全局顺序后整体落库，
+    // 列表视图里其它象限待办的相对位置保持不变
+    await todoStore.reorderTodos(mergeQuadrantOrder(globalIds, quadrantIds))
+  } finally {
+    dragPersisting--
+    if (dragPersisting === 0) syncFromStore()
   }
 }
 
@@ -128,7 +158,7 @@ function getQuadrantStyle(quadrant: typeof quadrantConfig.value[0]) {
             :animation="200"
             :force-fallback="true"
             class="quadrant-list"
-            @change="(evt: any) => onDragChange(quadrant.id, evt)"
+            @change="(evt: DragChangeEvent) => onDragChange(quadrant.id, evt)"
           >
             <template #item="{ element }">
               <TodoItem

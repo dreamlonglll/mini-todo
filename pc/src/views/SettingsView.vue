@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, reactive } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, reactive } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
-import { emit } from '@tauri-apps/api/event'
+import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { save, open } from '@tauri-apps/plugin-dialog'
 import { readTextFile } from '@tauri-apps/plugin-fs'
@@ -9,9 +9,12 @@ import { openUrl } from '@tauri-apps/plugin-opener'
 import { enable, disable, isEnabled } from '@tauri-apps/plugin-autostart'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAppStore, APP_VERSION } from '@/stores'
-import type { AppSettingKey, ScreenConfig, SyncSettings, SyncDownloadResult } from '@/types'
+import type { AppSettingKey, ScreenConfig, SyncSettings, SyncReport } from '@/types'
 import { PRESET_BG_COLORS, DEFAULT_BG_COLOR } from '@/types'
 import { isSameColor } from '@/utils/color'
+import { formatDateKey, formatDateTime } from '@/utils/datetime'
+import { notifyError } from '@/utils/notify'
+import { describeSkippedRecords, describeSyncReport, isSyncBusyError } from '@/utils/syncReport'
 
 const appWindow = getCurrentWindow()
 const appStore = useAppStore()
@@ -63,13 +66,10 @@ const systemFonts = ref<string[]>([])
 const fontFamily = ref('')
 const fontSize = ref(14)
 
-onMounted(async () => {
-  try {
-    autoStart.value = await isEnabled()
-  } catch (e) {
-    console.error('Failed to get autostart status:', e)
-  }
+let unlistenSyncCompleted: UnlistenFn | null = null
 
+// 读取本窗口展示的应用设置（打开时一次；同步应用了云端设置后再刷新一次）
+async function loadAppSettingsForDisplay() {
   try {
     const type = await invoke<string>('get_notification_type')
     notificationType.value = type === 'app' ? 'app' : 'system'
@@ -77,23 +77,54 @@ onMounted(async () => {
     console.error('Failed to get notification type:', e)
   }
 
-  await appStore.loadScreenConfigs()
   await appStore.loadShowCalendar()
   await appStore.loadAutoHideEnabled()
   await appStore.loadTopOnWake()
   await appStore.loadFixedEmbedDesktop()
   await appStore.loadWindowBackground()
   await appStore.loadDarkTheme()
-  await loadSyncSettings()
 
-  // 加载字体设置
   try {
-    systemFonts.value = await invoke<string[]>('get_system_fonts')
     fontFamily.value = await invoke<string>('get_todo_font_family')
     fontSize.value = await invoke<number>('get_todo_font_size')
   } catch (e) {
     console.error('Failed to load font settings:', e)
   }
+}
+
+onMounted(async () => {
+  try {
+    autoStart.value = await isEnabled()
+  } catch (e) {
+    console.error('Failed to get autostart status:', e)
+  }
+
+  await appStore.loadScreenConfigs()
+  await loadAppSettingsForDisplay()
+  await loadSyncSettings()
+
+  // 加载系统字体列表
+  try {
+    systemFonts.value = await invoke<string[]>('get_system_fonts')
+  } catch (e) {
+    console.error('Failed to load system fonts:', e)
+  }
+
+  // 任意窗口触发的同步（含主窗口自动同步）完成后：刷新"上次同步"时间；
+  // 应用了云端设置时本窗口显示的设置也已过时，重新读取
+  unlistenSyncCompleted = await listen<SyncReport | null>('sync-completed', async (event) => {
+    const report = event.payload
+    if (!report) return
+    syncSettings.lastSyncAt = report.lastSyncAt
+    if (report.settingsApplied) {
+      await loadAppSettingsForDisplay()
+    }
+  })
+})
+
+onBeforeUnmount(() => {
+  unlistenSyncCompleted?.()
+  unlistenSyncCompleted = null
 })
 
 // 设置窗口是独立 WebView，与主窗口不共享 Pinia 状态。
@@ -258,7 +289,8 @@ async function handleExport() {
 
     const filePath = await save({
       title: '导出待办数据',
-      defaultPath: `mini-todo-backup-${new Date().toISOString().slice(0, 10)}.zip`,
+      // 用本地日期：toISOString 是 UTC，东八区凌晨导出会带上前一天的日期
+      defaultPath: `mini-todo-backup-${formatDateKey(new Date())}.zip`,
       filters: [{
         name: 'ZIP 压缩包',
         extensions: ['zip']
@@ -338,6 +370,7 @@ const syncSettings = reactive<SyncSettings>({
   webdavUrl: '',
   webdavUsername: '',
   webdavPassword: '',
+  hasPassword: false,
   autoSync: false,
   syncInterval: 15,
   lastSyncAt: null,
@@ -345,8 +378,17 @@ const syncSettings = reactive<SyncSettings>({
 })
 const showPassword = ref(false)
 const testingConnection = ref(false)
-const syncing = ref(false)
-const syncStatus = ref<'idle' | 'uploading' | 'downloading'>('idle')
+const clearingPassword = ref(false)
+// 当前进行中的同步动作（立即同步 / 用云端覆盖本地 / 用本地覆盖云端）
+const syncAction = ref<'sync' | 'pull' | 'push' | null>(null)
+const showAdvancedSync = ref(false)
+
+// http:// 地址：账号密码与待办数据都会明文经过网络
+const isInsecureWebdavUrl = computed(() => /^http:\/\//i.test(syncSettings.webdavUrl.trim()))
+
+const passwordPlaceholder = computed(() =>
+  syncSettings.hasPassword ? '已保存（留空则不修改）' : '密码'
+)
 
 const syncIntervalOptions = [
   { label: '5 分钟', value: 5 },
@@ -360,20 +402,56 @@ async function loadSyncSettings() {
   try {
     const settings = await invoke<SyncSettings>('get_sync_settings')
     Object.assign(syncSettings, settings)
+    // 后端不回传已保存的密码；输入框只用来输入新密码
+    syncSettings.webdavPassword = ''
   } catch (e) {
     console.error('Failed to load sync settings:', e)
   }
 }
 
-async function saveSyncSettings() {
+// 保存同步配置。密码框留空 = 保留已保存的密码；clearPassword 显式清空
+async function persistSyncSettings(clearPassword = false): Promise<boolean> {
   try {
-    await invoke('save_sync_settings', { settings: syncSettings })
-    ElMessage.success('同步设置已保存')
+    const settings: SyncSettings = {
+      ...syncSettings,
+      webdavPassword: clearPassword ? '' : syncSettings.webdavPassword,
+      clearPassword,
+    }
+    await invoke('save_sync_settings', { settings })
     // 主窗口持有自动同步定时器，需按新的开关/间隔重建
     await notifyAppSettingChanged('sync')
+    // 重新读取：刷新 hasPassword，并清空密码输入框
+    await loadSyncSettings()
+    return true
   } catch (e) {
-    console.error('Failed to save sync settings:', e)
-    ElMessage.error('保存失败: ' + String(e))
+    notifyError(e, '保存同步设置失败')
+    return false
+  }
+}
+
+async function saveSyncSettings() {
+  if (await persistSyncSettings()) {
+    ElMessage.success('同步设置已保存')
+  }
+}
+
+async function handleClearPassword() {
+  try {
+    await ElMessageBox.confirm(
+      '确定清除已保存的 WebDAV 密码吗？清除后需要重新输入密码才能同步。',
+      '清除密码',
+      { confirmButtonText: '清除', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch {
+    return
+  }
+  clearingPassword.value = true
+  try {
+    if (await persistSyncSettings(true)) {
+      ElMessage.success('已清除保存的密码')
+    }
+  } finally {
+    clearingPassword.value = false
   }
 }
 
@@ -387,105 +465,92 @@ async function testConnection() {
     await invoke<boolean>('webdav_test_connection', {
       url: syncSettings.webdavUrl,
       username: syncSettings.webdavUsername,
-      password: syncSettings.webdavPassword,
+      // 留空时后端使用已保存的密码
+      password: syncSettings.webdavPassword || null,
     })
     ElMessage.success('连接成功')
   } catch (e) {
-    ElMessage.error('连接失败: ' + String(e))
+    notifyError(e, '连接失败')
   } finally {
     testingConnection.value = false
   }
 }
 
-async function handleUploadSync() {
+// 执行一次同步命令。后端成功后会向所有窗口广播 sync-completed，
+// 主窗口据此刷新列表与设置，这里只负责提示与"上次同步"时间
+async function runSyncCommand(
+  action: 'sync' | 'pull' | 'push',
+  command: 'webdav_sync' | 'webdav_force_pull' | 'webdav_force_push',
+  failureText: string
+) {
   if (!syncSettings.webdavUrl) {
     ElMessage.warning('请先配置 WebDAV 服务器')
     return
   }
+  if (syncAction.value) return
+  syncAction.value = action
   try {
-    syncing.value = true
-    syncStatus.value = 'uploading'
-    const lastSyncAt = await invoke<string>('webdav_upload_sync')
-    syncSettings.lastSyncAt = lastSyncAt
-    ElMessage.success('数据已上传到云端')
-    await emit('sync-completed')
-  } catch (e) {
-    ElMessage.error('上传失败: ' + String(e))
-  } finally {
-    syncing.value = false
-    syncStatus.value = 'idle'
-  }
-}
-
-async function handleDownloadSync() {
-  if (!syncSettings.webdavUrl) {
-    ElMessage.warning('请先配置 WebDAV 服务器')
-    return
-  }
-  try {
-    syncing.value = true
-    syncStatus.value = 'downloading'
-    const result = await invoke<SyncDownloadResult>('webdav_download_sync')
-
-    if (!result.hasRemote) {
-      ElMessage.info('云端暂无同步数据')
-      return
-    }
-
-    if (result.hasConflict) {
-      try {
-        const action = await ElMessageBox.confirm(
-          `本地数据（${formatTime(result.localUpdatedAt)}）和云端数据（${formatTime(result.remoteUpdatedAt)}）均有更新，请选择操作：`,
-          '同步冲突',
-          {
-            confirmButtonText: '使用云端数据',
-            cancelButtonText: '保留本地数据',
-            distinguishCancelAndClose: true,
-            type: 'warning',
-          }
-        )
-        if (action === 'confirm') {
-          await applyRemoteData(result)
-        } else {
-          await handleUploadSync()
-        }
-      } catch (e) {
-        if (e === 'cancel') {
-          await handleUploadSync()
-        }
-      }
-    } else {
-      await applyRemoteData(result)
-    }
-  } catch (e) {
-    ElMessage.error('下载失败: ' + String(e))
-  } finally {
-    syncing.value = false
-    syncStatus.value = 'idle'
-  }
-}
-
-async function applyRemoteData(result: SyncDownloadResult) {
-  if (!result.remoteData) return
-  try {
-    const lastSyncAt = await invoke<string>('webdav_apply_remote', {
-      syncDataJson: JSON.stringify(result.remoteData),
+    const report = await invoke<SyncReport>(command)
+    syncSettings.lastSyncAt = report.lastSyncAt
+    ElMessage({
+      type: report.status === 'no_changes' ? 'info' : 'success',
+      message: describeSyncReport(report),
     })
-    syncSettings.lastSyncAt = lastSyncAt
-    ElMessage.success('已同步云端数据到本地')
-    await emit('data-imported')
+    const skipped = describeSkippedRecords(report)
+    if (skipped) ElMessage.warning(skipped)
+    if (report.settingsApplied) {
+      await loadAppSettingsForDisplay()
+    }
   } catch (e) {
-    ElMessage.error('应用远程数据失败: ' + String(e))
+    if (isSyncBusyError(e)) {
+      ElMessage.info('已有同步正在进行，请稍后再试')
+    } else {
+      notifyError(e, failureText)
+    }
+  } finally {
+    syncAction.value = null
   }
 }
 
+// 立即同步：合并本地与云端的更改（含删除），与主窗口同步按钮、自动同步同一命令
+async function handleSyncNow() {
+  await runSyncCommand('sync', 'webdav_sync', '同步失败')
+}
+
+// 高级：用云端覆盖本地
+async function handleForcePull() {
+  try {
+    await ElMessageBox.confirm(
+      '将让本地数据与云端完全一致：本地有而云端没有的待办和子任务会被删除，' +
+        '应用设置也会被云端覆盖（窗口位置等设备相关设置除外）。此操作无法撤销，建议先导出备份。确定继续吗？',
+      '用云端覆盖本地',
+      { confirmButtonText: '覆盖本地', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch {
+    return
+  }
+  await runSyncCommand('pull', 'webdav_force_pull', '用云端覆盖本地失败')
+}
+
+// 高级：用本地覆盖云端
+async function handleForcePush() {
+  try {
+    await ElMessageBox.confirm(
+      '将让云端数据与本地完全一致：云端有而本地没有的待办和子任务会被删除，' +
+        '其它设备与云端服务下次同步时也会随之删除。此操作无法撤销。确定继续吗？',
+      '用本地覆盖云端',
+      { confirmButtonText: '覆盖云端', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch {
+    return
+  }
+  await runSyncCommand('push', 'webdav_force_push', '用本地覆盖云端失败')
+}
+
+// "上次同步"时间（元信息，可能带时区偏移）显示为本地时间
 function formatTime(time: string | null | undefined): string {
   if (!time) return '未知'
-  try {
-    return new Date(time).toLocaleString('zh-CN')
-  } catch {
-    return time
-  }
+  return formatDateTime(time, 'YYYY-MM-DD HH:mm') ?? time
 }
 
 async function handleCheckUpdate() {
@@ -800,6 +865,10 @@ async function handleCheckUpdate() {
                 size="small"
                 clearable
               />
+              <p v-if="isInsecureWebdavUrl" class="card-hint warning-hint">
+                <el-icon :size="14"><WarningFilled /></el-icon>
+                当前地址使用 http://，账号密码与待办数据将以明文传输，建议改用 https://
+              </p>
             </div>
 
             <div class="form-row">
@@ -812,12 +881,24 @@ async function handleCheckUpdate() {
                 />
               </div>
               <div class="form-item flex-1">
-                <label class="form-label">密码</label>
+                <label class="form-label">
+                  <span>密码</span>
+                  <button
+                    v-if="syncSettings.hasPassword"
+                    class="link-btn"
+                    type="button"
+                    :disabled="clearingPassword"
+                    @click="handleClearPassword"
+                  >
+                    清除已保存的密码
+                  </button>
+                </label>
                 <el-input
                   v-model="syncSettings.webdavPassword"
                   :type="showPassword ? 'text' : 'password'"
-                  placeholder="密码"
+                  :placeholder="passwordPlaceholder"
                   size="small"
+                  autocomplete="new-password"
                 >
                   <template #suffix>
                     <el-icon class="password-toggle" @click="showPassword = !showPassword">
@@ -852,7 +933,7 @@ async function handleCheckUpdate() {
               <el-icon class="row-icon"><Timer /></el-icon>
               <div class="row-content">
                 <span class="settings-label">自动同步</span>
-                <span class="settings-desc">定时自动将数据同步到云端</span>
+                <span class="settings-desc">定时自动与云端合并同步</span>
               </div>
             </div>
             <el-switch
@@ -884,26 +965,55 @@ async function handleCheckUpdate() {
           <div class="sync-actions">
             <button
               class="data-btn primary"
-              :disabled="syncing || !syncSettings.webdavUrl"
-              @click="handleUploadSync"
+              :disabled="!!syncAction || !syncSettings.webdavUrl"
+              @click="handleSyncNow"
             >
-              <el-icon><Upload /></el-icon>
-              <span>{{ syncStatus === 'uploading' ? '上传中...' : '上传到云端' }}</span>
-            </button>
-            <button
-              class="data-btn"
-              :disabled="syncing || !syncSettings.webdavUrl"
-              @click="handleDownloadSync"
-            >
-              <el-icon><Download /></el-icon>
-              <span>{{ syncStatus === 'downloading' ? '下载中...' : '从云端下载' }}</span>
+              <el-icon><Refresh /></el-icon>
+              <span>{{ syncAction === 'sync' ? '同步中...' : '立即同步' }}</span>
             </button>
           </div>
 
           <p class="card-hint">
             <el-icon :size="14"><InfoFilled /></el-icon>
-            通过 WebDAV 协议将待办数据和图片同步到云端存储
+            通过 WebDAV 协议同步待办数据和图片：本地与云端的新增、修改、删除会自动合并，以较新的修改为准
           </p>
+
+          <button
+            class="advanced-toggle"
+            type="button"
+            @click="showAdvancedSync = !showAdvancedSync"
+          >
+            <el-icon :size="12">
+              <ArrowDown v-if="showAdvancedSync" />
+              <ArrowRight v-else />
+            </el-icon>
+            <span>高级</span>
+          </button>
+
+          <div v-if="showAdvancedSync" class="advanced-sync">
+            <p class="card-hint">
+              <el-icon :size="14"><WarningFilled /></el-icon>
+              仅在两端数据出现异常时使用：会以一端为准整体覆盖另一端，被覆盖一端独有的数据将被删除
+            </p>
+            <div class="sync-actions">
+              <button
+                class="data-btn danger"
+                :disabled="!!syncAction || !syncSettings.webdavUrl"
+                @click="handleForcePull"
+              >
+                <el-icon><Download /></el-icon>
+                <span>{{ syncAction === 'pull' ? '覆盖中...' : '用云端覆盖本地' }}</span>
+              </button>
+              <button
+                class="data-btn danger"
+                :disabled="!!syncAction || !syncSettings.webdavUrl"
+                @click="handleForcePush"
+              >
+                <el-icon><Upload /></el-icon>
+                <span>{{ syncAction === 'push' ? '覆盖中...' : '用本地覆盖云端' }}</span>
+              </button>
+            </div>
+          </div>
         </div>
 
         <!-- 屏幕配置 -->
@@ -1293,8 +1403,80 @@ async function handleCheckUpdate() {
     }
   }
 
+  &.danger {
+    color: #dc2626;
+    border-color: #fecaca;
+
+    &:hover:not(:disabled) {
+      background: #fef2f2;
+      border-color: #fca5a5;
+    }
+  }
+
   .el-icon {
     font-size: 16px;
+  }
+}
+
+/* 明文传输等警示 */
+.card-hint.warning-hint {
+  margin-top: 4px;
+  color: #b45309;
+
+  .el-icon {
+    color: #f59e0b;
+  }
+}
+
+/* 表单标签右侧的文字按钮（清除已保存的密码） */
+.link-btn {
+  padding: 0;
+  border: none;
+  background: transparent;
+  font-size: 12px;
+  font-weight: 400;
+  color: #3b82f6;
+  cursor: pointer;
+
+  &:hover:not(:disabled) {
+    color: #2563eb;
+    text-decoration: underline;
+  }
+
+  &:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+}
+
+/* 高级同步选项 */
+.advanced-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 16px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  font-size: 12px;
+  color: #64748b;
+  cursor: pointer;
+
+  &:hover {
+    color: #334155;
+  }
+}
+
+.advanced-sync {
+  margin-top: 8px;
+  padding: 12px;
+  border: 1px solid #fde68a;
+  border-radius: 8px;
+  background: #fffbeb;
+
+  .sync-actions {
+    margin-top: 12px;
+    margin-bottom: 0;
   }
 }
 

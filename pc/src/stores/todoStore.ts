@@ -3,6 +3,7 @@ import { ref, computed } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import type { Todo, CreateTodoRequest, UpdateTodoRequest, SubTask, CreateSubTaskRequest, UpdateSubTaskRequest, ViewMode, QuadrantType } from '@/types'
 import { QUADRANTS } from '@/types'
+import { notifyError } from '@/utils/notify'
 
 export const useTodoStore = defineStore('todo', () => {
   // 状态
@@ -54,13 +55,19 @@ export const useTodoStore = defineStore('todo', () => {
 
   // 操作方法
   async function fetchTodos() {
+    // 后台轮询 / 聚焦也会调用：连续失败只在第一次弹提示，成功后复位
+    const alreadyFailing = error.value !== null
     loading.value = true
-    error.value = null
     try {
       todos.value = await invoke<Todo[]>('get_todos')
+      error.value = null
     } catch (e) {
       error.value = String(e)
-      console.error('Failed to fetch todos:', e)
+      if (alreadyFailing) {
+        console.error('Failed to fetch todos:', e)
+      } else {
+        notifyError(e, '加载待办失败')
+      }
     } finally {
       loading.value = false
     }
@@ -72,8 +79,7 @@ export const useTodoStore = defineStore('todo', () => {
       todos.value.push(newTodo)
       return newTodo
     } catch (e) {
-      error.value = String(e)
-      console.error('Failed to add todo:', e)
+      notifyError(e, '创建待办失败')
       return null
     }
   }
@@ -87,8 +93,7 @@ export const useTodoStore = defineStore('todo', () => {
       }
       return true
     } catch (e) {
-      error.value = String(e)
-      console.error('Failed to update todo:', e)
+      notifyError(e, '更新待办失败')
       return false
     }
   }
@@ -99,8 +104,7 @@ export const useTodoStore = defineStore('todo', () => {
       todos.value = todos.value.filter(t => t.id !== id)
       return true
     } catch (e) {
-      error.value = String(e)
-      console.error('Failed to delete todo:', e)
+      notifyError(e, '删除待办失败')
       return false
     }
   }
@@ -123,8 +127,7 @@ export const useTodoStore = defineStore('todo', () => {
       })
       return true
     } catch (e) {
-      error.value = String(e)
-      console.error('Failed to reorder todos:', e)
+      notifyError(e, '保存排序失败')
       return false
     }
   }
@@ -170,8 +173,7 @@ export const useTodoStore = defineStore('todo', () => {
       }
       return newSubTask
     } catch (e) {
-      error.value = String(e)
-      console.error('Failed to add subtask:', e)
+      notifyError(e, '添加子任务失败')
       return null
     }
   }
@@ -188,8 +190,7 @@ export const useTodoStore = defineStore('todo', () => {
       }
       return true
     } catch (e) {
-      error.value = String(e)
-      console.error('Failed to update subtask:', e)
+      notifyError(e, '更新子任务失败')
       return false
     }
   }
@@ -206,8 +207,7 @@ export const useTodoStore = defineStore('todo', () => {
       }
       return true
     } catch (e) {
-      error.value = String(e)
-      console.error('Failed to delete subtask:', e)
+      notifyError(e, '删除子任务失败')
       return false
     }
   }

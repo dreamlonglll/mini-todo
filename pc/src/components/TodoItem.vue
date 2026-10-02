@@ -2,8 +2,8 @@
 import { computed, ref, watch } from 'vue'
 import { useTodoStore, useAppStore } from '@/stores'
 import { ElMessageBox } from 'element-plus'
-import dayjs from 'dayjs'
 import type { Todo } from '@/types'
+import { formatDateTime } from '@/utils/datetime'
 
 const props = defineProps<{
   todo: Todo
@@ -33,11 +33,10 @@ const subtaskStats = computed(() => {
   return { total, completed }
 })
 
-// 格式化通知时间
-const formattedNotifyTime = computed(() => {
-  if (!props.todo.notifyAt) return null
-  return dayjs(props.todo.notifyAt).format('MM-DD HH:mm')
-})
+// 格式化通知时间（兼容空格 / T 分隔、带时区等形态；无法识别时不显示）
+const formattedNotifyTime = computed(() =>
+  formatDateTime(props.todo.notifyAt, 'MM-DD HH:mm', 'notify')
+)
 
 // 是否重复提醒
 const isRepeat = computed(() => !!props.todo.repeatEnabled)

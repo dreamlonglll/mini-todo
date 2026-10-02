@@ -5,6 +5,8 @@ import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { listen, emit } from '@tauri-apps/api/event'
 import MarkdownEditor from '@/components/MarkdownEditor.vue'
+import { toStorageMarkdown } from '@/utils/imageRef'
+import { notifyError } from '@/utils/notify'
 
 const route = useRoute()
 const subtaskId = parseInt(route.query.id as string)
@@ -24,7 +26,7 @@ async function loadSubtask() {
     title.value = result.title
     markdownContent.value = result.content || ''
   } catch (e) {
-    console.error('Failed to load subtask:', e)
+    notifyError(e, '加载子任务失败')
   }
 }
 
@@ -43,11 +45,13 @@ async function initMemorySubtask() {
 
 async function handleSave() {
   if (!title.value.trim()) return
+  // 未经编辑器改动的旧内容可能仍带 asset URL，保存时统一写回规范图片引用（utils/imageRef）
+  const content = toStorageMarkdown(markdownContent.value)
   if (isMemoryMode) {
     await emit('subtask-memory-save', {
       pendingId: subtaskId,
       title: title.value.trim(),
-      content: markdownContent.value,
+      content,
     })
     appWindow.close()
     return
@@ -57,12 +61,12 @@ async function handleSave() {
       id: subtaskId,
       data: {
         title: title.value.trim(),
-        content: markdownContent.value,
+        content,
       }
     })
     appWindow.close()
   } catch (e) {
-    console.error('Failed to save subtask:', e)
+    notifyError(e, '保存子任务失败')
   }
 }
 

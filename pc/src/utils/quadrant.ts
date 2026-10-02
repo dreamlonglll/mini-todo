@@ -22,3 +22,17 @@ export function resolveQuadrantColor(
     ? getQuadrantColor(nextQuadrant)
     : currentColor
 }
+
+/**
+ * 把某个象限内的新相对顺序合并回全局（列表视图）顺序。
+ *
+ * 全局顺序里属于该象限的那些"槽位"按新顺序依次填入，其它象限的待办原地不动；
+ * 这样四象限里拖拽只改变本象限内部的先后，不会把列表视图的整体顺序打乱。
+ * 象限顺序里出现、全局顺序里却没有的 id 追加在末尾（理论上不会发生，兜底防丢）。
+ */
+export function mergeQuadrantOrder(globalIds: number[], quadrantIds: number[]): number[] {
+  const inQuadrant = new Set(quadrantIds)
+  const queue = [...quadrantIds]
+  const merged = globalIds.map(id => (inQuadrant.has(id) ? (queue.shift() as number) : id))
+  return queue.length > 0 ? [...merged, ...queue] : merged
+}

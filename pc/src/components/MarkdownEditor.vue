@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import { invoke, convertFileSrc } from '@tauri-apps/api/core'
+import { ElMessage } from 'element-plus'
 import { Editor, rootCtx, defaultValueCtx, editorViewOptionsCtx } from '@milkdown/kit/core'
-import { commonmark } from '@milkdown/kit/preset/commonmark'
+import { commonmark, linkAttr } from '@milkdown/kit/preset/commonmark'
 import { gfm } from '@milkdown/kit/preset/gfm'
 import { listener, listenerCtx } from '@milkdown/kit/plugin/listener'
 import { upload, uploadConfig } from '@milkdown/kit/plugin/upload'
@@ -10,11 +11,21 @@ import { clipboard } from '@milkdown/kit/plugin/clipboard'
 import { Decoration } from '@milkdown/kit/prose/view'
 import { nord } from '@milkdown/theme-nord'
 import { replaceAll } from '@milkdown/kit/utils'
-import type { Node, Schema } from '@milkdown/kit/prose/model'
+import type { Mark, Node, Schema } from '@milkdown/kit/prose/model'
 import type { Uploader, UploadOptions } from '@milkdown/kit/plugin/upload'
 import '@milkdown/theme-nord/style.css'
-import { handleLinkClick } from '@/utils/fileLink'
+import { handleLinkClick, preventLinkAuxClick } from '@/utils/fileLink'
+import {
+  MAX_IMAGE_BYTES,
+  getImagesDir,
+  resolveImageExtension,
+  toDisplayMarkdown,
+  toStorageMarkdown,
+} from '@/utils/imageRef'
+import { notifyError } from '@/utils/notify'
 
+// modelValue / update:modelValue 一律是存储形式（图片引用为 minitodo-image://<name>，见 utils/imageRef）；
+// 编辑器内部渲染的是本机 asset URL，进出编辑器时各转换一次
 const props = defineProps<{
   modelValue: string
   readonly?: boolean
@@ -26,8 +37,10 @@ const emit = defineEmits<{
 
 const editorContainer = ref<HTMLDivElement | null>(null)
 let editorInstance: Editor | null = null
-// 编辑器内部当前内容，用于区分外部赋值与用户输入，避免 watch 回环
+// 编辑器内部当前内容（存储形式），用于区分外部赋值与用户输入，避免 watch 回环
 let internalContent = ''
+// 本机 images 目录：把存储形式的图片引用换成可显示的 asset URL
+let imagesDir: string | null = null
 // 初始化代次：create() 是异步的，readonly 切换重建/组件卸载可能与进行中的 create 竞争，
 // 代次不匹配时丢弃过期实例，避免孤儿编辑器泄漏
 let initSeq = 0
@@ -60,45 +73,42 @@ function handleImageClick(e: MouseEvent) {
   previewVisible.value = true
 }
 
-async function imageUploader(files: FileList, schema: Schema): Promise<Node[]> {
-  const images: File[] = []
-  for (let i = 0; i < files.length; i++) {
-    const file = files.item(i)
-    if (file && file.type.includes('image')) {
-      images.push(file)
-    }
+// 单张图片落盘：原始字节走 raw body IPC（不再逐字节拼 base64 + JSON），
+// 文件名由后端生成；失败只跳过这一张，不影响同批其它图片
+async function uploadImage(image: File, schema: Schema): Promise<Node | null> {
+  const ext = resolveImageExtension(image)
+  if (!ext) {
+    ElMessage.warning(`不支持的图片格式：${image.name || image.type}（支持 png / jpg / webp / gif / bmp）`)
+    return null
+  }
+  if (image.size > MAX_IMAGE_BYTES) {
+    ElMessage.warning(`图片超过 20MB，未插入：${image.name}`)
+    return null
   }
 
-  const nodes: Node[] = await Promise.all(
-    images.map(async (image) => {
-      const arrayBuffer = await image.arrayBuffer()
-      const uint8 = new Uint8Array(arrayBuffer)
-      let binary = ''
-      for (let i = 0; i < uint8.length; i++) {
-        binary += String.fromCharCode(uint8[i])
-      }
-      const base64 = btoa(binary)
-
-      const ext = image.name.split('.').pop() || 'png'
-      const fileName = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${ext}`
-
-      const filePath = await invoke<string>('save_subtask_image', {
-        imageData: base64,
-        fileName,
-      })
-
-      const src = convertFileSrc(filePath)
-      return schema.nodes.image.createAndFill({
-        src,
-        alt: image.name,
-      }) as Node
+  try {
+    const bytes = new Uint8Array(await image.arrayBuffer())
+    const filePath = await invoke<string>('save_subtask_image', bytes, {
+      headers: { 'x-image-ext': ext },
     })
-  )
-
-  return nodes
+    // 编辑器里放渲染形式（本机 asset URL），序列化输出时由 toStorageMarkdown 换回规范引用
+    return schema.nodes.image.createAndFill({
+      src: convertFileSrc(filePath),
+      alt: image.name,
+    })
+  } catch (e) {
+    notifyError(e, '图片保存失败')
+    return null
+  }
 }
 
-// 只读排版即详情预览：链接点击直接交给系统（file:/// 走资源管理器，http(s) 走默认浏览器）
+async function imageUploader(files: FileList, schema: Schema): Promise<Node[]> {
+  const images = Array.from(files).filter(file => file.type.startsWith('image/'))
+  const nodes = await Promise.all(images.map(image => uploadImage(image, schema)))
+  return nodes.filter((node): node is Node => node !== null)
+}
+
+// 链接点击一律由协议白名单决定去向，WebView 自身永不导航（见 utils/fileLink）
 function onLinkClick(event: MouseEvent): boolean {
   return handleLinkClick(event, { readonly: props.readonly === true })
 }
@@ -114,7 +124,11 @@ async function initEditor() {
     .config(nord)
     .config((ctx) => {
       ctx.set(rootCtx, editorContainer.value!)
-      ctx.set(defaultValueCtx, contentAtInit)
+      ctx.set(defaultValueCtx, toDisplayMarkdown(contentAtInit, imagesDir))
+
+      // Milkdown 渲染链接时会按自己的安全协议表清洗 href（file: 也会被清成空串），
+      // 原始地址另存到 data-href，点击时由 handleLinkClick 按白名单处理
+      ctx.set(linkAttr.key, (mark: Mark) => ({ 'data-href': mark.attrs.href }))
 
       const linkDOMHandler = {
         click: (_view: unknown, event: Event) => onLinkClick(event as MouseEvent),
@@ -132,10 +146,12 @@ async function initEditor() {
           handleDOMEvents: { ...prev.handleDOMEvents, ...linkDOMHandler },
         }))
         ctx.get(listenerCtx).markdownUpdated((_ctx, markdown, prevMarkdown) => {
-          if (markdown !== prevMarkdown) {
-            internalContent = markdown
-            emit('update:modelValue', markdown)
-          }
+          if (markdown === prevMarkdown) return
+          // 对外只暴露存储形式；比较也基于存储形式，外部回写同一内容时不会触发 replaceAll
+          const storage = toStorageMarkdown(markdown)
+          if (storage === internalContent) return
+          internalContent = storage
+          emit('update:modelValue', storage)
         })
         ctx.set(uploadConfig.key, {
           uploader: imageUploader as Uploader,
@@ -163,7 +179,7 @@ async function initEditor() {
   // create 期间外部可能已更新 modelValue（如父组件异步加载完成），
   // 此时 watch 里的 replaceAll 因 editorInstance 尚为 null 被跳过，这里补一次同步
   if (internalContent !== contentAtInit) {
-    instance.action(replaceAll(internalContent))
+    instance.action(replaceAll(toDisplayMarkdown(internalContent, imagesDir)))
   }
 }
 
@@ -175,12 +191,13 @@ function destroyEditor() {
   }
 }
 
-// 外部赋值（如异步加载完成）时同步到编辑器
+// 外部赋值（如异步加载完成）时同步到编辑器；比较基于存储形式，旧数据里的
+// asset URL 与规范引用视为同一内容
 watch(() => props.modelValue, (value) => {
-  const next = value ?? ''
+  const next = toStorageMarkdown(value ?? '')
   if (next === internalContent) return
   internalContent = next
-  editorInstance?.action(replaceAll(next))
+  editorInstance?.action(replaceAll(toDisplayMarkdown(next, imagesDir)))
 })
 
 // readonly 切换需要重建编辑器（listener/upload 插件仅编辑模式注册）
@@ -190,15 +207,20 @@ watch(() => props.readonly, async () => {
 })
 
 onMounted(async () => {
-  internalContent = props.modelValue ?? ''
+  internalContent = toStorageMarkdown(props.modelValue ?? '')
+  // 先拿到本机 images 目录再建编辑器，首帧就能显示图片（同一窗口内只查询一次）
+  imagesDir = await getImagesDir()
+  // await 期间组件可能已卸载：模板 ref 置空后 initEditor 直接返回
   await initEditor()
   editorContainer.value?.addEventListener('click', handleImageClick)
   editorContainer.value?.addEventListener('click', onLinkClick)
+  editorContainer.value?.addEventListener('auxclick', preventLinkAuxClick)
 })
 
 onBeforeUnmount(() => {
   editorContainer.value?.removeEventListener('click', handleImageClick)
   editorContainer.value?.removeEventListener('click', onLinkClick)
+  editorContainer.value?.removeEventListener('auxclick', preventLinkAuxClick)
   destroyEditor()
 })
 </script>

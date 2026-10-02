@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from 'vue'
 import type { Todo } from '@/types'
+import { formatDateKey, toDateKey } from '@/utils/datetime'
 import { getLunarDisplayText } from '@/utils/lunar'
 import { getYearHolidays, type HolidayInfo } from '@/utils/holiday'
 
@@ -76,7 +77,7 @@ const calendarCells = computed<CalendarCell[]>(() => {
   for (let i = firstDay - 1; i >= 0; i--) {
     const day = daysInPrevMonth - i
     const date = new Date(prevYear, prevMonth, day)
-    const dateStr = formatDate(date)
+    const dateStr = formatDateKey(date)
     const lunarDisplay = getLunarDisplayText(dateStr)
     cells.push({
       date,
@@ -94,11 +95,11 @@ const calendarCells = computed<CalendarCell[]>(() => {
   
   // 当月
   const today = new Date()
-  const todayStr = formatDate(today)
+  const todayStr = formatDateKey(today)
   
   for (let day = 1; day <= daysInMonth; day++) {
     const date = new Date(year, month, day)
-    const dateStr = formatDate(date)
+    const dateStr = formatDateKey(date)
     const lunarDisplay = getLunarDisplayText(dateStr)
     cells.push({
       date,
@@ -121,7 +122,7 @@ const calendarCells = computed<CalendarCell[]>(() => {
   
   for (let day = 1; day <= remaining; day++) {
     const date = new Date(nextYear, nextMonth, day)
-    const dateStr = formatDate(date)
+    const dateStr = formatDateKey(date)
     const lunarDisplay = getLunarDisplayText(dateStr)
     cells.push({
       date,
@@ -196,28 +197,16 @@ onMounted(() => {
   loadHolidayData()
 })
 
-// 格式化日期为 YYYY-MM-DD
-function formatDate(date: Date): string {
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-  return `${year}-${month}-${day}`
+// 获取 todo 的有效开始日期（YYYY-MM-DD）：无开始时间时取创建时间。
+// 时间可能是空格 / T 分隔或带时区（云端、AI 写入），统一走 utils/datetime 解析；
+// 都无法识别时返回 null，该待办不上日历
+function getTodoStartDate(todo: Todo): string | null {
+  return (todo.startTime ? toDateKey(todo.startTime, 'start') : null) ?? toDateKey(todo.createdAt)
 }
 
-// 获取 todo 的有效开始日期
-function getTodoStartDate(todo: Todo): string {
-  if (todo.startTime) {
-    return todo.startTime.split('T')[0]
-  }
-  return todo.createdAt.split('T')[0]
-}
-
-// 获取 todo 的有效截止日期
+// 获取 todo 的有效截止日期（YYYY-MM-DD）
 function getTodoEndDate(todo: Todo): string | null {
-  if (todo.endTime) {
-    return todo.endTime.split('T')[0]
-  }
-  return null
+  return todo.endTime ? toDateKey(todo.endTime, 'end') : null
 }
 
 // 跨天待办条信息
@@ -229,6 +218,8 @@ interface TodoBar {
   isStart: boolean
   isEnd: boolean
   lane: number // 在同一行内的层级，用于处理重叠
+  startKey: string // 有效开始日期 YYYY-MM-DD（预先算好，排序时不再重复解析）
+  endKey: string // 有效截止日期 YYYY-MM-DD（无截止时间时等于开始日期）
 }
 
 // 检查两个待办条是否在同一行内重叠
@@ -246,15 +237,11 @@ function assignLanes(bars: TodoBar[]): void {
   
   // 按原始开始日期排序，开始时间早的排在前面
   bars.sort((a, b) => {
-    const startA = getTodoStartDate(a.todo)
-    const startB = getTodoStartDate(b.todo)
-    if (startA !== startB) {
-      return startA.localeCompare(startB)
+    if (a.startKey !== b.startKey) {
+      return a.startKey.localeCompare(b.startKey)
     }
     // 如果开始日期相同，按结束日期排序
-    const endA = getTodoEndDate(a.todo) || startA
-    const endB = getTodoEndDate(b.todo) || startB
-    return endA.localeCompare(endB)
+    return a.endKey.localeCompare(b.endKey)
   })
   
   for (const bar of bars) {
@@ -288,6 +275,7 @@ const todoBarsByRow = computed(() => {
 
   for (const todo of props.todos) {
     const startDate = getTodoStartDate(todo)
+    if (!startDate) continue
     const endDate = getTodoEndDate(todo) || startDate
     
     // 检查是否在当前日历范围内
@@ -328,7 +316,9 @@ const todoBarsByRow = computed(() => {
         row,
         isStart,
         isEnd,
-        lane: 0 // 初始化为0，后面会重新计算
+        lane: 0, // 初始化为0，后面会重新计算
+        startKey: startDate,
+        endKey: endDate
       })
     }
   }

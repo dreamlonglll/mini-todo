@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, computed, ref, watch, nextTick } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { useTodoStore, useAppStore } from '@/stores'
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { getCurrentWindow, primaryMonitor, currentMonitor, LogicalSize } from '@tauri-apps/api/window'
@@ -10,7 +10,14 @@ import TitleBar from '@/components/TitleBar.vue'
 import TodoList from '@/components/TodoList.vue'
 import QuadrantView from '@/components/QuadrantView.vue'
 import CalendarView from '@/components/CalendarView.vue'
-import type { AppSettingChangedPayload, Todo, SyncSettings, SyncDownloadResult } from '@/types'
+import type { AppSettingChangedPayload, Todo, SyncSettings, SyncReport } from '@/types'
+import { errorMessage, notifyError } from '@/utils/notify'
+import {
+  describeSkippedRecords,
+  describeSyncReport,
+  hasLocalDataChanges,
+  isSyncBusyError,
+} from '@/utils/syncReport'
 
 const todoStore = useTodoStore()
 const appStore = useAppStore()
@@ -78,6 +85,13 @@ let unlistenAppSettings: (() => void) | null = null
 
 // 自动同步定时器
 let autoSyncTimer: ReturnType<typeof setInterval> | null = null
+// startAutoSync 代次：设置窗口连续改开关 / 间隔会重叠调用，只让最后一次调用装定时器
+let autoSyncGeneration = 0
+// 自动同步是否处于连续失败中：同一段失败只提示一次，成功后复位
+let autoSyncFailing = false
+// 最近一次已处理的同步报告：手动同步的返回值与后端 sync-completed 事件携带的是同一份报告，
+// 两条路径都会走到 applySyncReport，用它去重避免重复刷新
+let lastAppliedSyncReport = ''
 
 // 自动刷新定时器（低频轮询，捕获外部 DB 变更）
 let autoRefreshTimer: ReturnType<typeof setInterval> | null = null
@@ -276,9 +290,19 @@ onMounted(async () => {
   })
 
   unlistenTrayReset = await listen('tray-reset-window', async () => {
-    // 重置后需要更新 appStore 状态并退回普通模式（固定模式不允许挪窗口，嵌入桌面同样）
+    // 后端已把窗口挪回默认位置与尺寸。重置后需要更新 appStore 状态并退回普通模式
+    // （固定模式不允许挪窗口，嵌入桌面同样）
     if (appStore.isFixed) {
+      // toggleFixedMode 内部会 saveWindowState，把重置后的几何写进当前屏幕配置
       await appStore.toggleFixedMode()
+    } else {
+      // 普通模式下 onMoved 的 500ms 防抖还没落库：先把重置后的几何写进当前屏幕配置，
+      // 否则下面 initSettings 读到的是旧记录，会把窗口又挪回原处
+      if (saveDebounceTimer.value) {
+        clearTimeout(saveDebounceTimer.value)
+        saveDebounceTimer.value = null
+      }
+      await appStore.saveWindowState()
     }
     await appStore.initSettings()
   })
@@ -292,7 +316,7 @@ onMounted(async () => {
   })
 
   unlistenDataImported = await listen('data-imported', async () => {
-    // 导入 / 应用云端数据会覆盖 settings 表，待办和应用设置都要重载
+    // 导入会覆盖 settings 表，待办和应用设置都要重载（云同步走 sync-completed）
     await todoStore.fetchTodos()
     await reloadAppSettings()
     ElMessage.success('数据导入成功')
@@ -343,9 +367,14 @@ onMounted(async () => {
     }
   })
 
-  // 监听同步完成事件
-  unlistenSyncCompleted = await listen('sync-completed', async () => {
-    await todoStore.fetchTodos()
+  // 后端同步（手动 / 自动 / 设置窗口里的立即同步与强制覆盖）改动了本地数据或设置时广播，
+  // 负载是这次的同步报告
+  unlistenSyncCompleted = await listen<SyncReport | null>('sync-completed', async (event) => {
+    if (event.payload) {
+      await applySyncReport(event.payload)
+    } else {
+      await todoStore.fetchTodos()
+    }
   })
 
   // 初始化自动同步
@@ -376,6 +405,8 @@ onUnmounted(() => {
   if (unlistenAppSettings) unlistenAppSettings()
   if (unlistenFocus) unlistenFocus()
   if (unlistenSyncCompleted) unlistenSyncCompleted()
+  // 作废进行中的 startAutoSync（它 await 回来后不会再装定时器）
+  autoSyncGeneration++
   stopAutoSync()
   clearFabTimers()
   if (autoRefreshTimer) {
@@ -586,6 +617,23 @@ async function openSettings() {
   }
 }
 
+// 按同步报告刷新本地视图：待办有增删改才重新拉列表，应用了云端设置才重载设置。
+// 同一份报告（手动同步返回值 + 后端 sync-completed 事件）只处理一次
+async function applySyncReport(report: SyncReport) {
+  const key = JSON.stringify(report)
+  if (key === lastAppliedSyncReport) return
+  lastAppliedSyncReport = key
+
+  // 与焦点 / 轮询刷新同一约定：子窗口打开期间不动列表，关窗时会统一刷新
+  if (hasLocalDataChanges(report) && !isModalOpen.value) {
+    await todoStore.fetchTodos()
+  }
+  if (report.settingsApplied) {
+    await reloadAppSettings()
+  }
+}
+
+// 手动同步（标题栏按钮）：与设置页「立即同步」、自动同步走同一个智能同步命令
 async function handleSync() {
   if (isSyncing.value) return
   try {
@@ -596,85 +644,72 @@ async function handleSync() {
       return
     }
 
-    const result = await invoke<SyncDownloadResult>('webdav_download_sync')
+    const report = await invoke<SyncReport>('webdav_sync')
+    autoSyncFailing = false
+    await applySyncReport(report)
 
-    if (result.hasRemote && result.hasConflict) {
-      try {
-        const action = await ElMessageBox.confirm(
-          `本地和云端数据均有更新，请选择操作：`,
-          '同步冲突',
-          {
-            confirmButtonText: '使用云端数据',
-            cancelButtonText: '保留本地数据',
-            distinguishCancelAndClose: true,
-            type: 'warning',
-          }
-        )
-        if (action === 'confirm' && result.remoteData) {
-          await invoke<string>('webdav_apply_remote', {
-            syncDataJson: JSON.stringify(result.remoteData),
-          })
-          await todoStore.fetchTodos()
-          await reloadAppSettings()
-          ElMessage.success('已同步云端数据到本地')
-        } else {
-          await invoke<string>('webdav_upload_sync')
-          ElMessage.success('已上传本地数据到云端')
-        }
-      } catch (e) {
-        if (e === 'cancel') {
-          await invoke<string>('webdav_upload_sync')
-          ElMessage.success('已上传本地数据到云端')
-        }
-      }
-    } else if (result.hasRemote && result.remoteData) {
-      const remoteIsNewer = result.remoteUpdatedAt && result.localUpdatedAt
-        ? result.remoteUpdatedAt > result.localUpdatedAt
-        : !!result.remoteUpdatedAt
-
-      if (remoteIsNewer) {
-        await invoke<string>('webdav_apply_remote', {
-          syncDataJson: JSON.stringify(result.remoteData),
-        })
-        await todoStore.fetchTodos()
-        await reloadAppSettings()
-      }
-      await invoke<string>('webdav_upload_sync')
-      ElMessage.success('同步完成')
-    } else {
-      await invoke<string>('webdav_upload_sync')
-      ElMessage.success('数据已上传到云端')
-    }
+    ElMessage({
+      type: report.status === 'no_changes' ? 'info' : 'success',
+      message: describeSyncReport(report),
+    })
+    const skipped = describeSkippedRecords(report)
+    if (skipped) ElMessage.warning(skipped)
   } catch (e) {
-    ElMessage.error('同步失败: ' + String(e))
+    if (isSyncBusyError(e)) {
+      ElMessage.info('已有同步正在进行，请稍后再试')
+    } else {
+      notifyError(e, '同步失败')
+    }
   } finally {
     isSyncing.value = false
   }
 }
 
-async function startAutoSync() {
-  stopAutoSync()
+// 自动同步的一次执行：失败时同一段连续失败只提示一次，成功后复位
+async function runAutoSync() {
+  // 手动同步进行中（后端也会以"同步正在进行中"拒绝），跳过这一轮
+  if (isSyncing.value) return
+  isSyncing.value = true
   try {
-    const settings = await invoke<SyncSettings>('get_sync_settings')
-    if (settings.autoSync && settings.webdavUrl) {
-      const intervalMs = (settings.syncInterval || 15) * 60 * 1000
-      autoSyncTimer = setInterval(async () => {
-        try {
-          const result = await invoke<string>('webdav_auto_sync')
-          if (result === 'conflict') {
-            console.log('Auto sync: conflict detected, skipping')
-          } else if (result !== 'no_changes') {
-            await todoStore.fetchTodos()
-            // 自动同步可能应用了云端的 settings，需要跟着重载
-            await reloadAppSettings()
-          }
-        } catch (e) {
-          console.warn('Auto sync failed:', e)
-        }
-      }, intervalMs)
+    const report = await invoke<SyncReport>('webdav_sync')
+    autoSyncFailing = false
+    await applySyncReport(report)
+    const skipped = describeSkippedRecords(report)
+    if (skipped) console.warn('Auto sync:', skipped)
+  } catch (e) {
+    // 设置窗口里正好在同步：不算失败
+    if (isSyncBusyError(e)) return
+    console.warn('Auto sync failed:', e)
+    if (!autoSyncFailing) {
+      autoSyncFailing = true
+      const detail = errorMessage(e)
+      ElMessage.error(detail ? `自动同步失败：${detail}` : '自动同步失败')
     }
+  } finally {
+    isSyncing.value = false
+  }
+}
+
+// 按当前同步设置（重新）装自动同步定时器。
+// 读取设置是异步的，重叠调用时只让最后一次生效；清旧定时器与装新定时器都放在 await 之后，
+// 避免前一次调用在 await 期间装上的定时器被遗漏（定时器泄漏 → 同步频率翻倍）
+async function startAutoSync() {
+  const generation = ++autoSyncGeneration
+  let settings: SyncSettings
+  try {
+    settings = await invoke<SyncSettings>('get_sync_settings')
   } catch (e) {
     console.warn('Failed to init auto sync:', e)
+    return
+  }
+  if (generation !== autoSyncGeneration) return
+
+  stopAutoSync()
+  if (settings.autoSync && settings.webdavUrl) {
+    const intervalMs = Math.max(1, settings.syncInterval || 15) * 60 * 1000
+    autoSyncTimer = setInterval(() => {
+      void runAutoSync()
+    }, intervalMs)
   }
 }
 

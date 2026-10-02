@@ -12,11 +12,17 @@ const title = ref('')
 const description = ref('')
 const windowLabel = ref('')
 
+// vue-router 解析 query 时已经解码过一次（后端只编码一次）。不能再 decodeURIComponent：
+// 标题里含 "%"（如"完成 50%"）时会抛 URIError，整张通知卡片空白
+function queryText(value: unknown): string {
+  return typeof value === 'string' ? value : ''
+}
+
 onMounted(() => {
   // 解析 URL 参数
-  title.value = decodeURIComponent(route.query.title as string || '待办提醒')
-  description.value = decodeURIComponent(route.query.description as string || '')
-  windowLabel.value = decodeURIComponent(route.query.label as string || '')
+  title.value = queryText(route.query.title) || '待办提醒'
+  description.value = queryText(route.query.description)
+  windowLabel.value = queryText(route.query.label)
 })
 
 // 关闭通知窗口

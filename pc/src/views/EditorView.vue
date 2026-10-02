@@ -8,14 +8,18 @@ import { currentMonitor, primaryMonitor } from '@tauri-apps/api/window'
 import { listen, emit } from '@tauri-apps/api/event'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
-import type { Todo, CreateTodoRequest, UpdateTodoRequest, CreateSubTaskRequest, QuadrantType } from '@/types'
+import type { Todo, SubTask, CreateTodoRequest, UpdateTodoRequest, CreateSubTaskRequest, QuadrantType } from '@/types'
 import { DEFAULT_COLOR, PRESET_COLORS, QUADRANT_INFO, DEFAULT_QUADRANT } from '@/types'
 import { resolveQuadrantColor } from '@/utils/quadrant'
+import { composeDateTime, splitDateTime, formatDateTime } from '@/utils/datetime'
+import { toStorageMarkdown } from '@/utils/imageRef'
+import { notifyError } from '@/utils/notify'
 import draggable from 'vuedraggable'
 import MarkdownEditor from '@/components/MarkdownEditor.vue'
 
 const route = useRoute()
-const todoId = computed(() => route.query.id ? parseInt(route.query.id as string) : null)
+// 用 ref 而非由路由派生：新建后若有后续步骤失败，要原地切到该 id 的编辑态（见 saveNewTodo）
+const todoId = ref<number | null>(route.query.id ? parseInt(route.query.id as string) : null)
 const appWindow = getCurrentWindow()
 
 // 只读模式（仅编辑已有待办时有效，点击 [编辑] 原地切换到编辑排版）
@@ -44,27 +48,16 @@ const endTimeValue = ref<string | null>(null)
 const notifyDate = ref<string | null>(null)
 const notifyTime = ref<string | null>(null)
 
-// 组合日期和时间生成 notifyAt
+// 组合日期和时间生成 notifyAt（规范格式 YYYY-MM-DD HH:MM:SS；只选日期时默认 09:00）
 function updateNotifyAt() {
-  if (notifyDate.value && notifyTime.value) {
-    form.value.notifyAt = `${notifyDate.value}T${notifyTime.value}:00`
-  } else if (notifyDate.value) {
-    form.value.notifyAt = `${notifyDate.value}T09:00:00`
-  } else {
-    form.value.notifyAt = null
-  }
+  form.value.notifyAt = composeDateTime(notifyDate.value, notifyTime.value, 'notify')
 }
 
-// 解析 notifyAt 为日期和时间
+// 解析 notifyAt 为日期和时间（兼容空格 / T 分隔、带时区等形态，见 utils/datetime）
 function parseNotifyAt(notifyAtValue: string | null) {
-  if (notifyAtValue) {
-    const [datePart, timePart] = notifyAtValue.split('T')
-    notifyDate.value = datePart
-    notifyTime.value = timePart ? timePart.substring(0, 5) : '09:00'
-  } else {
-    notifyDate.value = null
-    notifyTime.value = null
-  }
+  const parts = splitDateTime(notifyAtValue, 'notify')
+  notifyDate.value = parts?.date ?? null
+  notifyTime.value = parts?.time ?? null
 }
 
 // 监听日期和时间变化
@@ -72,50 +65,28 @@ watch([notifyDate, notifyTime], () => {
   updateNotifyAt()
 })
 
-// 组合开始日期和时间
+// 组合开始日期和时间（只选日期时默认 00:00）
 function updateStartTime() {
-  if (startDate.value && startTimeValue.value) {
-    form.value.startTime = `${startDate.value}T${startTimeValue.value}:00`
-  } else if (startDate.value) {
-    form.value.startTime = `${startDate.value}T00:00:00`
-  } else {
-    form.value.startTime = null
-  }
+  form.value.startTime = composeDateTime(startDate.value, startTimeValue.value, 'start')
 }
 
-// 组合截止日期和时间
+// 组合截止日期和时间（只选日期时默认 23:59）
 function updateEndTime() {
-  if (endDate.value && endTimeValue.value) {
-    form.value.endTime = `${endDate.value}T${endTimeValue.value}:00`
-  } else if (endDate.value) {
-    form.value.endTime = `${endDate.value}T23:59:00`
-  } else {
-    form.value.endTime = null
-  }
+  form.value.endTime = composeDateTime(endDate.value, endTimeValue.value, 'end')
 }
 
 // 解析开始时间
 function parseStartTime(startTimeStr: string | null) {
-  if (startTimeStr) {
-    const [datePart, timePart] = startTimeStr.split('T')
-    startDate.value = datePart
-    startTimeValue.value = timePart ? timePart.substring(0, 5) : '00:00'
-  } else {
-    startDate.value = null
-    startTimeValue.value = null
-  }
+  const parts = splitDateTime(startTimeStr, 'start')
+  startDate.value = parts?.date ?? null
+  startTimeValue.value = parts?.time ?? null
 }
 
 // 解析截止时间
 function parseEndTime(endTimeStr: string | null) {
-  if (endTimeStr) {
-    const [datePart, timePart] = endTimeStr.split('T')
-    endDate.value = datePart
-    endTimeValue.value = timePart ? timePart.substring(0, 5) : '23:59'
-  } else {
-    endDate.value = null
-    endTimeValue.value = null
-  }
+  const parts = splitDateTime(endTimeStr, 'end')
+  endDate.value = parts?.date ?? null
+  endTimeValue.value = parts?.time ?? null
 }
 
 // 监听开始时间变化
@@ -156,7 +127,7 @@ async function onSubtaskDragEnd() {
   try {
     await invoke('reorder_subtasks', { ids })
   } catch (e) {
-    console.error('Failed to reorder subtasks:', e)
+    notifyError(e, '子任务排序保存失败')
     // 落库失败时本地顺序已经变了，重新拉一次让两边一致
     await loadTodo(false)
   }
@@ -218,10 +189,10 @@ const originalEndTime = ref<string | null>(null)
 // 只读模式：当前象限（优先级）信息
 const quadrantInfo = computed(() => QUADRANT_INFO.find(q => q.id === form.value.quadrant))
 
-// 只读模式：格式化 "YYYY-MM-DDTHH:MM:SS" 为 "YYYY-MM-DD HH:MM"
-function formatDateTime(value: string | null): string {
+// 只读模式：提醒时间显示为 "YYYY-MM-DD HH:MM"（无法识别时原样显示）
+function formatNotifyAt(value: string | null): string {
   if (!value) return ''
-  return value.replace('T', ' ').substring(0, 16)
+  return formatDateTime(value, 'YYYY-MM-DD HH:mm', 'notify') ?? value
 }
 
 // 只读模式：通知状态描述
@@ -239,12 +210,12 @@ const notifyStatusText = computed(() => {
       text += `（每月 ${repeatMonthDay.value} 号）`
     }
     if (form.value.notifyAt) {
-      text += `，下次 ${formatDateTime(form.value.notifyAt)}`
+      text += `，下次 ${formatNotifyAt(form.value.notifyAt)}`
     }
     return text
   }
   if (form.value.notifyAt) {
-    let text = `提醒 ${formatDateTime(form.value.notifyAt)}`
+    let text = `提醒 ${formatNotifyAt(form.value.notifyAt)}`
     if (form.value.notifyBefore > 0) {
       text += `（提前 ${form.value.notifyBefore} 分钟）`
     }
@@ -351,8 +322,7 @@ async function loadTodo(refreshForm = true) {
   if (!todoId.value) return
 
   try {
-    const todos = await invoke<Todo[]>('get_todos')
-    todo.value = todos.find(t => t.id === todoId.value) || null
+    todo.value = await invoke<Todo>('get_todo', { id: todoId.value })
 
     if (todo.value && refreshForm) {
       form.value = {
@@ -397,7 +367,7 @@ async function loadTodo(refreshForm = true) {
       repeatMonthDay.value = todo.value.repeatMonthDay || 1
     }
   } catch (e) {
-    console.error('Failed to load todo:', e)
+    notifyError(e, '加载待办失败')
   }
 }
 
@@ -412,76 +382,163 @@ function handleNotifyBeforeChange(value: number) {
   }
 }
 
+// 保存中：防止双击「创建」建出两条待办，或重复提交更新
+const saving = ref(false)
+
+// 编辑态的完整更新请求（含清除标记与重复提醒）
+function buildUpdateRequest(): UpdateTodoRequest {
+  // 判断是否需要清除时间字段
+  const shouldClearNotifyAt = originalNotifyAt.value !== null && !form.value.notifyAt
+  const shouldClearStartTime = originalStartTime.value !== null && !form.value.startTime
+  const shouldClearEndTime = originalEndTime.value !== null && !form.value.endTime
+
+  const wasRepeatEnabled = !!todo.value?.repeatEnabled
+  const shouldClearRepeat = wasRepeatEnabled && !repeatEnabled.value
+
+  return {
+    title: form.value.title,
+    // 描述未经编辑器改动时可能仍是旧数据里的 asset URL，保存时统一写回规范图片引用
+    description: toStorageMarkdown(form.value.description) || null,
+    color: form.value.color,
+    quadrant: form.value.quadrant,
+    notifyAt: form.value.notifyAt || undefined,
+    notifyBefore: repeatEnabled.value ? 0 : form.value.notifyBefore,
+    clearNotifyAt: shouldClearNotifyAt,
+    startTime: form.value.startTime || undefined,
+    endTime: form.value.endTime || undefined,
+    clearStartTime: shouldClearStartTime,
+    clearEndTime: shouldClearEndTime,
+    clearRepeat: shouldClearRepeat,
+    repeatEnabled: repeatEnabled.value || undefined,
+    repeatType: repeatEnabled.value ? repeatType.value : undefined,
+    repeatInterval: repeatEnabled.value ? repeatInterval.value : undefined,
+    repeatWeekdays: repeatEnabled.value && repeatType.value === 'weekly' && repeatWeekdays.value.length > 0
+      ? [...repeatWeekdays.value].sort((a, b) => a - b).join(',') : undefined,
+    repeatMonthDay: repeatEnabled.value && repeatType.value === 'monthly'
+      ? repeatMonthDay.value : undefined,
+  }
+}
+
+// 记录已落库的待办，后续保存一律走更新分支
+function enterEditState(saved: Todo) {
+  todoId.value = saved.id
+  todo.value = saved
+  originalNotifyAt.value = saved.notifyAt
+  originalStartTime.value = saved.startTime
+  originalEndTime.value = saved.endTime
+}
+
+// 把新建时暂存的子任务按顺序落库：成功一个移出一个；遇到失败即停下，
+// 剩余的留在 pendingSubtasks 里，下次点保存时重试，已创建的不会重复创建
+async function flushPendingSubtasks(parentId: number): Promise<boolean> {
+  for (const pending of [...pendingSubtasks.value]) {
+    const data: CreateSubTaskRequest = {
+      parentId,
+      title: pending.title,
+      content: pending.content ? toStorageMarkdown(pending.content) : undefined,
+    }
+    let created: SubTask
+    try {
+      created = await invoke<SubTask>('create_subtask', { data })
+    } catch (e) {
+      notifyError(e, `${pendingSubtasks.value.length} 个子任务未能创建，请点击「保存」重试`)
+      return false
+    }
+    pendingSubtasks.value = pendingSubtasks.value.filter(s => s.id !== pending.id)
+
+    // create_subtask 不接受完成态：新建时就勾选了完成的子任务补一次更新（失败不影响子任务本身）
+    if (pending.completed) {
+      try {
+        await invoke('update_subtask', { id: created.id, data: { completed: true } })
+      } catch (e) {
+        console.error('Failed to mark new subtask completed:', e)
+      }
+    }
+  }
+  return true
+}
+
+// 新建待办。create_todo 成功之后的步骤（补存重复提醒、创建暂存的子任务）任一失败，
+// 就原地切到该 id 的编辑态：用户再点保存走的是更新分支，不会重复创建待办。
+// 全部成功则直接关窗，界面不经过中间状态
+async function saveNewTodo() {
+  const data: CreateTodoRequest = {
+    title: form.value.title,
+    description: toStorageMarkdown(form.value.description) || undefined,
+    color: form.value.color,
+    quadrant: form.value.quadrant,
+    notifyAt: form.value.notifyAt || undefined,
+    notifyBefore: repeatEnabled.value ? 0 : form.value.notifyBefore,
+    startTime: form.value.startTime || undefined,
+    endTime: form.value.endTime || undefined,
+  }
+
+  let created: Todo
+  try {
+    created = await invoke<Todo>('create_todo', { data })
+  } catch (e) {
+    notifyError(e, '创建待办失败')
+    return
+  }
+
+  let ok = true
+  // create_todo 不接受重复提醒字段：开启了重复时补一次完整更新，否则重复设置会被丢掉
+  if (repeatEnabled.value) {
+    try {
+      created = await invoke<Todo>('update_todo', { id: created.id, data: buildUpdateRequest() })
+    } catch (e) {
+      notifyError(e, '待办已创建，但重复提醒未保存，请点击「保存」重试')
+      ok = false
+    }
+  }
+  if (ok) {
+    ok = await flushPendingSubtasks(created.id)
+  }
+
+  if (!ok) {
+    enterEditState(created)
+    await loadTodo(false)
+    return
+  }
+  ElMessage.success('待办已创建')
+  handleClose()
+}
+
+// 更新已有待办（含新建后切过来的），并补建上次没能创建的子任务
+async function saveExistingTodo(id: number) {
+  try {
+    enterEditState(await invoke<Todo>('update_todo', { id, data: buildUpdateRequest() }))
+  } catch (e) {
+    notifyError(e, '保存待办失败')
+    return
+  }
+
+  if (pendingSubtasks.value.length > 0 && !(await flushPendingSubtasks(id))) {
+    await loadTodo(false)
+    return
+  }
+  ElMessage.success('待办已保存')
+  handleClose()
+}
+
 // 保存待办
 async function handleSave() {
+  if (saving.value) return
   if (!form.value.title.trim()) return
 
   if (isCustomNotifyBefore.value) {
     form.value.notifyBefore = customNotifyBefore.value
   }
 
+  saving.value = true
   try {
-    if (isEdit.value && todoId.value) {
-      // 判断是否需要清除时间字段
-      const shouldClearNotifyAt = originalNotifyAt.value !== null && !form.value.notifyAt
-      const shouldClearStartTime = originalStartTime.value !== null && !form.value.startTime
-      const shouldClearEndTime = originalEndTime.value !== null && !form.value.endTime
-      
-      const wasRepeatEnabled = !!todo.value?.repeatEnabled
-      const shouldClearRepeat = wasRepeatEnabled && !repeatEnabled.value
-
-      const data: UpdateTodoRequest = {
-        title: form.value.title,
-        description: form.value.description || null,
-        color: form.value.color,
-        quadrant: form.value.quadrant,
-        notifyAt: form.value.notifyAt || undefined,
-        notifyBefore: repeatEnabled.value ? 0 : form.value.notifyBefore,
-        clearNotifyAt: shouldClearNotifyAt,
-        startTime: form.value.startTime || undefined,
-        endTime: form.value.endTime || undefined,
-        clearStartTime: shouldClearStartTime,
-        clearEndTime: shouldClearEndTime,
-        clearRepeat: shouldClearRepeat,
-        repeatEnabled: repeatEnabled.value || undefined,
-        repeatType: repeatEnabled.value ? repeatType.value : undefined,
-        repeatInterval: repeatEnabled.value ? repeatInterval.value : undefined,
-        repeatWeekdays: repeatEnabled.value && repeatType.value === 'weekly' && repeatWeekdays.value.length > 0
-          ? repeatWeekdays.value.sort((a, b) => a - b).join(',') : undefined,
-        repeatMonthDay: repeatEnabled.value && repeatType.value === 'monthly'
-          ? repeatMonthDay.value : undefined,
-      }
-      await invoke('update_todo', { id: todoId.value, data })
-      ElMessage.success('待办已保存')
+    if (todoId.value !== null) {
+      await saveExistingTodo(todoId.value)
     } else {
-      const data: CreateTodoRequest = {
-        title: form.value.title,
-        description: form.value.description || undefined,
-        color: form.value.color,
-        quadrant: form.value.quadrant,
-        notifyAt: form.value.notifyAt || undefined,
-        notifyBefore: form.value.notifyBefore,
-        startTime: form.value.startTime || undefined,
-        endTime: form.value.endTime || undefined,
-      }
-      const newTodo = await invoke<Todo>('create_todo', { data })
-      
-      if (pendingSubtasks.value.length > 0) {
-        for (const subtask of pendingSubtasks.value) {
-          const subtaskData: CreateSubTaskRequest = {
-            parentId: newTodo.id,
-            title: subtask.title,
-            content: subtask.content || undefined
-          }
-          await invoke('create_subtask', { data: subtaskData })
-        }
-      }
-      ElMessage.success('待办已创建')
+      await saveNewTodo()
     }
-
-    handleClose()
-  } catch (e) {
-    console.error('Failed to save:', e)
+  } finally {
+    saving.value = false
   }
 }
 
@@ -496,8 +553,7 @@ async function updateTodoCompleted(completed: boolean) {
     await invoke('update_todo', { id: todoId.value, data })
     handleClose()
   } catch (e) {
-    const action = completed ? 'complete' : 'reopen'
-    console.error(`Failed to ${action} todo:`, e)
+    notifyError(e, completed ? '标记完成失败' : '重新打开失败')
   } finally {
     isUpdatingCompleteState.value = false
   }
@@ -528,7 +584,7 @@ async function addSubtask() {
       await loadTodo(false)
       newSubtaskTitle.value = ''
     } catch (e) {
-      console.error('Failed to add subtask:', e)
+      notifyError(e, '添加子任务失败')
     }
   } else {
     // 新建模式：添加到本地列表
@@ -566,7 +622,7 @@ async function importSubtasks() {
     const paths = Array.isArray(selected) ? selected : [selected]
     if (paths.length === 0) return
 
-    const created = await invoke<any[]>('import_subtasks_from_paths', {
+    const created = await invoke<SubTask[]>('import_subtasks_from_paths', {
       parentId: todoId.value,
       paths,
     })
@@ -574,7 +630,7 @@ async function importSubtasks() {
     await loadTodo(false)
     ElMessage.success(`成功导入 ${created.length} 个子任务`)
   } catch (e) {
-    ElMessage.error('导入失败: ' + String(e))
+    notifyError(e, '导入失败')
   }
 }
 
@@ -594,7 +650,7 @@ async function importSubtasksFromFolder() {
 
     const paths = [selected as string]
 
-    const created = await invoke<any[]>('import_subtasks_from_paths', {
+    const created = await invoke<SubTask[]>('import_subtasks_from_paths', {
       parentId: todoId.value,
       paths,
     })
@@ -602,7 +658,7 @@ async function importSubtasksFromFolder() {
     await loadTodo(false)
     ElMessage.success(`成功导入 ${created.length} 个子任务`)
   } catch (e) {
-    ElMessage.error('导入失败: ' + String(e))
+    notifyError(e, '导入失败')
   }
 }
 
@@ -618,7 +674,7 @@ async function toggleSubtask(subtaskId: number) {
     })
     await loadTodo(false)
   } catch (e) {
-    console.error('Failed to toggle subtask:', e)
+    notifyError(e, '更新子任务失败')
   }
 }
 
@@ -656,7 +712,7 @@ async function deleteSubtask(subtaskId: number) {
       await invoke('delete_subtask', { id: subtaskId })
       await loadTodo(false)
     } catch (e) {
-      console.error('Failed to delete subtask:', e)
+      notifyError(e, '删除子任务失败')
     }
   } else {
     // 新建模式：从本地列表删除
@@ -708,7 +764,7 @@ async function saveInlineEdit(subtaskId: number) {
     })
     await loadTodo(false)
   } catch (e) {
-    console.error('Failed to update subtask title:', e)
+    notifyError(e, '修改子任务标题失败')
   }
   inlineEditingSubtaskId.value = null
 }
@@ -822,7 +878,7 @@ async function openSubtaskWindow(subtaskId: number, mode: 'edit' | 'view') {
   } catch (e) {
     isSubtaskEditorOpen.value = false
     cleanupMemoryListeners()
-    console.error(`Failed to open subtask ${mode}:`, e)
+    notifyError(e, '打开子任务窗口失败')
   }
 }
 
@@ -1154,8 +1210,14 @@ function onHeaderMouseDown(e: MouseEvent) {
             <el-icon><Close /></el-icon>
             取消
           </el-button>
-          <el-button type="primary" size="small" @click="handleSave">
-            <el-icon>
+          <el-button
+            type="primary"
+            size="small"
+            :loading="saving"
+            :disabled="saving"
+            @click="handleSave"
+          >
+            <el-icon v-if="!saving">
               <Check v-if="isEdit" />
               <Plus v-else />
             </el-icon>
@@ -1218,6 +1280,12 @@ function onHeaderMouseDown(e: MouseEvent) {
                 </template>
               </el-dropdown>
             </div>
+          </div>
+
+          <!-- 新建时暂存、但落库失败的子任务：保存时会重试（见 flushPendingSubtasks） -->
+          <div v-if="isEdit && pendingSubtasks.length > 0" class="pending-subtask-hint">
+            <el-icon :size="14"><Warning /></el-icon>
+            <span>{{ pendingSubtasks.length }} 个子任务尚未创建，点击「保存」重试</span>
           </div>
 
           <!-- 子任务列表 -->
@@ -1749,6 +1817,19 @@ function onHeaderMouseDown(e: MouseEvent) {
       transition: width 0.3s ease;
     }
   }
+}
+
+/* 落库失败、待重试的子任务提示 */
+.pending-subtask-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: #fffbeb;
+  color: #b45309;
+  font-size: 12px;
 }
 
 /* 添加子任务输入框 */
