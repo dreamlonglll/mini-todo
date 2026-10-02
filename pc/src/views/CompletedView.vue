@@ -2,10 +2,11 @@
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import type { UnlistenFn } from '@tauri-apps/api/event'
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { currentMonitor, primaryMonitor } from '@tauri-apps/api/window'
-import { ElMessageBox } from 'element-plus'
+import { Check, Clock, Close, Delete, RefreshLeft, Search } from '@element-plus/icons-vue'
+import { ElMessageBox } from '@/plugins/element'
 import type { Todo } from '@/types'
 import { formatDateTime, normalizeDateTime } from '@/utils/datetime'
 import { notifyError } from '@/utils/notify'
@@ -172,11 +173,6 @@ function handleClose() {
 
 onMounted(async () => {
   await loadCompletedTodos()
-
-  const unlisten = await listen('todo-updated', async () => {
-    await loadCompletedTodos()
-  })
-  unlisteners.push(unlisten)
 
   // 编辑器打开期间本窗口获得焦点（被点击）时，把编辑器带回前台
   const unlistenFocus = await appWindow.onFocusChanged(async ({ payload: focused }) => {

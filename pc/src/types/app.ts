@@ -52,9 +52,6 @@ export interface AppSettings {
   textTheme: TextTheme
 }
 
-// 窗口模式：普通 / 固定（可贴边隐藏、置顶唤起；开启"嵌入桌面"后固定即嵌入桌面图标层之上）
-export type WindowMode = 'normal' | 'fixed'
-
 /**
  * 跨窗口设置变更事件 `app-settings-changed` 的 key
  *

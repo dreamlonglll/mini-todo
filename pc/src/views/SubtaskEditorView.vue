@@ -1,12 +1,15 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { ref, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { listen, emit } from '@tauri-apps/api/event'
+import { Check, Close, FullScreen } from '@element-plus/icons-vue'
 import MarkdownEditor from '@/components/MarkdownEditor.vue'
+import { ElMessageBox } from '@/plugins/element'
 import { toStorageMarkdown } from '@/utils/imageRef'
 import { notifyError } from '@/utils/notify'
+import { bindEditorShortcuts } from '@/utils/editorShortcuts'
 
 const route = useRoute()
 const subtaskId = parseInt(route.query.id as string)
@@ -17,14 +20,33 @@ const appWindow = getCurrentWindow()
 
 const title = ref('')
 const markdownContent = ref('')
+// 保存中：防止连按 Ctrl+Enter / 双击重复提交
+const saving = ref(false)
 
 let unlistenMemoryInit: (() => void) | null = null
+let unbindShortcuts: (() => void) | null = null
+
+// 加载完成时的内容快照；Esc 关闭前比对，有未保存的修改先确认。
+// 先以初始空内容占位：加载完成前按 Esc 不会误报"未保存的修改"
+let cleanSnapshot = ''
+
+function contentSnapshot(): string {
+  return JSON.stringify([title.value.trim(), toStorageMarkdown(markdownContent.value)])
+}
+
+cleanSnapshot = contentSnapshot()
+
+async function markClean() {
+  await nextTick()
+  cleanSnapshot = contentSnapshot()
+}
 
 async function loadSubtask() {
   try {
     const result = await invoke<{ title: string; content: string | null }>('get_subtask', { id: subtaskId })
     title.value = result.title
     markdownContent.value = result.content || ''
+    await markClean()
   } catch (e) {
     notifyError(e, '加载子任务失败')
   }
@@ -38,40 +60,60 @@ async function initMemorySubtask() {
       if (event.payload.pendingId !== subtaskId) return
       title.value = event.payload.title
       markdownContent.value = event.payload.content || ''
+      void markClean()
     }
   )
   await emit('subtask-memory-ready', { pendingId: subtaskId })
 }
 
 async function handleSave() {
-  if (!title.value.trim()) return
+  if (isViewMode || saving.value || !title.value.trim()) return
   // 未经编辑器改动的旧内容可能仍带 asset URL，保存时统一写回规范图片引用（utils/imageRef）
   const content = toStorageMarkdown(markdownContent.value)
-  if (isMemoryMode) {
-    await emit('subtask-memory-save', {
-      pendingId: subtaskId,
-      title: title.value.trim(),
-      content,
-    })
-    appWindow.close()
-    return
-  }
+  saving.value = true
   try {
-    await invoke('update_subtask', {
-      id: subtaskId,
-      data: {
+    if (isMemoryMode) {
+      await emit('subtask-memory-save', {
+        pendingId: subtaskId,
         title: title.value.trim(),
         content,
-      }
-    })
+      })
+    } else {
+      await invoke('update_subtask', {
+        id: subtaskId,
+        data: {
+          title: title.value.trim(),
+          content,
+        }
+      })
+    }
     appWindow.close()
   } catch (e) {
     notifyError(e, '保存子任务失败')
+  } finally {
+    saving.value = false
   }
 }
 
 function handleClose() {
   appWindow.close()
+}
+
+// Esc：只读直接关；编辑中有未保存的修改先确认
+async function closeWithConfirm() {
+  if (saving.value) return
+  if (!isViewMode && contentSnapshot() !== cleanSnapshot) {
+    try {
+      await ElMessageBox.confirm('有未保存的修改，确定放弃并关闭吗？', '放弃修改', {
+        confirmButtonText: '放弃',
+        cancelButtonText: '继续编辑',
+        type: 'warning',
+      })
+    } catch {
+      return
+    }
+  }
+  handleClose()
 }
 
 async function handleMaximize() {
@@ -93,6 +135,10 @@ function onHeaderMouseDown(e: MouseEvent) {
 }
 
 onMounted(async () => {
+  unbindShortcuts = bindEditorShortcuts({
+    onClose: () => void closeWithConfirm(),
+    onSubmit: () => void handleSave(),
+  })
   if (isMemoryMode) {
     await initMemorySubtask()
   } else {
@@ -103,6 +149,8 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   unlistenMemoryInit?.()
   unlistenMemoryInit = null
+  unbindShortcuts?.()
+  unbindShortcuts = null
 })
 </script>
 
@@ -147,7 +195,13 @@ onBeforeUnmount(() => {
           <el-icon><Close /></el-icon>
           {{ isViewMode ? '关闭' : '取消' }}
         </el-button>
-        <el-button v-if="!isViewMode" type="primary" :disabled="!title.trim()" @click="handleSave">
+        <el-button
+          v-if="!isViewMode"
+          type="primary"
+          :loading="saving"
+          :disabled="!title.trim() || saving"
+          @click="handleSave"
+        >
           <el-icon><Check /></el-icon>
           保存
         </el-button>

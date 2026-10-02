@@ -1,7 +1,20 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useTodoStore, useAppStore } from '@/stores'
-import { ElMessageBox } from 'element-plus'
+import {
+  ArrowDown,
+  ArrowRight,
+  Bell,
+  CirclePlus,
+  Delete,
+  Finished,
+  RefreshLeft,
+  RefreshRight,
+  Select,
+  SuccessFilled,
+  Top,
+} from '@element-plus/icons-vue'
+import { ElMessageBox } from '@/plugins/element'
 import type { Todo } from '@/types'
 import { formatDateTime } from '@/utils/datetime'
 

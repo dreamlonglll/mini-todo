@@ -3,6 +3,7 @@ import { ref, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import { Bell, Close } from '@element-plus/icons-vue'
 
 const route = useRoute()
 const appWindow = getCurrentWindow()

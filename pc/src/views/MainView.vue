@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, computed, ref, watch, nextTick } from 'vue'
-import { ElMessage } from 'element-plus'
+import { onMounted, onUnmounted, computed, ref, watch, nextTick, defineAsyncComponent } from 'vue'
+import { Plus } from '@element-plus/icons-vue'
+import { ElMessage } from '@/plugins/element'
 import { useTodoStore, useAppStore } from '@/stores'
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { getCurrentWindow, primaryMonitor, currentMonitor, LogicalSize } from '@tauri-apps/api/window'
@@ -9,7 +10,7 @@ import { invoke } from '@tauri-apps/api/core'
 import TitleBar from '@/components/TitleBar.vue'
 import TodoList from '@/components/TodoList.vue'
 import QuadrantView from '@/components/QuadrantView.vue'
-import CalendarView from '@/components/CalendarView.vue'
+import type CalendarViewComponent from '@/components/CalendarView.vue'
 import type { AppSettingChangedPayload, Todo, SyncSettings, SyncReport } from '@/types'
 import { errorMessage, notifyError } from '@/utils/notify'
 import {
@@ -18,6 +19,9 @@ import {
   hasLocalDataChanges,
   isSyncBusyError,
 } from '@/utils/syncReport'
+
+// 日历默认隐藏：按需加载，农历库 lunar-javascript（约 285KB）不进主窗口首屏的包
+const CalendarView = defineAsyncComponent(() => import('@/components/CalendarView.vue'))
 
 const todoStore = useTodoStore()
 const appStore = useAppStore()
@@ -32,8 +36,8 @@ const showCalendar = computed(() => appStore.showCalendar)
 // 当前视图模式
 const viewMode = computed(() => todoStore.viewMode)
 
-// 日历组件引用
-const calendarRef = ref<InstanceType<typeof CalendarView> | null>(null)
+// 日历组件引用（异步组件的模板 ref 会转发到加载完成的内部组件实例）
+const calendarRef = ref<InstanceType<typeof CalendarViewComponent> | null>(null)
 
 // 当前月份文本（从日历组件获取）
 const calendarMonthText = computed(() => calendarRef.value?.currentMonthText || '')
@@ -93,9 +97,10 @@ let autoSyncFailing = false
 // 两条路径都会走到 applySyncReport，用它去重避免重复刷新
 let lastAppliedSyncReport = ''
 
-// 自动刷新定时器（低频轮询，捕获外部 DB 变更）
-let autoRefreshTimer: ReturnType<typeof setInterval> | null = null
-const AUTO_REFRESH_INTERVAL = 60_000
+// 变更轮询定时器：每 5s 读一次本地变更计数（get_change_seq，极轻量），
+// 其它窗口 / 提醒调度 / 同步 / 外部脚本写过库时才全量拉取
+let changePollTimer: ReturnType<typeof setInterval> | null = null
+const CHANGE_POLL_INTERVAL = 5_000
 
 // 防抖保存定时器
 const saveDebounceTimer = ref<number | null>(null)
@@ -380,12 +385,12 @@ onMounted(async () => {
   // 初始化自动同步
   startAutoSync()
 
-  // 启动低频轮询刷新
-  autoRefreshTimer = setInterval(() => {
+  // 启动变更轮询（子窗口打开期间不刷新列表，关窗时会统一刷新）
+  changePollTimer = setInterval(() => {
     if (!isModalOpen.value) {
-      todoStore.fetchTodos()
+      void todoStore.refreshIfChanged()
     }
-  }, AUTO_REFRESH_INTERVAL)
+  }, CHANGE_POLL_INTERVAL)
 
   // 初始化鼠标在窗口内状态（用于 macOS 自动隐藏唤起）
   void reportAutoHideCursorInside(true)
@@ -409,9 +414,9 @@ onUnmounted(() => {
   autoSyncGeneration++
   stopAutoSync()
   clearFabTimers()
-  if (autoRefreshTimer) {
-    clearInterval(autoRefreshTimer)
-    autoRefreshTimer = null
+  if (changePollTimer) {
+    clearInterval(changePollTimer)
+    changePollTimer = null
   }
   if (saveDebounceTimer.value) {
     clearTimeout(saveDebounceTimer.value)

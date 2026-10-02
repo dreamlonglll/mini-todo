@@ -3,7 +3,21 @@ import { computed } from 'vue'
 import { useAppStore, useTodoStore, APP_VERSION } from '@/stores'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { ElMessageBox } from 'element-plus'
+import {
+  ArrowLeft,
+  ArrowRight,
+  Expand,
+  Finished,
+  Fold,
+  List,
+  Lock,
+  Moon,
+  Refresh,
+  Setting,
+  Sunny,
+  Unlock,
+} from '@element-plus/icons-vue'
+import { ElMessageBox } from '@/plugins/element'
 import type { ViewMode } from '@/types'
 
 const appWindow = getCurrentWindow()

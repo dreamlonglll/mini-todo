@@ -3,7 +3,7 @@ import { computed, ref } from 'vue'
 import { getVersion } from '@tauri-apps/api/app'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow, PhysicalPosition, PhysicalSize, availableMonitors, primaryMonitor } from '@tauri-apps/api/window'
-import type { WindowPosition, WindowSize, WindowMode, ScreenConfig, SaveScreenConfigRequest, MonitorInfo } from '@/types'
+import type { WindowPosition, WindowSize, ScreenConfig, SaveScreenConfigRequest, MonitorInfo } from '@/types'
 import { DEFAULT_BG_COLOR, DEFAULT_BG_ALPHA } from '@/types'
 import { hexToRgbChannels } from '@/utils/color'
 import { notifyError } from '@/utils/notify'
@@ -44,7 +44,6 @@ export const useAppStore = defineStore('app', () => {
   const isDarkTheme = ref(false)
   const windowPosition = ref<WindowPosition | null>(null)
   const windowSize = ref<WindowSize | null>(null)
-  const windowMode = computed<WindowMode>(() => (isFixed.value ? 'fixed' : 'normal'))
   
   // 屏幕配置相关状态
   const currentScreenConfigId = ref<string>('')
@@ -286,17 +285,6 @@ export const useAppStore = defineStore('app', () => {
     }
   }
 
-  // 切换日历显示
-  async function toggleShowCalendar() {
-    try {
-      showCalendar.value = !showCalendar.value
-      await invoke('set_show_calendar', { show: showCalendar.value })
-    } catch (e) {
-      console.error('Failed to toggle show calendar:', e)
-      showCalendar.value = !showCalendar.value // 回滚
-    }
-  }
-
   // 设置日历显示
   async function setShowCalendar(show: boolean) {
     const oldValue = showCalendar.value
@@ -319,18 +307,6 @@ export const useAppStore = defineStore('app', () => {
     } catch (e) {
       console.error('Failed to load todo font settings:', e)
     }
-  }
-
-  async function setTodoFontFamily(family: string) {
-    todoFontFamily.value = family
-    applyTodoFontStyles()
-    await invoke('set_todo_font_family', { fontFamily: family })
-  }
-
-  async function setTodoFontSize(size: number) {
-    todoFontSize.value = size
-    applyTodoFontStyles()
-    await invoke('set_todo_font_size', { fontSize: size })
   }
 
   function applyTodoFontStyles() {
@@ -594,39 +570,6 @@ export const useAppStore = defineStore('app', () => {
     }
   }
 
-  // 更新屏幕配置名称
-  async function updateScreenConfigName(configId: string, displayName: string): Promise<boolean> {
-    try {
-      await invoke('update_screen_config_name', { configId, displayName })
-      await loadScreenConfigs()
-      return true
-    } catch (e) {
-      console.error('Failed to update screen config name:', e)
-      return false
-    }
-  }
-
-  // 导出数据
-  async function exportData(): Promise<string | null> {
-    try {
-      return await invoke<string>('export_data')
-    } catch (e) {
-      console.error('Failed to export data:', e)
-      return null
-    }
-  }
-
-  // 导入数据
-  async function importData(jsonData: string): Promise<boolean> {
-    try {
-      await invoke('import_data', { jsonData })
-      return true
-    } catch (e) {
-      console.error('Failed to import data:', e)
-      return false
-    }
-  }
-
   // 比较版本号 (返回: 1 表示 v1 > v2, -1 表示 v1 < v2, 0 表示相等)
   function compareVersions(v1: string, v2: string): number {
     const parts1 = v1.replace(/^v/, '').split('.').map(Number)
@@ -689,7 +632,6 @@ export const useAppStore = defineStore('app', () => {
     isDarkTheme,
     windowPosition,
     windowSize,
-    windowMode,
     hasUpdate,
     latestVersion,
     // 屏幕配置状态
@@ -708,19 +650,13 @@ export const useAppStore = defineStore('app', () => {
     setDarkTheme,
     toggleDarkTheme,
     saveWindowState,
-    exportData,
-    importData,
     checkForUpdates,
     getReleasesUrl,
     // 屏幕配置方法
-    generateScreenConfigId,
-    generateScreenConfigDisplayName,
     loadScreenConfigs,
     deleteScreenConfig,
-    updateScreenConfigName,
     // 日历方法
     loadShowCalendar,
-    toggleShowCalendar,
     setShowCalendar,
     // 自动隐藏方法
     loadAutoHideEnabled,
@@ -738,12 +674,7 @@ export const useAppStore = defineStore('app', () => {
     windowBgAlpha,
     loadWindowBackground,
     setWindowBackground,
-    // 待办字体方法
-    todoFontFamily,
-    todoFontSize,
+    // 待办字体（设置窗口直接写库并发 todo-font-changed，主窗口据此重载）
     loadTodoFontSettings,
-    setTodoFontFamily,
-    setTodoFontSize,
-    applyTodoFontStyles
   }
 })

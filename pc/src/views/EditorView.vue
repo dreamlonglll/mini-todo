@@ -6,7 +6,23 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { currentMonitor, primaryMonitor } from '@tauri-apps/api/window'
 import { listen, emit } from '@tauri-apps/api/event'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import {
+  Bell,
+  Check,
+  CircleCheck,
+  Close,
+  Delete,
+  Edit,
+  FullScreen,
+  List,
+  Plus,
+  Rank,
+  RefreshLeft,
+  Upload,
+  View,
+  Warning,
+} from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from '@/plugins/element'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import type { Todo, SubTask, CreateTodoRequest, UpdateTodoRequest, CreateSubTaskRequest, QuadrantType } from '@/types'
 import { DEFAULT_COLOR, PRESET_COLORS, QUADRANT_INFO, DEFAULT_QUADRANT } from '@/types'
@@ -14,6 +30,7 @@ import { resolveQuadrantColor } from '@/utils/quadrant'
 import { composeDateTime, splitDateTime, formatDateTime } from '@/utils/datetime'
 import { toStorageMarkdown } from '@/utils/imageRef'
 import { notifyError } from '@/utils/notify'
+import { bindEditorShortcuts, isImeComposing } from '@/utils/editorShortcuts'
 import draggable from 'vuedraggable'
 import MarkdownEditor from '@/components/MarkdownEditor.vue'
 
@@ -299,18 +316,88 @@ async function onDescDialogClosed() {
   }
 }
 
+// ===== 键盘：Esc 关闭、Ctrl+Enter 保存（见 utils/editorShortcuts）=====
+
+// 新建待办的标题输入框：打开即聚焦
+const titleInputRef = ref<{ focus: () => void } | null>(null)
+
+// 打开时的表单快照（编辑已有待办时为加载完成后的值）；Esc 关闭前比对，有未保存的修改先确认。
+// 先以初始空表单占位：加载完成前按 Esc 不会误报"未保存的修改"
+let cleanSnapshot = ''
+
+function formSnapshot(): string {
+  return JSON.stringify([
+    form.value.title,
+    toStorageMarkdown(form.value.description),
+    form.value.color,
+    form.value.quadrant,
+    form.value.notifyAt,
+    isCustomNotifyBefore.value ? customNotifyBefore.value : form.value.notifyBefore,
+    form.value.startTime,
+    form.value.endTime,
+    repeatEnabled.value,
+    repeatType.value,
+    repeatInterval.value,
+    [...repeatWeekdays.value].sort((a, b) => a - b),
+    repeatMonthDay.value,
+    // 新建时暂存（或保存时没能创建）的子任务也属于未保存的内容
+    pendingSubtasks.value.map(s => [s.title, s.content, s.completed]),
+  ])
+}
+
+cleanSnapshot = formSnapshot()
+
+async function markFormClean() {
+  // 日期 / 时间拆分字段的 watcher 会在下一轮把 form 里的时间规范化，等它跑完再拍快照
+  await nextTick()
+  cleanSnapshot = formSnapshot()
+}
+
+async function closeWithConfirm() {
+  // 保存 / 标记完成进行中：等它结束（成功后会自行关窗），避免关窗打断后续步骤
+  if (saving.value || isUpdatingCompleteState.value) return
+  if (!isViewMode.value && formSnapshot() !== cleanSnapshot) {
+    try {
+      await ElMessageBox.confirm('有未保存的修改，确定放弃并关闭吗？', '放弃修改', {
+        confirmButtonText: '放弃',
+        cancelButtonText: '继续编辑',
+        type: 'warning',
+      })
+    } catch {
+      return
+    }
+  }
+  handleClose()
+}
+
+let unbindShortcuts: (() => void) | null = null
+
 onBeforeUnmount(() => {
   if (descPreviewTimer) {
     clearTimeout(descPreviewTimer)
     descPreviewTimer = null
   }
+  unbindShortcuts?.()
+  unbindShortcuts = null
 })
 
 // 初始化
 onMounted(async () => {
+  unbindShortcuts = bindEditorShortcuts({
+    onClose: () => void closeWithConfirm(),
+    onSubmit: () => {
+      if (!isViewMode.value) void handleSave()
+    },
+    // 子任务窗口打开期间本窗口处于模态遮罩下
+    enabled: () => !isSubtaskEditorOpen.value,
+  })
+
   if (todoId.value) {
     await loadTodo()
+  } else {
+    titleInputRef.value?.focus()
   }
+  await markFormClean()
 })
 
 // 加载待办数据
@@ -775,12 +862,24 @@ function cancelInlineEdit() {
 }
 
 function handleInlineEditKeydown(e: KeyboardEvent, subtaskId: number) {
+  // 输入法用回车上屏 / Esc 取消候选时不算提交 / 取消
+  if (isImeComposing(e)) return
   if (e.key === 'Enter') {
     e.preventDefault()
     saveInlineEdit(subtaskId)
   } else if (e.key === 'Escape') {
+    // 只取消行内编辑，不让窗口级的 Esc 把整个编辑窗口关掉
+    e.preventDefault()
     cancelInlineEdit()
   }
+}
+
+// 快速添加子任务（仅无修饰键的回车，Ctrl+Enter 留给窗口级快捷键保存待办）。
+// 用 keydown 而不是 keyup：中文输入法用回车把拼音上屏时，keyup 已不带组合状态，会被误当成"添加"
+function handleNewSubtaskEnter(e: KeyboardEvent) {
+  if (isImeComposing(e)) return
+  e.preventDefault()
+  void addSubtask()
 }
 
 async function openSubtaskWindow(subtaskId: number, mode: 'edit' | 'view') {
@@ -947,6 +1046,7 @@ function onHeaderMouseDown(e: MouseEvent) {
           <!-- 标题 -->
           <el-form-item label="标题" required>
             <el-input 
+              ref="titleInputRef"
               v-model="form.title" 
               placeholder="请输入待办标题"
               maxlength="100"
@@ -1256,7 +1356,7 @@ function onHeaderMouseDown(e: MouseEvent) {
                 v-model="newSubtaskTitle"
                 type="text"
                 placeholder="添加子任务..."
-                @keyup.enter="addSubtask"
+                @keydown.enter.exact="handleNewSubtaskEnter"
               />
               <transition name="fade">
                 <button 

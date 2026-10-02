@@ -1,25 +1,23 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
-import type { Todo, CreateTodoRequest, UpdateTodoRequest, SubTask, CreateSubTaskRequest, UpdateSubTaskRequest, ViewMode, QuadrantType } from '@/types'
+import type { Todo, UpdateTodoRequest, ViewMode, QuadrantType } from '@/types'
 import { QUADRANTS } from '@/types'
 import { notifyError } from '@/utils/notify'
 
 export const useTodoStore = defineStore('todo', () => {
   // 状态
   const todos = ref<Todo[]>([])
-  const loading = ref(false)
-  const error = ref<string | null>(null)
   const viewMode = ref<ViewMode>('list')
 
   // 计算属性
-  const pendingTodos = computed(() => 
+  const pendingTodos = computed(() =>
     todos.value
       .filter(t => !t.completed)
       .sort((a, b) => a.sortOrder - b.sortOrder)
   )
 
-  const completedTodos = computed(() => 
+  const completedTodos = computed(() =>
     todos.value
       .filter(t => t.completed)
       .sort((a, b) => b.sortOrder - a.sortOrder)
@@ -39,7 +37,7 @@ export const useTodoStore = defineStore('todo', () => {
       [QUADRANTS.URGENT_NOT_IMPORTANT]: [],
       [QUADRANTS.NOT_URGENT_NOT_IMPORTANT]: [],
     }
-    
+
     pendingTodos.value.forEach(todo => {
       const quadrant = todo.quadrant as QuadrantType
       if (result[quadrant]) {
@@ -49,42 +47,103 @@ export const useTodoStore = defineStore('todo', () => {
         result[QUADRANTS.IMPORTANT_URGENT].push(todo)
       }
     })
-    
+
     return result
   })
 
-  // 操作方法
-  async function fetchTodos() {
-    // 后台轮询 / 聚焦也会调用：连续失败只在第一次弹提示，成功后复位
-    const alreadyFailing = error.value !== null
-    loading.value = true
-    try {
-      todos.value = await invoke<Todo[]>('get_todos')
-      error.value = null
-    } catch (e) {
-      error.value = String(e)
-      if (alreadyFailing) {
-        console.error('Failed to fetch todos:', e)
-      } else {
-        notifyError(e, '加载待办失败')
-      }
-    } finally {
-      loading.value = false
-    }
-  }
+  // ===== 全量拉取（get_todos）=====
+  //
+  // 触发源很多（启动、窗口聚焦、子窗口关闭、同步完成、变更计数轮询），可能接连发生：
+  // - 单飞：同一时刻只有一个拉取在途。在途期间再请求只记一笔，结束后补拉一次——在途那次
+  //   可能读在了触发新请求的那次改动之前；所有调用方都等到补拉结束
+  // - 序号：本窗口的写操作（完成、删除、排序……）会就地更新 todos。拉取期间发生过写操作时，
+  //   这次结果可能早于该写操作，直接丢弃并补拉，避免列表闪回旧状态
+  let fetching = false
+  let fetchQueued = false
+  let fetchWaiters: Array<(ok: boolean) => void> = []
+  let mutationSeq = 0
+  // 连续失败只在第一次弹提示，成功后复位（后台轮询 / 聚焦也会触发拉取）
+  let fetchFailing = false
 
-  async function addTodo(data: CreateTodoRequest): Promise<Todo | null> {
+  // 当前 todos 对应的本地变更计数（get_change_seq）；null = 未知（尚未拉取或后端不支持）
+  let loadedChangeSeq: number | null = null
+  let changeSeqUnsupported = false
+
+  /** 本地 todos / subtasks 的变更计数，任意增删改都会增大；读取失败返回 null */
+  async function readChangeSeq(): Promise<number | null> {
     try {
-      const newTodo = await invoke<Todo>('create_todo', { data })
-      todos.value.push(newTodo)
-      return newTodo
+      return await invoke<number>('get_change_seq')
     } catch (e) {
-      notifyError(e, '创建待办失败')
+      if (!changeSeqUnsupported) {
+        changeSeqUnsupported = true
+        console.warn('Failed to read change seq:', e)
+      }
       return null
     }
   }
 
+  async function runFetchLoop() {
+    let ok = false
+    try {
+      do {
+        fetchQueued = false
+        const mutationSeqAtStart = mutationSeq
+        try {
+          // 先记变更计数再读数据：读数据期间发生的改动会让下一次轮询看到新计数，不会漏
+          const changeSeq = await readChangeSeq()
+          const result = await invoke<Todo[]>('get_todos')
+          if (mutationSeqAtStart === mutationSeq) {
+            todos.value = result
+            loadedChangeSeq = changeSeq
+          } else {
+            fetchQueued = true
+          }
+          ok = true
+          fetchFailing = false
+        } catch (e) {
+          ok = false
+          if (fetchFailing) {
+            console.error('Failed to fetch todos:', e)
+          } else {
+            fetchFailing = true
+            notifyError(e, '加载待办失败')
+          }
+        }
+      } while (fetchQueued)
+    } finally {
+      fetching = false
+      const waiters = fetchWaiters
+      fetchWaiters = []
+      waiters.forEach(resolve => resolve(ok))
+    }
+  }
+
+  /** 全量拉取待办（单飞）；返回最终是否拉取成功 */
+  function fetchTodos(): Promise<boolean> {
+    return new Promise<boolean>(resolve => {
+      fetchWaiters.push(resolve)
+      if (fetching) {
+        fetchQueued = true
+        return
+      }
+      fetching = true
+      void runFetchLoop()
+    })
+  }
+
+  /**
+   * 变更计数与当前列表对应的计数不同（其它窗口、同步、提醒调度写过库）时才全量拉取。
+   * 用于主窗口的高频轮询；拉取在途时跳过（在途那次结束后计数自然对齐，下一轮再比较）
+   */
+  async function refreshIfChanged(): Promise<void> {
+    if (fetching) return
+    const seq = await readChangeSeq()
+    if (seq === null || seq === loadedChangeSeq || fetching) return
+    await fetchTodos()
+  }
+
   async function updateTodo(id: number, data: UpdateTodoRequest): Promise<boolean> {
+    mutationSeq++
     try {
       const updatedTodo = await invoke<Todo>('update_todo', { id, data })
       const index = todos.value.findIndex(t => t.id === id)
@@ -99,6 +158,7 @@ export const useTodoStore = defineStore('todo', () => {
   }
 
   async function deleteTodo(id: number): Promise<boolean> {
+    mutationSeq++
     try {
       await invoke('delete_todo', { id })
       todos.value = todos.value.filter(t => t.id !== id)
@@ -116,6 +176,7 @@ export const useTodoStore = defineStore('todo', () => {
   }
 
   async function reorderTodos(orderedIds: number[]): Promise<boolean> {
+    mutationSeq++
     try {
       await invoke('reorder_todos', { ids: orderedIds })
       // 更新本地排序
@@ -163,80 +224,17 @@ export const useTodoStore = defineStore('todo', () => {
     }
   }
 
-  // 子任务操作
-  async function addSubTask(data: CreateSubTaskRequest): Promise<SubTask | null> {
-    try {
-      const newSubTask = await invoke<SubTask>('create_subtask', { data })
-      const todo = todos.value.find(t => t.id === data.parentId)
-      if (todo) {
-        todo.subtasks.push(newSubTask)
-      }
-      return newSubTask
-    } catch (e) {
-      notifyError(e, '添加子任务失败')
-      return null
-    }
-  }
-
-  async function updateSubTask(id: number, data: UpdateSubTaskRequest): Promise<boolean> {
-    try {
-      const updatedSubTask = await invoke<SubTask>('update_subtask', { id, data })
-      for (const todo of todos.value) {
-        const index = todo.subtasks.findIndex(s => s.id === id)
-        if (index !== -1) {
-          todo.subtasks[index] = updatedSubTask
-          break
-        }
-      }
-      return true
-    } catch (e) {
-      notifyError(e, '更新子任务失败')
-      return false
-    }
-  }
-
-  async function deleteSubTask(id: number): Promise<boolean> {
-    try {
-      await invoke('delete_subtask', { id })
-      for (const todo of todos.value) {
-        const index = todo.subtasks.findIndex(s => s.id === id)
-        if (index !== -1) {
-          todo.subtasks.splice(index, 1)
-          break
-        }
-      }
-      return true
-    } catch (e) {
-      notifyError(e, '删除子任务失败')
-      return false
-    }
-  }
-
-  async function toggleSubTaskComplete(id: number): Promise<boolean> {
-    for (const todo of todos.value) {
-      const subtask = todo.subtasks.find(s => s.id === id)
-      if (subtask) {
-        return updateSubTask(id, { completed: !subtask.completed })
-      }
-    }
-    return false
-  }
-
   return {
     // 状态
     todos,
-    loading,
-    error,
     viewMode,
     // 计算属性
     pendingTodos,
-    completedTodos,
     todoCount,
     todosByQuadrant,
     // 方法
     fetchTodos,
-    addTodo,
-    updateTodo,
+    refreshIfChanged,
     deleteTodo,
     toggleComplete,
     reorderTodos,
@@ -244,9 +242,5 @@ export const useTodoStore = defineStore('todo', () => {
     setViewMode,
     loadViewMode,
     saveViewMode,
-    addSubTask,
-    updateSubTask,
-    deleteSubTask,
-    toggleSubTaskComplete
   }
 })

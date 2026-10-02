@@ -1,4 +1,4 @@
-import { ElMessage } from 'element-plus'
+import { ElMessage } from '@/plugins/element'
 
 // 提示里展示的错误详情上限：后端偶尔会带回很长的链式错误，整段塞进 toast 不可读
 const MAX_DETAIL_LENGTH = 200

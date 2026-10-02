@@ -25,8 +25,10 @@ const quadrantLists = ref<Record<QuadrantType, Todo[]>>({
   [QUADRANTS.NOT_URGENT_NOT_IMPORTANT]: [],
 })
 
-// 拖拽落库进行中：期间 store 会多次回流（象限更新、排序），先不按 store 重建本地列表，
-// 保持用户拖放后的样子，落库结束后再统一按 store 重建一次
+// 拖拽进行中（SortableJS 拖动中，或松手后的落库中）：期间 store 会多次回流（象限更新、排序，
+// 以及轮询 / 聚焦 / 同步触发的刷新），先不按 store 重建本地列表——拖动途中重建会让 Vue 移动
+// SortableJS 正在操作的 DOM 节点，落库途中重建会让待办闪回原象限。都结束后再统一按 store 重建一次
+let dragging = false
 let dragPersisting = 0
 
 // 按 store 重建本地四象限列表
@@ -40,15 +42,25 @@ function syncFromStore() {
   }
 }
 
-// 同步 store 数据到本地
-watch(
-  () => todoStore.todosByQuadrant,
-  () => {
-    if (dragPersisting > 0) return
-    syncFromStore()
-  },
-  { immediate: true, deep: true }
-)
+function syncIfIdle() {
+  if (!dragging && dragPersisting === 0) syncFromStore()
+}
+
+// 同步 store 数据到本地。
+// 不需要 deep：todosByQuadrant 是 computed，成员、象限、排序变化都会让它产出新对象；
+// 列表项内部字段由 TodoItem 直接读同一个待办对象，自然响应
+watch(() => todoStore.todosByQuadrant, syncIfIdle, { immediate: true })
+
+function onDragStart() {
+  dragging = true
+}
+
+// SortableJS 先派发 add / remove / update（对应 change，落库从这里开始），最后才是 end；
+// 落库还没结束时由 onDragChange 的 finally 负责重建
+function onDragEnd() {
+  dragging = false
+  syncIfIdle()
+}
 
 // 象限配置
 const quadrantConfig = computed(() => [
@@ -95,7 +107,7 @@ async function onDragChange(quadrantId: QuadrantType, evt: DragChangeEvent) {
     await todoStore.reorderTodos(mergeQuadrantOrder(globalIds, quadrantIds))
   } finally {
     dragPersisting--
-    if (dragPersisting === 0) syncFromStore()
+    syncIfIdle()
   }
 }
 
@@ -158,6 +170,8 @@ function getQuadrantStyle(quadrant: typeof quadrantConfig.value[0]) {
             :animation="200"
             :force-fallback="true"
             class="quadrant-list"
+            @start="onDragStart"
+            @end="onDragEnd"
             @change="(evt: DragChangeEvent) => onDragChange(quadrant.id, evt)"
           >
             <template #item="{ element }">

@@ -20,6 +20,16 @@ export default tseslint.config(
     },
   },
 
+  // 开发辅助脚本（如 scripts/e2e/cdp.mjs）跑在 Node 里
+  {
+    files: ['scripts/**/*.{js,mjs}'],
+    languageOptions: {
+      globals: {
+        ...globals.node,
+      },
+    },
+  },
+
   // .vue SFC 的 <script lang="ts"> 交给 typescript-eslint 解析
   {
     files: ['**/*.vue'],
@@ -41,6 +51,34 @@ export default tseslint.config(
       '@typescript-eslint/no-unused-vars': [
         'error',
         { argsIgnorePattern: '^_', varsIgnorePattern: '^_', caughtErrors: 'none' },
+      ],
+    },
+  },
+
+  // Element Plus 按需引入后，ElMessage / ElMessageBox 等函数式 API 的样式不会被自动带上：
+  // 一律经 @/plugins/element 导入（那里同时引入样式）。仅类型导入不受限制
+  {
+    files: ['src/**/*.{ts,vue}'],
+    ignores: ['src/plugins/element.ts'],
+    rules: {
+      '@typescript-eslint/no-restricted-imports': [
+        'error',
+        {
+          paths: [
+            {
+              name: 'element-plus',
+              message: '请从 @/plugins/element 导入（该模块同时引入对应样式）；新的函数式 API 先在那里补上样式再导出',
+              allowTypeImports: true,
+            },
+          ],
+          patterns: [
+            {
+              group: ['element-plus/*'],
+              message: '组件由 unplugin-vue-components 按需引入，函数式 API 请从 @/plugins/element 导入',
+              allowTypeImports: true,
+            },
+          ],
+        },
       ],
     },
   },

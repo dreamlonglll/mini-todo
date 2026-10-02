@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import type { Todo } from '@/types'
 import { formatDateKey, toDateKey } from '@/utils/datetime'
 import { getLunarDisplayText } from '@/utils/lunar'
@@ -20,6 +21,30 @@ const currentMonth = ref(new Date().getMonth()) // 0-11
 
 // 当前悬停的 todo ID（用于跨行联动 hover）
 const hoveredTodoId = ref<number | null>(null)
+
+// "今天"（YYYY-MM-DD）。单独做成响应式状态：computed 里直接 new Date() 不会随日期变化重算，
+// 窗口跨午夜一直开着时高亮会停在昨天。午夜定时器与窗口聚焦时刷新
+const todayKey = ref(formatDateKey(new Date()))
+let midnightTimer: ReturnType<typeof setTimeout> | null = null
+let unlistenFocus: (() => void) | null = null
+let unmounted = false
+
+function refreshToday() {
+  const key = formatDateKey(new Date())
+  if (key !== todayKey.value) todayKey.value = key
+}
+
+// 定时到下一个本地午夜（多留 1 秒余量）；系统休眠会让定时器延后触发，聚焦刷新兜底
+function scheduleMidnightRefresh() {
+  if (midnightTimer) clearTimeout(midnightTimer)
+  const now = new Date()
+  const nextMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1)
+  midnightTimer = setTimeout(() => {
+    midnightTimer = null
+    refreshToday()
+    scheduleMidnightRefresh()
+  }, nextMidnight.getTime() - now.getTime() + 1000)
+}
 
 // 星期标题
 const weekDays = ['一', '二', '三', '四', '五', '六', '日']
@@ -94,8 +119,7 @@ const calendarCells = computed<CalendarCell[]>(() => {
   }
   
   // 当月
-  const today = new Date()
-  const todayStr = formatDateKey(today)
+  const todayStr = todayKey.value
   
   for (let day = 1; day <= daysInMonth; day++) {
     const date = new Date(year, month, day)
@@ -141,11 +165,26 @@ const calendarCells = computed<CalendarCell[]>(() => {
   return cells
 })
 
-// 加载失败后的重试延迟（毫秒）
+// 节假日整体为空时的重新加载：最多 HOLIDAY_MAX_RELOADS 次，间隔递增
+// （每次加载内部 getYearHolidays 已自带 3 次重试；离线且无缓存时不再无限重试）
 const RELOAD_RETRY_DELAY = 5000
+const HOLIDAY_MAX_RELOADS = 3
+
+// 加载序号：切月 / 卸载后，进行中的旧加载返回时直接丢弃，不覆盖新月份的数据
+let holidayLoadSeq = 0
+let holidayRetryTimer: ReturnType<typeof setTimeout> | null = null
+
+function clearHolidayRetry() {
+  if (holidayRetryTimer) {
+    clearTimeout(holidayRetryTimer)
+    holidayRetryTimer = null
+  }
+}
 
 // 加载节假日数据
-async function loadHolidayData() {
+async function loadHolidayData(reloadCount = 0) {
+  clearHolidayRetry()
+  const seq = ++holidayLoadSeq
   const year = currentYear.value
   const month = currentMonth.value
   
@@ -159,6 +198,7 @@ async function loadHolidayData() {
   
   for (const y of years) {
     const yearHolidays = await getYearHolidays(y)
+    if (seq !== holidayLoadSeq) return
     for (const [date, info] of yearHolidays) {
       allHolidays.set(date, info)
     }
@@ -166,12 +206,13 @@ async function loadHolidayData() {
   
   holidayData.value = allHolidays
   
-  // 如果加载结果为空，延迟后自动重试一次
-  if (allHolidays.size === 0) {
+  // 加载结果为空：延迟后重新加载，次数有上限
+  if (allHolidays.size === 0 && reloadCount < HOLIDAY_MAX_RELOADS) {
     console.warn('[CalendarView] Holiday data is empty, will retry after delay...')
-    setTimeout(() => {
-      loadHolidayData()
-    }, RELOAD_RETRY_DELAY)
+    holidayRetryTimer = setTimeout(() => {
+      holidayRetryTimer = null
+      void loadHolidayData(reloadCount + 1)
+    }, RELOAD_RETRY_DELAY * (reloadCount + 1))
   }
 }
 
@@ -187,14 +228,40 @@ function isCellAdjustWorkday(dateStr: string): boolean {
   return info !== null && info !== undefined && !info.isHoliday
 }
 
-// 监听年月变化，重新加载节假日数据
+// 监听年月变化，重新加载节假日数据（loadHolidayData 会作废上个月份的加载与重试）
 watch([currentYear, currentMonth], () => {
-  loadHolidayData()
-}, { immediate: false })
+  void loadHolidayData()
+})
 
-// 初始化加载节假日数据
-onMounted(() => {
-  loadHolidayData()
+onMounted(async () => {
+  void loadHolidayData()
+  scheduleMidnightRefresh()
+  // 窗口重新获得焦点时刷新"今天"：休眠唤醒后午夜定时器可能还没来得及触发
+  try {
+    const unlisten = await getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+      if (focused) refreshToday()
+    })
+    // 注册是异步的：期间组件可能已卸载
+    if (unmounted) {
+      unlisten()
+    } else {
+      unlistenFocus = unlisten
+    }
+  } catch (e) {
+    console.warn('[CalendarView] Failed to listen window focus:', e)
+  }
+})
+
+onBeforeUnmount(() => {
+  unmounted = true
+  holidayLoadSeq++
+  clearHolidayRetry()
+  if (midnightTimer) {
+    clearTimeout(midnightTimer)
+    midnightTimer = null
+  }
+  unlistenFocus?.()
+  unlistenFocus = null
 })
 
 // 获取 todo 的有效开始日期（YYYY-MM-DD）：无开始时间时取创建时间。
@@ -353,6 +420,7 @@ function nextMonth() {
 
 // 回到今天
 function goToToday() {
+  refreshToday()
   const today = new Date()
   currentYear.value = today.getFullYear()
   currentMonth.value = today.getMonth()

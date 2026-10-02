@@ -1,8 +1,5 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
-import ElementPlus from 'element-plus'
-import 'element-plus/dist/index.css'
-import * as ElementPlusIconsVue from '@element-plus/icons-vue'
 import App from './App.vue'
 import router from './router'
 import './styles/main.scss'
@@ -66,14 +63,10 @@ if (import.meta.env.PROD) {
   })
 }
 
+// Element Plus 组件与样式按需引入（vite.config.ts 的 unplugin-vue-components），
+// 图标在各 SFC 里显式 import，函数式 API 走 @/plugins/element：这里不再全量注册
 const app = createApp(App)
-
-// 注册所有 Element Plus 图标
-for (const [key, component] of Object.entries(ElementPlusIconsVue)) {
-  app.component(key, component)
-}
 
 app.use(createPinia())
 app.use(router)
-app.use(ElementPlus)
 app.mount('#app')

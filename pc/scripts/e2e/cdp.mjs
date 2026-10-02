@@ -33,7 +33,8 @@ function send(method, params) {
       const msg = JSON.parse(ev.data);
       if (msg.id !== myId) return;
       ws.removeEventListener('message', onmsg);
-      msg.error ? rej(new Error(JSON.stringify(msg.error))) : res(msg.result);
+      if (msg.error) rej(new Error(JSON.stringify(msg.error)));
+      else res(msg.result);
     };
     ws.addEventListener('message', onmsg);
     ws.send(JSON.stringify({ id: myId, method, params }));

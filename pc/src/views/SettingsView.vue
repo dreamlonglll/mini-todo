@@ -7,7 +7,34 @@ import { save, open } from '@tauri-apps/plugin-dialog'
 import { readTextFile } from '@tauri-apps/plugin-fs'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import { enable, disable, isEnabled } from '@tauri-apps/plugin-autostart'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import {
+  ArrowDown,
+  ArrowRight,
+  Bell,
+  Brush,
+  Calendar,
+  Check,
+  Clock,
+  Close,
+  Connection,
+  Delete,
+  Download,
+  Folder,
+  Hide,
+  InfoFilled,
+  Monitor,
+  Moon,
+  Promotion,
+  Refresh,
+  Setting,
+  Sunny,
+  Timer,
+  Top,
+  Upload,
+  View,
+  WarningFilled,
+} from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from '@/plugins/element'
 import { useAppStore, APP_VERSION } from '@/stores'
 import type { AppSettingKey, ScreenConfig, SyncSettings, SyncReport } from '@/types'
 import { PRESET_BG_COLORS, DEFAULT_BG_COLOR } from '@/types'
@@ -22,12 +49,13 @@ const appStore = useAppStore()
 // 当前激活的菜单
 const activeMenu = ref('general')
 
+// icon 存组件本身而不是名字字符串：图标不再全局注册，<component :is> 拿到字符串会解析不到
 const menuItems = [
-  { key: 'general', label: '常规', icon: 'Setting' },
-  { key: 'appearance', label: '外观', icon: 'Brush' },
-  { key: 'data', label: '数据与同步', icon: 'Folder' },
-  { key: 'screen', label: '屏幕配置', icon: 'Monitor' },
-  { key: 'about', label: '关于', icon: 'InfoFilled' },
+  { key: 'general', label: '常规', icon: Setting },
+  { key: 'appearance', label: '外观', icon: Brush },
+  { key: 'data', label: '数据与同步', icon: Folder },
+  { key: 'screen', label: '屏幕配置', icon: Monitor },
+  { key: 'about', label: '关于', icon: InfoFilled },
 ]
 
 const exporting = ref(false)
@@ -160,6 +188,11 @@ async function handleFixedEmbedDesktopChange(val: boolean) {
 async function handleBgColorChange(color: string) {
   await appStore.setWindowBackground(color, appStore.windowBgAlpha)
   await notifyAppSettingChanged('windowBackground')
+}
+
+// el-slider 事件值的类型是 number | number[]（range 模式才是数组）；这里的滑块都不是 range
+function sliderValue(val: number | number[]): number {
+  return Array.isArray(val) ? val[0] : val
 }
 
 // 拖动过程中只更新本地显示，避免每一格都写一次库
@@ -624,7 +657,7 @@ async function handleCheckUpdate() {
             <el-switch
               v-model="autoStart"
               :loading="autoStartLoading"
-              @change="handleAutoStartChange"
+              @change="(val) => handleAutoStartChange(val === true)"
             />
           </div>
 
@@ -638,7 +671,7 @@ async function handleCheckUpdate() {
             </div>
             <el-switch
               :model-value="showCalendar"
-              @change="(val: boolean) => handleShowCalendarChange(val)"
+              @change="(val) => handleShowCalendarChange(val === true)"
             />
           </div>
 
@@ -652,7 +685,7 @@ async function handleCheckUpdate() {
             </div>
             <el-switch
               :model-value="autoHideEnabled"
-              @change="(val: boolean) => handleAutoHideChange(val)"
+              @change="(val) => handleAutoHideChange(val === true)"
             />
           </div>
 
@@ -667,7 +700,7 @@ async function handleCheckUpdate() {
             <el-switch
               :model-value="topOnWake"
               :disabled="!autoHideEnabled"
-              @change="(val: boolean) => handleTopOnWakeChange(val)"
+              @change="(val) => handleTopOnWakeChange(val === true)"
             />
           </div>
 
@@ -685,7 +718,7 @@ async function handleCheckUpdate() {
             </div>
             <el-switch
               :model-value="fixedEmbedDesktop"
-              @change="(val: boolean) => handleFixedEmbedDesktopChange(val)"
+              @change="(val) => handleFixedEmbedDesktopChange(val === true)"
             />
           </div>
 
@@ -699,7 +732,7 @@ async function handleCheckUpdate() {
             </div>
             <el-switch
               :model-value="appStore.isDarkTheme"
-              @change="(val: boolean) => handleDarkThemeChange(val)"
+              @change="(val) => handleDarkThemeChange(val === true)"
             />
           </div>
 
@@ -747,8 +780,8 @@ async function handleCheckUpdate() {
                 :step="5"
                 :disabled="!appStore.isDarkTheme"
                 :format-tooltip="(val: number) => `${val}%`"
-                @input="(val: number) => handleBgAlphaInput(val)"
-                @change="(val: number) => handleBgAlphaChange(val)"
+                @input="(val) => handleBgAlphaInput(sliderValue(val))"
+                @change="(val) => handleBgAlphaChange(sliderValue(val))"
               />
               <span class="alpha-value">{{ Math.round(windowBgAlpha * 100) }}%</span>
             </div>
@@ -766,7 +799,7 @@ async function handleCheckUpdate() {
               :model-value="notificationType"
               :disabled="notificationTypeLoading"
               size="small"
-              @change="handleNotificationTypeChange"
+              @change="(val) => handleNotificationTypeChange(val === 'app' ? 'app' : 'system')"
             >
               <el-radio-button value="system">系统通知</el-radio-button>
               <el-radio-button value="app">软件通知</el-radio-button>
@@ -809,7 +842,7 @@ async function handleCheckUpdate() {
               :max="20"
               :step="1"
               :show-tooltip="false"
-              @change="handleFontSizePersist"
+              @change="(val) => handleFontSizePersist(sliderValue(val))"
             />
           </div>
 
