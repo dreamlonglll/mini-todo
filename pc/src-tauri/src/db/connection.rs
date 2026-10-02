@@ -55,7 +55,9 @@ impl Database {
     /// 拿锁时忽略中毒标记：持锁线程 panic 只影响那一次操作，SQLite 连接本身
     /// 仍然可用；若沿用 `unwrap()`，一次 panic 会让之后所有 DB 调用永久 panic。
     fn lock_conn(&self) -> std::sync::MutexGuard<'_, Connection> {
-        self.conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.conn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// 测试专用：内存库 + 完整迁移，不触碰真实用户数据文件。

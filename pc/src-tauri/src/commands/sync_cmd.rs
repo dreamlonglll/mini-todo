@@ -932,10 +932,8 @@ mod tests {
     }
 
     fn count_subtasks(db: &Database) -> i64 {
-        db.with_connection(|conn| {
-            conn.query_row("SELECT COUNT(*) FROM subtasks", [], |r| r.get(0))
-        })
-        .unwrap()
+        db.with_connection(|conn| conn.query_row("SELECT COUNT(*) FROM subtasks", [], |r| r.get(0)))
+            .unwrap()
     }
 
     #[test]
@@ -956,8 +954,11 @@ mod tests {
     #[test]
     fn merge_remote_newer_overwrites_local() {
         let db = test_db();
-        merge_remote_into_local(&db, &sync_data(vec![make_todo(1, "旧标题", "2026-01-01 10:00:00")]))
-            .unwrap();
+        merge_remote_into_local(
+            &db,
+            &sync_data(vec![make_todo(1, "旧标题", "2026-01-01 10:00:00")]),
+        )
+        .unwrap();
 
         let stats = merge_remote_into_local(
             &db,
@@ -998,8 +999,11 @@ mod tests {
         )
         .unwrap();
 
-        merge_remote_into_local(&db, &sync_data(vec![make_todo(2, "远端", "2026-01-01 10:00:00")]))
-            .unwrap();
+        merge_remote_into_local(
+            &db,
+            &sync_data(vec![make_todo(2, "远端", "2026-01-01 10:00:00")]),
+        )
+        .unwrap();
 
         assert!(todo_title(&db, 1).is_some());
         assert!(todo_title(&db, 2).is_some());
@@ -1018,8 +1022,11 @@ mod tests {
         )
         .unwrap();
 
-        sync_apply_remote(&db, &sync_data(vec![make_todo(2, "保留", "2026-01-01 10:00:00")]))
-            .unwrap();
+        sync_apply_remote(
+            &db,
+            &sync_data(vec![make_todo(2, "保留", "2026-01-01 10:00:00")]),
+        )
+        .unwrap();
 
         assert!(todo_title(&db, 1).is_none());
         assert!(todo_title(&db, 2).is_some());

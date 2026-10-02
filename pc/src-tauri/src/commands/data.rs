@@ -74,7 +74,10 @@ fn read_app_settings(conn: &rusqlite::Connection) -> AppSettings {
     }
 }
 
-pub(crate) fn write_app_settings(conn: &rusqlite::Connection, settings: &AppSettings) -> rusqlite::Result<()> {
+pub(crate) fn write_app_settings(
+    conn: &rusqlite::Connection,
+    settings: &AppSettings,
+) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('is_fixed', ?1, datetime('now', 'localtime'))",
         [if settings.is_fixed { "true" } else { "false" }],
@@ -470,8 +473,7 @@ mod tests {
         })
         .expect("预置 fixed_embed_desktop 失败");
 
-        let json =
-            export_json(vec![make_todo(1, "a")]).replace("\"fixedEmbedDesktop\":false,", "");
+        let json = export_json(vec![make_todo(1, "a")]).replace("\"fixedEmbedDesktop\":false,", "");
         assert!(
             !json.contains("fixedEmbedDesktop"),
             "测试前提：JSON 中不含 fixedEmbedDesktop"

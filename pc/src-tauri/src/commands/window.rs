@@ -15,8 +15,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetClassNameW, GetCursorPos, GetShellWindow, GetWindowLongPtrW, GetWindowLongW, IsWindow,
     SetWindowLongPtrW, SetWindowLongW, SetWindowPos, ShowWindow, GWLP_HWNDPARENT, GWL_EXSTYLE,
     HWND_BOTTOM, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, SWP_FRAMECHANGED, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_RESTORE, SW_SHOW, WS_EX_APPWINDOW,
-    WS_EX_TOOLWINDOW,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_RESTORE, SW_SHOW, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
 };
 
 /// 全局固定模式状态
@@ -149,7 +148,9 @@ pub fn init_top_on_wake(db: &State<Database>) {
 /// 托盘双击的临时置顶用它判断"到点该不该收回置顶"，避免误取消唤起态的置顶。
 pub fn should_stay_on_top() -> bool {
     TOP_ON_WAKE.load(Ordering::SeqCst)
-        && with_auto_hide_state(|state| state.enabled && !state.hidden && state.docked_edge.is_some())
+        && with_auto_hide_state(|state| {
+            state.enabled && !state.hidden && state.docked_edge.is_some()
+        })
 }
 
 /// 读取 settings 表的 text_theme
@@ -1031,10 +1032,7 @@ fn needs_reattach(
     if shell_now == 0 {
         return false;
     }
-    cached_owner == 0
-        || !owner_alive
-        || shell_now != cached_owner
-        || current_owner != cached_owner
+    cached_owner == 0 || !owner_alive || shell_now != cached_owner || current_owner != cached_owner
 }
 
 #[cfg(target_os = "windows")]
@@ -1563,11 +1561,7 @@ pub fn get_window_background(db: State<Database>) -> Result<WindowBackground, St
 /// 供设置窗口调用：只写这两个键，不走 saveWindowState，
 /// 否则会把设置窗口的几何信息与 is_fixed 误存为主窗口状态
 #[tauri::command]
-pub fn set_window_background(
-    db: State<Database>,
-    color: String,
-    alpha: f64,
-) -> Result<(), String> {
+pub fn set_window_background(db: State<Database>, color: String, alpha: f64) -> Result<(), String> {
     let alpha = alpha.clamp(0.0, 1.0);
     db.with_connection(|conn| {
         conn.execute(
@@ -1650,7 +1644,9 @@ pub fn bring_main_window_to_front(app: &tauri::AppHandle) {
 /// 必须固定取 label 为 "main" 的窗口：设置、编辑器等独立 WebView 也会间接调用此命令，
 /// 若按调用方窗口取值，会把它们的几何信息误存成主窗口状态
 #[tauri::command]
-pub fn get_window_persist_state(app_handle: tauri::AppHandle) -> Result<WindowPersistState, String> {
+pub fn get_window_persist_state(
+    app_handle: tauri::AppHandle,
+) -> Result<WindowPersistState, String> {
     let window = app_handle
         .get_webview_window("main")
         .ok_or_else(|| "主窗口不存在".to_string())?;
