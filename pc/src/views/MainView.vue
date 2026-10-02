@@ -649,7 +649,8 @@ async function handleSync() {
       return
     }
 
-    const report = await invoke<SyncReport>('webdav_sync')
+    // 手动同步总是无条件 GET：nginx 的 ETag 只到秒，同秒等长的远端改写会被条件 GET 的 304 挡住
+    const report = await invoke<SyncReport>('webdav_sync', { full: true })
     autoSyncFailing = false
     await applySyncReport(report)
 

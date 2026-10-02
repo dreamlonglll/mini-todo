@@ -1,40 +1,25 @@
 use crate::db::backup;
+pub(crate) use crate::db::settings_kv::settings_version;
 use crate::db::settings_kv::{
     bool_str, get_bool_setting, get_setting, get_setting_or, set_bool_setting, set_setting,
-    set_setting_at,
+    set_setting_at, SYNCED_SETTING_KEYS,
 };
 use crate::db::sync_store::{
     self, insert_subtask_row, insert_todo_row, normalize_todo_lenient, EntityKind,
 };
-use crate::db::time::now_local;
+use crate::db::time::{now_local, superseding};
 use crate::db::{
     AppSettings, Database, ExportData, WindowPosition, WindowSize, DEFAULT_WINDOW_BG_ALPHA,
     DEFAULT_WINDOW_BG_COLOR,
 };
 use chrono::Local;
 use serde_json::{Map, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read as _, Write as _};
 use tauri::{AppHandle, Manager};
 
 /// 导出 / 同步文档的格式版本
 pub const EXPORT_VERSION: &str = "4.0";
-
-/// 参与同步 LWW 的设置键（K3-5）：本地设置版本 = 这些键的 `max(updated_at)`。
-/// `window_position` / `window_size` 是设备相关的，仍写入导出 / 上传以兼容旧版，
-/// 但永不从远端应用，也不计入设置版本。
-pub(crate) const SYNCED_SETTING_KEYS: [&str; 10] = [
-    "is_fixed",
-    "fixed_embed_desktop",
-    "auto_hide_enabled",
-    "top_on_wake",
-    "window_bg_color",
-    "window_bg_alpha",
-    "text_theme",
-    "show_calendar",
-    "view_mode",
-    "notification_type",
-];
 
 fn read_json_setting<T: serde::de::DeserializeOwned>(
     conn: &rusqlite::Connection,
@@ -98,20 +83,6 @@ pub(crate) fn write_app_settings(
     set_setting(conn, "view_mode", &settings.view_mode)?;
     set_setting(conn, "notification_type", &settings.notification_type)?;
     Ok(())
-}
-
-/// 本地设置版本：参与同步的设置键的 `max(updated_at)`（规范时间格式）
-pub(crate) fn settings_version(conn: &rusqlite::Connection) -> rusqlite::Result<Option<String>> {
-    let placeholders = vec!["?"; SYNCED_SETTING_KEYS.len()].join(", ");
-    let sql = format!(
-        "SELECT MAX(updated_at) FROM settings WHERE key IN ({})",
-        placeholders
-    );
-    conn.query_row(
-        &sql,
-        rusqlite::params_from_iter(SYNCED_SETTING_KEYS.iter()),
-        |r| r.get(0),
-    )
 }
 
 /// 远端 settings JSON 字段 → 本地键 + 取值校验
@@ -252,8 +223,10 @@ pub fn export_data_internal(db: &Database) -> Result<String, String> {
 /// 1. 导入前先 `VACUUM INTO` 备份当前库（`backups/`，保留最近 5 份；内存库跳过）
 /// 2. 单个事务内：清空 → 按**原 id** 插入（子任务的 parentId 以外层待办为准）→ 写设置
 /// 3. 导入的记录 `updated_at` 统一改为导入时刻：恢复备份是用户的明确意图，应当在同步
-///    合并中胜出，而不是被远端的"较新"旧数据覆盖（A11）
-/// 4. 导入前存在、导入后不存在的记录写墓碑，删除随同步传播；导入后存在的记录清掉同键墓碑
+///    合并中胜出，而不是被远端的"较新"旧数据覆盖（A11）。导入前本地已有同 id 记录、且它的
+///    时间比"现在"还新（同步自时钟偏快的设备）时，取它 + 1 秒——否则恢复的版本照样输给它
+/// 4. 导入前存在、导入后不存在的记录写墓碑（时间不早于记录自己的 updated_at，理由同上），
+///    删除随同步传播；导入后存在的记录清掉同键墓碑
 ///
 /// 任一步失败整体回滚，原有数据不受影响。
 pub fn import_data_raw(db: &Database, json_data: &str) -> Result<(), String> {
@@ -278,13 +251,19 @@ fn import_records(
     import: &ExportData,
     now: &str,
 ) -> rusqlite::Result<()> {
-    let ids_of = |table: &str| -> rusqlite::Result<HashSet<i64>> {
-        let mut stmt = conn.prepare(&format!("SELECT id FROM {table}"))?;
-        let rows = stmt.query_map([], |r| r.get(0))?;
+    // 导入前的 id → updated_at
+    let versions_of = |table: &str| -> rusqlite::Result<HashMap<i64, String>> {
+        let mut stmt = conn.prepare(&format!("SELECT id, updated_at FROM {table}"))?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
         rows.collect()
     };
-    let before_todos = ids_of("todos")?;
-    let before_subtasks = ids_of("subtasks")?;
+    let before_todos = versions_of("todos")?;
+    let before_subtasks = versions_of("subtasks")?;
+    // 导入版本的时间：至少是现在，且严格晚于被它取代的本地版本
+    let imported_at = |before: &HashMap<i64, String>, id: i64| match before.get(&id) {
+        Some(previous) => superseding(now, previous),
+        None => now.to_string(),
+    };
 
     conn.execute("DELETE FROM subtasks", [])?;
     conn.execute("DELETE FROM todos", [])?;
@@ -294,7 +273,7 @@ fn import_records(
     for original in &import.todos {
         let mut todo = original.clone();
         normalize_todo_lenient(&mut todo);
-        todo.updated_at = now.to_string();
+        todo.updated_at = imported_at(&before_todos, todo.id);
         if todo.created_at.trim().is_empty() {
             todo.created_at = now.to_string();
         }
@@ -304,7 +283,7 @@ fn import_records(
         for sub in &todo.subtasks {
             let mut sub = sub.clone();
             sub.parent_id = todo.id;
-            sub.updated_at = now.to_string();
+            sub.updated_at = imported_at(&before_subtasks, sub.id);
             if sub.created_at.trim().is_empty() {
                 sub.created_at = now.to_string();
             }
@@ -313,11 +292,17 @@ fn import_records(
         }
     }
 
-    for id in before_todos.difference(&after_todos) {
-        sync_store::record_tombstone(conn, EntityKind::Todo, *id, now)?;
+    for (id, updated_at) in &before_todos {
+        if !after_todos.contains(id) {
+            let deleted_at = sync_store::deletion_time(now, updated_at);
+            sync_store::record_tombstone(conn, EntityKind::Todo, *id, &deleted_at)?;
+        }
     }
-    for id in before_subtasks.difference(&after_subtasks) {
-        sync_store::record_tombstone(conn, EntityKind::Subtask, *id, now)?;
+    for (id, updated_at) in &before_subtasks {
+        if !after_subtasks.contains(id) {
+            let deleted_at = sync_store::deletion_time(now, updated_at);
+            sync_store::record_tombstone(conn, EntityKind::Subtask, *id, &deleted_at)?;
+        }
     }
     for id in &after_todos {
         sync_store::remove_tombstone(conn, EntityKind::Todo, *id)?;
@@ -658,6 +643,51 @@ mod tests {
             tombstones(&db),
             vec![("subtask".to_string(), 11), ("todo".to_string(), 1)]
         );
+    }
+
+    /// 本地记录同步自时钟偏快的设备、updated_at 比"现在"还新：恢复的版本要严格晚于它，
+    /// 被移除记录的墓碑也要压得住它——否则下次同步时这些"未来"版本照样胜出，恢复被悄悄撤销
+    #[test]
+    fn import_beats_future_dated_local_versions() {
+        let db = test_db();
+        db.with_connection(|conn| {
+            conn.execute_batch(
+                "INSERT INTO todos (id, title, updated_at) VALUES
+                 (1, '将被恢复', '2099-01-01 08:00:00'), (2, '将被移除', '2099-01-02 08:00:00');
+                 INSERT INTO subtasks (id, parent_id, title, updated_at) VALUES
+                 (11, 1, '将被恢复', '2099-01-01 09:00:00'), (12, 2, '将被移除', '2099-01-03 08:00:00');",
+            )
+        })
+        .unwrap();
+
+        let mut t = make_todo(1, "恢复的版本");
+        t.subtasks.push(make_subtask(11, 1, "恢复的子任务"));
+        import_data_raw(&db, &export_json(vec![t])).unwrap();
+
+        let updated_at = |table: &str, id: i64| -> String {
+            db.with_connection(|c| {
+                c.query_row(
+                    &format!("SELECT updated_at FROM {table} WHERE id = ?1"),
+                    [id],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap()
+        };
+        assert_eq!(updated_at("todos", 1), "2099-01-01 08:00:01");
+        assert_eq!(updated_at("subtasks", 11), "2099-01-01 09:00:01");
+
+        let tombs = db
+            .with_connection(|c| sync_store::list_tombstones(c, "2000-01-01 00:00:00"))
+            .unwrap();
+        let find = |kind: &str, id: i64| {
+            tombs
+                .iter()
+                .find(|t| t.entity_type == kind && t.entity_id == id)
+                .map(|t| t.deleted_at.clone())
+        };
+        assert_eq!(find("todo", 2).as_deref(), Some("2099-01-02 08:00:00"));
+        assert_eq!(find("subtask", 12).as_deref(), Some("2099-01-03 08:00:00"));
     }
 
     /// 导入的记录 updated_at 改为导入时刻（恢复备份是权威的），时间字段规范化。

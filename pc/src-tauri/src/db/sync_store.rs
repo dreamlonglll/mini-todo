@@ -9,7 +9,7 @@
 //! 网络与 JSON 文档拼装在 `commands::sync_cmd`；本模块只认已解析的记录和 SQLite。
 
 use super::models::{SubTask, Todo, Tombstone};
-use super::time::{normalize_datetime, plus_one_second, DefaultTime};
+use super::time::{normalize_datetime, superseding, DefaultTime};
 use super::{subtask_from_row, todo_from_row, SUBTASK_COLUMNS, TODO_COLUMNS};
 use rusqlite::{params, Connection, ErrorCode, OptionalExtension, Result, Transaction};
 use serde_json::Value;
@@ -123,12 +123,14 @@ pub fn purge_tombstones_before(conn: &Connection, cutoff: &str) -> Result<usize>
 }
 
 /// 删除墓碑时间：至少是现在，且不早于记录自己的 updated_at（防止另一端时钟偏快时，
-/// 记录的 updated_at 比"现在"还新，导致删除压不住、下次同步又被复活）
-fn deletion_time(now: &str, record_updated_at: &str) -> String {
-    if record_updated_at > now {
-        record_updated_at.to_string()
-    } else {
-        now.to_string()
+/// 记录的 updated_at 比"现在"还新，导致删除压不住、下次同步又被复活）。
+///
+/// 只认能识别的记录时间：以前直接按字符串比较，乱码时间（如 `"zzz"`）"大于"任何合法时间，
+/// 会被原样写进墓碑表——之后既清理不掉、又会压制同 id 的一切版本，远端还解析不了这条墓碑。
+pub(crate) fn deletion_time(now: &str, record_updated_at: &str) -> String {
+    match normalize_datetime(record_updated_at, DefaultTime::StartOfDay) {
+        Some(at) if at.as_str() > now => at,
+        _ => now.to_string(),
     }
 }
 
@@ -273,23 +275,16 @@ pub fn value_id(v: &Value) -> Option<i64> {
     }
 }
 
-/// 取记录的 `updatedAt`，只接受能识别的时间（规范化后）；无法识别 / 缺失时为空串。
-/// 用在要写进墓碑的场合：原样的乱码时间不能进墓碑表（会破坏按时间清理与比较）。
-fn canonical_updated_at(v: &Value) -> String {
+/// 取记录的 `updatedAt`（规范化后）；无法识别 / 缺失时为空串，即"比任何合法时间都旧"，
+/// 与 cloud 合并的 `canon_ts` 同一规则（K3 三处一致）。
+///
+/// 以前无法识别的值按原串参与比较：`"zzz"` 这类乱码在字符串比较里大于任何合法时间，于是
+/// LWW 永远选它（本地合法的修改再也传不出去），强制推送还会把它抄进本地记录的 updated_at。
+pub fn value_updated_at(v: &Value) -> String {
     v.get("updatedAt")
         .and_then(Value::as_str)
         .and_then(|raw| normalize_datetime(raw, DefaultTime::StartOfDay))
         .unwrap_or_default()
-}
-
-/// 取记录的 `updatedAt`（规范化后；无法识别时原样；缺失时为空串）
-pub fn value_updated_at(v: &Value) -> String {
-    match v.get("updatedAt").and_then(Value::as_str) {
-        Some(raw) => {
-            normalize_datetime(raw, DefaultTime::StartOfDay).unwrap_or_else(|| raw.to_string())
-        }
-        None => String::new(),
-    }
 }
 
 /// 待办 JSON 里嵌套的子任务数组
@@ -400,7 +395,7 @@ pub fn normalize_todo_lenient(t: &mut Todo) {
 pub struct RemoteTodo {
     pub id: Option<i64>,
     pub todo: Option<Todo>,
-    /// 规范化后的 updatedAt（无法识别时为原始串），无法解析的记录也用它判断墓碑压制
+    /// 规范化后的 updatedAt（无法识别 / 缺失时为空串），无法解析的记录也用它判断墓碑压制
     pub updated_at: String,
     pub subtasks: Vec<RemoteSubtask>,
     pub error: Option<String>,
@@ -968,7 +963,7 @@ pub fn force_push_prepare(
                     tx,
                     EntityKind::Todo,
                     id,
-                    &deletion_time(now, &canonical_updated_at(rv)),
+                    &deletion_time(now, &value_updated_at(rv)),
                 )?,
                 Some(local) => {
                     let remote_ts = value_updated_at(rv);
@@ -985,7 +980,7 @@ pub fn force_push_prepare(
                     tx,
                     EntityKind::Subtask,
                     sid,
-                    &deletion_time(now, &canonical_updated_at(sv)),
+                    &deletion_time(now, &value_updated_at(sv)),
                 )?,
                 Some(local) => {
                     let remote_ts = value_updated_at(sv);
@@ -1011,14 +1006,7 @@ pub fn force_push_prepare(
 
     let mut bumped = 0u32;
     for ((kind, id), beat) in must_beat {
-        let target = {
-            let after = plus_one_second(&beat);
-            if after.as_str() > now {
-                after
-            } else {
-                now.to_string()
-            }
-        };
+        let target = superseding(now, &beat);
         let table = match kind {
             EntityKind::Todo => "todos",
             EntityKind::Subtask => "subtasks",
@@ -1523,6 +1511,86 @@ mod tests {
         assert_eq!(ua(2), now, "必须压过远端墓碑");
         let tombs = db.with_connection(|c| list_tombstones(c, CUTOFF)).unwrap();
         assert_eq!(tombs, vec![tomb("subtask", 31, now), tomb("todo", 3, now)]);
+    }
+
+    /// 回归：远端记录的 updatedAt 是乱码时，强制推送以前会把它当成"更新的版本"，
+    /// 用 plus_one_second（乱码原样返回）把乱码抄进本地记录的 updated_at——此后这条记录在
+    /// 每一次 LWW 里都赢、其它写入方又都解析不了它。乱码时间现在视为最旧：不推进、不进墓碑。
+    #[test]
+    fn force_push_prepare_ignores_unparseable_remote_timestamps() {
+        let db = db();
+        merge(
+            &db,
+            vec![todo_json(1, "本地", "2026-05-01 10:00:00")],
+            vec![],
+        );
+        let mut garbage_shared = todo_json(1, "远端乱码时间", "2026-05-01 10:00:00");
+        garbage_shared["updatedAt"] = json!("zzz-not-a-time");
+        let mut garbage_only = todo_json(2, "远端独有乱码时间", "2026-05-01 10:00:00");
+        garbage_only["updatedAt"] = json!("zzz-not-a-time");
+        let now = "2026-05-03 00:00:00";
+
+        let bumped = db
+            .with_transaction(|tx| {
+                force_push_prepare(tx, &[garbage_shared, garbage_only], &[], now)
+            })
+            .unwrap();
+        assert_eq!(bumped, 0, "乱码时间不算更新的版本");
+        let local: String = db
+            .with_connection(|c| {
+                c.query_row("SELECT updated_at FROM todos WHERE id = 1", [], |r| {
+                    r.get(0)
+                })
+            })
+            .unwrap();
+        assert_eq!(local, "2026-05-01 10:00:00");
+        let tombs = db.with_connection(|c| list_tombstones(c, CUTOFF)).unwrap();
+        assert_eq!(tombs, vec![tomb("todo", 2, now)], "墓碑时间只取合法时间");
+    }
+
+    #[test]
+    fn deletion_time_only_trusts_parseable_record_times() {
+        let now = "2026-05-03 00:00:00";
+        assert_eq!(deletion_time(now, "2026-05-01 10:00:00"), now);
+        assert_eq!(
+            deletion_time(now, "2099-01-01T08:00"),
+            "2099-01-01 08:00:00",
+            "比现在还新的合法时间：取它（规范化后）"
+        );
+        for bad in ["zzz", "", "not a time"] {
+            assert_eq!(deletion_time(now, bad), now, "{bad:?}");
+        }
+
+        // 本地记录带着乱码时间被删除：墓碑落规范时间
+        let db = db();
+        db.with_connection(|c| {
+            c.execute(
+                "INSERT INTO todos (id, title, updated_at) VALUES (5, 'x', 'zzz')",
+                [],
+            )
+            .map(|_| ())
+        })
+        .unwrap();
+        db.with_transaction(|tx| delete_todo_with_tombstones(tx, 5, now))
+            .unwrap();
+        let tombs = db.with_connection(|c| list_tombstones(c, CUTOFF)).unwrap();
+        assert_eq!(tombs, vec![tomb("todo", 5, now)]);
+    }
+
+    #[test]
+    fn value_updated_at_treats_garbage_as_oldest() {
+        assert_eq!(
+            value_updated_at(&json!({"updatedAt": "2026-05-01T10:00"})),
+            "2026-05-01 10:00:00"
+        );
+        for v in [
+            json!({"updatedAt": "zzz"}),
+            json!({"updatedAt": 20260501}),
+            json!({}),
+            json!("not an object"),
+        ] {
+            assert_eq!(value_updated_at(&v), "", "{v}");
+        }
     }
 
     #[test]

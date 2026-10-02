@@ -25,7 +25,7 @@ Before touching sync, import/export, or any write path of `todos` / `subtasks` /
 (PC commands or cloud REST handlers):
 
 - [ ] Read [Sync Protocol](./sync-protocol.md) — §3.2 (time + monotonic `updated_at`) and §3.4 (WebDAV rules)
-- [ ] Settings writes go through `db::settings_kv` only; synced keys live in `SYNCED_SETTING_KEYS`
+- [ ] Settings writes go through `db::settings_kv` only; synced keys live in `db::settings_kv::SYNCED_SETTING_KEYS`
 - [ ] Any new `settings` key / table / record field: walk the "维护检查清单" in `CLAUDE.md`
   (models → data.rs → sync_store → cloud `src/model.rs`)
 

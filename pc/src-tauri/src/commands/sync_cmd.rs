@@ -5,9 +5,11 @@
 //! ```text
 //! 互斥（同一时刻只允许一个同步，含强制拉取 / 推送）
 //! 最多 4 轮：
-//!   本地有未同步变更（local_seq ≠ synced_seq，或设置版本 > 基准里的 settingsUpdatedAt）
-//!     → 无条件 GET；否则基准里有 ETag 时带 If-None-Match 的条件 GET，304 → 无变化，结束
-//!     （不用 If-Modified-Since：nginx 按整秒比较，同一秒内的写入会被漏掉）
+//!   本地有未同步变更（local_seq ≠ synced_seq，或设置版本 > 基准里的 settingsUpdatedAt）、
+//!   手动同步（`full: true`）或每第 FULL_GET_EVERY 轮 → 无条件 GET；
+//!   否则基准里有 ETag 时带 If-None-Match 的条件 GET，304 → 无变化，结束
+//!     （不用 If-Modified-Since：nginx 按整秒比较，同一秒内的写入会被漏掉；
+//!      nginx 的 ETag 也只到秒，同秒等长的改写同样 304，所以要定期无条件 GET 兜底）
 //!   404 → 远端为空；200 → 解析（失败直接报错，绝不上传覆盖读不懂的远端）
 //!   单事务合并：墓碑并集 → 墓碑应用到本地 → 记录级 LWW（平局保留本地）→ 远端设置（K3-5）
 //!   下载远端列出、本地缺失的图片
@@ -50,11 +52,19 @@ use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 /// 一次同步里 GET → 合并 → PUT 的最大轮数（412 重试上限）
 const MAX_ATTEMPTS: usize = 4;
+
+/// 每隔这么多轮智能同步做一次无条件 GET（与 cloud 的 `FULL_PULL_EVERY` 同一规则）。
+///
+/// nginx dav 的 ETag 是 `"<mtime 秒十六进制>-<大小十六进制>"`：另一写入方在本机记下基准的同一秒内
+/// 改写了 sync-data、且压缩后大小恰好不变（等长的标题修改、象限 1→2 ……）时 ETag 不变，
+/// 带 `If-None-Match` 的条件 GET 得到 304，这次修改要等到下一次有人写入才会被看到。
+/// 自动同步每 10 轮无条件 GET 一次兜底（盲区最多延迟 10 个周期）；手动同步（`full: true`）每次都无条件 GET。
+pub const FULL_GET_EVERY: u32 = 10;
 
 /// 412 之后、下一轮 GET 之前的等待时间。Apache mod_dav 在文件写入后约 1 秒内只给弱 ETag，
 /// 这期间 `If-Match` 一定 412；等过这一秒再取到的就是可以强匹配的 ETag。
@@ -459,6 +469,19 @@ impl SyncReport {
 
 static SYNC_RUNNING: AtomicBool = AtomicBool::new(false);
 
+/// 进程内智能同步的轮次计数（拿到同步互斥后加一，第一轮为 1）
+static SMART_SYNC_ROUNDS: AtomicU32 = AtomicU32::new(0);
+
+/// 第 `round` 轮（从 1 起）智能同步是否做无条件 GET（同 cloud `is_full_pull_round`）
+fn is_full_get_round(round: u32) -> bool {
+    round > 0 && round.is_multiple_of(FULL_GET_EVERY)
+}
+
+/// 这一轮是否无条件 GET：调用方明确要求（手动同步传 `full: true`）或轮到兜底轮
+fn wants_full_get(requested: Option<bool>, round: u32) -> bool {
+    requested == Some(true) || is_full_get_round(round)
+}
+
 /// 同步互斥：同一时刻只允许一个同步（含强制拉取 / 推送），重入直接报错
 struct SyncGuard;
 
@@ -479,15 +502,21 @@ impl Drop for SyncGuard {
 
 #[derive(Debug, Clone, Copy)]
 enum SyncMode {
-    Smart,
+    /// `full`：调用方要求本轮无条件 GET（`None` = 旧调用方没传，按 false 处理）
+    Smart {
+        full: Option<bool>,
+    },
     ForcePull,
     ForcePush,
 }
 
-/// 智能同步（K4）：手动同步、设置页"立即同步"、自动同步定时器共用
+/// 智能同步（K4）：手动同步、设置页"立即同步"、自动同步定时器共用。
+///
+/// `full: true`（标题栏同步按钮、设置页"立即同步"）：本轮第一次 GET 不带 `If-None-Match`，
+/// 绕开 nginx 秒级 ETag 的盲区（见 [`FULL_GET_EVERY`]）；自动同步不传，每第 10 轮自动无条件一次。
 #[tauri::command]
-pub async fn webdav_sync(app: AppHandle) -> Result<SyncReport, String> {
-    run_sync_command(app, SyncMode::Smart).await
+pub async fn webdav_sync(app: AppHandle, full: Option<bool>) -> Result<SyncReport, String> {
+    run_sync_command(app, SyncMode::Smart { full }).await
 }
 
 /// 用云端覆盖本地：删除本地独有的待办 / 子任务（不生成墓碑），应用远端设置（设备相关键除外）。
@@ -562,7 +591,12 @@ fn run_sync_blocking(db: &Database, mode: SyncMode) -> Result<SyncReport, String
         retry_delay: CONFLICT_RETRY_DELAY,
     };
     let report = match mode {
-        SyncMode::Smart => engine.sync(),
+        SyncMode::Smart { full } => {
+            let round = SMART_SYNC_ROUNDS
+                .fetch_add(1, Ordering::Relaxed)
+                .wrapping_add(1);
+            engine.sync(wants_full_get(full, round))
+        }
         SyncMode::ForcePull => engine.force_pull(),
         SyncMode::ForcePush => engine.force_push(),
     }?;
@@ -783,8 +817,8 @@ impl SyncEngine<'_> {
         }
     }
 
-    /// 智能同步（K4）
-    fn sync(&self) -> Result<SyncReport, String> {
+    /// 智能同步（K4）。`full`：第一次 GET 也不带条件（手动同步 / 兜底轮）
+    fn sync(&self, full: bool) -> Result<SyncReport, String> {
         let mut report = SyncReport::default();
         let mut images = ImageTransfer::new(self.client, &self.images_dir);
 
@@ -793,9 +827,9 @@ impl SyncEngine<'_> {
             let dirty = pre.dirty();
             let cutoff = sync_store::retention_cutoff();
 
-            // 本地有变更时反正要拿到远端全文来合并，直接无条件 GET
+            // 本地有变更时反正要拿到远端全文来合并，直接无条件 GET；手动同步 / 兜底轮也无条件
             let conditional =
-                (!dirty && attempt == 0 && pre.base.etag.is_some()).then_some(&pre.base);
+                (!full && !dirty && attempt == 0 && pre.base.etag.is_some()).then_some(&pre.base);
             let (remote, version) = match self.client.get(SYNC_DATA_FILE, conditional)? {
                 GetOutcome::NotModified => {
                     let at =
@@ -988,8 +1022,16 @@ fn apply_remote_settings_if_newer(
     ) else {
         return Ok(false);
     };
+    if first_sync {
+        let changed = adopt_settings_json(conn, obj, remote_at)?;
+        // 本机设置此刻就是远端这个版本：同一事务里记下设置基准，"首次同步"到此为止。
+        // 否则这次同步若在上传前失败（412 用尽、网络中断），下一次仍按首次同步无条件采用远端
+        // 设置，把用户在两次同步之间改过的设置悄悄覆盖掉
+        set_setting(conn, KEY_SYNCED_SETTINGS_AT, remote_at)?;
+        return Ok(changed);
+    }
     let local_at = settings_version(conn)?.unwrap_or_default();
-    if first_sync || remote_at > local_at.as_str() {
+    if remote_at > local_at.as_str() {
         adopt_settings_json(conn, obj, remote_at)
     } else {
         Ok(false)
@@ -1886,7 +1928,7 @@ mod tests {
         let fx = Fixture::new("push-empty");
         add_local_todo(&fx.db, 1, "本地", "2026-09-01 10:00:00");
 
-        let report = fx.engine().sync().expect("首次同步");
+        let report = fx.engine().sync(false).expect("首次同步");
         assert_eq!(report.status, SyncStatus::Pushed);
         assert!(!report.last_sync_at.is_empty());
         let remote = fx.remote();
@@ -1904,7 +1946,7 @@ mod tests {
         );
 
         fx.clear_log();
-        let again = fx.engine().sync().expect("二次同步");
+        let again = fx.engine().sync(false).expect("二次同步");
         assert_eq!(again.status, SyncStatus::NoChanges);
         assert_eq!(
             fx.log(),
@@ -1927,7 +1969,7 @@ mod tests {
         fx.set_remote(&remote);
         add_local_todo(&fx.db, 1, "本地", "2026-09-01 10:00:00");
 
-        let report = fx.engine().sync().expect("同步");
+        let report = fx.engine().sync(false).expect("同步");
         assert_eq!(report.status, SyncStatus::Merged);
         assert_eq!(report.todos_inserted, 1);
         assert_eq!(report.records_skipped, 1);
@@ -1960,7 +2002,10 @@ mod tests {
         assert_eq!(after["settings"]["textTheme"], "light");
 
         fx.clear_log();
-        assert_eq!(fx.engine().sync().unwrap().status, SyncStatus::NoChanges);
+        assert_eq!(
+            fx.engine().sync(false).unwrap().status,
+            SyncStatus::NoChanges
+        );
         assert_eq!(fx.count(PUT_DOC), 0);
     }
 
@@ -1969,7 +2014,7 @@ mod tests {
         let fx = Fixture::new("412");
         fx.set_remote(&doc(vec![todo_json(2, "远端", "2026-09-02 10:00:00")]));
         add_local_todo(&fx.db, 1, "本地", "2026-09-01 10:00:00");
-        fx.engine().sync().expect("建立基准");
+        fx.engine().sync(false).expect("建立基准");
 
         add_local_todo(&fx.db, 5, "本地新增", "2026-09-06 10:00:00");
         let mut concurrent = fx.remote();
@@ -1983,7 +2028,7 @@ mod tests {
 
         fx.clear_log();
         let started = std::time::Instant::now();
-        let report = fx.engine().sync().expect("412 后重试应成功");
+        let report = fx.engine().sync(false).expect("412 后重试应成功");
         assert!(
             started.elapsed() >= CONFLICT_RETRY_DELAY,
             "412 之后要等过 Apache 的弱 ETag 窗口再重试"
@@ -2018,7 +2063,7 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
         });
-        let err = fx.engine().sync().expect_err("连续冲突应报错");
+        let err = fx.engine().sync(false).expect_err("连续冲突应报错");
         stop.store(true, Ordering::SeqCst);
         feeder.join().unwrap();
         assert!(err.contains("请稍后重试"), "{err}");
@@ -2040,7 +2085,7 @@ mod tests {
                 st.write(SYNC_DATA_FILE, body);
             }
             add_local_todo(&fx.db, 1, "本地", "2026-09-01 10:00:00");
-            let err = fx.engine().sync().expect_err("看不懂的远端应报错");
+            let err = fx.engine().sync(false).expect_err("看不懂的远端应报错");
             assert!(
                 err.contains("解析远程数据失败") || err.contains("解压失败"),
                 "{err}"
@@ -2065,7 +2110,7 @@ mod tests {
         fx.server().omit_put_headers = true;
         add_local_todo(&fx.db, 1, "本地", "2026-09-01 10:00:00");
 
-        fx.engine().sync().unwrap();
+        fx.engine().sync(false).unwrap();
         assert_eq!(fx.count("HEAD /mini-todo/sync-data.json.gz"), 1);
         assert_eq!(
             fx.count("PROPFIND /mini-todo/sync-data.json.gz"),
@@ -2077,14 +2122,17 @@ mod tests {
         assert!(!setting(&fx.db, KEY_LAST_MODIFIED).is_empty());
 
         fx.clear_log();
-        assert_eq!(fx.engine().sync().unwrap().status, SyncStatus::NoChanges);
+        assert_eq!(
+            fx.engine().sync(false).unwrap().status,
+            SyncStatus::NoChanges
+        );
         assert_eq!(fx.count(PUT_DOC), 0);
 
         // HEAD 也不给 ETag → PROPFIND getetag 兜底
         fx.server().head_without_etag = true;
         add_local_todo(&fx.db, 2, "再改", "2026-09-02 10:00:00");
         fx.clear_log();
-        fx.engine().sync().unwrap();
+        fx.engine().sync(false).unwrap();
         assert_eq!(fx.count("HEAD /mini-todo/sync-data.json.gz"), 1);
         assert_eq!(fx.count("PROPFIND /mini-todo/sync-data.json.gz"), 1);
         let current_etag = fx.server().files[SYNC_DATA_FILE].etag.clone();
@@ -2113,7 +2161,7 @@ mod tests {
         add_local_todo(&fx.db, 1, "本地", "2026-09-01 10:00:00");
 
         let started = std::time::Instant::now();
-        let report = fx.engine().sync().expect("弱 ETag 窗口过后重试应成功");
+        let report = fx.engine().sync(false).expect("弱 ETag 窗口过后重试应成功");
         assert!(started.elapsed() >= fx.retry_delay);
         assert_eq!(report.status, SyncStatus::Merged);
         assert_eq!(remote_ids(&fx.remote()), vec![1, 2]);
@@ -2140,7 +2188,10 @@ mod tests {
             })
             .unwrap();
         fx.clear_log();
-        assert_eq!(fx.engine().sync().unwrap().status, SyncStatus::NoChanges);
+        assert_eq!(
+            fx.engine().sync(false).unwrap().status,
+            SyncStatus::NoChanges
+        );
         assert_eq!(fx.count(PUT_DOC), 0);
         assert!(!fx.sent_time_conditions(), "绝不发基于时间的条件头");
     }
@@ -2159,7 +2210,7 @@ mod tests {
             st.propfind_without_etag = true;
         }
         add_local_todo(&fx.db, 1, "本地", "2026-09-01 10:00:00");
-        fx.engine().sync().expect("首次上传");
+        fx.engine().sync(false).expect("首次上传");
         let base = setting(&fx.db, KEY_REMOTE_ETAG);
         assert_eq!(
             base,
@@ -2182,7 +2233,7 @@ mod tests {
             "前提：Last-Modified 与基准相同"
         );
 
-        let report = fx.engine().sync().expect("同步");
+        let report = fx.engine().sync(false).expect("同步");
         assert_eq!(report.status, SyncStatus::Pulled);
         assert!(local_titles(&fx.db).iter().any(|(id, _)| *id == 9));
         let conditions = fx.server().get_conditions.clone();
@@ -2194,17 +2245,92 @@ mod tests {
         assert!(!fx.sent_time_conditions());
     }
 
+    /// nginx 的 ETag 只到秒：另一台设备在本机记下基准的同一秒内改写了 sync-data、压缩后大小又恰好
+    /// 不变时 ETag 不变，普通轮次的条件 GET 得到 304、看不到这次修改（盲区，与 cloud 相同）。
+    /// 手动同步（`full`）与每第 FULL_GET_EVERY 轮做无条件 GET，把它合并进来。
+    #[test]
+    fn nginx_same_second_same_size_rewrite_is_caught_by_a_full_get() {
+        let fx = Fixture::new("nginx-blind-spot");
+        {
+            let mut st = fx.server();
+            st.nginx_second = Some(2_000);
+            st.omit_put_headers = true;
+            st.ignore_put_preconditions = true;
+            st.propfind_without_etag = true;
+        }
+        add_local_todo(&fx.db, 1, "aaaa", "2026-09-01 10:00:00");
+        fx.engine().sync(false).expect("首次上传");
+        let base = setting(&fx.db, KEY_REMOTE_ETAG);
+        let base_len = fx.server().files[SYNC_DATA_FILE].body.len();
+
+        // 同一秒内另一台设备改了标题与 updatedAt（都等长），挑一个压缩后大小也相同的改写
+        let original = fx.remote();
+        let (title, rewritten) = (b'a'..=b'z')
+            .flat_map(|c1| (b'a'..=b'z').map(move |c2| format!("{}{}zz", c1 as char, c2 as char)))
+            .find_map(|title| {
+                let mut doc = original.clone();
+                doc["todos"][0]["title"] = json!(title);
+                doc["todos"][0]["updatedAt"] = json!("2026-09-02 10:00:00");
+                let bytes = gzip_compress(&serde_json::to_vec(&doc).unwrap()).unwrap();
+                (bytes.len() == base_len).then_some((title, bytes))
+            })
+            .expect("应能找到压缩后等长的改写");
+        fx.server().write(SYNC_DATA_FILE, rewritten);
+        assert_eq!(
+            fx.server().files[SYNC_DATA_FILE].etag,
+            base,
+            "前提：ETag 没变"
+        );
+
+        // 普通的自动同步轮：If-None-Match → 304，修改被盲区挡住
+        let report = fx.engine().sync(false).unwrap();
+        assert_eq!(report.status, SyncStatus::NoChanges);
+        assert_eq!(local_titles(&fx.db), vec![(1, "aaaa".to_string())]);
+        assert_eq!(
+            fx.server().get_conditions.last(),
+            Some(&(Some(base.clone()), None))
+        );
+
+        // 手动同步 / 兜底轮：无条件 GET，合并到这次修改；没有需要上传的
+        fx.clear_log();
+        let report = fx.engine().sync(true).unwrap();
+        assert_eq!(report.status, SyncStatus::Pulled);
+        assert_eq!(report.todos_updated, 1);
+        assert_eq!(local_titles(&fx.db), vec![(1, title)]);
+        assert_eq!(fx.server().get_conditions.last(), Some(&(None, None)));
+        assert_eq!(fx.count(PUT_DOC), 0);
+    }
+
+    /// 兜底轮与 cloud 的 `is_full_pull_round` 同一规则：第 10、20、30… 轮；手动同步每轮都是
+    #[test]
+    fn every_tenth_smart_sync_round_and_every_manual_sync_do_a_full_get() {
+        let full_rounds: Vec<u32> = (0..=35).filter(|r| is_full_get_round(*r)).collect();
+        assert_eq!(full_rounds, vec![10, 20, 30]);
+        assert_eq!(FULL_GET_EVERY, 10);
+
+        for round in [1, 2, 9, 11, u32::MAX] {
+            assert!(!wants_full_get(None, round), "自动同步第 {round} 轮");
+            assert!(!wants_full_get(Some(false), round));
+            assert!(wants_full_get(Some(true), round), "手动同步总是无条件");
+        }
+        assert!(wants_full_get(None, 10));
+        assert!(wants_full_get(Some(false), 20));
+    }
+
     /// 只有 Last-Modified 的旧基准（R1 之前 / 不给 ETag 的服务端）：做无条件 GET，不发 IMS
     #[test]
     fn base_without_etag_downloads_unconditionally() {
         let fx = Fixture::new("lm-only-base");
         add_local_todo(&fx.db, 1, "本地", "2026-09-01 10:00:00");
-        fx.engine().sync().unwrap();
+        fx.engine().sync(false).unwrap();
         fx.db
             .with_connection(|c| set_setting(c, KEY_REMOTE_ETAG, "").map(|_| ()))
             .unwrap();
         fx.clear_log();
-        assert_eq!(fx.engine().sync().unwrap().status, SyncStatus::NoChanges);
+        assert_eq!(
+            fx.engine().sync(false).unwrap().status,
+            SyncStatus::NoChanges
+        );
         assert_eq!(
             fx.server().get_conditions.last(),
             Some(&(None, None)),
@@ -2218,13 +2344,13 @@ mod tests {
         let fx = Fixture::new("tombstones");
         fx.set_remote(&doc(vec![todo_json(2, "远端", "2026-09-02 10:00:00")]));
         add_local_todo(&fx.db, 1, "本地", "2026-09-01 10:00:00");
-        fx.engine().sync().unwrap();
+        fx.engine().sync(false).unwrap();
 
         // 本地删除 → 墓碑随上传传播，远端记录消失
         fx.db
             .with_transaction(|tx| sync_store::delete_todo_with_tombstones(tx, 2, &now_local()))
             .unwrap();
-        let report = fx.engine().sync().unwrap();
+        let report = fx.engine().sync(false).unwrap();
         assert_eq!(report.status, SyncStatus::Pushed);
         let remote = fx.remote();
         assert_eq!(remote_ids(&remote), vec![1]);
@@ -2240,7 +2366,7 @@ mod tests {
             .push(json!({"entityType": "todo", "entityId": 1, "deletedAt": now_local()}));
         fx.set_remote(&other);
         fx.clear_log();
-        let report = fx.engine().sync().unwrap();
+        let report = fx.engine().sync(false).unwrap();
         assert_eq!(report.todos_deleted, 1);
         assert_eq!(report.status, SyncStatus::Pulled);
         assert!(local_titles(&fx.db).is_empty());
@@ -2251,11 +2377,11 @@ mod tests {
     fn local_only_records_are_reuploaded_when_remote_lost_them() {
         let fx = Fixture::new("reupload");
         add_local_todo(&fx.db, 1, "本地", "2026-09-01 10:00:00");
-        fx.engine().sync().unwrap();
+        fx.engine().sync(false).unwrap();
 
         // 另一个写入方（旧版本 / 不检查条件头的服务端）把远端整包覆盖掉了
         fx.set_remote(&doc(vec![todo_json(7, "别人的", "2026-09-07 10:00:00")]));
-        let report = fx.engine().sync().unwrap();
+        let report = fx.engine().sync(false).unwrap();
         assert_eq!(report.status, SyncStatus::Merged);
         assert_eq!(remote_ids(&fx.remote()), vec![1, 7]);
     }
@@ -2302,7 +2428,10 @@ mod tests {
 
         // 强制拉取后再智能同步：无事可做
         fx.clear_log();
-        assert_eq!(fx.engine().sync().unwrap().status, SyncStatus::NoChanges);
+        assert_eq!(
+            fx.engine().sync(false).unwrap().status,
+            SyncStatus::NoChanges
+        );
         assert_eq!(fx.count(PUT_DOC), 0);
     }
 
@@ -2416,7 +2545,7 @@ mod tests {
         fx.set_remote(&remote);
         add_local_todo(&fx.db, 1, "本地", "2026-09-01 10:00:00");
 
-        let report = fx.engine().sync().unwrap();
+        let report = fx.engine().sync(false).unwrap();
         assert_eq!(report.images_uploaded, 1);
         assert_eq!(report.images_downloaded, 1);
         assert_eq!(
@@ -2589,6 +2718,36 @@ mod tests {
         assert_eq!(merged[2], json!("无 id 的垃圾"));
     }
 
+    /// 回归：远端同 id 记录的 updatedAt 是乱码时，以前按原串比较（`"zzz" > "2026-…"`），
+    /// 上传文档里留的是远端那份看不懂的版本，本地合法的修改永远传不出去。
+    /// 现在乱码视为最旧（与 cloud 的 canon_ts 一致）：本地版本胜出，并触发一次上传把远端修好。
+    #[test]
+    fn unparseable_remote_timestamp_never_beats_the_local_version() {
+        let fx = Fixture::new("garbage-ts");
+        let mut garbage = todo_json(1, "远端乱码时间", "2026-09-01 10:00:00");
+        garbage["updatedAt"] = json!("zzz");
+        fx.set_remote(&doc(vec![garbage]));
+        add_local_todo(&fx.db, 1, "本地合法版本", "2026-09-05 10:00:00");
+
+        let report = fx.engine().sync(false).expect("同步");
+        assert_eq!(report.records_skipped, 1, "看不懂的远端版本跳过");
+        assert_eq!(
+            local_titles(&fx.db),
+            vec![(1, "本地合法版本".to_string())],
+            "本地不受影响"
+        );
+        let remote = fx.remote();
+        assert_eq!(remote["todos"][0]["title"], "本地合法版本", "远端被修好");
+        assert_eq!(remote["todos"][0]["updatedAt"], "2026-09-05 10:00:00");
+
+        fx.clear_log();
+        assert_eq!(
+            fx.engine().sync(false).unwrap().status,
+            SyncStatus::NoChanges
+        );
+        assert_eq!(fx.count(PUT_DOC), 0, "修好之后不再反复上传");
+    }
+
     #[test]
     fn subtask_listed_under_two_todos_is_kept_once() {
         let mut a = todo_json(1, "A", "2026-09-01 00:00:00");
@@ -2674,6 +2833,42 @@ mod tests {
         remote.settings_updated_at = Some("2026-09-02 00:00:00".to_string());
         assert!(apply(&remote, false), "远端较新应用");
         assert_eq!(setting(&db, "view_mode"), "list");
+    }
+
+    /// 回归：首次同步采用了远端设置、但在上传前失败（412 用尽 / 断网）时，以前仍处于
+    /// "首次同步"状态，下次同步会再无条件采用一遍远端设置，覆盖用户在两次之间改过的设置
+    #[test]
+    fn first_sync_adopts_remote_settings_only_once() {
+        let fx = Fixture::new("first-sync-once");
+        let mut remote = doc(vec![]);
+        remote["settings"] = json!({"textTheme": "light"});
+        remote["settingsUpdatedAt"] = json!("2026-09-03 00:00:00");
+        let remote: SyncData = serde_json::from_value(remote).unwrap();
+        let cutoff = "2000-01-01 00:00:00";
+        let engine = fx.engine();
+
+        assert!(engine.read_pre_state().unwrap().first_sync);
+        let (_, applied) = engine.merge(&remote, true, cutoff).unwrap();
+        assert!(applied, "首次同步采用远端设置");
+        assert_eq!(setting(&fx.db, "text_theme"), "light");
+
+        // 合并之后、上传之前失败（finish 没跑）：已经不是首次同步了
+        let pre = engine.read_pre_state().unwrap();
+        assert!(!pre.first_sync);
+        assert_eq!(pre.synced_settings_at, "2026-09-03 00:00:00");
+        assert!(
+            pre.settings_version <= pre.synced_settings_at,
+            "采用后的设置本身不算未同步的变更"
+        );
+
+        // 用户在两次同步之间改了设置：下一次合并不能再把它覆盖回去
+        fx.db
+            .with_connection(|c| set_setting(c, "text_theme", "dark").map(|_| ()))
+            .unwrap();
+        let (_, applied) = engine.merge(&remote, pre.first_sync, cutoff).unwrap();
+        assert!(!applied);
+        assert_eq!(setting(&fx.db, "text_theme"), "dark");
+        assert!(engine.read_pre_state().unwrap().dirty(), "新设置待上传");
     }
 
     // ------------------------------------------------------------------

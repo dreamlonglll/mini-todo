@@ -1,4 +1,6 @@
-use crate::db::time::{format_canonical, parse_local_datetime_with, DefaultTime};
+use crate::db::time::{
+    format_canonical, parse_local_datetime_with, DefaultTime, SQL_SET_UPDATED_AT,
+};
 use crate::db::Database;
 use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, NaiveTime};
 use std::collections::BTreeSet;
@@ -51,12 +53,56 @@ struct WorkArea {
     height: f64,
 }
 
-/// 第 `slot` 个通知窗口的左上角逻辑坐标：从工作区右下角往上堆叠，
+/// 通知窗口的逻辑尺寸
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct NotificationSize {
+    width: f64,
+    height: f64,
+}
+
+/// 向窗口构建器请求的尺寸。真实尺寸可能更大（Linux / GTK 有最小尺寸限制，320×120 实际出来是
+/// 320×200），定位与堆叠都以真实尺寸为准，见 [`NotificationService::fit_to_actual_size`]。
+const REQUESTED_SIZE: NotificationSize = NotificationSize {
+    width: NOTIFICATION_WIDTH,
+    height: NOTIFICATION_HEIGHT,
+};
+
+/// 最近一次观测到的通知窗口真实尺寸：后续通知直接按它摆放，不必先按请求尺寸放下再挪位置
+static LAST_ACTUAL_SIZE: Mutex<Option<NotificationSize>> = Mutex::new(None);
+
+impl NotificationSize {
+    /// 物理像素 → 逻辑像素；尺寸为 0 或缩放比例不合法时返回 `None`
+    fn from_physical(width: u32, height: u32, scale: f64) -> Option<Self> {
+        if width == 0 || height == 0 || !(scale.is_finite() && scale > 0.0) {
+            return None;
+        }
+        Some(Self {
+            width: width as f64 / scale,
+            height: height as f64 / scale,
+        })
+    }
+
+    /// 相差超过半个逻辑像素才算不同（物理像素换算的舍入误差不算）
+    fn differs_from(self, other: Self) -> bool {
+        (self.width - other.width).abs() >= 0.5 || (self.height - other.height).abs() >= 0.5
+    }
+}
+
+fn last_actual_size() -> Option<NotificationSize> {
+    *LAST_ACTUAL_SIZE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn remember_actual_size(size: NotificationSize) {
+    *LAST_ACTUAL_SIZE.lock().unwrap_or_else(|e| e.into_inner()) = Some(size);
+}
+
+/// 第 `slot` 个通知窗口（逻辑尺寸 `size`）的左上角逻辑坐标：从工作区右下角往上堆叠，
 /// 一列放不下就往左开新列；整个工作区都放满时从头复用位置（取模），永远落在工作区内。
+/// 行高、列宽都按窗口真实尺寸算——按请求尺寸算的话，被系统撑高的窗口底部会被工作区边缘切掉。
 /// 全程浮点运算，不会出现 u32 下溢。
-fn notification_position(area: WorkArea, slot: u32) -> (f64, f64) {
-    let row_step = NOTIFICATION_HEIGHT + NOTIFICATION_SPACING;
-    let col_step = NOTIFICATION_WIDTH + NOTIFICATION_SPACING;
+fn notification_position(area: WorkArea, size: NotificationSize, slot: u32) -> (f64, f64) {
+    let row_step = size.height + NOTIFICATION_SPACING;
+    let col_step = size.width + NOTIFICATION_SPACING;
     let rows = ((area.height - 2.0 * NOTIFICATION_MARGIN + NOTIFICATION_SPACING) / row_step)
         .floor()
         .max(1.0) as u32;
@@ -66,9 +112,8 @@ fn notification_position(area: WorkArea, slot: u32) -> (f64, f64) {
     let slot = slot % rows.saturating_mul(cols).max(1);
     let (col, row) = (slot / rows, slot % rows);
 
-    let x = area.x + area.width - NOTIFICATION_MARGIN - NOTIFICATION_WIDTH - col as f64 * col_step;
-    let y =
-        area.y + area.height - NOTIFICATION_MARGIN - NOTIFICATION_HEIGHT - row as f64 * row_step;
+    let x = area.x + area.width - NOTIFICATION_MARGIN - size.width - col as f64 * col_step;
+    let y = area.y + area.height - NOTIFICATION_MARGIN - size.height - row as f64 * row_step;
     (x, y)
 }
 
@@ -279,9 +324,12 @@ impl NotificationService {
         let counter = NOTIFICATION_COUNTER.fetch_add(1, Ordering::SeqCst);
         let window_label = format!("notification_{}", counter);
 
-        // 右下角堆叠：新通知占最小的空闲槽位
+        // 右下角堆叠：新通知占最小的空闲槽位。先按上次观测到的真实尺寸摆放（首次按请求尺寸），
+        // 建好后再按这扇窗口的真实尺寸校正
         let slot = acquire_slot(&NOTIFICATION_SLOTS);
-        let (x, y) = notification_position(Self::primary_work_area(app_handle), slot);
+        let area = Self::primary_work_area(app_handle);
+        let expected = last_actual_size().unwrap_or(REQUESTED_SIZE);
+        let (x, y) = notification_position(area, expected, slot);
 
         // URL 编码标题和描述
         let encoded_title = urlencoding::encode(title);
@@ -313,18 +361,59 @@ impl NotificationService {
 
         match window_builder.build() {
             Ok(window) => {
-                // `Destroyed` 是窗口生命周期的权威信号，槽位只在这里归还
-                window.on_window_event(move |event| {
-                    if let tauri::WindowEvent::Destroyed = event {
-                        release_slot(&NOTIFICATION_SLOTS, slot);
+                // 闭包里只拿 AppHandle + 标签，不持有窗口本身（窗口持有自己的事件闭包会成环）
+                let app = app_handle.clone();
+                let label = window_label.clone();
+                window.on_window_event(move |event| match event {
+                    // `Destroyed` 是窗口生命周期的权威信号，槽位只在这里归还
+                    tauri::WindowEvent::Destroyed => release_slot(&NOTIFICATION_SLOTS, slot),
+                    // 有的平台在窗口真正显示时才定下最终尺寸（GTK 最小尺寸），按它重新摆一次
+                    tauri::WindowEvent::Resized(inner) => {
+                        if let Some(w) = app.get_webview_window(&label) {
+                            Self::fit_to_actual_size(&w, area, slot, expected, Some(*inner));
+                        }
                     }
+                    _ => {}
                 });
+                // build() 返回时尺寸已经定下的平台之后不一定再发 Resized：立即校正一次
+                Self::fit_to_actual_size(&window, area, slot, expected, None);
                 Ok(())
             }
             Err(e) => {
                 release_slot(&NOTIFICATION_SLOTS, slot);
                 Err(e.to_string())
             }
+        }
+    }
+
+    /// 按窗口的真实尺寸校正位置：与摆放时假设的尺寸 `placed_for` 不同就重算本槽位的坐标并移过去，
+    /// 同时记下真实尺寸供后续通知直接使用。`resized` 是 `Resized` 事件带来的物理尺寸，
+    /// 为 `None` 时读取窗口当前的外框尺寸。
+    fn fit_to_actual_size(
+        window: &tauri::WebviewWindow,
+        area: WorkArea,
+        slot: u32,
+        placed_for: NotificationSize,
+        resized: Option<tauri::PhysicalSize<u32>>,
+    ) {
+        let Ok(scale) = window.scale_factor() else {
+            return;
+        };
+        let physical = match resized {
+            Some(size) => size,
+            None => match window.outer_size() {
+                Ok(size) => size,
+                Err(_) => return,
+            },
+        };
+        let Some(actual) = NotificationSize::from_physical(physical.width, physical.height, scale)
+        else {
+            return;
+        };
+        remember_actual_size(actual);
+        if actual.differs_from(placed_for) {
+            let (x, y) = notification_position(area, actual, slot);
+            let _ = window.set_position(tauri::LogicalPosition::new(x, y));
         }
     }
 
@@ -362,10 +451,11 @@ impl NotificationService {
     }
 
     /// 标记待办为已通知。刷新 updated_at：提醒状态要随同步传播到其它设备。
+    /// 新时间严格晚于原值（`SQL_SET_UPDATED_AT`），同一秒内的两次写入也能分出先后。
     fn mark_as_notified(db: &Database, todo_id: i64) -> Result<(), String> {
         db.with_connection(|conn| {
             conn.execute(
-                "UPDATE todos SET notified = 1, updated_at = datetime('now', 'localtime') WHERE id = ?",
+                &format!("UPDATE todos SET notified = 1, {SQL_SET_UPDATED_AT} WHERE id = ?"),
                 [todo_id],
             )?;
             Ok(())
@@ -400,10 +490,12 @@ impl NotificationService {
 
         db.with_connection(|conn| {
             conn.execute(
-                "UPDATE todos SET notify_at = ?1, notified = 0,
-                        repeat_month_day = COALESCE(repeat_month_day, ?2),
-                        updated_at = datetime('now', 'localtime')
-                 WHERE id = ?3",
+                &format!(
+                    "UPDATE todos SET notify_at = ?1, notified = 0,
+                            repeat_month_day = COALESCE(repeat_month_day, ?2),
+                            {SQL_SET_UPDATED_AT}
+                     WHERE id = ?3"
+                ),
                 rusqlite::params![format_canonical(&next), anchor_day, todo.id],
             )?;
             Ok(())
@@ -599,39 +691,43 @@ mod tests {
         height: 825.6,
     };
 
-    fn assert_inside(area: WorkArea, (x, y): (f64, f64)) {
+    fn assert_inside(area: WorkArea, size: NotificationSize, (x, y): (f64, f64)) {
         assert!(
-            x >= area.x && x + NOTIFICATION_WIDTH <= area.x + area.width,
+            x >= area.x && x + size.width <= area.x + area.width + 1e-9,
             "x={x}"
         );
         assert!(
-            y >= area.y && y + NOTIFICATION_HEIGHT <= area.y + area.height,
+            y >= area.y && y + size.height <= area.y + area.height + 1e-9,
             "y={y}"
         );
     }
 
     #[test]
     fn first_notification_sits_in_the_bottom_right_of_the_work_area() {
-        let (x, y) = notification_position(AREA_125, 0);
+        let (x, y) = notification_position(AREA_125, REQUESTED_SIZE, 0);
         assert_eq!(x, 1536.0 - 20.0 - 320.0);
         assert!((y - (825.6 - 20.0 - 120.0)).abs() < 1e-9);
-        assert_inside(AREA_125, (x, y));
+        assert_inside(AREA_125, REQUESTED_SIZE, (x, y));
     }
 
     #[test]
     fn notifications_stack_upwards_then_wrap_into_new_columns() {
         // 825.6 高：每列放得下 (825.6 - 40 + 10) / 130 = 6 个
-        let (x0, y0) = notification_position(AREA_125, 0);
-        let (x1, y1) = notification_position(AREA_125, 1);
+        let (x0, y0) = notification_position(AREA_125, REQUESTED_SIZE, 0);
+        let (x1, y1) = notification_position(AREA_125, REQUESTED_SIZE, 1);
         assert_eq!(x1, x0);
         assert!((y0 - y1 - 130.0).abs() < 1e-9, "向上堆叠");
 
-        let (x6, y6) = notification_position(AREA_125, 6);
+        let (x6, y6) = notification_position(AREA_125, REQUESTED_SIZE, 6);
         assert_eq!(x6, x0 - 330.0, "第 7 个换到左边一列");
         assert_eq!(y6, y0);
 
         for slot in 0..200 {
-            assert_inside(AREA_125, notification_position(AREA_125, slot));
+            assert_inside(
+                AREA_125,
+                REQUESTED_SIZE,
+                notification_position(AREA_125, REQUESTED_SIZE, slot),
+            );
         }
     }
 
@@ -645,7 +741,11 @@ mod tests {
             height: 700.0,
         };
         for slot in 0..50 {
-            assert_inside(area, notification_position(area, slot));
+            assert_inside(
+                area,
+                REQUESTED_SIZE,
+                notification_position(area, REQUESTED_SIZE, slot),
+            );
         }
         // 放不下一整个窗口的极小工作区：不 panic，坐标有限
         let tiny = WorkArea {
@@ -654,8 +754,52 @@ mod tests {
             width: 100.0,
             height: 50.0,
         };
-        let (x, y) = notification_position(tiny, u32::MAX);
+        let (x, y) = notification_position(tiny, REQUESTED_SIZE, u32::MAX);
         assert!(x.is_finite() && y.is_finite());
+    }
+
+    /// e2e 实测（Linux，GDK_SCALE=2）：请求 320×120，GTK 撑成 320×200；按请求尺寸算的位置
+    /// 让窗口底部被工作区边缘切掉 80 个逻辑像素。按真实尺寸重算后整扇窗口都在工作区内，
+    /// 堆叠也按真实行高
+    #[test]
+    fn taller_than_requested_windows_stay_inside_the_work_area() {
+        // 1600×1000 物理 @2x，无面板
+        let area = WorkArea {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 500.0,
+        };
+        let actual = NotificationSize::from_physical(640, 400, 2.0).unwrap();
+        assert_eq!(
+            actual,
+            NotificationSize {
+                width: 320.0,
+                height: 200.0
+            }
+        );
+        assert!(actual.differs_from(REQUESTED_SIZE));
+
+        // 旧算法（按请求尺寸）：y = 360，底边 560 > 500，被切掉
+        let (_, stale_y) = notification_position(area, REQUESTED_SIZE, 0);
+        assert!(stale_y + actual.height > area.height);
+
+        let (x0, y0) = notification_position(area, actual, 0);
+        assert_eq!((x0, y0), (800.0 - 20.0 - 320.0, 500.0 - 20.0 - 200.0));
+        let (_, y1) = notification_position(area, actual, 1);
+        assert_eq!(y0 - y1, 210.0, "按真实行高向上堆叠");
+        for slot in 0..50 {
+            assert_inside(area, actual, notification_position(area, actual, slot));
+        }
+    }
+
+    #[test]
+    fn physical_sizes_convert_with_the_scale_factor_and_reject_garbage() {
+        let s = NotificationSize::from_physical(400, 150, 1.25).unwrap();
+        assert!(!s.differs_from(REQUESTED_SIZE), "舍入误差内视为相同: {s:?}");
+        assert_eq!(NotificationSize::from_physical(0, 150, 1.0), None);
+        assert_eq!(NotificationSize::from_physical(320, 120, 0.0), None);
+        assert_eq!(NotificationSize::from_physical(320, 120, f64::NAN), None);
     }
 
     // ---- notify_at 解析 ----
@@ -873,6 +1017,32 @@ mod tests {
             updated_at.as_str() > "2026-01-01 00:00:00",
             "推进要随同步传播"
         );
+    }
+
+    /// 提醒状态的写入同样要让 updated_at 严格递增：同步来的版本带着"未来"时间戳时，
+    /// 写"现在"会输给它；同一秒内两次写入时间相同，另一端在两次之间同步过就会永远停在第一次
+    #[test]
+    fn reminder_writes_move_updated_at_strictly_forward() {
+        let db = Database::new_in_memory().unwrap();
+        insert_reminder(&db, 1, "2020-01-01 09:00:00", "");
+        insert_reminder(&db, 2, "2020-01-01 09:00:00", "daily");
+        db.with_connection(|c| {
+            c.execute("UPDATE todos SET updated_at = '2099-01-01 08:00:00'", [])
+        })
+        .unwrap();
+
+        NotificationService::mark_as_notified(&db, 1).unwrap();
+        assert_eq!(row_state(&db, 1).3, "2099-01-01 08:00:01");
+        NotificationService::mark_as_notified(&db, 1).unwrap();
+        assert_eq!(
+            row_state(&db, 1).3,
+            "2099-01-01 08:00:02",
+            "同一秒内也严格递增"
+        );
+
+        let todo = pending(&db, 2);
+        NotificationService::advance_repeat(&db, &todo).unwrap();
+        assert_eq!(row_state(&db, 2).3, "2099-01-01 08:00:01");
     }
 
     #[test]

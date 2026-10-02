@@ -24,7 +24,7 @@
 
 ```rust
 // PC — commands/sync_cmd.rs (all async; blocking work in spawn_blocking; one sync at a time)
-#[tauri::command] pub async fn webdav_sync(app: AppHandle) -> Result<SyncReport, String>;       // smart sync
+#[tauri::command] pub async fn webdav_sync(app: AppHandle, full: Option<bool>) -> Result<SyncReport, String>; // smart sync; full=Some(true): unconditional first GET (manual sync)
 #[tauri::command] pub async fn webdav_force_pull(app: AppHandle) -> Result<SyncReport, String>; // local := remote
 #[tauri::command] pub async fn webdav_force_push(app: AppHandle) -> Result<SyncReport, String>; // remote := local
 // re-entry while a sync runs -> Err("同步正在进行中")
@@ -85,10 +85,16 @@ cloud keeps the equivalent in `meta` (`dirty`, `base_etag`, `base_last_modified`
   ahead: plain `now` would lose to the version it replaces.
 - A tombstone's `deletedAt = max(now, record.updatedAt)` (only parseable times count), so a delete
   always suppresses the version it deleted.
+- Synced settings move as one block: writing any `SYNCED_SETTING_KEYS` key (PC `db/settings_kv.rs`)
+  stamps `max(now, settings_version + 1s)`, so `settingsUpdatedAt` also strictly increases.
+- Unparseable or missing `updatedAt` compares as the **oldest** value on both sides (PC
+  `sync_store::value_updated_at`, cloud `canon_ts`) — a garbage string must never win LWW or be
+  copied into a new version.
 
 #### 3.3 Merge (identical on PC `merge_remote` and cloud `sync/merge.rs`)
 
-1. Record LWW on normalized `updatedAt`; **ties keep the local version**.
+1. Record LWW on normalized `updatedAt`; **ties keep the local version**; unparseable/missing
+   `updatedAt` is the oldest possible value.
 2. A tombstone with `deletedAt >= record.updatedAt` deletes/suppresses the record; a todo tombstone
    takes its subtasks with it. A record edited after deletion (`updatedAt > deletedAt`) survives.
 3. Records present on one side only are kept (union). **No "absent means deleted".**
@@ -107,14 +113,14 @@ cloud keeps the equivalent in `meta` (`dirty`, `base_etag`, `base_last_modified`
 
 | Step | Rule |
 |---|---|
-| Read | `If-None-Match: <base ETag>` only when nothing local is pending and a base ETag exists; otherwise unconditional GET. **Never `If-Modified-Since`.** |
+| Read | `If-None-Match: <base ETag>` only when nothing local is pending and a base ETag exists; otherwise unconditional GET. Manual sync and every 10th round use an unconditional GET (see "Full GET"). **Never `If-Modified-Since`.** |
 | Write | Always GET + merge first. PUT with `If-Match: "<opaque>"` (strip `W/`) when a base ETag exists, else no precondition. **Never `If-Unmodified-Since`.** |
 | 412 | Wait ≥ 1.1 s, then unconditional GET → merge → PUT. At most 4 attempts (PC) / 3 attempts (cloud) per sync. |
 | 404/409 on PUT | MKCOL the parent chain once, retry. No MKCOL on every sync. |
 | New base | ETag from the PUT response → HEAD → PROPFIND Depth 0 `getetag`. If the probed size ≠ uploaded size, record no base (next sync does a full GET). Never record a base for content that was not merged. |
 | Images | Upload missing images **before** the document; list remote images with one PROPFIND Depth 1 (any namespace prefix, single- or multi-line XML); names must pass `is_safe_image_name` (`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`, no `..`). |
 | Self-heal | After merging, if the remote document lacks local records/tombstones (a server that ignores preconditions let someone overwrite us), upload again even when nothing changed locally. |
-| Full pull (cloud) | Every 10th pull round is unconditional: nginx ETags have 1-second resolution and hide same-second, same-size rewrites behind 304. |
+| Full GET (both) | Unconditional GET on every 10th round — cloud pull loop (`FULL_PULL_EVERY`), PC smart sync (`FULL_GET_EVERY`, process-wide counter) — and on every manual sync (cloud `/sync`, `/sync/pull`; PC `webdav_sync { full: true }` from the title-bar button and Settings "立即同步"): nginx ETags have 1-second resolution and hide same-second, same-size rewrites behind 304. |
 
 #### 3.5 Force operations (PC)
 

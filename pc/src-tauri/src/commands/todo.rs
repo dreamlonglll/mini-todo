@@ -1,6 +1,6 @@
 use crate::db::paths::{self, is_safe_image_name};
 use crate::db::sync_store;
-use crate::db::time::{normalize_datetime, now_local, DefaultTime};
+use crate::db::time::{normalize_datetime, now_local, DefaultTime, SQL_SET_UPDATED_AT};
 use crate::db::{
     subtask_from_row, todo_from_row, CreateSubTaskRequest, CreateTodoRequest, Database, SubTask,
     Todo, UpdateSubTaskRequest, UpdateTodoRequest, SUBTASK_COLUMNS, TODO_COLUMNS,
@@ -239,7 +239,8 @@ fn update_todo_inner(db: &Database, id: i64, data: &UpdateTodoRequest) -> Result
         return Err("No fields to update".to_string());
     }
 
-    updates.push("updated_at = datetime('now', 'localtime')");
+    // 严格晚于原值：同一秒内的两次修改、或原值来自时钟偏快的设备时，新版本仍然胜出
+    updates.push(SQL_SET_UPDATED_AT);
     let sql = format!("UPDATE todos SET {} WHERE id = ?", updates.join(", "));
     params.push(Box::new(id));
 
@@ -284,20 +285,19 @@ enum OrderTable {
 
 /// 把 `ids` 的下标写成 sort_order，只更新 sort_order 真正变化的行，返回更新的行数。
 ///
-/// 只有这些行刷新 updated_at（排序也要随同步传播）。以前每次拖拽把传入的所有行都刷成"现在"，
-/// 在记录级 LWW 下会压掉其它设备 / AI 刚对这些待办做的修改（A7）。调用方提供事务。
+/// 只有这些行刷新 updated_at（排序也要随同步传播，新时间严格晚于原值）。以前每次拖拽把传入的
+/// 所有行都刷成"现在"，在记录级 LWW 下会压掉其它设备 / AI 刚对这些待办做的修改（A7）。
+/// 调用方提供事务。
 fn apply_order(conn: &Connection, table: OrderTable, ids: &[i64]) -> rusqlite::Result<usize> {
-    let sql = match table {
-        OrderTable::Todos => {
-            "UPDATE todos SET sort_order = ?1, updated_at = datetime('now', 'localtime')
-             WHERE id = ?2 AND sort_order IS NOT ?1"
-        }
-        OrderTable::Subtasks => {
-            "UPDATE subtasks SET sort_order = ?1, updated_at = datetime('now', 'localtime')
-             WHERE id = ?2 AND sort_order IS NOT ?1"
-        }
+    let table_name = match table {
+        OrderTable::Todos => "todos",
+        OrderTable::Subtasks => "subtasks",
     };
-    let mut stmt = conn.prepare_cached(sql)?;
+    let sql = format!(
+        "UPDATE {table_name} SET sort_order = ?1, {SQL_SET_UPDATED_AT}
+         WHERE id = ?2 AND sort_order IS NOT ?1"
+    );
+    let mut stmt = conn.prepare_cached(&sql)?;
     let mut changed = 0;
     for (index, id) in ids.iter().enumerate() {
         changed += stmt.execute(rusqlite::params![index as i64, id])?;
@@ -329,6 +329,14 @@ pub fn update_subtask(
     id: i64,
     data: UpdateSubTaskRequest,
 ) -> Result<SubTask, String> {
+    update_subtask_inner(&db, id, &data)
+}
+
+fn update_subtask_inner(
+    db: &Database,
+    id: i64,
+    data: &UpdateSubTaskRequest,
+) -> Result<SubTask, String> {
     db.with_connection(|conn| {
         let mut updates = Vec::new();
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -356,7 +364,7 @@ pub fn update_subtask(
             ));
         }
 
-        updates.push("updated_at = datetime('now', 'localtime')");
+        updates.push(SQL_SET_UPDATED_AT);
 
         let sql = format!("UPDATE subtasks SET {} WHERE id = ?", updates.join(", "));
         params.push(Box::new(id));
@@ -405,7 +413,8 @@ pub fn get_images_dir() -> Result<String, String> {
 /// 保存编辑器里粘贴 / 拖入的图片（K7）。
 ///
 /// 请求体是图片原始字节（前端 `invoke('save_subtask_image', bytes, { headers: { 'x-image-ext': 'png' } })`，
-/// 不再走 base64 + JSON）；扩展名必须在白名单内，单张不超过 20MB。文件名由后端生成
+/// 不再走 base64 + JSON；IPC 退回 postMessage 时的数字数组同样接受，见 [`image_bytes`]）；
+/// 扩展名必须在白名单内，单张不超过 20MB。文件名由后端生成
 /// `<毫秒>_<6 位随机>.<ext>` 并经 K5 安全文件名校验——以前文件名由前端给、直接 `join`，
 /// 可以写到图片目录之外（B2）。返回图片的绝对路径。
 #[tauri::command]
@@ -416,11 +425,7 @@ pub async fn save_subtask_image(request: tauri::ipc::Request<'_>) -> Result<Stri
             .get("x-image-ext")
             .and_then(|v| v.to_str().ok()),
     )?;
-    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
-        return Err("图片数据必须以原始字节发送".to_string());
-    };
-    check_image_size(bytes.len())?;
-    let bytes = bytes.clone();
+    let bytes = image_bytes(request.body(), MAX_IMAGE_BYTES)?;
 
     let path = tauri::async_runtime::spawn_blocking(move || {
         store_image(&paths::images_dir(), ext, &bytes)
@@ -448,16 +453,37 @@ fn image_extension(header: Option<&str>) -> Result<&'static str, String> {
         })
 }
 
-fn check_image_size(len: usize) -> Result<(), String> {
+fn check_image_size(len: usize, max_bytes: usize) -> Result<(), String> {
     if len == 0 {
         Err("图片内容为空".to_string())
-    } else if len > MAX_IMAGE_BYTES {
-        Err(format!(
-            "图片超过 {}MB，未保存",
-            MAX_IMAGE_BYTES / 1024 / 1024
-        ))
+    } else if len > max_bytes {
+        Err(format!("图片超过 {}MB，未保存", max_bytes / 1024 / 1024))
     } else {
         Ok(())
+    }
+}
+
+/// 取出请求体里的图片字节（先查长度上限，再拷贝 / 转换）。
+///
+/// 前端正常走自定义协议 IPC，请求体是原始字节（`InvokeBody::Raw`）。自定义协议被拦截（CSP、
+/// WebView 限制）时 Tauri 退回 postMessage，`Uint8Array` 会被序列化成数字数组，到这里是
+/// `InvokeBody::Json(Array)`：同样接受，但每一项都必须是 0–255 的整数，否则整体报错（不截断、
+/// 不猜测）。请求头（`x-image-ext`）两条通路都会带上，扩展名规则不变。
+fn image_bytes(body: &tauri::ipc::InvokeBody, max_bytes: usize) -> Result<Vec<u8>, String> {
+    match body {
+        tauri::ipc::InvokeBody::Raw(bytes) => {
+            check_image_size(bytes.len(), max_bytes)?;
+            Ok(bytes.clone())
+        }
+        tauri::ipc::InvokeBody::Json(serde_json::Value::Array(items)) => {
+            check_image_size(items.len(), max_bytes)?;
+            items
+                .iter()
+                .map(|v| v.as_u64().and_then(|n| u8::try_from(n).ok()))
+                .collect::<Option<Vec<u8>>>()
+                .ok_or_else(|| "图片数据格式错误：字节数组只能包含 0–255 的整数".to_string())
+        }
+        _ => Err("图片数据必须是原始字节或字节数组".to_string()),
     }
 }
 
@@ -873,6 +899,91 @@ mod tests {
         assert!(seq(&db) > s1);
     }
 
+    // ---- updated_at 严格递增（记录级 LWW 的前提）----
+
+    fn updated_at_of(db: &Database, table: &str, id: i64) -> String {
+        db.with_connection(|c| {
+            c.query_row(
+                &format!("SELECT updated_at FROM {table} WHERE id = ?1"),
+                [id],
+                |r| r.get(0),
+            )
+        })
+        .unwrap()
+    }
+
+    /// 回归（e2e 实测丢更新）：同一条记录在同一秒内改两次，以前两次的 updated_at 相同；
+    /// 另一端在两次之间同步过第一版的话，平局保留本地，第二版永远传不过去。
+    #[test]
+    fn two_updates_in_the_same_second_get_strictly_increasing_updated_at() {
+        let db = db();
+        let todo = create_todo_inner(&db, &create_request("a")).unwrap();
+        let mut stamps = vec![updated_at_of(&db, "todos", todo.id)];
+        for title in ["b", "c", "d"] {
+            let mut upd = update_request();
+            upd.title = Some(title.to_string());
+            update_todo_inner(&db, todo.id, &upd).unwrap();
+            stamps.push(updated_at_of(&db, "todos", todo.id));
+        }
+        for pair in stamps.windows(2) {
+            assert!(pair[1] > pair[0], "{stamps:?}");
+        }
+    }
+
+    /// 同步来的版本带着比本机时钟还新的时间戳（对端时钟偏快 / cloud timezone 配错）时，
+    /// 本机的修改仍要晚于它，否则下次同步就被它要取代的旧版本覆盖
+    #[test]
+    fn edits_on_future_dated_records_still_win() {
+        let db = db();
+        db.with_connection(|c| {
+            c.execute_batch(
+                "INSERT INTO todos (id, title, sort_order, updated_at) VALUES
+                 (1, 'a', 0, '2099-01-01 08:00:00'), (2, 'b', 1, '2099-01-01 08:00:00');
+                 INSERT INTO subtasks (id, parent_id, title, sort_order, updated_at) VALUES
+                 (11, 1, 's', 0, '2099-01-01 08:00:00'), (12, 1, 't', 1, 'not a time');",
+            )
+        })
+        .unwrap();
+
+        let mut upd = update_request();
+        upd.completed = Some(true);
+        update_todo_inner(&db, 1, &upd).unwrap();
+        assert_eq!(updated_at_of(&db, "todos", 1), "2099-01-01 08:00:01");
+
+        db.with_transaction(|tx| apply_order(tx, OrderTable::Todos, &[2, 1]))
+            .unwrap();
+        assert_eq!(updated_at_of(&db, "todos", 1), "2099-01-01 08:00:02");
+        assert_eq!(updated_at_of(&db, "todos", 2), "2099-01-01 08:00:01");
+
+        let sub = update_subtask_inner(
+            &db,
+            11,
+            &UpdateSubTaskRequest {
+                title: None,
+                content: Some("x".to_string()),
+                completed: None,
+                sort_order: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(sub.updated_at, "2099-01-01 08:00:01");
+
+        // 原值是乱码：按"现在"写，不是 NULL（MAX 遇 NULL 会撞 NOT NULL）
+        let before = now_local();
+        let sub = update_subtask_inner(
+            &db,
+            12,
+            &UpdateSubTaskRequest {
+                title: None,
+                content: None,
+                completed: Some(true),
+                sort_order: None,
+            },
+        )
+        .unwrap();
+        assert!(sub.updated_at >= before && sub.updated_at.len() == 19);
+    }
+
     // ---- 排序 ----
 
     #[test]
@@ -953,9 +1064,61 @@ mod tests {
         for bad in [None, Some(""), Some("svg"), Some("png/../x"), Some("exe")] {
             assert!(image_extension(bad).is_err(), "{bad:?}");
         }
-        assert!(check_image_size(0).is_err());
-        assert!(check_image_size(MAX_IMAGE_BYTES).is_ok());
-        assert!(check_image_size(MAX_IMAGE_BYTES + 1).is_err());
+        assert!(check_image_size(0, MAX_IMAGE_BYTES).is_err());
+        assert!(check_image_size(MAX_IMAGE_BYTES, MAX_IMAGE_BYTES).is_ok());
+        assert!(check_image_size(MAX_IMAGE_BYTES + 1, MAX_IMAGE_BYTES).is_err());
+    }
+
+    /// 原始字节（自定义协议 IPC）与数字数组（退回 postMessage 时 `Uint8Array` 的序列化形式）
+    /// 都接受；数组里只要有一项不是 0–255 的整数就整体拒绝；大小上限对两种形式都生效
+    #[test]
+    fn image_bytes_accept_raw_bodies_and_postmessage_byte_arrays() {
+        use serde_json::json;
+        use tauri::ipc::InvokeBody;
+
+        assert_eq!(
+            image_bytes(&InvokeBody::Raw(vec![1, 2, 3]), 8),
+            Ok(vec![1, 2, 3])
+        );
+        assert_eq!(
+            image_bytes(&InvokeBody::Json(json!([0, 127, 255])), 8),
+            Ok(vec![0, 127, 255])
+        );
+
+        for bad in [
+            json!([256]),
+            json!([-1]),
+            json!([1.5]),
+            json!([1.0]),
+            json!(["1"]),
+            json!([null]),
+            json!([[1]]),
+            json!([1, 2, 300]),
+        ] {
+            let err = image_bytes(&InvokeBody::Json(bad.clone()), 8).unwrap_err();
+            assert!(err.contains("0–255"), "{bad}: {err}");
+        }
+
+        // 空、超限：两种形式一样处理
+        assert!(image_bytes(&InvokeBody::Raw(Vec::new()), 8).is_err());
+        assert!(image_bytes(&InvokeBody::Json(json!([])), 8).is_err());
+        assert!(image_bytes(&InvokeBody::Raw(vec![0; 9]), 8)
+            .unwrap_err()
+            .contains("超过"));
+        assert!(
+            image_bytes(&InvokeBody::Json(json!([0, 0, 0, 0, 0, 0, 0, 0, 0])), 8)
+                .unwrap_err()
+                .contains("超过")
+        );
+        assert!(image_bytes(&InvokeBody::Raw(vec![0; 8]), 8).is_ok());
+
+        // 其它 JSON（对象 / base64 串 / null）不是图片数据
+        for other in [json!({"0": 1}), json!("AAEC"), json!(null)] {
+            assert!(
+                image_bytes(&InvokeBody::Json(other.clone()), 8).is_err(),
+                "{other}"
+            );
+        }
     }
 
     #[test]

@@ -136,8 +136,8 @@ mini-todo/
   支持粘贴 MD 源码自动解析（clipboard 插件）、GFM 表格/任务清单/删除线，编辑模式提供源码/预览分栏的放大编辑弹窗（联动窗口最大化）
 - Markdown 中的图片统一存为 `minitodo-image://<文件名>`（`utils/imageRef.ts`），渲染时换成本机 images 目录的
   asset URL；兼容旧数据里的 `http://asset.localhost/<绝对路径>` / `asset://localhost/...`（按文件名映射到本机，
-  修复跨设备裂图）。上传走 raw body：`invoke('save_subtask_image', bytes, { headers: { 'x-image-ext': 'png' } })`，
-  扩展名白名单 png/jpg/jpeg/webp/gif/bmp、单张 ≤20MB，文件名由后端生成
+  修复跨设备裂图）。上传走 raw body：`invoke('save_subtask_image', bytes, { headers: { 'x-image-ext': 'png' } })`
+  （IPC 退回 postMessage 时的数字数组同样接受），扩展名白名单 png/jpg/jpeg/webp/gif/bmp、单张 ≤20MB，文件名由后端生成
 - 链接点击走协议白名单（`utils/fileLink.ts`）：http/https/mailto 交给系统程序，`file:///` 在资源管理器定位
   （拒绝 UNC），其余（javascript:/data: 等）一律拦截且不让 WebView 导航
 - 编辑类窗口支持 Esc 关闭（有未保存修改时确认）、Ctrl/Cmd+Enter 保存；保存有防重入
@@ -160,7 +160,8 @@ mini-todo/
 - Windows 系统通知 / 应用内通知
 - 预设提前提醒（5/15/30 分钟）
 - 自定义提前时间
-- 应用内通知窗口按显示器 work area 与缩放比例换算逻辑坐标，自下而上叠放、超出换列
+- 应用内通知窗口按显示器 work area 与缩放比例换算逻辑坐标，自下而上叠放、超出换列；按窗口实际尺寸（平台可能强加最小高度）
+  重新定位并记住，保证不出屏
 
 ### 重复提醒
 - 按天 / 周 / 周几 / 月几号循环
@@ -184,7 +185,7 @@ mini-todo/
 
 ### WebDAV 云同步
 - 智能同步 `webdav_sync`：先 GET 远端并逐条合并（LWW + 墓碑），本地有变化才条件 PUT；手动按钮、设置页
-  「立即同步」与自动同步共用。另有带二次确认的「用云端覆盖本地」`webdav_force_pull`、「用本地覆盖云端」
+  「立即同步」与自动同步共用（手动传 `{ full: true }` 无条件 GET；自动同步每 10 轮也做一次无条件 GET）。另有带二次确认的「用云端覆盖本地」`webdav_force_pull`、「用本地覆盖云端」
   `webdav_force_push`。不再有整库二选一的冲突对话框
 - 同步范围：todos / subtasks / 墓碑 / 10 个应用设置项（按 `settingsUpdatedAt` 做 LWW，窗口位置与尺寸不从远端应用）/ 图片
 - 自动同步可选（按间隔轮询）；同步命令在 `spawn_blocking` 中执行，不阻塞 UI 线程；同一时刻只允许一个同步
@@ -263,7 +264,9 @@ mini-todo/
   `createdAt` / `updatedAt` / 墓碑 `deletedAt` / `settingsUpdatedAt`
 - 读取兼容空格 / `T`、有无秒、小数秒、`Z`/`±HH:MM` 后缀（换算本地）、仅日期（开始 00:00:00、截止 23:59:00、提醒 09:00:00）
 - Rust 用 `db::time`，前端用 `utils/datetime.ts`；**禁止** `split('T')` 之类的手写解析
-- 对已有记录写 `updated_at` 时取 `max(now, 旧值 + 1 秒)`，保证同一记录的新版本时间戳严格递增（秒级 LWW 下同秒两次编辑不丢）
+- 对已有记录写 `updated_at` 时取 `max(now, 旧值 + 1 秒)`（Rust `db::time::superseding`，SQL 片段 `SQL_SET_UPDATED_AT`），
+  保证同一记录的新版本时间戳严格递增（秒级 LWW 下同秒两次编辑不丢）；参与同步的设置项按整个设置块的版本同样递增；
+  删除墓碑 `deleted_at = max(now, 记录 updated_at)`；无法解析的时间在比较中视为最旧
 
 ### 数据导入导出与同步
 
@@ -272,7 +275,8 @@ mini-todo/
 - **导出版本号**：当前 `4.0`（位于 `pc/src-tauri/src/commands/data.rs`）
 - **关键文件**：
   - 模型定义：`pc/src-tauri/src/db/models.rs` → `ExportData`、`AppSettings`
-  - 设置读写（唯一来源）：`pc/src-tauri/src/commands/data.rs` → `read_app_settings` / `write_app_settings` / `SYNCED_SETTING_KEYS`
+  - 设置读写（唯一来源）：`pc/src-tauri/src/commands/data.rs` → `read_app_settings` / `write_app_settings`；
+    参与同步的键 `SYNCED_SETTING_KEYS` 与设置版本 `settings_version` 在 `db/settings_kv.rs`
   - 导入导出：`data.rs` → `export_data_internal`、`import_data_raw`（仅手动导入导出使用）
   - WebDAV 同步：`commands/sync_cmd.rs` → `SyncData`、`run_sync_blocking`、`build_sync_doc`；
     记录读写/合并/墓碑：`db/sync_store.rs`（`merge_remote`、`load_todos_with_subtasks`）
@@ -378,7 +382,7 @@ TodoItem / EditorView
 
 ```
 webdav_sync()（async → spawn_blocking，单同步互斥，"同步正在进行中"）
-  ├── GET sync-data（有基准 ETag 时 If-None-Match；本地有未上传变更时无条件 GET）
+  ├── GET sync-data（有基准 ETag 时 If-None-Match；本地有未上传变更 / 手动同步 / 每第 10 轮时无条件 GET）
   │     ├── 304 → 远端未变
   │     ├── 200 → 解析（失败直接报错）→ 单事务逐条合并（LWW + 墓碑 + 设置 LWW）→ 下载缺失图片
   │     └── 404 → 首次上传

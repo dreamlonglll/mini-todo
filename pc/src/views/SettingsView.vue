@@ -514,7 +514,8 @@ async function testConnection() {
 async function runSyncCommand(
   action: 'sync' | 'pull' | 'push',
   command: 'webdav_sync' | 'webdav_force_pull' | 'webdav_force_push',
-  failureText: string
+  failureText: string,
+  args?: Record<string, unknown>
 ) {
   if (!syncSettings.webdavUrl) {
     ElMessage.warning('请先配置 WebDAV 服务器')
@@ -523,7 +524,7 @@ async function runSyncCommand(
   if (syncAction.value) return
   syncAction.value = action
   try {
-    const report = await invoke<SyncReport>(command)
+    const report = await invoke<SyncReport>(command, args)
     syncSettings.lastSyncAt = report.lastSyncAt
     ElMessage({
       type: report.status === 'no_changes' ? 'info' : 'success',
@@ -547,7 +548,8 @@ async function runSyncCommand(
 
 // 立即同步：合并本地与云端的更改（含删除），与主窗口同步按钮、自动同步同一命令
 async function handleSyncNow() {
-  await runSyncCommand('sync', 'webdav_sync', '同步失败')
+  // 手动同步总是无条件 GET（full）：绕开 nginx 秒级 ETag 下同秒等长改写的 304 盲区
+  await runSyncCommand('sync', 'webdav_sync', '同步失败', { full: true })
 }
 
 // 高级：用云端覆盖本地

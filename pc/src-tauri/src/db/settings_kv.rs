@@ -4,10 +4,45 @@
 //! `max(updated_at)`"当作本地设置版本（K3-5），`INSERT OR REPLACE` 式的无条件写会让每次
 //! 窗口移动 / 重复保存都把版本推到"现在"，远端设置就再也应用不进来，本地还会无谓上传。
 //!
-//! 所有 settings 写入都应走这里（data.rs / sync_cmd.rs / settings_cmd.rs 已改，window.rs 由 R2 改）。
+//! 所有 settings 写入都应走这里（data.rs / sync_cmd.rs / settings_cmd.rs / window.rs）。
 //! 多键写入的事务由调用方负责。
 
+use super::time::{now_local, superseding};
 use rusqlite::{Connection, OptionalExtension, Result};
+
+/// 参与同步 LWW 的设置键（K3-5）：本地设置版本 = 这些键的 `max(updated_at)`。
+/// `window_position` / `window_size` 是设备相关的，仍写入导出 / 上传以兼容旧版，
+/// 但永不从远端应用，也不计入设置版本。
+pub const SYNCED_SETTING_KEYS: [&str; 10] = [
+    "is_fixed",
+    "fixed_embed_desktop",
+    "auto_hide_enabled",
+    "top_on_wake",
+    "window_bg_color",
+    "window_bg_alpha",
+    "text_theme",
+    "show_calendar",
+    "view_mode",
+    "notification_type",
+];
+
+pub fn is_synced_setting(key: &str) -> bool {
+    SYNCED_SETTING_KEYS.contains(&key)
+}
+
+/// 本地设置版本：参与同步的设置键的 `max(updated_at)`（规范时间格式）
+pub fn settings_version(conn: &Connection) -> Result<Option<String>> {
+    let placeholders = vec!["?"; SYNCED_SETTING_KEYS.len()].join(", ");
+    let sql = format!(
+        "SELECT MAX(updated_at) FROM settings WHERE key IN ({})",
+        placeholders
+    );
+    conn.query_row(
+        &sql,
+        rusqlite::params_from_iter(SYNCED_SETTING_KEYS.iter()),
+        |r| r.get(0),
+    )
+}
 
 /// 布尔值在 settings 表里的存储形式
 pub fn bool_str(value: bool) -> &'static str {
@@ -44,7 +79,15 @@ pub fn get_bool_setting(conn: &Connection, key: &str, default: bool) -> bool {
 
 /// 写入值；只有新增或值变化时才写，并把 `updated_at` 设为当前本地时间。
 /// 返回是否真的发生了变化。
+///
+/// 参与同步的键按整块做 LWW（`settingsUpdatedAt` = 这些键的 `max(updated_at)`），新时间要严格
+/// 晚于当前整块版本：否则同一秒内的第二次修改（同一个键或另一个键）与刚同步过的版本时间相同，
+/// 不会被当成未同步的变更；整块版本带着"未来"时间（同步自时钟偏快的设备）时，本机修改也会输给它。
 pub fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<bool> {
+    if is_synced_setting(key) {
+        let block_version = settings_version(conn)?.unwrap_or_default();
+        return set_setting_at(conn, key, value, &superseding(&now_local(), &block_version));
+    }
     let changed = conn.execute(
         "INSERT INTO settings (key, value, updated_at)
          VALUES (?1, ?2, datetime('now', 'localtime'))
@@ -137,6 +180,45 @@ mod tests {
                 "2026-02-01 08:00:00"
             )?);
             assert_eq!(updated_at(conn, "probe_key"), "2026-02-01 08:00:00");
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    /// 回归：参与同步的设置在同一秒内改两次（或改两个不同的键），以前第二次与刚同步过的整块
+    /// 版本时间相同，不算未同步变更、永远传不出去；整块版本在"未来"时本机修改也会输给它
+    #[test]
+    fn synced_settings_move_the_block_version_strictly_forward() {
+        let db = Database::new_in_memory().unwrap();
+        db.with_connection(|conn| {
+            // 整块版本来自时钟偏快的设备
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value, updated_at)
+                 VALUES ('text_theme', 'light', '2099-01-01 08:00:00')",
+                [],
+            )?;
+            assert_eq!(
+                settings_version(conn)?.as_deref(),
+                Some("2099-01-01 08:00:00")
+            );
+
+            assert!(set_setting(conn, "view_mode", "quadrant")?, "另一个键");
+            assert_eq!(updated_at(conn, "view_mode"), "2099-01-01 08:00:01");
+            assert!(set_setting(conn, "view_mode", "list")?, "同一个键再改一次");
+            assert_eq!(
+                settings_version(conn)?.as_deref(),
+                Some("2099-01-01 08:00:02")
+            );
+            // 值没变：不写、版本不动
+            assert!(!set_bool_setting(conn, "show_calendar", false)?);
+            assert_eq!(
+                settings_version(conn)?.as_deref(),
+                Some("2099-01-01 08:00:02")
+            );
+
+            // 不参与同步的键照旧取"现在"，不受整块版本影响
+            assert!(set_setting(conn, "window_position", r#"{"x":1,"y":2}"#)?);
+            assert!(updated_at(conn, "window_position").as_str() < "2099-01-01 00:00:00");
             Ok(())
         })
         .unwrap();

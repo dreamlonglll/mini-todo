@@ -956,6 +956,80 @@ mod tests {
         assert_eq!(foreign_key_violations(&conn).unwrap().len(), 1);
     }
 
+    /// 从每一个历史版本（带数据，含已删除的 Agent / 工作流表里引用待办与子任务的行）
+    /// 都能经启动路径升级到最新版本：外键关闭下的重建表（v10）与删表删列（v23）不丢待办 /
+    /// 子任务、不留下外键违规，存量时间被规范化，结束后外键重新打开。
+    #[test]
+    fn every_historical_version_upgrades_with_its_data() {
+        for from in 1..LATEST_VERSION {
+            let conn = fresh_conn();
+            run_migrations_to(&conn, from).expect("迁移到旧版本失败");
+            assert_eq!(max_version(&conn), from);
+            conn.execute_batch(
+                "INSERT INTO todos (id, title, notify_at, created_at, updated_at)
+                 VALUES (1, '老数据', '2026-05-01T09:30', '2026-04-01 10:00:00', '2026-04-02 11:00:00');
+                 INSERT INTO subtasks (id, parent_id, title) VALUES (1, 1, '子任务');",
+            )
+            .unwrap();
+            if (9..23).contains(&from) {
+                conn.execute_batch(
+                    "INSERT INTO agent_configs (id, name, agent_type) VALUES (1, 'a', 'custom');
+                     UPDATE todos SET agent_id = 1 WHERE id = 1;",
+                )
+                .unwrap();
+            }
+            if (11..23).contains(&from) {
+                conn.execute(
+                    "INSERT INTO agent_executions (task_id, subtask_id, agent_id) VALUES ('t', 1, 1)",
+                    [],
+                )
+                .unwrap();
+            }
+            if (15..23).contains(&from) {
+                conn.execute_batch(
+                    "INSERT INTO subtasks (id, parent_id, title) VALUES (2, 1, '依赖');
+                     INSERT INTO task_dependencies (subtask_id, depends_on_id) VALUES (1, 2);",
+                )
+                .unwrap();
+            }
+            if (19..23).contains(&from) {
+                conn.execute(
+                    "INSERT INTO workflow_steps (todo_id, step_order, step_type, subtask_id)
+                     VALUES (1, 0, 'subtask', 1)",
+                    [],
+                )
+                .unwrap();
+            }
+
+            migrate(&conn).unwrap_or_else(|e| panic!("从 v{from} 升级失败: {e}"));
+            assert_eq!(max_version(&conn), LATEST_VERSION, "from v{from}");
+            let (title, notify_at): (String, String) = conn
+                .query_row("SELECT title, notify_at FROM todos WHERE id = 1", [], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
+                .unwrap();
+            assert_eq!(title, "老数据", "from v{from}");
+            assert_eq!(notify_at, "2026-05-01 09:30:00", "from v{from}");
+            let subtasks: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM subtasks WHERE parent_id = 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(subtasks >= 1, "from v{from}: 子任务不能丢");
+            assert!(
+                foreign_key_violations(&conn).unwrap().is_empty(),
+                "from v{from}"
+            );
+            let fk: i64 = conn
+                .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(fk, 1, "from v{from}");
+            assert!(!table_exists(&conn, "agent_configs"), "from v{from}");
+        }
+    }
+
     /// 启动路径（外键关闭下迁移）同样能把全新库迁到最新版本，并以外键开启的状态交付。
     #[test]
     fn migrate_entry_point_runs_with_foreign_keys_off_then_restores_them() {

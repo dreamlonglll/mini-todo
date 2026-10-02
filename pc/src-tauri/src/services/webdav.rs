@@ -20,7 +20,9 @@
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE, ETAG, LAST_MODIFIED};
 use reqwest::{Method, StatusCode};
+use std::collections::BTreeSet;
 use std::path::Path;
+use std::sync::Mutex;
 use std::time::Duration;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -120,7 +122,7 @@ impl WebDavClient {
         if !(lower.starts_with("https://") || lower.starts_with("http://")) {
             return Err("WebDAV 地址必须以 http:// 或 https:// 开头".to_string());
         }
-        if lower.starts_with("http://") {
+        if lower.starts_with("http://") && first_plaintext_warning(&PLAINTEXT_WARNED, &base_url) {
             log::warn!("[webdav] 警告：使用明文 http:// 连接 WebDAV，密码与数据可能被窃听");
         }
 
@@ -396,6 +398,18 @@ impl WebDavClient {
             status => Err(format!("列出目录失败，状态码: {}", status)),
         }
     }
+}
+
+/// 已经警告过明文 http:// 的服务器地址（进程内）
+static PLAINTEXT_WARNED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+/// 每个地址每个进程只警告一次：每次同步 / 测试连接都会新建客户端，以前一次同步就刷好几条
+/// 同样的警告。地址只放在内存里做去重，不写进日志（可能带着 `user:pass@`）。
+fn first_plaintext_warning(warned: &Mutex<BTreeSet<String>>, base_url: &str) -> bool {
+    warned
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(base_url.to_string())
 }
 
 fn propfind() -> Method {
@@ -834,6 +848,15 @@ mod tests {
         assert_eq!(transfer_timeout(0), REQUEST_TIMEOUT);
         assert_eq!(transfer_timeout(20 * 1024 * 1024), Duration::from_secs(409));
         assert_eq!(transfer_timeout(u64::MAX), MAX_TRANSFER_TIMEOUT);
+    }
+
+    #[test]
+    fn plaintext_warning_is_logged_once_per_url() {
+        let warned = Mutex::new(BTreeSet::new());
+        assert!(first_plaintext_warning(&warned, "http://nas.local/dav"));
+        assert!(!first_plaintext_warning(&warned, "http://nas.local/dav"));
+        assert!(!first_plaintext_warning(&warned, "http://nas.local/dav"));
+        assert!(first_plaintext_warning(&warned, "http://other.local/dav"));
     }
 
     #[test]
