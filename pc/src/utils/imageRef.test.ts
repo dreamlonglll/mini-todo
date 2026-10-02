@@ -13,6 +13,7 @@ import {
   IMAGE_REF_SCHEME,
   isSafeImageName,
   resolveImageExtension,
+  toAssetUrl,
   toDisplayMarkdown,
   toImageRef,
   toStorageMarkdown,
@@ -136,6 +137,39 @@ describe('toDisplayMarkdown', () => {
   it('leaves content untouched without an images directory', () => {
     const md = '![a](minitodo-image://a.png)'
     expect(toDisplayMarkdown(md, null)).toBe(md)
+  })
+
+  it('never puts raw parentheses into the link destination', () => {
+    // 不成对的括号会截断 Markdown 链接目标 / 让图片语法失效，编辑一次就把引用转义成普通文本
+    for (const dir of [
+      'C:\\Users\\bob(\\AppData\\Local\\mini-todo\\images',
+      'C:\\Users\\a)b\\AppData\\Local\\mini-todo\\images',
+      'C:\\Program Files (x86)\\mini-todo\\images',
+    ]) {
+      const md = '![a](minitodo-image://1_a.png) tail'
+      const display = toDisplayMarkdown(md, dir)
+      const url = /^!\[a\]\((\S+)\) tail$/.exec(display)?.[1]
+      expect(url, display).toBeDefined()
+      expect(url).not.toMatch(/[()]/)
+      expect(toStorageMarkdown(display)).toBe(md)
+    }
+  })
+})
+
+describe('toAssetUrl', () => {
+  it('percent-encodes the parentheses convertFileSrc leaves raw', () => {
+    expect(toAssetUrl('C:\\Users\\bob(1)\\x.png')).toBe(
+      `http://asset.localhost/${encodeURIComponent('C:\\Users\\bob')}%281%29${encodeURIComponent('\\x.png')}`
+    )
+  })
+})
+
+describe('toStorageMarkdown with serializer-escaped legacy URLs', () => {
+  it('accepts \\( \\) escapes and <...> destinations around legacy asset URLs', () => {
+    const encoded = encodeURIComponent('C:\\Program Files (x86)\\mini-todo\\images\\1_a.png')
+    const escaped = encoded.replace(/\(/g, '\\(').replace(/\)/g, '\\)')
+    expect(toStorageMarkdown(`![a](http://asset.localhost/${escaped})`)).toBe('![a](minitodo-image://1_a.png)')
+    expect(toStorageMarkdown(`![a](<http://asset.localhost/${encoded}>)`)).toBe('![a](<minitodo-image://1_a.png>)')
   })
 })
 

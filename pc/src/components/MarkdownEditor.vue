@@ -1,8 +1,15 @@
 <script setup lang="ts">
 import { ref, watch, onMounted, onBeforeUnmount } from 'vue'
-import { invoke, convertFileSrc } from '@tauri-apps/api/core'
+import { invoke } from '@tauri-apps/api/core'
 import { ElMessage } from '@/plugins/element'
-import { Editor, rootCtx, defaultValueCtx, editorViewOptionsCtx } from '@milkdown/kit/core'
+import {
+  Editor,
+  rootCtx,
+  defaultValueCtx,
+  editorViewCtx,
+  editorViewOptionsCtx,
+  serializerCtx,
+} from '@milkdown/kit/core'
 import { commonmark, linkAttr } from '@milkdown/kit/preset/commonmark'
 import { gfm } from '@milkdown/kit/preset/gfm'
 import { listener, listenerCtx } from '@milkdown/kit/plugin/listener'
@@ -19,6 +26,7 @@ import {
   MAX_IMAGE_BYTES,
   getImagesDir,
   resolveImageExtension,
+  toAssetUrl,
   toDisplayMarkdown,
   toStorageMarkdown,
 } from '@/utils/imageRef'
@@ -44,6 +52,20 @@ let imagesDir: string | null = null
 // 初始化代次：create() 是异步的，readonly 切换重建/组件卸载可能与进行中的 create 竞争，
 // 代次不匹配时丢弃过期实例，避免孤儿编辑器泄漏
 let initSeq = 0
+// 外部赋值写进编辑器（replaceAll）后，listener 会在防抖后把这份内容"规范化"后的 Markdown
+// （补末尾换行、统一列表符号等）当作更新回报。那只是父组件给的内容换了个写法，不是用户输入：
+// emit 回去会让内容一加载完就被当成已修改（Esc 关闭误报"未保存的修改"），导入的原文也会被悄悄改写。
+// 这里记下回声的样子，markdownUpdated 收到一模一样的内容时忽略
+let echoMarkdown: string | null = null
+
+// 把存储形式的内容写进编辑器（外部赋值 / 创建期间错过的赋值），并记下它的回声
+function setEditorContent(instance: Editor, storage: string) {
+  instance.action((ctx) => {
+    replaceAll(toDisplayMarkdown(storage, imagesDir))(ctx)
+    // 只读排版不注册 listener，没有回声，也省掉一次序列化（描述弹窗的预览随输入频繁刷新）
+    echoMarkdown = props.readonly ? null : ctx.get(serializerCtx)(ctx.get(editorViewCtx).state.doc)
+  })
+}
 
 // 图片预览
 const previewVisible = ref(false)
@@ -93,7 +115,7 @@ async function uploadImage(image: File, schema: Schema): Promise<Node | null> {
     })
     // 编辑器里放渲染形式（本机 asset URL），序列化输出时由 toStorageMarkdown 换回规范引用
     return schema.nodes.image.createAndFill({
-      src: convertFileSrc(filePath),
+      src: toAssetUrl(filePath),
       alt: image.name,
     })
   } catch (e) {
@@ -114,9 +136,22 @@ function onLinkClick(event: MouseEvent): boolean {
 }
 
 async function initEditor() {
-  if (!editorContainer.value) return
-
   const seq = ++initSeq
+  // 先拿到本机 images 目录再建编辑器，首帧就能显示图片（getImagesDir 每个窗口只查询一次）。
+  // 首次挂载与 readonly 切换都走这里：查询期间被重建 / 卸载时由更新的那次接手
+  if (imagesDir === null) {
+    imagesDir = await getImagesDir()
+    if (seq !== initSeq) return
+  }
+  // await 期间组件可能已卸载：模板 ref 置空后直接返回
+  if (!editorContainer.value) return
+  // 首次挂载与 readonly 切换的初始化可能交错：同一容器里只保留一个编辑器实例
+  if (editorInstance) {
+    editorInstance.destroy()
+    editorInstance = null
+  }
+  echoMarkdown = null
+
   // 固定 create 期间使用的初始内容，create 完成后与 internalContent 比对补同步
   const contentAtInit = internalContent
 
@@ -147,6 +182,10 @@ async function initEditor() {
         }))
         ctx.get(listenerCtx).markdownUpdated((_ctx, markdown, prevMarkdown) => {
           if (markdown === prevMarkdown) return
+          // 外部赋值的回声（见 echoMarkdown）：内容与父组件给的相同，只是写法被规范化
+          const echo = echoMarkdown
+          echoMarkdown = null
+          if (markdown === echo) return
           // 对外只暴露存储形式；比较也基于存储形式，外部回写同一内容时不会触发 replaceAll
           const storage = toStorageMarkdown(markdown)
           if (storage === internalContent) return
@@ -179,7 +218,7 @@ async function initEditor() {
   // create 期间外部可能已更新 modelValue（如父组件异步加载完成），
   // 此时 watch 里的 replaceAll 因 editorInstance 尚为 null 被跳过，这里补一次同步
   if (internalContent !== contentAtInit) {
-    instance.action(replaceAll(toDisplayMarkdown(internalContent, imagesDir)))
+    setEditorContent(instance, internalContent)
   }
 }
 
@@ -197,7 +236,7 @@ watch(() => props.modelValue, (value) => {
   const next = toStorageMarkdown(value ?? '')
   if (next === internalContent) return
   internalContent = next
-  editorInstance?.action(replaceAll(toDisplayMarkdown(next, imagesDir)))
+  if (editorInstance) setEditorContent(editorInstance, next)
 })
 
 // readonly 切换需要重建编辑器（listener/upload 插件仅编辑模式注册）
@@ -208,9 +247,6 @@ watch(() => props.readonly, async () => {
 
 onMounted(async () => {
   internalContent = toStorageMarkdown(props.modelValue ?? '')
-  // 先拿到本机 images 目录再建编辑器，首帧就能显示图片（同一窗口内只查询一次）
-  imagesDir = await getImagesDir()
-  // await 期间组件可能已卸载：模板 ref 置空后 initEditor 直接返回
   await initEditor()
   editorContainer.value?.addEventListener('click', handleImageClick)
   editorContainer.value?.addEventListener('click', onLinkClick)

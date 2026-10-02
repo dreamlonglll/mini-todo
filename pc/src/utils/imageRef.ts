@@ -4,7 +4,7 @@
  * 规范形式：`minitodo-image://<name>`，<name> 是本机 images 目录下的安全文件名。
  * 数据库、导出文件与 WebDAV 同步数据里只存规范形式，云端 / AI 通过 `GET /images/<name>` 取图。
  *
- * - 渲染（toDisplayMarkdown）：换成本机 `convertFileSrc(<images 目录>/<name>)`
+ * - 渲染（toDisplayMarkdown）：换成本机 `convertFileSrc(<images 目录>/<name>)`（括号另行编码，见 toAssetUrl）
  * - 保存（toStorageMarkdown）：父目录名为 `images` 的 asset URL 一律换回规范形式
  *
  * 兼容旧数据：旧版本直接存 `convertFileSrc(本机绝对路径)`，即
@@ -55,6 +55,18 @@ function joinPath(dir: string, name: string): string {
   return dir.endsWith('\\') || dir.endsWith('/') ? `${dir}${name}` : `${dir}${sep}${name}`
 }
 
+/**
+ * 本机文件 → 可放进 Markdown 的 asset URL
+ *
+ * convertFileSrc 用 encodeURIComponent 编码路径，而 ( ) 不在它的编码范围内：路径里有
+ * 不成对的括号（如用户名 "bob("、"a)b"）时，原样拼进 `![](...)` 会让链接目标被截断或整个
+ * 图片语法失效，用户一编辑，序列化结果就把图片引用转义成普通文本。asset 协议按百分号解码
+ * 路径，这里把括号也编码掉，拼进 Markdown 的一定是合法的链接目标
+ */
+export function toAssetUrl(path: string): string {
+  return convertFileSrc(path).replace(/[()]/g, (c) => (c === '(' ? '%28' : '%29'))
+}
+
 function replaceImageRefs(markdown: string, replacer: (name: string) => string): string {
   return markdown.replace(
     IMAGE_REF_RE,
@@ -72,7 +84,7 @@ function replaceImageRefs(markdown: string, replacer: (name: string) => string):
  */
 export function toDisplayMarkdown(markdown: string, imagesDir: string | null): string {
   if (!markdown || !imagesDir) return markdown
-  return replaceImageRefs(markdown, (name) => convertFileSrc(joinPath(imagesDir, name)))
+  return replaceImageRefs(markdown, (name) => toAssetUrl(joinPath(imagesDir, name)))
 }
 
 /** 渲染形式 / 旧数据 → 存储形式：父目录为 images 的 asset URL 换回规范引用（幂等） */

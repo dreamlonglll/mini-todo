@@ -127,6 +127,24 @@ export function splitDateTime(
   return { date: d.format('YYYY-MM-DD'), time: d.format('HH:mm') }
 }
 
+/**
+ * 两个时间是否落在同一分钟（任意 K1 形态）。都为空视为相同；只有一边为空或无法识别视为不同。
+ *
+ * 编辑器的时间选择器只精确到分钟，用它判断"用户有没有改过这个时间"：
+ * 已存的 `09:00:30`（云端 / AI 写入）回填选择器后是 `09:00`，不应被当成修改
+ */
+export function isSameMinute(
+  a: string | null | undefined,
+  b: string | null | undefined,
+  kind: DateTimeKind = 'generic'
+): boolean {
+  if (!a && !b) return true
+  const da = parseDateTime(a, kind)
+  const db = parseDateTime(b, kind)
+  if (!da || !db) return false
+  return Math.floor(da.getTime() / 60_000) === Math.floor(db.getTime() / 60_000)
+}
+
 /** Date → 本地日期键 `YYYY-MM-DD`（日历格子、按天比较用） */
 export function formatDateKey(date: Date): string {
   return dayjs(date).format('YYYY-MM-DD')

@@ -27,7 +27,13 @@ import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import type { Todo, SubTask, CreateTodoRequest, UpdateTodoRequest, CreateSubTaskRequest, QuadrantType } from '@/types'
 import { DEFAULT_COLOR, PRESET_COLORS, QUADRANT_INFO, DEFAULT_QUADRANT } from '@/types'
 import { resolveQuadrantColor } from '@/utils/quadrant'
-import { composeDateTime, splitDateTime, formatDateTime } from '@/utils/datetime'
+import {
+  composeDateTime,
+  splitDateTime,
+  formatDateTime,
+  isSameMinute,
+  normalizeDateTime,
+} from '@/utils/datetime'
 import { toStorageMarkdown } from '@/utils/imageRef'
 import { notifyError } from '@/utils/notify'
 import { bindEditorShortcuts, isImeComposing } from '@/utils/editorShortcuts'
@@ -482,13 +488,23 @@ function buildUpdateRequest(): UpdateTodoRequest {
   const wasRepeatEnabled = !!todo.value?.repeatEnabled
   const shouldClearRepeat = wasRepeatEnabled && !repeatEnabled.value
 
+  // 提醒时间没改就不发：后端收到 notifyAt 会把 notified 复位，已经提醒过的待办只是改个标题，
+  // 保存后一分钟内又会再弹一次。例外照常发送：重复提醒（开启重复时要重新挂上提醒，之后由调度器
+  // 推进）；库里存的不是规范格式（旧数据，如仅日期会被 SQLite 当成零点）时顺带写回规范格式
+  const originalNotify = originalNotifyAt.value
+  const notifyAtUnchanged =
+    isSameMinute(form.value.notifyAt, originalNotify, 'notify') &&
+    normalizeDateTime(originalNotify, 'notify') === originalNotify
+  const sendNotifyAt = !!form.value.notifyAt && (!notifyAtUnchanged || repeatEnabled.value)
+
   return {
     title: form.value.title,
-    // 描述未经编辑器改动时可能仍是旧数据里的 asset URL，保存时统一写回规范图片引用
-    description: toStorageMarkdown(form.value.description) || null,
+    // 描述未经编辑器改动时可能仍是旧数据里的 asset URL，保存时统一写回规范图片引用。
+    // 清空时也要发空串：后端把 null / 缺省当作"不修改"，发 null 会让清空描述保存不上
+    description: toStorageMarkdown(form.value.description),
     color: form.value.color,
     quadrant: form.value.quadrant,
-    notifyAt: form.value.notifyAt || undefined,
+    notifyAt: sendNotifyAt ? form.value.notifyAt ?? undefined : undefined,
     notifyBefore: repeatEnabled.value ? 0 : form.value.notifyBefore,
     clearNotifyAt: shouldClearNotifyAt,
     startTime: form.value.startTime || undefined,

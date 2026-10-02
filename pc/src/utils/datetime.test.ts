@@ -4,6 +4,7 @@ import {
   formatDateKey,
   formatDateTime,
   formatStorageDateTime,
+  isSameMinute,
   normalizeDateTime,
   parseDateTime,
   splitDateTime,
@@ -169,6 +170,32 @@ describe('splitDateTime', () => {
   it('returns null for invalid input', () => {
     expect(splitDateTime('garbage')).toBeNull()
     expect(splitDateTime(null)).toBeNull()
+  })
+})
+
+describe('isSameMinute', () => {
+  it('ignores seconds and the separator / timezone spelling', () => {
+    expect(isSameMinute('2026-10-02 09:00:30', '2026-10-02 09:00:00')).toBe(true)
+    expect(isSameMinute('2026-10-02T09:00', '2026-10-02 09:00:59')).toBe(true)
+    expect(isSameMinute('2026-10-02T01:00:00Z', '2026-10-02 09:00:00')).toBe(true)
+  })
+
+  it('applies the field default for date-only values', () => {
+    expect(isSameMinute('2026-10-02', '2026-10-02 09:00:00', 'notify')).toBe(true)
+    expect(isSameMinute('2026-10-02', '2026-10-02 09:00:00', 'start')).toBe(false)
+  })
+
+  it('detects a changed minute, date or presence', () => {
+    expect(isSameMinute('2026-10-02 09:01:00', '2026-10-02 09:00:00')).toBe(false)
+    expect(isSameMinute('2026-10-03 09:00:00', '2026-10-02 09:00:00')).toBe(false)
+    expect(isSameMinute('2026-10-02 09:00:00', null)).toBe(false)
+    expect(isSameMinute(undefined, '2026-10-02 09:00:00')).toBe(false)
+  })
+
+  it('treats two empty values as equal and unrecognised values as different', () => {
+    expect(isSameMinute(null, undefined)).toBe(true)
+    expect(isSameMinute('', null)).toBe(true)
+    expect(isSameMinute('garbage', 'garbage')).toBe(false)
   })
 })
 
