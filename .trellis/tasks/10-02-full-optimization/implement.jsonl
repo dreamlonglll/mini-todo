@@ -1,0 +1,9 @@
+{"file": ".trellis/tasks/10-02-full-optimization/research/analysis-findings.md", "reason": "Full audit findings (A–G) with file:line evidence; every PRD item references these IDs"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend pre-development checklist: new settings keys, command registration, quality bar (cargo check 0 warnings, cargo test green)"}
+{"file": ".trellis/spec/backend/window-modes.md", "reason": "Win32 ordering rules for window modes; R2 must not break them when fixing topmost residue / auto-hide hysteresis"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "Frontend spec entry point"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "Pinia store conventions, data refresh triggers, cross-window settings events, modal-skip convention"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Forbidden patterns and code standards for Vue/TS (no emoji icons, Element Plus icons only)"}
+{"file": ".trellis/spec/frontend/component-guidelines.md", "reason": "Component conventions incl. icon registration rule that D2 changes"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Changes span SQLite migration, Rust models, sync payload, cloud API and TS types"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Reuse existing helpers instead of duplicating (settings KV, time utils, image name validation)"}
