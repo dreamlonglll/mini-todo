@@ -1903,6 +1903,23 @@ mod tests {
         .unwrap()
     }
 
+    /// gzip 压缩 `data`，再用头部的 FNAME 字段（名字 + 结尾 NUL）补到恰好 `size` 字节；
+    /// 压缩流不变、解压结果不变。压缩后已超过 `size` 时返回 None
+    fn gzip_padded_to(data: &[u8], size: usize) -> Option<Vec<u8>> {
+        let plain = gzip_compress(data).unwrap();
+        let pad = size.checked_sub(plain.len())?;
+        if pad == 0 {
+            return Some(plain);
+        }
+        let mut encoder = flate2::GzBuilder::new()
+            .filename(vec![b'x'; pad - 1])
+            .write(Vec::new(), Compression::default());
+        encoder.write_all(data).unwrap();
+        let padded = encoder.finish().unwrap();
+        assert_eq!(padded.len(), size);
+        Some(padded)
+    }
+
     fn remote_ids(doc: &Value) -> Vec<i64> {
         let mut ids: Vec<i64> = doc["todos"]
             .as_array()
@@ -2263,18 +2280,19 @@ mod tests {
         let base = setting(&fx.db, KEY_REMOTE_ETAG);
         let base_len = fx.server().files[SYNC_DATA_FILE].body.len();
 
-        // 同一秒内另一台设备改了标题与 updatedAt（都等长），挑一个压缩后大小也相同的改写
+        // 同一秒内另一台设备改了标题与 updatedAt，写回的文件与原文件等长。文档里有 deviceId / 时间等随运行时刻
+        // 变化的内容，不能指望碰巧压缩到等长：取一个压缩后不比原文件大的改写，再用 gzip 头补齐到等长
         let original = fx.remote();
-        let (title, rewritten) = (b'a'..=b'z')
-            .flat_map(|c1| (b'a'..=b'z').map(move |c2| format!("{}{}zz", c1 as char, c2 as char)))
+        let (title, rewritten) = (1..=4)
+            .flat_map(|len| (b'b'..=b'z').map(move |c| (c as char).to_string().repeat(len)))
             .find_map(|title| {
                 let mut doc = original.clone();
                 doc["todos"][0]["title"] = json!(title);
                 doc["todos"][0]["updatedAt"] = json!("2026-09-02 10:00:00");
-                let bytes = gzip_compress(&serde_json::to_vec(&doc).unwrap()).unwrap();
-                (bytes.len() == base_len).then_some((title, bytes))
+                let bytes = gzip_padded_to(&serde_json::to_vec(&doc).unwrap(), base_len)?;
+                Some((title, bytes))
             })
-            .expect("应能找到压缩后等长的改写");
+            .expect("应能构造出与原文件等长的改写");
         fx.server().write(SYNC_DATA_FILE, rewritten);
         assert_eq!(
             fx.server().files[SYNC_DATA_FILE].etag,
