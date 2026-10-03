@@ -11,11 +11,7 @@ use axum::response::Response;
 
 use super::AppState;
 
-pub async fn require_bearer(
-    State(state): State<AppState>,
-    req: Request,
-    next: Next,
-) -> Result<Response, Response> {
+pub async fn require_bearer(State(state): State<AppState>, req: Request, next: Next) -> Response {
     let token = req
         .headers()
         .get(header::AUTHORIZATION)
@@ -29,14 +25,14 @@ pub async fn require_bearer(
 
     let supplied = match token {
         Some(t) if !t.is_empty() => t,
-        _ => return Err(unauthorized("missing bearer token")),
+        _ => return unauthorized("missing bearer token"),
     };
 
     if !constant_time_eq(supplied.as_bytes(), state.config.api_key.as_bytes()) {
-        return Err(unauthorized("invalid api key"));
+        return unauthorized("invalid api key");
     }
 
-    Ok(next.run(req).await)
+    next.run(req).await
 }
 
 /// 常数时间字节比较，防止通过响应时延逐字节猜 api_key。
