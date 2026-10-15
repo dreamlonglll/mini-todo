@@ -982,9 +982,10 @@ mod tests {
             duration_until_next_minute(at(121, 0)),
             Duration::from_secs(59)
         );
+        // Windows 的 SystemTime 精度是 100ns（999_999_999 会被截成 999_999_900），取两边都能精确表示的值
         assert_eq!(
-            duration_until_next_minute(at(179, 999_999_999)),
-            Duration::from_nanos(1)
+            duration_until_next_minute(at(179, 999_999_900)),
+            Duration::from_nanos(100)
         );
         assert_eq!(
             duration_until_next_minute(at(150, 500_000_000)),
