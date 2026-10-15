@@ -8,9 +8,7 @@
 """
 from __future__ import annotations
 
-import base64
 import ctypes
-import io
 import json
 import os
 import sqlite3
@@ -420,6 +418,12 @@ def tray_icon_rect(hwnd: int, uid: int) -> tuple[int, tuple | None]:
     return hr & 0xFFFFFFFF, ((r.left, r.top, r.right, r.bottom) if hr == 0 else None)
 
 
+def redraw_desktop() -> None:
+    """让桌面整体重绘（分辨率 / 背景色刚改过时，旧区域外可能还没画）"""
+    # RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW | RDW_FRAME
+    user32.RedrawWindow(None, None, None, 0x1 | 0x4 | 0x80 | 0x100 | 0x400)
+
+
 def keyboard_layout() -> str:
     return f"0x{(user32.GetKeyboardLayout(0) or 0) & 0xFFFFFFFF:08X}"
 
@@ -645,35 +649,17 @@ def diff_ratio(a, b, region: tuple[int, int, int, int] | None = None, tol: int =
     return changed / max(1, n)
 
 
-_EMITTED = [0]
-
-
-def emit_image(img, name: str, budget: int | None, max_w: int = 360, quality: int = 40) -> bool:
-    """把图片缩小后以 JPEG base64 打进日志（产物下载不可用时从日志还原）；budget 为失败截图的张数上限
-    （None = 不计数）"""
-    if budget is not None:
-        if _EMITTED[0] >= budget:
-            return False
-        _EMITTED[0] += 1
-    im = img.copy()
+def save_emit(img, out_dir: Path, name: str, max_w: int = 760, colors: int = 32) -> Path:
+    """把截图存成小体积 PNG（缩小 + 调色板量化）到 <out>/emit/，由 emit_annotations.py 作为注解发出"""
+    d = Path(out_dir) / "emit"
+    d.mkdir(parents=True, exist_ok=True)
+    im = img.convert("RGB")
     if im.width > max_w:
         im = im.resize((max_w, round(im.height * max_w / im.width)))
-    buf = io.BytesIO()
-    im.save(buf, "JPEG", quality=quality)
-    b64 = base64.b64encode(buf.getvalue()).decode()
-    if os.environ.get("GITHUB_ACTIONS"):
-        # GitHub Actions：作为 notice 注解输出（可经 check-runs annotations API 取回，不占日志；每步最多 10 条 notice）
-        chunk = 60000
-        parts = [b64[i:i + chunk] for i in range(0, len(b64), chunk)]
-        for k, part in enumerate(parts):
-            print(f"::notice title=IMG {name} {k + 1}/{len(parts)}::{part}")
-        print(f"(图片 {name}：{im.width}×{im.height}，{len(b64)} 个 base64 字符，{len(parts)} 条注解)", flush=True)
-        return True
-    print(f"===IMG-BEGIN {name}===")
-    for i in range(0, len(b64), 1000):
-        print(b64[i:i + 1000])
-    print(f"===IMG-END {name}===", flush=True)
-    return True
+    n = len(list(d.glob("*.png")))
+    path = d / f"{n:02d}-{name}.png"
+    im.quantize(colors).save(path, "PNG", optimize=True)
+    return path
 
 
 # ----------------------------------------------------------------------------- 等待
@@ -894,47 +880,87 @@ class Checks:
     def done(self, summary: str = "") -> str:
         bad = [w for c, w in self.items if not c]
         if bad:
+            if CURRENT_REPORT[0]:
+                CURRENT_REPORT[0].snapshot()
             raise AssertionError("; ".join(bad))
         return summary or f"{len(self.items)} 项检查通过"
 
 
+CURRENT_REPORT: list = [None]
+
+
+class _Tee:
+    def __init__(self, stream):
+        self.stream = stream
+        self.buf: list[str] = []
+
+    def write(self, data):
+        self.buf.append(data)
+        return self.stream.write(data)
+
+    def flush(self):
+        self.stream.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
+
+
 class Report:
-    def __init__(self, out_dir: Path, title: str, emit_budget: int = 2):
+    def __init__(self, out_dir: Path, title: str, emit_budget: int = 3):
         self.out_dir = out_dir
         self.title = title
         self.emit_budget = emit_budget
         self.results: list[dict] = []
-        self.pending_images: list[tuple] = []
+        self.current: str | None = None
+        self.snapped: set[str] = set()
         out_dir.mkdir(parents=True, exist_ok=True)
+        CURRENT_REPORT[0] = self
+
+    def snapshot(self) -> None:
+        """失败当时的整屏截图（在用例清理窗口之前调用）；前 emit_budget 张另存一份小图供注解输出"""
+        cid = self.current
+        if not cid or cid in self.snapped:
+            return
+        self.snapped.add(cid)
+        try:
+            img = grab()
+            img.save(self.out_dir / f"fail-{cid}.png")
+            if len(self.snapped) <= self.emit_budget:
+                save_emit(img, self.out_dir, f"fail-{cid}", max_w=960, colors=48)
+        except Exception as e:  # noqa: BLE001
+            print(f"  (失败截图出错: {e})")
 
     def case(self, cid: str, title: str, fn: Callable[[], str | None], on_fail: Callable[[str], None] | None = None):
         print(f"\n::group::[{cid}] {title}", flush=True)
+        self.current = cid
+        tee = _Tee(sys.stdout)
+        sys.stdout = tee
         t0 = time.time()
         status, detail = "PASS", ""
         try:
-            detail = fn() or ""
-        except Skip as e:
-            status, detail = "SKIP", str(e)
-        except AssertionError as e:
-            status, detail = "FAIL", str(e)
-        except Exception as e:  # noqa: BLE001
-            status, detail = "FAIL", f"{type(e).__name__}: {e}"
-            traceback.print_exc()
-        dt = time.time() - t0
-        if status == "FAIL":
             try:
-                img = grab()
-                path = self.out_dir / f"fail-{cid}.png"
-                img.save(path)
-                self.pending_images.append((cid, img))
+                detail = fn() or ""
+            except Skip as e:
+                status, detail = "SKIP", str(e)
+            except AssertionError as e:
+                status, detail = "FAIL", str(e)
             except Exception as e:  # noqa: BLE001
-                print(f"  (失败截图出错: {e})")
-            if on_fail:
-                try:
-                    on_fail(cid)
-                except Exception as e:  # noqa: BLE001
-                    print(f"  (on_fail 出错: {e})")
-        print(f"[{status}] {cid} {title} ({dt:.1f}s) {detail}", flush=True)
+                status, detail = "FAIL", f"{type(e).__name__}: {e}"
+                traceback.print_exc(file=sys.stdout)
+            dt = time.time() - t0
+            if status == "FAIL":
+                self.snapshot()
+                if on_fail:
+                    try:
+                        on_fail(cid)
+                    except Exception as e:  # noqa: BLE001
+                        print(f"  (on_fail 出错: {e})")
+            print(f"[{status}] {cid} {title} ({dt:.1f}s) {detail}", flush=True)
+        finally:
+            sys.stdout = tee.stream
+            self.current = None
+        if status == "FAIL":
+            (self.out_dir / f"fail-{cid}.txt").write_text("".join(tee.buf), encoding="utf-8")
         print("::endgroup::", flush=True)
         self.results.append({"id": cid, "title": title, "status": status, "detail": detail, "seconds": round(dt, 1)})
         return status == "PASS"
@@ -947,9 +973,6 @@ class Report:
         return [r for r in self.results if r["status"] == "FAIL"]
 
     def finish(self) -> int:
-        # 失败截图（小图）放在汇总表之前，汇总表永远是日志最后一段
-        for cid, img in self.pending_images:
-            emit_image(img, f"fail-{cid}", self.emit_budget)
         (self.out_dir / "results.json").write_text(json.dumps(self.results, ensure_ascii=False, indent=2),
                                                    encoding="utf-8")
         counts = {s: sum(1 for r in self.results if r["status"] == s) for s in ("PASS", "FAIL", "SKIP")}

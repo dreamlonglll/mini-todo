@@ -68,8 +68,20 @@ jobs:
           --work "$env:RUNNER_TEMP/e2e-work"
           --suite debug
           --allow-real-profile
-          --emit-shots W01
-          --uia-dump
+          --emit-shots W01,W08,N01,I05,D00,D01,F04
+
+      # 产物 / 日志下载链接在某些环境下不可达：失败详情与关键截图另以注解输出（check-runs annotations API 可取回）
+      - name: Report failures as annotations
+        if: always()
+        run: python scripts/e2e-windows/emit_annotations.py failures "$env:RUNNER_TEMP/e2e-out"
+
+      - name: Emit screenshots as annotations (1/2)
+        if: always()
+        run: python scripts/e2e-windows/emit_annotations.py images "$env:RUNNER_TEMP/e2e-out" --skip 0 --max 18
+
+      - name: Emit screenshots as annotations (2/2)
+        if: always()
+        run: python scripts/e2e-windows/emit_annotations.py images "$env:RUNNER_TEMP/e2e-out" --skip 18 --max 18
 
       - name: Collect app logs
         if: always()
@@ -134,6 +146,15 @@ jobs:
           --work "$env:RUNNER_TEMP/e2e-work"
           --suite release
           --allow-real-profile
+          --emit-shots P01
+
+      - name: Report failures as annotations
+        if: always()
+        run: python scripts/e2e-windows/emit_annotations.py failures "$env:RUNNER_TEMP/e2e-out"
+
+      - name: Emit screenshots as annotations
+        if: always()
+        run: python scripts/e2e-windows/emit_annotations.py images "$env:RUNNER_TEMP/e2e-out" --skip 0 --max 18
 
       - name: Collect app logs
         if: always()

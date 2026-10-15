@@ -64,9 +64,10 @@ def shot(win: Win, name: str, pad: int = 0):
     return img
 
 
-def maybe_emit(cid: str, img) -> None:
+def maybe_emit(cid: str, img, name: str | None = None) -> None:
+    """--emit-shots 里列出的用例：截图另存一份小图，由 emit_annotations.py 作为注解发出"""
     if cid in C.emit_shots:
-        W.emit_image(img, f"shot-{cid}", budget=None, max_w=380, quality=45)
+        W.save_emit(img, C.out, name or f"shot-{cid}")
 
 
 def fresh_data(name: str, seed: bool = True) -> Path:
@@ -100,7 +101,7 @@ def all_windows_titled(title: str) -> list[Win]:
 def has_content(img) -> int:
     """图里不同颜色的数量（缩小后统计）：GPUI 真的画了东西才会远大于个位数"""
     small = img.resize((max(1, img.width // 4), max(1, img.height // 4)))
-    return len(set(small.getdata()))
+    return len(small.getcolors(1 << 24) or [])
 
 
 def title_button(main: Win, index_from_right: int) -> tuple[int, int]:
@@ -166,6 +167,27 @@ def find_blue_box(win: Win, region_logical: tuple, rgb=EP_PRIMARY, tol: int = 45
     bx0, by0, bx1, by1, n = box
     print(f"    blue box {region_logical} → ({bx0 / s:.0f},{by0 / s:.0f})-({bx1 / s:.0f},{by1 / s:.0f}) n={n}")
     return (bx0 + bx1) / 2 / s, (by0 + by1) / 2 / s
+
+
+EP_INPUT_BORDER = (220, 223, 230)   # EP 输入框边框 #DCDFE6
+SETTINGS_BTN_BORDER = (226, 232, 240)  # 设置页白色按钮边框 #E2E8F0
+
+
+def detect_boxes(win: Win, x_logical: float, y0: float, y1: float, border=EP_INPUT_BORDER, tol: int = 6,
+                 min_h: float = 16, max_h: float = 36, img=None) -> list[tuple[float, float]]:
+    """沿一列找"上下两条边框线、中间白底"的框（输入框 / 白色按钮）：[(上边, 下边)]（逻辑像素）"""
+    img = img or W.grab_client(win)
+    s = win.scale
+    x = round(x_logical * s)
+    lines = [a for a, _ in W.column_runs(img, x, round(y0 * s), min(img.height, round(y1 * s)),
+                                         lambda c: W.color_dist(c, border) <= tol)]
+    boxes = []
+    for i in range(len(lines) - 1):
+        top, bottom = lines[i], lines[i + 1]
+        inside = (W.rgb_at(img, x, top + round(2 * s)), W.rgb_at(img, x, bottom - round(2 * s)))
+        if min_h * s <= bottom - top <= max_h * s and all(min(c) >= 253 for c in inside):
+            boxes.append((top / s, bottom / s))
+    return boxes
 
 
 def start_probe(x: int, y: int, w: int, h: int) -> tuple[subprocess.Popen, Win]:
@@ -245,16 +267,20 @@ def setup_env() -> None:
     m = W.primary_monitor()
     C.explorer = bool(W.shell_window())
     W.park_cursor()
-    time.sleep(0.5)
-    # 桌面颜色：主显示器上 9 个点取众数（启动应用之前，屏幕上应只有桌面）
+    W.redraw_desktop()
+    time.sleep(2)
+    # 桌面颜色：主显示器工作区 5×5 个点取众数（启动应用之前，屏幕上应只有桌面）
     l, t, r, b = m["work"]
     img = W.grab((l, t, r, b))
-    pts = [(img.width * fx // 10, img.height * fy // 10) for fx in (3, 5, 7) for fy in (3, 5, 7)]
+    pts = [(img.width * fx // 10, img.height * fy // 10) for fx in (1, 3, 5, 7, 9) for fy in (1, 3, 5, 7, 9)]
     colors = [W.rgb_at(img, x, y) for x, y in pts]
     C.desktop_rgb = max(set(colors), key=colors.count)
     img.save(C.out / "desktop-before.png")
+    hist = {str(cc): colors.count(cc) for cc in set(colors)}
+    others = [W.describe_hwnd(h) for h in W.top_level_windows() if W.user32.IsWindowVisible(W.wt.HWND(h))][:12]
+    print(f"  desktop colors={hist}\n  visible windows={others}")
     info = (f"primary={m['rect']} work={m['work']} monitors={len(W.monitors())} shell={W.describe_hwnd(W.shell_window())} "
-            f"explorer={C.explorer} desktop_rgb={C.desktop_rgb} kbd={W.keyboard_layout()}")
+            f"explorer={C.explorer} desktop_rgb={C.desktop_rgb}（{colors.count(C.desktop_rgb)}/25）kbd={W.keyboard_layout()}")
     C.report.add("ENV", "运行环境", "PASS", info)
 
 
@@ -301,7 +327,7 @@ def group_windows(uia: bool) -> None:
             img = shot(win, f"{cid}-{title}")
             n = has_content(img)
             c.ok(n >= 12, f"界面已渲染（不同颜色数 {n}）")
-            maybe_emit(cid, img)
+            maybe_emit(cid, W.grab_client(win, 12) if cid == "W01" else img)
             if cid == "W01":
                 check_main_transparency(win, img, c)
             if uia and cid == "W06":
@@ -320,16 +346,23 @@ def group_windows(uia: bool) -> None:
 
 
 def check_main_transparency(win: Win, img, c: Checks) -> None:
-    """透明窗口：客户区四角（圆角之外）应透出桌面背景；中心是白色不透明底"""
+    """透明窗口：客户区四角（圆角之外）应透出背后的桌面；中心是白色不透明底。
+    对照色取窗口外框（含不可见缩放边框）之外 25px 的三个点，多数一致时用它，否则用启动前采的桌面色"""
     w, h = img.size
     x, y, _, _ = win.client()
-    outside = W.rgb_at(W.grab((x - 30, y + h // 2, x - 20, y + h // 2 + 10)), 5, 5)
+    l, t, r, b = win.rect()
+    pts = {"left": (l - 25, y + h // 2), "right": (r + 25, y + h // 2), "top": (x + w // 2, max(0, t - 25))}
+    outs = {k: W.rgb_at(W.grab((px, py, px + 1, py + 1)), 0, 0) for k, (px, py) in pts.items()}
+    vals = list(outs.values())
+    ref = next((v for v in vals if sum(W.color_dist(v, o) <= 20 for o in vals) >= 2), C.desktop_rgb)
     corners = [W.rgb_at(img, 0, 0), W.rgb_at(img, w - 1, 0), W.rgb_at(img, 0, h - 1), W.rgb_at(img, w - 1, h - 1)]
-    print(f"    desktop(setup)={C.desktop_rgb} outside-left={outside} corners={corners} center={W.rgb_at(img, w // 2, h // 2)}")
-    ok = [W.color_dist(cc, outside) <= 40 for cc in corners]
-    c.ok(all(ok), f"四角透出背景（{sum(ok)}/4 与窗外像素 {outside} 接近）")
-    c.ok(W.color_dist(outside, (255, 255, 255)) > 40 or W.color_dist(C.desktop_rgb, (255, 255, 255)) <= 40,
-         "窗外取样不是白色（背景色可分辨）")
+    center = W.rgb_at(img, w // 2, h // 2)
+    info = f"窗外={outs} 对照={ref} 四角={corners} 中心={center} 桌面(启动前)={C.desktop_rgb}"
+    print(f"    {info}")
+    ok = [W.color_dist(cc, ref) <= 45 for cc in corners]
+    c.ok(all(ok), f"四角透出背后的桌面（{sum(ok)}/4；{info}）")
+    c.ok(W.color_dist(ref, (255, 255, 255)) > 40 and W.color_dist(ref, (0, 0, 0)) > 40,
+         f"对照色可分辨（不是纯白 / 纯黑：{ref}）")
 
 
 # ----------------------------------------------------------------------------- S：窗口模式与 Win32 状态
@@ -564,14 +597,19 @@ def group_notifications() -> None:
             ys.sort(reverse=True)
             s = wins[0].scale
             y0, x0, w0, h0 = ys[0]
-            c.near(x0 + w0, wr - round(20 * s), 3, "最下方通知右边缘 = 工作区右 - 20")
-            c.near(y0 + h0, wb - round(20 * s), 3, "最下方通知下边缘 = 工作区底 - 20")
+            print(f"    work={m['work']} clients={[(x, y, w, h) for y, x, w, h in ys]} rects={[n.rect() for n in wins]}")
+            geo = f"work={m['work']} client=({x0},{y0},{w0}×{h0}) rect={wins[0].rect() if len(wins) == 1 else [n.rect() for n in wins]}"
+            c.near(x0 + w0, wr - round(20 * s), 3, f"最下方通知客户区右边缘 = 工作区右 - 20（{geo}）")
+            c.near(y0 + h0, wb - round(20 * s), 3, f"最下方通知客户区下边缘 = 工作区底 - 20（{geo}）")
             c.near(round(w0 / s), 320, 2, "通知逻辑宽")
+            c.near(round(h0 / s), 120, 2, "通知逻辑高")
             for i in range(1, len(ys)):
                 c.near(ys[i - 1][0] - ys[i][0], h0 + round(10 * s), 3, f"第 {i + 1} 条叠在上一条之上（间距 10）")
                 c.near(ys[i][1] + ys[i][2], x0 + w0, 2, f"第 {i + 1} 条右对齐")
             top = ys[-1][0]
-            W.grab((x0 - 10, top - 10, x0 + w0 + 10, y0 + h0 + 10)).save(C.out / "N01-notifications.png")
+            nimg = W.grab((x0 - 30, top - 10, wr, wb))
+            nimg.save(C.out / "N01-notifications.png")
+            maybe_emit("N01", nimg)
             return c.done(f"{len(wins)} 个通知，work={m['work']}，rects={[(x, y, w, h) for y, x, w, h in ys]}")
         except Exception:
             dump_log_tail(app)
@@ -888,7 +926,7 @@ def group_webdav() -> None:
         W.park_cursor()
         time.sleep(1.2)
         st["settings"] = stw
-        shot(stw, "D00-settings-data")
+        maybe_emit("D00", shot(stw, "D00-settings-data"))
         return "WebDAV 服务与设置页就绪"
 
     def need_settings() -> Win:
@@ -898,16 +936,31 @@ def group_webdav() -> None:
 
     def d01():
         stw = need_settings()
-        W.click(*stw.pt(420, 307))
+        img = W.grab_client(stw)
+        left = detect_boxes(stw, 300, 240, 520, img=img)
+        right = detect_boxes(stw, 540, 240, 520, img=img)
+        buttons = detect_boxes(stw, 300, 240, 540, border=SETTINGS_BTN_BORDER, tol=6, min_h=30, max_h=50, img=img)
+        print(f"    输入框 x=300: {left}  x=540: {right}  白色按钮 x=300: {buttons}")
+        mid = lambda box: (box[0] + box[1]) / 2  # noqa: E731
+        url_y = mid(left[0]) if left else 307
+        user_y = mid(left[1]) if len(left) >= 2 else 375
+        pass_y = mid(right[1]) if len(right) >= 2 else 375
+        test_y = mid(buttons[0]) if buttons else 423
+        st["save_y"] = test_y
+        W.click(*stw.pt(420, url_y))
         W.key_combo("ctrl", "a")
         W.type_text(f"http://127.0.0.1:{port}")
-        W.click(*stw.pt(298, 375))
+        W.click(*stw.pt(298, user_y))
         W.key_combo("ctrl", "a")
         W.type_text(DAV_USER)
-        W.click(*stw.pt(530, 375))
+        W.click(*stw.pt(530, pass_y))
+        W.key_combo("ctrl", "a")
         W.type_text(DAV_PASS)
+        W.park_cursor()
+        time.sleep(0.5)
+        maybe_emit("D01", shot(stw, "D01-filled"))
         n0 = len(access_log())
-        W.click(*stw.pt(300, 423))       # 测试连接
+        W.click(*stw.pt(300, test_y))       # 测试连接
         W.park_cursor()
         try:
             hits = W.wait_until(lambda: [r for r in access_log()[n0:] if r.get("user") == DAV_USER
@@ -920,7 +973,7 @@ def group_webdav() -> None:
 
     def d02():
         stw = need_settings()
-        W.click(*stw.pt(540, 423))       # 保存配置
+        W.click(*stw.pt(540, st.get("save_y", 423)))       # 保存配置（与「测试连接」同一行）
         W.park_cursor()
         c = Checks()
         try:
@@ -1100,38 +1153,53 @@ def group_fences() -> None:
         shot(fence, "F03-renamed")
         return c.done()
 
-    def f04():
+    def drag_file_into(fence: Win, mode: str, name: str) -> tuple[bool, str]:
+        """用拖放源窗口（mode=shell / winforms）把一个新文件真实拖到收纳箱上；返回（是否移入, 诊断）"""
         nonlocal drag_proc
-        fence = need_fence()
-        src_dir = C.work / "drag-src"
+        stop_proc(drag_proc)
+        src_dir = C.work / f"drag-src-{mode}"
         shutil.rmtree(src_dir, ignore_errors=True)
         src_dir.mkdir(parents=True)
-        src = src_dir / "e2e-drop.txt"
-        src.write_text("dragged into a fence\n", encoding="utf-8")
-        result = C.out / "drag-result.txt"
+        src = src_dir / name
+        src.write_text(f"dragged into a fence ({mode})\n", encoding="utf-8")
+        result = C.out / f"drag-result-{mode}.txt"
         result.unlink(missing_ok=True)
         m = W.primary_monitor()
         sx, sy = m["work"][0] + 60, m["work"][1] + 300
-        drag_proc = subprocess.Popen(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
-                                      str(HERE / "drag-source.ps1"), "-Path", str(src), "-Title", DRAG_TITLE,
-                                      "-X", str(sx), "-Y", str(sy), "-ResultFile", str(result)],
+        drag_proc = subprocess.Popen(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-STA", "-File",
+                                      str(HERE / "drag-source.ps1"), "-Path", str(src), "-Mode", mode,
+                                      "-Title", DRAG_TITLE, "-X", str(sx), "-Y", str(sy), "-ResultFile", str(result)],
                                      creationflags=W.CREATE_NO_WINDOW)
         dsrc = W.wait_until(lambda: (all_windows_titled(DRAG_TITLE) or [None])[0], 30, "拖放源窗口出现")
         time.sleep(0.8)
+        mark = app.log_size()
         x, y, w, h = dsrc.client()
         fx, fy, fw, fh = fence.client()
         W.drag(x + w // 2, y + h // 2, fx + fw // 2, fy + fh // 2, steps=40, hold=0.4, step_delay=0.04, settle=1.0)
         W.park_cursor()
-        c = Checks()
+        moved = False
         try:
-            W.wait_until(lambda: (folder() / "e2e-drop.txt").exists() and not src.exists(), 12,
-                         "文件被移入收纳文件夹")
-            c.ok(True, f"已移入 {folder().name}")
-        except (W.Timeout, AssertionError) as e:
-            c.ok(False, f"{e}；源存在={src.exists()} 收纳夹={[p.name for p in folder().iterdir()]}")
-        print(f"    drag result: {result.read_text() if result.exists() else '(none)'}")
-        shot(fence, "F04-after-drop")
-        return c.done()
+            W.wait_until(lambda: (folder() / name).exists() and not src.exists(), 10, "文件被移入收纳文件夹")
+            moved = True
+        except (W.Timeout, AssertionError):
+            pass
+        res = result.read_text(encoding="utf-8", errors="replace").strip() if result.exists() else "(无结果)"
+        logs = [l.split("]", 3)[-1].strip() for l in app.log_since(mark).splitlines()][-6:]
+        diag = f"{mode}: 移入={moved} 源存在={src.exists()} 拖放源={res} 收纳夹={[p.name for p in folder().iterdir()]} 日志={logs}"
+        print(f"    {diag}")
+        stop_proc(drag_proc)
+        return moved, diag
+
+    def f04():
+        fence = need_fence()
+        moved, diag = drag_file_into(fence, "shell", "e2e-drop-shell.txt")
+        img = shot(fence, "F04-after-drop")
+        maybe_emit("F04", img)
+        if moved:
+            return diag
+        # Shell 数据对象没成功时再用 .NET DataObject 试一次，帮助区分是拖放源还是放置目标的问题
+        moved2, diag2 = drag_file_into(fence, "winforms", "e2e-drop-winforms.txt")
+        raise AssertionError(f"Shell 拖放源拖入失败（{diag}）；对照 .NET DataObject：{diag2}")
 
     def f05():
         fence = need_fence()
