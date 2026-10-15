@@ -767,3 +767,39 @@ PC 前端（D1 正确性 / 安全 / 同步 UI、D2 性能 / 清理 / 测试）�
 - 在 Windows 上用 pc/scripts/e2e/ 复验窗口模式（嵌入桌面 / 固定模式）与系统通知，本环境无法覆盖 Win32 行为
 - 多设备请同时升级到 PC 2.5.0 / cloud 0.3.0（旧版仍是整库覆盖式同步）
 - 留待后续：window.rs 拆分、多显示器、按窗口拆 capabilities、updater、端到端加密、字段级合并、WebDAV 响应大小上限
+
+
+## Session 21: 桌面收纳箱（Desktop Fence）
+
+**Date**: 2026-10-15
+**Task**: 桌面收纳箱（Desktop Fence）
+**Branch**: `main`
+
+### Summary
+
+新增桌面收纳箱：托盘新建，始终嵌入桌面层，固定/折叠/悬停展开/改名/外观/图标大小/排序；真收纳（拖入移到 %USERPROFILE%\MiniTodo收纳箱\<名称>\，文件夹为内容来源，移回/跨箱/删除还原，有未移回项则保留收纳箱）；v29 三张本地表，按屏幕组合记忆位置并运行时切换；debug 专用数据隔离开关；修复主窗口嵌入桌面启动竞态。A/B 两条并行工作线 + 集成 + 审查（修复并发孤儿文件夹、禁止收纳桌面本身）。待用户手动验证：真实 OLE 拖入、公共桌面 UAC 取消、占用文件时删除、插拔显示器。上游 sync_cmd nginx 同秒等长用例仍不稳定，与本次无关。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `e1827e5` | (see git log) |
+| `409c5c6` | (see git log) |
+| `845e121` | (see git log) |
+| `8ffca8c` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
