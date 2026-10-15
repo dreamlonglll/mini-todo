@@ -1,0 +1,92 @@
+name: PC (GPUI) CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'pc-gpui/**'
+      - '.github/workflows/pc-gpui-ci.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'pc-gpui/**'
+      - '.github/workflows/pc-gpui-ci.yml'
+  workflow_dispatch:
+
+jobs:
+  windows:
+    name: fmt / clippy / tests / release build (pc-gpui, Windows)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: pc-gpui
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './pc-gpui -> target'
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace --locked --no-fail-fast
+
+      # release 构建会在 build.rs 里用 Windows SDK 的 fxc.exe 预编译 GPUI 的 HLSL 着色器；
+      # debug 构建在运行时按构建机上的绝对路径编译着色器，拷到别的机器跑不起来，所以试用请下载这里的 release 产物
+      - name: Release build
+        run: cargo build --release -p mini-todo --locked
+
+      - name: Upload release binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: mini-todo-gpui-windows-x64
+          path: pc-gpui/target/release/mini-todo.exe
+          if-no-files-found: error
+
+  linux:
+    name: clippy / tests (pc-gpui, Linux)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: pc-gpui
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev \
+            libxcb1-dev libvulkan-dev libfontconfig-dev libfreetype-dev libssl-dev libzstd-dev \
+            libasound2-dev pkg-config clang
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './pc-gpui -> target'
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace --locked --no-fail-fast
