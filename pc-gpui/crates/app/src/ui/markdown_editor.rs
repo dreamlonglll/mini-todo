@@ -108,7 +108,7 @@ pub struct MarkdownEditor {
     readonly: bool,
     /// 源码区内边距（上下, 左右）
     padding: (f32, f32),
-    /// 源码区自动增高的行数范围（`None` = 撑满父元素）
+    /// 源码区自动增高的行数范围（`None` = 撑满父元素）。父元素须是 flex 列：编辑器根元素按 `flex: 1 0 auto` 撑满它
     rows: Option<(usize, usize)>,
     on_image_click: Option<ImageClickHandler>,
     /// 拖入图片（不用 GPUI `on_drop`：刚打过字的键盘模态下它收不到松手，见 `ui::external_drop`）
@@ -355,7 +355,8 @@ impl Render for MarkdownEditor {
                 });
             div()
                 .w_full()
-                .when(self.rows.is_none(), |this| this.size_full())
+                // 撑满根元素（根元素已撑满内容框），源码框在框内滚动
+                .when(self.rows.is_none(), |this| this.flex_1().min_h_0())
                 .px(px(pad_x - TEXTAREA_INSET_X))
                 .py(px(pad_y))
                 .font(editor_theme::mono_font())
@@ -390,11 +391,14 @@ impl Render for MarkdownEditor {
             .read(cx)
             .focus_handle(cx)
             .contains_focused(window, cx);
+        // 根元素 `flex: 1 0 auto`：撑满父元素（描述框 / 子任务内容框里的 flex 列）的剩余高度，内容更高时随内容增高。
+        // 这样点框内任意位置（空描述、内容下方的空白）都落在根元素上、进入源码编辑，与旧版 `.ProseMirror { min-height }`
+        // 一致。不能用 `min_h_full`：描述框只有 min / max 高度，百分比最小高度不生效，点击区会缩成内容高度（缺陷 D1）
         let root = div()
             .id(SharedString::from(format!("{}-root", self.id)))
             .w_full()
-            .min_h_full()
-            .when(self.rows.is_none(), |this| this.size_full())
+            .flex_grow(1.)
+            .flex_shrink_0()
             .flex()
             .flex_col()
             .when(!self.readonly && !editing, |this| {

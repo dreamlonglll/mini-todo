@@ -1,19 +1,23 @@
 //! Markdown 只读渲染（旧 `MarkdownEditor.vue` 的只读排版：Milkdown + theme-nord + scoped 覆盖）。
 //!
 //! 排版分两层：
-//! - **块级**（段落、标题、列表、任务项、引用、代码块、表格、分隔线、独占段落的图片、`<br />` 空行）由本模块
+//! - **块级**（段落、标题、列表、任务项、引用、代码块、表格、分隔线、图片、`<br />` 空行）由本模块
 //!   按 `ui-editor-windows.md` §5.5 的实际生效值自己排（外边距按 CSS 规则折叠：相邻块取较大值，列表项 / 引用
 //!   的首尾子块外边距透出到外层；Markdown 根是 flex 子项，首块上边距与末块下边距留在容器内）；
-//! - **行内**（粗体、斜体、删除线、行内代码、链接、行内图片、硬换行）交给 gpui-base 的 `TextView`：每个块的行内
+//! - **行内**（粗体、斜体、删除线、行内代码、链接、硬换行）交给 gpui-base 的 `TextView`：每个块的行内
 //!   内容由 mdast 重新序列化成"全标点转义"的 Markdown（与原文的分隔符规则等价，块语法不会被误识别），
 //!   保留文字选择 / 复制。
 //!
-//! 图片：`minitodo-image://<name>` 与旧 asset URL 映射到本机 images 目录（`util::image_ref`）；独占段落的图片
-//! 按原始宽高比缩放（max-width 100%）、圆角 6、阴影，点击打开预览（[`MarkdownView::on_image_click`]）。
+//! 图片：`minitodo-image://<name>` 与旧 asset URL 映射到本机 images 目录（`util::image_ref`）；按原始尺寸显示
+//! （max-width 100%，超宽按宽高比缩小）、圆角 6、阴影，点击打开预览（[`MarkdownView::on_image_click`]）。
+//! 段落顶层的图片都由本模块排：只有图片的段落是 [`Block::Images`]；与文字同段的拆成"文字段 / 图片 / 文字段"
+//! （[`Block::Mixed`]），同一行里依次排开、放不下换行、垂直居中——旧版 img 是 `inline-block` + `vertical-align:
+//! middle`，行高被图片撑开（TextView 自己画行内图片时会把它缩成一行字高，不能交给它）。
 //! 链接：一律走 `util::file_link` 白名单（必须接管 `on_link_click`，否则 TextView 默认直接 `open_url`）。
 //!
-//! 与旧版的差异：行内代码 / 行内图片的细节由 TextView 绘制（代码字号 0.875em、内边距 4px，旧版 0.9em / 6px）；
-//! 选择只在单个块内（不能跨段落拖选）；任务项方框只显示（旧版同样不能点击切换）。
+//! 与旧版的差异：行内代码的细节由 TextView 绘制（代码字号 0.875em、内边距 4px，旧版 0.9em / 6px）；与图片同段的
+//! 文字段是一整块（长到一行放不下时独占一行，旧版会接着图片所在行的剩余宽度排）；链接 / 标题 / 表格里的图片仍由 TextView
+//! 按一行字高绘制且不能点开预览；选择只在单个块内（不能跨段落拖选）；任务项方框只显示（旧版同样不能点击切换）。
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -48,11 +52,21 @@ pub enum ColumnAlign {
     Right,
 }
 
-/// 独占段落的一张图片
+/// 自己排版的一张图片（独占段落的，或从含文字的段落里拆出来的）
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockImage {
     pub url: String,
     pub alt: String,
+}
+
+/// 含图片又含文字的段落里的一段（见 [`Block::Mixed`]）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InlinePart {
+    /// 行内 Markdown；与图片相邻一侧的空白换成一个不换行空格（单独排版的文字段首尾空白会被 Markdown 解析吃掉）
+    Text(String),
+    Image(BlockImage),
+    /// 段落顶层的硬换行：另起一行
+    Break,
 }
 
 /// 列表
@@ -84,6 +98,8 @@ pub enum Block {
     Paragraph(String),
     /// 只含图片的段落
     Images(Vec<BlockImage>),
+    /// 含图片又含文字的段落：图片拆出来按原始尺寸排（TextView 会把行内图片缩成一行字高），文字段交给 TextView
+    Mixed(Vec<InlinePart>),
     /// Milkdown 保存空段落用的独占一行 `<br />`：显示为一个空行
     EmptyLine,
     Heading(u8, String),
@@ -100,9 +116,11 @@ impl Block {
     /// 折叠后的 (上外边距, 下外边距)
     fn margins(&self) -> (f32, f32) {
         match self {
-            Block::Paragraph(_) | Block::Images(_) | Block::EmptyLine | Block::RawText(_) => {
-                (editor_theme::MD_P_MARGIN, editor_theme::MD_P_MARGIN)
-            }
+            Block::Paragraph(_)
+            | Block::Images(_)
+            | Block::Mixed(_)
+            | Block::EmptyLine
+            | Block::RawText(_) => (editor_theme::MD_P_MARGIN, editor_theme::MD_P_MARGIN),
             Block::Heading(level, _) => {
                 let (_, _, top, bottom) = heading_metrics(*level);
                 (top, bottom)
@@ -128,8 +146,15 @@ impl Block {
         }
     }
 
-    /// 首行行高（列表标记 / 任务方框按它垂直对齐）
-    fn first_line_height(&self) -> f32 {
+    /// 首行行高（列表标记按它垂直居中）。图片所在的行被图片撑高（按原始高度估算；超宽被缩小的图片会偏高）
+    fn first_line_height(&self, images_dir: &Path) -> f32 {
+        let tallest = |images: &mut dyn Iterator<Item = &BlockImage>| {
+            images
+                .filter_map(|image| image_ref::resolve_image_path(&image.url, images_dir))
+                .filter_map(|path| image_size(&path))
+                .map(|(_, h)| h as f32)
+                .fold(editor_theme::MD_P_LINE, f32::max)
+        };
         match self {
             Block::Heading(level, _) => {
                 let (size, line, _, _) = heading_metrics(*level);
@@ -138,12 +163,22 @@ impl Block {
             Block::Code(_) => editor_theme::MD_PRE_LINE + 24.,
             Block::Quote(children) => children
                 .first()
-                .map_or(editor_theme::MD_P_LINE, Block::first_line_height),
+                .map_or(editor_theme::MD_P_LINE, |b| b.first_line_height(images_dir)),
             Block::List(list) => list
                 .items
                 .first()
                 .and_then(|item| item.blocks.first())
-                .map_or(editor_theme::MD_P_LINE, Block::first_line_height),
+                .map_or(editor_theme::MD_P_LINE, |b| b.first_line_height(images_dir)),
+            Block::Images(images) => tallest(&mut images.iter()),
+            Block::Mixed(parts) => tallest(
+                &mut parts
+                    .iter()
+                    .take_while(|part| !matches!(part, InlinePart::Break))
+                    .filter_map(|part| match part {
+                        InlinePart::Image(image) => Some(image),
+                        _ => None,
+                    }),
+            ),
             _ => editor_theme::MD_P_LINE,
         }
     }
@@ -272,31 +307,94 @@ fn convert_paragraph(children: &[Node], defs: &Definitions) -> Block {
     // 只有图片（中间允许空白 / 换行）：块级图片
     let mut images = Vec::new();
     let only_images = !meaningful.is_empty()
-        && meaningful.iter().all(|n| match n {
-            Node::Image(image) => {
-                images.push(BlockImage {
-                    url: image.url.clone(),
-                    alt: image.alt.clone(),
-                });
+        && meaningful.iter().all(|n| match resolved_image(n, defs) {
+            Some(image) => {
+                images.push(image);
                 true
             }
-            Node::ImageReference(r) => match defs.get(&r.identifier) {
-                Some((url, _)) => {
-                    images.push(BlockImage {
-                        url: url.clone(),
-                        alt: r.alt.clone(),
-                    });
-                    true
-                }
-                None => false,
-            },
-            Node::Break(_) => true,
-            _ => false,
+            None => matches!(n, Node::Break(_)),
         });
     if only_images && !images.is_empty() {
         return Block::Images(images);
     }
+    if let Some(parts) = mixed_parts(children, defs) {
+        return Block::Mixed(parts);
+    }
     Block::Paragraph(inline_markdown(children, defs))
+}
+
+/// 段落顶层的图片（引用式图片要有定义；没有定义的按文字显示）
+fn resolved_image(node: &Node, defs: &Definitions) -> Option<BlockImage> {
+    match node {
+        Node::Image(image) => Some(BlockImage {
+            url: image.url.clone(),
+            alt: image.alt.clone(),
+        }),
+        Node::ImageReference(r) => defs.get(&r.identifier).map(|(url, _)| BlockImage {
+            url: url.clone(),
+            alt: r.alt.clone(),
+        }),
+        _ => None,
+    }
+}
+
+/// 不换行空格：文字段与图片之间的空格（旧版 `white-space: break-spaces` 照常显示这个空格）
+const NBSP: char = '\u{a0}';
+
+/// 含图片又含文字的段落 → 文字段 / 图片 / 硬换行；没有顶层图片返回 `None`
+fn mixed_parts(children: &[Node], defs: &Definitions) -> Option<Vec<InlinePart>> {
+    if !children.iter().any(|n| resolved_image(n, defs).is_some()) {
+        return None;
+    }
+    let mut parts = Vec::new();
+    let mut run: Vec<&Node> = Vec::new();
+    for node in children {
+        if let Some(image) = resolved_image(node, defs) {
+            flush_text(&mut run, true, defs, &mut parts);
+            parts.push(InlinePart::Image(image));
+        } else if matches!(node, Node::Break(_)) {
+            flush_text(&mut run, false, defs, &mut parts);
+            parts.push(InlinePart::Break);
+        } else {
+            run.push(node);
+        }
+    }
+    flush_text(&mut run, false, defs, &mut parts);
+    Some(parts)
+}
+
+/// 一段连续的行内节点 → 文字段。首尾空白去掉；与图片相邻的一侧保留成一个不换行空格。
+/// 只有空白时：夹在两张图片之间才保留（一个空格宽），否则丢掉
+fn flush_text(
+    run: &mut Vec<&Node>,
+    before_image: bool,
+    defs: &Definitions,
+    parts: &mut Vec<InlinePart>,
+) {
+    if run.is_empty() {
+        return;
+    }
+    let mut markdown = String::new();
+    for node in run.drain(..) {
+        write_inline(node, defs, &mut markdown);
+    }
+    let after_image = matches!(parts.last(), Some(InlinePart::Image(_)));
+    let trimmed = markdown.trim();
+    if trimmed.is_empty() {
+        if after_image && before_image && !markdown.is_empty() {
+            parts.push(InlinePart::Text(NBSP.to_string()));
+        }
+        return;
+    }
+    let mut text = String::with_capacity(trimmed.len() + 4);
+    if after_image && markdown.starts_with(|c: char| c.is_whitespace()) {
+        text.push(NBSP);
+    }
+    text.push_str(trimmed);
+    if before_image && markdown.ends_with(|c: char| c.is_whitespace()) {
+        text.push(NBSP);
+    }
+    parts.push(InlinePart::Text(text));
 }
 
 fn convert_table(table: &mdast::Table, defs: &Definitions) -> Block {
@@ -521,7 +619,7 @@ pub fn image_size(path: &Path) -> Option<(u32, u32)> {
     })
 }
 
-/// 文档里全部块级图片的本机路径（按文档顺序；预览翻页用）
+/// 文档里全部自己排版的图片（独占段落的与从文字段落里拆出来的；表格里的不算）的本机路径（按文档顺序；预览翻页用）
 pub fn block_image_paths(blocks: &[Block], images_dir: &Path) -> Vec<PathBuf> {
     fn walk(blocks: &[Block], dir: &Path, out: &mut Vec<PathBuf>) {
         for block in blocks {
@@ -532,6 +630,12 @@ pub fn block_image_paths(blocks: &[Block], images_dir: &Path) -> Vec<PathBuf> {
                             .iter()
                             .filter_map(|image| image_ref::resolve_image_path(&image.url, dir)),
                     );
+                }
+                Block::Mixed(parts) => {
+                    out.extend(parts.iter().filter_map(|part| match part {
+                        InlinePart::Image(image) => image_ref::resolve_image_path(&image.url, dir),
+                        _ => None,
+                    }));
                 }
                 Block::Quote(children) => walk(children, dir, out),
                 Block::List(list) => {
@@ -552,7 +656,7 @@ pub fn block_image_paths(blocks: &[Block], images_dir: &Path) -> Vec<PathBuf> {
 // 渲染
 // ---------------------------------------------------------------------------
 
-/// 点击块级图片：(文档里全部块级图片, 被点的下标)
+/// 点击图片：(文档里全部可预览的图片（[`block_image_paths`]）, 被点的下标)
 pub type ImageClickHandler = Rc<dyn Fn(Vec<PathBuf>, usize, &mut Window, &mut App)>;
 
 /// 只读 Markdown 视图
@@ -608,7 +712,7 @@ impl MarkdownView {
         self
     }
 
-    /// 点击块级图片（打开预览）
+    /// 点击图片（打开预览）
     pub fn on_image_click(
         mut self,
         handler: impl Fn(Vec<PathBuf>, usize, &mut Window, &mut App) + 'static,
@@ -808,6 +912,7 @@ fn render_block(block: &Block, ctx: &Ctx, path: &str, image_counter: &mut usize)
             .bg(hex(editor_theme::MD_RULE))
             .into_any_element(),
         Block::Images(images) => render_images(images, ctx, path, image_counter),
+        Block::Mixed(parts) => render_mixed(parts, ctx, path, text, image_counter),
     }
 }
 
@@ -832,6 +937,7 @@ fn render_quote_children(
                 .line_height(px(editor_theme::MD_P_LINE))
                 .child(inline_view(ctx, &child_path, markdown, quote_text))
                 .into_any_element(),
+            Block::Mixed(parts) => render_mixed(parts, ctx, &child_path, quote_text, image_counter),
             other => render_block(other, ctx, &child_path, image_counter),
         };
         out.push(div().w_full().pt(px(gap)).child(element).into_any_element());
@@ -848,10 +954,9 @@ fn render_list(list: &MdList, ctx: &Ctx, path: &str, image_counter: &mut usize) 
         let (top, bottom) = item_margins(item);
         let gap = prev_bottom.map_or(0., |prev| prev.max(top));
         let item_path = format!("{path}l{ix}.");
-        let line = item
-            .blocks
-            .first()
-            .map_or(editor_theme::MD_P_LINE, Block::first_line_height);
+        let line = item.blocks.first().map_or(editor_theme::MD_P_LINE, |b| {
+            b.first_line_height(&ctx.images_dir)
+        });
         let marker: AnyElement = match item.checked {
             Some(checked) => task_box(checked).into_any_element(),
             None if list.ordered => div()
@@ -1017,75 +1122,131 @@ fn md_shadow() -> Vec<BoxShadow> {
     ]
 }
 
+/// 一张自己排版的图片：原始尺寸、最大宽度 100%（按宽高比缩小）、圆角 6、阴影；悬停变淡，点击打开预览。
+/// 本机图片按出现顺序编号（`image_counter`，与 [`block_image_paths`] 顺序一致）
+fn image_frame(image: &BlockImage, ctx: &Ctx, id: &str, image_counter: &mut usize) -> AnyElement {
+    let local = image_ref::resolve_image_path(&image.url, &ctx.images_dir);
+    let index = local.as_ref().map(|_| {
+        let index = *image_counter;
+        *image_counter += 1;
+        index
+    });
+    let source: ImageSource = match &local {
+        Some(path) => ImageSource::from(path.clone()),
+        None => ImageSource::from(image.url.clone()),
+    };
+    let size = local.as_deref().and_then(image_size);
+    let alt = SharedString::from(image.alt.clone());
+    let picture = img(source)
+        .size_full()
+        .rounded(px(6.))
+        .with_fallback(move || {
+            div()
+                .text_size(px(14.))
+                .text_color(theme::light().text_tertiary)
+                .child(alt.clone())
+                .into_any_element()
+        });
+    let frame = div()
+        .id(SharedString::from(format!("{}/{id}", ctx.base_id)))
+        .relative()
+        .flex_none()
+        .max_w_full()
+        .rounded(px(6.))
+        .shadow(md_shadow())
+        .cursor(CursorStyle::PointingHand)
+        .hover(|s| {
+            s.opacity(0.85).shadow(vec![theme::shadow(
+                0.,
+                2.,
+                8.,
+                0.,
+                theme::rgba_css(0, 0, 0, 0.15),
+            )])
+        })
+        .map(|this| match size {
+            Some((w, h)) if w > 0 && h > 0 => {
+                this.w(px(w as f32)).aspect_ratio(w as f32 / h as f32)
+            }
+            _ => this,
+        })
+        .child(picture);
+    match (ctx.on_image_click.clone(), index) {
+        (Some(handler), Some(index)) => {
+            let paths = ctx.image_paths.clone();
+            frame
+                .on_click(move |_, window, cx| handler(paths.to_vec(), index, window, cx))
+                .into_any_element()
+        }
+        _ => frame.into_any_element(),
+    }
+}
+
+/// 一行图片 / 文字：放不下时换行；各项垂直居中（旧版 img 是 `inline-block` + Tailwind preflight 的
+/// `vertical-align: middle`，行高被图片撑开、文字落在图片高度中间）
+fn inline_row(items: Vec<AnyElement>) -> gpui_kit::Div {
+    div()
+        .w_full()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .children(items)
+}
+
 fn render_images(
     images: &[BlockImage],
     ctx: &Ctx,
     path: &str,
     image_counter: &mut usize,
 ) -> AnyElement {
-    let elements = images.iter().enumerate().map(|(ix, image)| {
-        let local = image_ref::resolve_image_path(&image.url, &ctx.images_dir);
-        let index = local.as_ref().map(|_| {
-            let index = *image_counter;
-            *image_counter += 1;
-            index
-        });
-        let source: ImageSource = match &local {
-            Some(path) => ImageSource::from(path.clone()),
-            None => ImageSource::from(image.url.clone()),
-        };
-        let size = local.as_deref().and_then(image_size);
-        let alt = SharedString::from(image.alt.clone());
-        let picture = img(source)
-            .size_full()
-            .rounded(px(6.))
-            .with_fallback(move || {
-                div()
-                    .text_size(px(14.))
-                    .text_color(theme::light().text_tertiary)
-                    .child(alt.clone())
-                    .into_any_element()
-            });
-        let frame = div()
-            .id(SharedString::from(format!("{}/{path}i{ix}", ctx.base_id)))
-            .relative()
-            .flex_none()
-            .max_w_full()
-            .rounded(px(6.))
-            .shadow(md_shadow())
-            .cursor(CursorStyle::PointingHand)
-            .hover(|s| {
-                s.opacity(0.85).shadow(vec![theme::shadow(
-                    0.,
-                    2.,
-                    8.,
-                    0.,
-                    theme::rgba_css(0, 0, 0, 0.15),
-                )])
-            })
-            .map(|this| match size {
-                Some((w, h)) if w > 0 && h > 0 => {
-                    this.w(px(w as f32)).aspect_ratio(w as f32 / h as f32)
-                }
-                _ => this,
-            })
-            .child(picture);
-        match (ctx.on_image_click.clone(), index) {
-            (Some(handler), Some(index)) => {
-                let paths = ctx.image_paths.clone();
-                frame
-                    .on_click(move |_, window, cx| handler(paths.to_vec(), index, window, cx))
-                    .into_any_element()
+    let elements = images
+        .iter()
+        .enumerate()
+        .map(|(ix, image)| image_frame(image, ctx, &format!("{path}i{ix}"), image_counter))
+        .collect();
+    inline_row(elements).into_any_element()
+}
+
+/// 含图片又含文字的段落（[`Block::Mixed`]）：按顶层硬换行分行，每行里文字段（TextView，按内容宽度、放不下时
+/// 占满一行折行）与图片（同块级图片）依次排开、放不下就换行、垂直居中。
+///
+/// 与旧版的差异：旧版是真正的行内排版——图片前后的文字会填满图片所在行的剩余宽度再折到下一行；这里文字段是
+/// 一整块，长到一行放不下时独占一行（图片排到它下面一行）
+fn render_mixed(
+    parts: &[InlinePart],
+    ctx: &Ctx,
+    path: &str,
+    color: Hsla,
+    image_counter: &mut usize,
+) -> AnyElement {
+    let mut rows: Vec<Vec<AnyElement>> = vec![Vec::new()];
+    for (ix, part) in parts.iter().enumerate() {
+        match part {
+            InlinePart::Break => rows.push(Vec::new()),
+            InlinePart::Text(markdown) => {
+                let text = div()
+                    .min_w_0()
+                    .child(inline_view(ctx, &format!("{path}s{ix}"), markdown, color))
+                    .into_any_element();
+                rows.last_mut().expect("至少一行").push(text);
             }
-            _ => frame.into_any_element(),
+            InlinePart::Image(image) => {
+                let frame = image_frame(image, ctx, &format!("{path}i{ix}"), image_counter);
+                rows.last_mut().expect("至少一行").push(frame);
+            }
         }
-    });
+    }
     div()
         .w_full()
         .flex()
-        .flex_wrap()
-        .items_end()
-        .children(elements)
+        .flex_col()
+        .text_size(px(editor_theme::MD_P_SIZE))
+        .line_height(px(editor_theme::MD_P_LINE))
+        // 空行（连续硬换行）也有一行高
+        .children(
+            rows.into_iter()
+                .map(|items| inline_row(items).min_h(px(editor_theme::MD_P_LINE))),
+        )
         .into_any_element()
 }
 
@@ -1146,6 +1307,17 @@ mod tests {
         assert_eq!(blocks[0], Block::Quote(vec![para("第一行\n第二行")]));
     }
 
+    fn image(name: &str, alt: &str) -> BlockImage {
+        BlockImage {
+            url: format!("minitodo-image://{name}"),
+            alt: alt.into(),
+        }
+    }
+
+    fn text(markdown: &str) -> InlinePart {
+        InlinePart::Text(markdown.to_string())
+    }
+
     #[test]
     fn standalone_images_and_br_lines_become_blocks() {
         let blocks = parse_blocks(
@@ -1153,23 +1325,105 @@ mod tests {
         );
         assert_eq!(
             blocks[0],
-            Block::Images(vec![BlockImage {
-                url: "minitodo-image://sample-chart.png".into(),
-                alt: "指标截图".into()
-            }])
+            Block::Images(vec![image("sample-chart.png", "指标截图")])
         );
         assert_eq!(blocks[1], Block::EmptyLine);
-        assert_eq!(blocks[2], para("文字 ![a](minitodo-image://a.png)"));
+        assert_eq!(
+            blocks[2],
+            Block::Mixed(vec![
+                text("文字\u{a0}"),
+                InlinePart::Image(image("a.png", "a"))
+            ])
+        );
         assert_eq!(
             block_image_paths(&blocks, Path::new("/d")),
-            vec![PathBuf::from("/d/sample-chart.png")]
+            vec![
+                PathBuf::from("/d/sample-chart.png"),
+                PathBuf::from("/d/a.png")
+            ]
         );
+    }
+
+    #[test]
+    fn images_next_to_text_are_split_out_of_the_paragraph() {
+        // 与图片相邻的空白变成不换行空格；文字段按行内 Markdown 序列化
+        let blocks = parse_blocks("pic ![e](minitodo-image://e.png) **after** text\n");
+        assert_eq!(
+            blocks[0],
+            Block::Mixed(vec![
+                text("pic\u{a0}"),
+                InlinePart::Image(image("e.png", "e")),
+                text("\u{a0}**after** text"),
+            ])
+        );
+        // 顶层硬换行另起一行；与图片之间没有空白时不加空格
+        let blocks = parse_blocks("第一行\\\n![e](minitodo-image://e.png)\\\n最后一行\n");
+        assert_eq!(
+            blocks[0],
+            Block::Mixed(vec![
+                text("第一行"),
+                InlinePart::Break,
+                InlinePart::Image(image("e.png", "e")),
+                InlinePart::Break,
+                text("最后一行"),
+            ])
+        );
+        // 两张图片之间的空格保留一个空格宽；引用式图片按定义解析；列表 / 引用里同样拆开
+        let blocks = parse_blocks(
+            "![a](minitodo-image://a.png) ![b][r] 尾巴\n\n- 项 ![c](minitodo-image://c.png)\n\n[r]: minitodo-image://b.png\n",
+        );
+        assert_eq!(
+            blocks[0],
+            Block::Mixed(vec![
+                InlinePart::Image(image("a.png", "a")),
+                text("\u{a0}"),
+                InlinePart::Image(image("b.png", "b")),
+                text("\u{a0}尾巴"),
+            ])
+        );
+        let Block::List(list) = &blocks[1] else {
+            panic!("list: {blocks:?}")
+        };
+        assert_eq!(
+            list.items[0].blocks,
+            vec![Block::Mixed(vec![
+                text("项\u{a0}"),
+                InlinePart::Image(image("c.png", "c"))
+            ])]
+        );
+        assert_eq!(
+            block_image_paths(&blocks, Path::new("/d")),
+            ["a.png", "b.png", "c.png"].map(|n| PathBuf::from("/d").join(n))
+        );
+        // 链接里的图片、没有定义的引用式图片不拆（仍是普通段落）
+        let blocks = parse_blocks("看 [![a](minitodo-image://a.png)](https://x.y) 与 ![b][nope]\n");
+        assert!(matches!(blocks[0], Block::Paragraph(_)), "{blocks:?}");
+    }
+
+    #[test]
+    fn first_line_of_an_image_row_is_as_tall_as_its_images() {
+        let dir = std::env::temp_dir().join(format!("mt-md-line-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        ::image::RgbImage::new(16, 90)
+            .save(dir.join("tall.png"))
+            .unwrap();
+        let blocks = parse_blocks(
+            "前 ![t](minitodo-image://tall.png) 后\n\n文字\\\n![t](minitodo-image://tall.png)\n",
+        );
+        assert_eq!(blocks[0].first_line_height(&dir), 90.);
+        // 图片在第二行：首行仍是一行字高
+        assert_eq!(blocks[1].first_line_height(&dir), editor_theme::MD_P_LINE);
+        // 读不到的图片按一行字高
+        let missing = parse_blocks("![m](minitodo-image://missing.png) x\n");
+        assert_eq!(missing[0].first_line_height(&dir), editor_theme::MD_P_LINE);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn inline_serialization_round_trips_through_the_parser() {
         for source in [
-            "a **b** *c* ~~d~~ `e` [f](https://x.y/z \"t\") ![g](minitodo-image://g.png)",
+            // 段落顶层的图片会拆成 Block::Mixed；链接里的图片仍按行内 Markdown 序列化
+            "a **b** *c* ~~d~~ `e` [f](https://x.y/z \"t\") [![g](minitodo-image://g.png)](https://x.y)",
             "代码 `` a`b `` 与 ` `` `",
             "行尾硬换行\\\n下一行",
             "[引用链接][r]\n\n[r]: https://example.com",

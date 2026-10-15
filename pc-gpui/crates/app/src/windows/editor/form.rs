@@ -212,6 +212,7 @@ impl EditorWindow {
             })
             .rounded(px(8.))
             .line_height(gpui_kit::relative(theme::LINE_HEIGHT))
+            // flex 列：编辑器根元素撑满这 122 高（点框内任意位置都进入编辑），内容更长时随内容增高、在框内滚动
             .child(
                 div()
                     .min_h(px(122.))

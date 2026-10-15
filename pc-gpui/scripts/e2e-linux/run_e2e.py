@@ -939,7 +939,7 @@ def _sync_cases(kind: str, tag: str, a: Session, app: App, cloud: Cloud, ctx: di
         ed = ui.open_detail(app, title)
         ui.editor_click_edit(app, ed)
         app.x.click(ed, *ui.ED_DESC)
-        # 图片独占一段（与文字同行的行内图片会被缩成一行字高，见 README「观察」）
+        # 图片独占一段（与文字同行的情况由 ui/markdown.rs 的单测覆盖）
         app.type(ed, "pic")
         app.key(ed, "Return", "Return")
         app.type(ed, f"![e2e](minitodo-image://{name})")

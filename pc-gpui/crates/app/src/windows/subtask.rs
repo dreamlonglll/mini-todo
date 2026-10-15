@@ -483,10 +483,12 @@ impl Render for SubtaskWindow {
                             .border_color(palette.border)
                             .rounded(px(8.))
                             .bg(hex(0xFFFFFF))
+                            // 至少撑满内容框（编辑器根元素再撑满这一层：点框内任意位置都进入编辑），内容更长时
+                            // 随内容增高、在框内滚动（不能 `size_full`：滚动范围只按直接子元素算，长内容会滚不动）
                             .child(
                                 div()
-                                    .size_full()
-                                    .min_h(px(290.))
+                                    .w_full()
+                                    .min_h_full()
                                     .flex()
                                     .flex_col()
                                     .child(self.content.clone()),

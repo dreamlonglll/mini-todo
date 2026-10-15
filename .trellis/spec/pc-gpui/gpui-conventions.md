@@ -111,6 +111,8 @@
 - 图片进 App 级资源缓存，文件变了不会自动刷新：缓存键里带上会变的东西（收纳箱图标键 = 路径 + 修改时间 + 档位），或 `remove_asset`。
 - Markdown 图片：存储形式 `minitodo-image://<name>`，渲染经 `util::image_ref::resolve_image_path` 映射到本机 images 目录
   （`ui::markdown` 已处理，基于 `gpui_kit::base::TextView::markdown(..).image_source(..)`）；文件名经 `is_safe_image_name` 校验。
+  段落顶层的图片（独占段落、与文字同段）由 `ui::markdown` 自己排（原始尺寸、`max-width: 100%`、与文字垂直居中，同旧版
+  `inline-block` + `vertical-align: middle`）：TextView 自己画的行内图片没有宽高属性时只有 0.75 行高、也不受容器宽度约束，不要交给它。
 - SVG 是单色蒙版，**必须设颜色才会绘制**：一律 `ui::icon::icon(EpIcon::X, size, color)`。新图标：SVG 放进
   `assets/icons/{ep,app}/`（EP 图标文件名与 `@element-plus/icons-vue` 的 kebab-case 一致），在 `assets.rs` 表里加一行。禁止 emoji。
 - 链接点击走 `util::file_link::handle_link_click`（协议白名单）；`cx.open_url` 本身不做任何校验。直接用 gpui-base `TextView` 渲染
@@ -196,6 +198,16 @@
   （图片预览旋转在后台用 `image` crate 处理）、自带删除线对中文落在基线附近（`todo_item::strike` 自绘）。
 - 滚轮增量方向与 DOM `deltaY` 相反（向上为正）。
 - Markdown 编辑是"源码 + 预览"（旧版 Milkdown 所见即所得无法 1:1 还原，PRD D7）；只读渲染、图片、链接白名单与旧版一致。
+  与文字同段的图片拆成"文字段 / 图片 / 文字段"排在同一行（放不下换行），文字段是一整块：长到一行放不下时独占一行，
+  不像旧版那样接着图片所在行的剩余宽度排。
+
+### 2.14 布局易错点（taffy）
+
+- 百分比高度 / 最小高度（`h_full`、`min_h_full`）只在父元素高度**确定**时生效；父元素只有 `min_h` / `max_h`（如描述框）时按 auto 处理，
+  元素缩成内容高度。要"至少撑满父元素、内容更多时随内容增高"：父元素 `flex().flex_col()`，子元素 `flex_grow(1.).flex_shrink_0()`
+  （`ui::markdown_editor` 的根元素；缺陷 D1：空描述框只有顶部 10px 能点进编辑）。
+- `overflow_y_scroll` 的可滚动范围只按**直接子元素**的边界计算（gpui `Div::prepaint`）：滚动容器的直接子元素不要 `size_full`
+  （高度被钉成容器高度，孙元素溢出也滚不动），用 `min_h_full`（子任务内容框）。
 
 ---
 
