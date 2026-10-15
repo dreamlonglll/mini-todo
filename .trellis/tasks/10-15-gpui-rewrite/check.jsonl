@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "后端质量检查要求（fmt/clippy/test、settings_kv、日志）"}
+{"file": ".trellis/spec/backend/sync-protocol.md", "reason": "同步协议不变量，检查 core 移植是否破坏"}
+{"file": ".trellis/tasks/10-15-gpui-rewrite/info.md", "reason": "本任务技术设计"}

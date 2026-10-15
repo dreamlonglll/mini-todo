@@ -1,0 +1,44 @@
+[package]
+name = "mini-todo-core"
+description = "mini-todo 业务核心：数据库、同步、导入导出、提醒、收纳箱文件层（不依赖 GPUI / Tauri / tokio）"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lib]
+name = "mini_todo_core"
+
+[features]
+# 对外暴露 Database::new_in_memory，供 app crate 的测试使用
+test-util = []
+
+[dependencies]
+# 版本与 pc/src-tauri/Cargo.toml 保持一致（同一数据库 / 同步文档 / 导出格式）
+log = "0.4"
+encoding_rs = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5"
+base64 = "0.22"
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+# webdav.rs 解码 PROPFIND 里的 href
+urlencoding = "2"
+flate2 = "1.1.9"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# 桌面收纳箱（services/fence_fs）：监听收纳目录变化；图标位图编码为 PNG
+notify = "7"
+png = "0.17"
+# 农历 / 节气 / 传统节日（lunar-javascript 同一作者 6tail 的 Rust 库）
+tyme4rs = "1.5"
+
+[target.'cfg(windows)'.dependencies]
+# 与 pc/src-tauri 相同的 features：IFileOperation 移动、IShellItemImageFactory 图标、ShellExecuteExW、
+# 资源管理器定位、IShellLinkW、DPAPI、DirectWrite 字体枚举
+windows = { version = "0.58", features = ["implement", "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Dwm", "Win32_Graphics_DirectWrite", "Win32_Graphics_Gdi", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Registry", "Win32_UI_Shell", "Win32_UI_Shell_Common"] }
+# windows 0.58 的 #[implement] 宏展开后引用 ::windows_core，版本须与 windows 一致
+windows-core = "0.58"
+
+[dev-dependencies]
+tiny_http = "0.12"

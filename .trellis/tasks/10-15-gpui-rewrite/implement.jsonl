@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "后端规范索引与开发前检查清单（settings_kv、时间、日志等约定在新 core/app 中继续适用）"}
+{"file": ".trellis/spec/backend/sync-protocol.md", "reason": "同步协议、时间格式、单调 updated_at、LWW+墓碑、WebDAV 条件请求规则——core 移植后必须保持一致"}
+{"file": ".trellis/tasks/10-15-gpui-rewrite/info.md", "reason": "本任务技术设计：目录、core/app 拆分、全局状态与窗口映射、样式还原策略"}
