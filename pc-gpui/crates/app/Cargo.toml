@@ -31,6 +31,8 @@ url = "2"
 regex = "1"
 # 开机自启：与旧版 tauri-plugin-autostart 2.5（底层 auto-launch 0.5）同一库、同名同键
 auto-launch = "0.5"
+# 版本检查（W1，GitHub latest release）：与 core 相同版本与特性，不多编一份
+reqwest = { version = "0.12", features = ["json", "blocking"] }
 
 [target.'cfg(windows)'.dependencies]
 # 与 gpui-pre-windows 同一版本（0.62），避免再编一份 windows crate

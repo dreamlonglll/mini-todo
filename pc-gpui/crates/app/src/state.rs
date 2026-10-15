@@ -970,18 +970,20 @@ impl AppState {
     // 平台相关动作（W1 实现）
     // ------------------------------------------------------------------
 
-    /// TODO(W1)：切换固定模式（旧 `toggleFixedMode`：翻转 `is_fixed` → `apply_fixed_mode` /
-    /// `apply_normal_mode` → `save_window_state`；失败 `切换固定模式失败：…`）。
-    /// 需要主窗口句柄与 `platform::*`，由主窗口实现者补全。
+    /// 切换固定模式（旧 `toggleFixedMode`）：翻转 `is_fixed` → 按"嵌入桌面"偏好进入经典固定 / 嵌入桌面，
+    /// 或退回普通模式 → 保存窗口状态；失败提示 `切换固定模式失败：…`（W1：`services::window_mode`）
     pub fn toggle_fixed_mode(&mut self, cx: &mut Context<Self>) {
-        log::warn!("[window] toggle_fixed_mode 尚未实现（W1）");
+        self.is_fixed = !self.is_fixed;
+        let fixed = self.is_fixed;
         cx.notify();
+        cx.defer(move |cx| crate::services::window_mode::toggle_fixed(cx, fixed));
     }
 
-    /// TODO(W1)：保存主窗口状态（旧 `saveWindowState`：读窗口物理几何（贴边隐藏中用锚点）→
+    /// 保存主窗口状态（旧 `saveWindowState`：读窗口物理几何（贴边隐藏中用锚点）→
     /// `settings::save_screen_config` → `settings::save_window_settings` → 刷新运行时偏好）。
-    pub fn save_window_state(&mut self, _cx: &mut Context<Self>) {
-        log::debug!("[window] save_window_state 尚未实现（W1）");
+    /// 设置窗口里不要调用（几何取的是主窗口，但旧版约定设置项各写各的键）
+    pub fn save_window_state(&mut self, cx: &mut Context<Self>) {
+        cx.defer(crate::services::window_mode::save_window_state);
     }
 }
 

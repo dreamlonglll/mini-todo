@@ -9,6 +9,7 @@
 //! | [`message_box`] | `ElMessageBox.confirm`：遮罩、标题 / 图标 / 内容 / 取消 + 确认、Esc / 遮罩 / × 取消、Enter 确认 |
 //! | [`input`] | `el-input` 外观的单行输入（包装 gpui-component `InputState`） |
 //! | [`title_bar`] | 通用自绘标题栏（拖动区 + 标题 + 关闭按钮）与 `drag_region` |
+//! | [`scrollbar`] | 细滚动条（非覆盖式，主列表 6px） |
 //! | [`layers`] | 每个窗口 Root 上的浮层插件（message / message_box 挂在这里，窗口视图不用管） |
 //!
 //! 各窗口需要的其它控件（日期 / 时间 / 颜色选择、下拉、开关、滑块、复选框…）由对应窗口实现者在 `ui/` 下新建文件。
@@ -19,5 +20,6 @@ pub mod input;
 pub mod layers;
 pub mod message;
 pub mod message_box;
+pub mod scrollbar;
 pub mod title_bar;
 pub mod tooltip;

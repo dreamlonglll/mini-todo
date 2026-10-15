@@ -77,9 +77,13 @@ pc-gpui/scripts/shot.sh --no-build --click 356,576 --sleep 1 --target 新建待�
 | `gallery` | 控件样例窗口（`ui/` 里的 Element Plus 风格控件，改控件后对照用） |
 | `toast:<success\|info\|warning\|error>:<文字>` | 在主窗口里弹一条 ElMessage（3s 后消失，截图用 `--wait 1`） |
 | `confirm:<标题>:<内容>` | 在主窗口里弹 ElMessageBox.confirm（`确定` / `取消`） |
+| `calendar` | 运行时打开日历（与设置里打开「展示日历」相同：主窗口按旧版公式加宽，左栏 = 打开前的宽度；W1） |
 
 这些窗口**不走模态关系**（主窗口不显示遮罩、没有 owner），只用于截图；无法识别的项记 warning 并跳过。
 新增窗口种类时：在 `crates/app/src/windows/mod.rs` 的 `DebugOpen` / `parse_debug_open` / `open_debug` 里加一项，并更新本表。
+
+`MINI_TODO_DEBUG_LATEST_VERSION=v2.6.0`（仅 debug，W1）：版本检查不联网、直接当作 GitHub 最新版本，用于截图更新红点 /
+「版本更新」确认框。
 
 其它 debug 专用环境变量（与旧版相同）：`MINI_TODO_DATA_DIR`（数据目录、日志 `<dir>/logs`；不启用单实例、不刷新开机自启项）、
 `MINI_TODO_FENCES_ROOT`（收纳根目录）、`MINI_TODO_SCREEN_ID_FILE`（文件内容非空时替代屏幕组合 ID）。
