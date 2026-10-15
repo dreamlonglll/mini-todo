@@ -97,25 +97,25 @@ Create detailed flow docs when:
 
 ## Removing a Feature End-to-End
 
-Mirror image of the "adding a field" checklist in `CLAUDE.md`. When deleting a feature that touches multiple layers (DB schema + Rust models + Tauri commands + frontend types + UI), walk every layer or you leave dangling references.
+Mirror image of the "adding a field" checklist in `CLAUDE.md`. When deleting a feature that touches multiple layers (DB schema + core models / functions + app state + windows / controls + cloud contract), walk every layer or you leave dangling references.
 
 ### Layer-by-layer removal checklist
 
 When removing a feature whose data is persisted and synchronized:
 
-- [ ] **DB migration**: write a new HEAD migration that `DROP TABLE` for owned tables and `ALTER TABLE … DROP COLUMN` for fields on retained tables
+- [ ] **DB migration**: write a new HEAD migration (`pc-gpui/crates/core/src/db/migrations.rs`) that `DROP TABLE` for owned tables and `ALTER TABLE … DROP COLUMN` for fields on retained tables — but first check [pc-gpui/data-compat.md](../pc-gpui/data-compat.md): older installed versions may still read / write those columns
 - [ ] **Drop indices first**: SQLite refuses to drop a column that is part of an index; emit `DROP INDEX IF EXISTS` before `DROP COLUMN`
-- [ ] **Rust models** (`pc/src-tauri/src/db/models.rs`): delete struct fields and any deleted-table types; keep the Todo/SubTask structs lean
-- [ ] **Tauri commands**: delete the command files entirely AND delete their registration in `lib.rs` `tauri::generate_handler!` (forgetting the registration produces "command not found" only at runtime)
-- [ ] **Frontend types** (`pc/src/types/`): delete the matching TS interface fields; delete dedicated type files; remove their re-exports in `pc/src/types/index.ts` and `pc/src/stores/index.ts`
-- [ ] **Pinia stores**: delete the store files; verify no other stores import from them
-- [ ] **Vue components/views**: delete dedicated files; in mixed files, delete in place (don't refactor) — see "In-place deletion" below
-- [ ] **Router**: drop dead routes from `pc/src/router/index.ts`
+- [ ] **Rust models** (`pc-gpui/crates/core/src/db/models.rs`): delete struct fields and any deleted-table types; keep the Todo/SubTask structs lean
+- [ ] **core functions** (`crates/core/src/*.rs`): delete the module / functions and their tests; the compiler then lists every caller in `crates/app`
+- [ ] **app state & services**: `AppState` fields / methods (`state.rs`), `services/*` timers or background tasks that fed them
+- [ ] **windows & controls**: delete dedicated window modules, `WindowKind` variants and `DebugOpen` entries (`windows/mod.rs`); in mixed files, delete in place (don't refactor) — see "In-place deletion" below; drop `theme.rs` tokens and `assets.rs` icons nothing uses any more
+- [ ] **Tests & scripts**: `scripts/regress.py` scenes (`SCENES` / `SMOKE` / `CALLS`), Linux / Windows e2e cases, `MINI_TODO_DEBUG_OPEN` docs that reference the deleted UI
 - [ ] **WebDAV/Export DTOs**: shrink `ExportData` and `SyncData`; rely on serde leniency (see "Backward-compatible deserialization" below)
+- [ ] **cloud contract**: drop the field from `cloud/src/model.rs` (`TODO_FIELDS` / `SUBTASK_FIELDS`) so new REST writes stop accepting it
 - [ ] **Cargo.toml**: prune deps that the deleted code was the sole consumer of (e.g. `cron`, `async-trait` if only AgentRunner used it)
-- [ ] **CLAUDE.md / docs**: remove "主要数据表" rows, command lists, architecture diagrams, and event names referring to the deleted feature
-- [ ] **Spec files** (`.trellis/spec/`): grep the spec dir for store names, view names, type names you deleted — purge stale references the same commit
-- [ ] **Version bump**: app version (3 places: `pc/package.json`, `pc/src-tauri/Cargo.toml`, `pc/src-tauri/tauri.conf.json`) and export version (`pc/src-tauri/src/commands/data.rs`)
+- [ ] **CLAUDE.md / docs**: remove "主要数据表" rows, function lists, architecture diagrams, and window / state names referring to the deleted feature
+- [ ] **Spec files** (`.trellis/spec/`): grep the spec dir for state names, window names, type names you deleted — purge stale references the same commit
+- [ ] **Version bump**: app version has a single source, `pc-gpui/Cargo.toml` `[workspace.package] version` + `Cargo.lock` (see [pc-gpui/release.md](../pc-gpui/release.md)); export version is `EXPORT_VERSION` in `pc-gpui/crates/core/src/data.rs`
 
 ### Backward-compatible deserialization for export/sync DTOs
 
@@ -142,17 +142,17 @@ pub struct ExportData {
 
 ### In-place deletion (no refactor) for large files
 
-When deleting a feature from a large mixed file (`EditorView.vue` 2086 lines, `SubtaskEditorView.vue` 892 lines), **delete in place** — don't reorder, rename, or extract helpers as part of the same change.
+When deleting a feature from a large mixed file (e.g. `crates/core/src/fence/mod.rs` ~1800 lines, `crates/app/src/windows/fence/mod.rs` ~1270 lines), **delete in place** — don't reorder, rename, or extract helpers as part of the same change.
 
 **Why**:
 - Keeps the diff readable so reviewers can verify "only deletions, no behavior change to retained features"
-- Reduces risk of breaking watchers / nextTick chains / emit ordering
+- Reduces risk of breaking subscriptions / `cx.spawn` task chains / epoch counters that guard against stale results
 - Makes git blame still useful for retained code
 
 **What "in place" means**:
-- Delete the import, the ref, the computed, the watcher, the function, the template branch — all in their original positions
-- Clean up newly-unused imports / refs that the deletion makes dead — that's not "refactoring"
-- Don't merge two `<script setup>` sections, don't re-sort props, don't rename anything
+- Delete the `use`, the field, the subscription, the method, the render branch — all in their original positions
+- Clean up newly-unused imports / fields that the deletion makes dead — that's not "refactoring"
+- Don't merge `impl` blocks, don't re-sort struct fields, don't rename anything
 
 If after deletion the file's structure feels wrong, file a follow-up task for refactoring; don't blend it with the removal.
 
@@ -165,7 +165,7 @@ shared compressed JSON blob on WebDAV acts as source of truth. Each writer pulls
 periodically and pushes after local writes. The catch is **concurrent writes** and **servers that
 implement HTTP preconditions differently** — naive full-replacement PUT silently loses data.
 
-Implemented in `pc/src-tauri/src/commands/sync_cmd.rs` + `db/sync_store.rs` (PC) and
+Implemented in `pc-gpui/crates/core/src/sync/mod.rs` + `db/sync_store.rs` (PC) and
 `cloud/src/sync/*` (cloud). The exact contract (document shape, merge rules, WebDAV header rules,
 error matrix, required tests) is **[Sync Protocol](../backend/sync-protocol.md)** — read it before
 touching either side. This section explains the traps that made those rules necessary.
@@ -198,7 +198,7 @@ pub fn now_local_string(tz: chrono_tz::Tz) -> String {
 
 Readers must still accept `T`, missing seconds, fractions, `Z` / `±HH:MM` and date-only input and
 normalize before comparing (`db::time::normalize_datetime`, cloud `time::normalize_datetime`,
-frontend `utils/datetime.ts`). A blob-level "snapshot created at" field may use ISO with offset — it
+PC UI `crates/app/src/util/datetime.rs`). A blob-level "snapshot created at" field may use ISO with offset — it
 is metadata and never compared.
 
 ### Trap 2: Second-resolution timestamps + "ties keep local" lose same-second edits
@@ -232,14 +232,15 @@ When a writer inserts a record from the other side it **must** keep the sender's
 Otherwise AUTOINCREMENT assigns a new id, the next round sends that back as a different record — id
 drift, looping forever. Ids are therefore explicit on every insert path (`sync_store::insert_todo_row`
 / `insert_subtask_row`, cloud repo inserts), including import and force pull. Cloud-created ids are
-`millis * 1000 + rand(0..999)`, kept below 2^53 so the JS frontend can represent them exactly.
+`millis * 1000 + rand(0..999)`, kept below 2^53 so consumers that parse JSON numbers as doubles (the old
+Tauri JS frontend did) can represent them exactly.
 
 ### Trap 5: Tombstones must travel with the data
 
 LWW without tombstones: A deletes X, B still has X → next merge resurrects X. Tombstones kept only
 in A's local table are not enough either: B's next push re-adds X to the blob, and A's next pull
 inserts it again. So tombstones live in the blob, both sides union them, and a "make remote equal
-local" operation (PC `webdav_force_push`) must write tombstones for every remote-only record —
+local" operation (PC `SyncMode::ForcePush`) must write tombstones for every remote-only record —
 otherwise the other writer merges them straight back.
 
 ### Per-record conflict matrix
@@ -267,7 +268,7 @@ match client.upload_bytes(path, body, Some(&last_modified))? {   // If-Unmodifie
 **Correct**: read-merge-write, opaque ETag precondition, wait out the weak-ETag window on 412
 
 ```rust
-// sketch of sync_cmd.rs::run_sync_blocking (cloud push.rs has the same shape)
+// sketch of core sync/mod.rs::run_sync_blocking (cloud push.rs has the same shape)
 for attempt in 0..MAX_ATTEMPTS {
     let remote = client.get(SYNC_DATA_FILE, if_none_match)?;      // unconditional when dirty
     merge_remote(&tx, &remote)?;                                     // LWW + tombstones + settings

@@ -1,8 +1,14 @@
 # pc-gpui 验证工具
 
-在 Linux（Xvfb + mesa lavapipe）上运行**真实的** GPUI 应用并截图，用来和参考截图（Vue 版在浏览器里按真实窗口尺寸渲染，
-`ref-ui/screens/*.png`）逐一对照。只覆盖 Linux 后端；Windows 专有行为（嵌入桌面、DirectComposition 透明、托盘……）
-需要在 Windows 上实机验收。
+在 Linux（Xvfb + mesa lavapipe）上运行**真实的** GPUI 应用并截图，用来和基线截图逐一对照。只覆盖 Linux 后端；
+Windows 专有行为（嵌入桌面、DirectComposition 透明、托盘……）需要在 Windows 上实机验收。
+
+基线有两种：
+
+- `--before`：改动前跑一遍 `regress.py` 的输出（自身回归，随时可生成，日常用这个）。
+- `--ref`（**可选**）：重写期间由旧 Tauri 版的 Vue 前端在浏览器里按真实窗口尺寸渲染的参考截图（`ref-ui/screens/*.png`）。
+  它们在仓库外生成、不在仓库里，旧前端已在 3.0 删除，无法再从仓库重新生成；手上有这批截图时才用。下文提到的
+  `ref-ui/screens/…` 都指这批截图。
 
 | 文件 | 作用 |
 |---|---|

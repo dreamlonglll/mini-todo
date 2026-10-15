@@ -1,7 +1,7 @@
 //! mini-todo 业务核心：GPUI 版 PC 端（`pc-gpui/crates/app`）与界面无关的全部逻辑。
 //!
-//! 由旧版 `pc/src-tauri/src` 复制而来：`db/**`、`services::{webdav, secret, fence_fs}` 原样复制；
-//! `commands/*.rs` 去掉 Tauri 外壳（`#[tauri::command]` / `State` / `AppHandle` / 事件）后成为普通的
+//! 由旧 Tauri 版（`src-tauri/src`，3.0 起已删除，见 git 历史）复制而来：`db/**`、`services::{webdav, secret, fence_fs}`
+//! 原样复制；`commands/*.rs` 去掉 Tauri 外壳（`#[tauri::command]` / `State` / `AppHandle` / 事件）后成为普通的
 //! **阻塞**函数。不依赖 GPUI / Tauri / tokio，app 层在后台线程调用它们，再把结果交回界面。
 //!
 //! | 模块 | 内容 |

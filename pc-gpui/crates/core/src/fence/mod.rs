@@ -35,7 +35,8 @@ use self::items::{begin_deleting, delete_item, fence_originals, is_deleting, is_
 /// 收纳箱窗口 label 前缀（`fence-{id}`；app 层可用作窗口登记的键）
 pub const FENCE_LABEL_PREFIX: &str = "fence-";
 
-/// 标题栏高度（逻辑像素），与 `pc/src/types/fence.ts` 的 `FENCE_TITLE_BAR_HEIGHT` 一致。
+/// 标题栏高度（逻辑像素；收纳箱窗口标题栏 `crates/app/src/windows/fence/mod.rs` 直接用它，旧 Tauri 版前端对应
+/// `FENCE_TITLE_BAR_HEIGHT`）。
 /// 折叠态窗口高度 = 它 × 缩放比例
 pub const FENCE_TITLE_BAR_DIP: f64 = 32.0;
 /// 默认图标格（逻辑像素），参考 LucidDesk 的 88×96 DIP

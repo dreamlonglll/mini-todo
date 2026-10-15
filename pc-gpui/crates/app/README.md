@@ -5,7 +5,7 @@ GPUI 版 PC 端的界面、窗口与平台集成：package `mini-todo`，lib `mi
 `mini-todo-core`（业务逻辑，见 `../core/README.md`）。
 
 本文件面向后续维护者：模块地图、约定、主要接口、调试开关与验证方法。设计依据：
-`.trellis/tasks/10-15-gpui-rewrite/info.md` §3-4；UI 规格：`research/ui-main-window.md`、`ui-editor-windows.md`、
+`.trellis/tasks/archive/2026-10/10-15-gpui-rewrite/info.md` §3-4；UI 规格：`research/ui-main-window.md`、`ui-editor-windows.md`、
 `ui-settings-fence.md`；GPUI API：`research/gpui-api.md`（API 以 `~/.cargo/registry/src/index.crates.io-*/` 源码为准）。
 
 ## 1. 构建与验证（在 `pc-gpui/` 下）
@@ -26,8 +26,9 @@ scripts/shot.sh --name main-list --window "Mini Todo" /tmp/shots
 scripts/shot.sh --open main,gallery --window 控件样例 /tmp/shots   # ui/ 控件样例
 ```
 
-参考截图（旧 Vue 版在浏览器中按真实窗口尺寸渲染）由 `ref-ui/harness/run.sh` 生成，不在仓库里；回归脚本用
-`--ref` / `MINI_TODO_REF_DIR` 指定目录。
+参考截图（旧 Tauri 版的 Vue 前端在浏览器中按真实窗口尺寸渲染）是重写期间在仓库外生成的（`ref-ui/harness/run.sh`），
+不在仓库里；旧前端已在 3.0 删除，无法再从仓库重新生成。手上有这批截图时用 `--ref` / `MINI_TODO_REF_DIR` 指定目录（**可选**），
+否则用 `--before`（改动前跑一遍的输出）做自身回归。
 
 ## 2. 模块地图
 
@@ -100,7 +101,9 @@ src/
 7. **GPUI 没有 z-index**：后绘制者在上；浮层用 `deferred(anchored()…)`（弹层统一走 `ui::ep_popper::popper`）。消息 / 确认框由
    `UiLayer` 插件画在 Root 之上，窗口视图不用管。圆角容器裁不掉子元素背景（内容遮罩只有矩形）。
 8. **SVG 图标必须设颜色**才会绘制（`ui::icon::icon(source, size, color)` 已处理）。本地图片用 `img(PathBuf)`（`&str` 会被当成 URI）。
-9. **QuitMode::Explicit**：关掉所有窗口进程不退出（托盘常驻）；Linux 没有托盘，最后一个窗口关闭时退出。
+9. **QuitMode::Explicit**：进程何时退出由应用自己决定 —— Windows 上主窗口关闭后若已没有别的窗口就 `cx.quit()`
+   （收纳箱 / 编辑等窗口还开着时进程继续，托盘可再唤起主窗口；见 `windows/main_window.rs`），托盘「退出」直接退出；
+   Linux 没有托盘，最后一个窗口关闭时退出（`lib.rs`）。
 10. **键盘**：键绑定的 action 先于 `on_key_down` 派发；编辑类窗口的 Esc / Ctrl+Enter 是 action，弹层打开时由窗口自己先收起弹层
     （`any_popup_open` / `close_popups`），控件自身的 Esc 处理只在没有绑定的窗口里生效。
 

@@ -43,6 +43,9 @@ cargo build --release
 
 无需任何 C 工具链（rusqlite bundled、reqwest rustls）。
 
+也可以直接用预编译版：仓库每次发版（推 `v*` tag，`.github/workflows/release.yml`）都会在 GitHub Release 附带
+`minitodo-cloud-<cloud 版本>-linux-<x86_64|aarch64>.tar.gz` 与对应的 `.sha256`（cloud 版本取自 `cloud/Cargo.toml`，与 PC 版本号无关）。
+
 ## 配置
 
 复制 `config.example.toml` 为 `/etc/minitodo/config.toml`（路径自定），按注释填
@@ -109,7 +112,7 @@ X-Last-Sync-At: 2026-05-13 12:34:56
 | **NextCloud** | 重量级，但自带 Web UI；本服务通过 `/remote.php/dav/files/USER` 接入 |
 | **坚果云** | 国内体验稳定；WebDAV 限速明显，仅适合个人 |
 
-e2e 套件（`pc/scripts/e2e-linux/`）对 Apache mod_dav 与 nginx dav（+ dav_ext）都完整验证过同步。
+e2e 套件（`pc-gpui/scripts/e2e-linux/`，旧 Tauri 版时期也有一套）对 Apache mod_dav 与 nginx dav（+ dav_ext）都完整验证过同步。
 nginx 必须加载 `dav_ext` 模块（PROPFIND），否则图片清单拿不到。
 
 最简单的自托管：
@@ -266,6 +269,6 @@ cargo fmt --check
 python3 -m unittest discover -s skill/minitodo -p 'test_*.py'
 ```
 
-与真实 PC 应用、真实 WebDAV 的端到端验证见 `pc/scripts/e2e-linux/README.md`。
+与真实 PC 应用、真实 WebDAV 的端到端验证见 `pc-gpui/scripts/e2e-linux/README.md`。
 
-本子项目独立于 `pc/`，不在同一 Cargo workspace 中，互不影响。
+本子项目独立于 PC 端 `pc-gpui/`，不在同一 Cargo workspace 中，互不影响。

@@ -12,11 +12,12 @@ use std::path::PathBuf;
 
 /// 开发专用：覆盖应用数据根目录的环境变量，**仅 debug 构建生效**。
 ///
-/// 用户日常运行着安装版，安装版启用了单实例插件、默认共用真实库与 WebDAV。开发版设置它之后：
+/// 用户日常运行着安装版，安装版启用了单实例、默认共用真实库与 WebDAV。开发版设置它之后：
 /// - 库、图片、备份、节假日缓存都落到该目录（全部经 [`app_data_dir`] 取路径）；新库没有 WebDAV
 ///   配置，因此不会同步
-/// - 日志、WebView2 用户数据也改到该目录下（`lib.rs`），不与安装版共用日志文件与浏览器进程
-/// - 不注册单实例插件、不刷新开机自启注册表项（`lib.rs`），两个 `mini-todo.exe` 可以并存
+/// - 日志也改到该目录下（app 的 `services::logging`），不与安装版共用日志文件
+/// - 不启用单实例（app 的 `services::single_instance`）、不刷新开机自启注册表项（app 的 `lib.rs`），
+///   两个 `mini-todo.exe` 可以并存
 ///
 /// release 构建完全忽略它：[`dev_data_dir_override`] 在 release 下根本不读环境变量，
 /// 纯函数 [`data_dir_override`] 在 `debug_build == false` 时恒为 `None`（有单元测试）。

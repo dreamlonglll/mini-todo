@@ -1,6 +1,6 @@
 //! 农历、节气、传统节日（日历视图单元格下方的小字）。
 //!
-//! 与旧版前端 `pc/src/utils/lunar.ts`（lunar-javascript）逐字段等价：底层换算（公历 → 农历年月日、
+//! 与旧 Tauri 版前端（已删除，见 git 历史）的 `utils/lunar.ts`（lunar-javascript）逐字段等价：底层换算（公历 → 农历年月日、
 //! 闰月、年干支、节气日）用同一作者 6tail 的 Rust 库 `tyme4rs`，名称与格式按 lunar-javascript 输出：
 //!
 //! | 字段 | lunar-javascript | 示例 |
@@ -21,7 +21,7 @@ use tyme4rs::tyme::lunar::{LunarDay, LunarMonth};
 use tyme4rs::tyme::solar::SolarDay;
 use tyme4rs::tyme::{Culture, Tyme};
 
-/// 某天的农历信息（字段同 `pc/src/utils/lunar.ts` 的 `LunarInfo`）
+/// 某天的农历信息（字段同旧前端 `utils/lunar.ts` 的 `LunarInfo`）
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LunarInfo {
     /// 农历日（初一、初二……三十）

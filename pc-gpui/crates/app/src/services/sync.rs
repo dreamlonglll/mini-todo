@@ -1,5 +1,5 @@
 //! WebDAV 同步编排（标题栏同步按钮、自动同步、设置页「立即同步」/ 强制拉取 / 强制推送共用）与
-//! `pc/src/utils/syncReport.ts` 的提示文案（逐字移植）。
+//! 同步结果提示文案（逐字移植自旧 Tauri 版前端 `utils/syncReport.ts`，已删除，见 git 历史）。
 //!
 //! ```ignore
 //! // 标题栏同步按钮（旧 MainView.handleSync）

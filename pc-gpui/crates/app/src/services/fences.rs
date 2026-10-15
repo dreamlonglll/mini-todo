@@ -2,7 +2,7 @@
 //! 目录监听 → 前台刷新、200ms 嵌入守护（Explorer 重启后重挂）、约 2 秒一次的屏幕组合检测。
 //!
 //! 契约：`.trellis/spec/backend/desktop-fences.md` §3.1（建窗参数、可做的窗口操作、几何落库）、§3.4（文件层与线程）、
-//! §3.5（屏幕组合布局）；旧实现 `pc/src-tauri/src/commands/fence.rs` 的 `open_fence_window` / `restore_fences` /
+//! §3.5（屏幕组合布局）；对应旧 Tauri 版（已删除，见 git 历史）`commands/fence.rs` 的 `open_fence_window` / `restore_fences` /
 //! `create_fence_at_cursor` / `toggle_all_fences` / `reset_all_fence_positions` / `tick_fence_screen_layouts`。
 //!
 //! GPUI 下的做法（`research/backend-port.md` §5.3、§7.1）：

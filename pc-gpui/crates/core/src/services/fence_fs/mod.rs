@@ -18,8 +18,8 @@
 //!
 //! 需要 COM STA 的操作（`IFileOperation`、`IShellItemImageFactory`、`ShellExecuteExW`、
 //! `SHOpenFolderAndSelectItems`）在内部专用 STA 线程执行，对外函数可从任意线程调用，但都是**阻塞**的：
-//! 在 Tauri async 命令里用 `tauri::async_runtime::spawn_blocking` 包一层。
-//! **不要在主线程（同步命令、`run_on_main_thread`、窗口事件回调）里调用带 `owner_hwnd` 的移动操作**：
+//! app 层放到后台线程调用（`db::spawn_db` / `background_executor`）。
+//! **不要在 UI 主线程（GPUI 事件处理、`update` / `render`、窗口事件回调）里调用带 `owner_hwnd` 的移动操作**：
 //! 系统对话框以该窗口为父窗口，会向主线程同步发消息，主线程阻塞等待时会死锁。
 //!
 //! ## 平台
@@ -45,7 +45,7 @@ mod watch;
 #[cfg_attr(windows, allow(dead_code))]
 pub(crate) const UNSUPPORTED: &str = "桌面收纳箱仅支持 Windows";
 
-// 契约见 `.trellis/spec/backend/desktop-fences.md`；这里只重新导出集成层（`commands::fence*`）用到的项，
+// 契约见 `.trellis/spec/backend/desktop-fences.md`；这里只重新导出集成层（core 的 `fence` / `fence::items`）用到的项，
 // 其余函数仍可经子模块路径在本模块内使用（纯逻辑都有单元测试）
 pub use folder::{
     create_fence_folder, ensure_fence_folder, fence_folder_path, list_fence_folders,

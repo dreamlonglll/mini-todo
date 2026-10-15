@@ -151,8 +151,8 @@ pub(crate) fn watch_root_at(
 
 /// 监听收纳根目录（不存在则创建），变化经 300ms 去抖后在内部线程 `fence-watch` 上回调。
 ///
-/// * 回调在后台线程执行，里面可以直接 `app_handle.emit_to(...)` 通知对应收纳箱窗口重新列举
-/// * 返回的 [`FenceWatcher`] 需要一直持有（例如放进 Tauri 托管状态），drop 即停止监听
+/// * 回调在后台线程执行，不要在里面碰界面：app 经 channel 把结果交回前台（`fence::items::watch` → app `services::fences`）
+/// * 返回的 [`FenceWatcher`] 需要一直持有（app 放在 `services::fences` 的 `FenceRuntime` 全局状态里），drop 即停止监听
 /// * 本应用自己的移入 / 移回操作同样会触发回调，调用方据此统一刷新即可，不需要区分来源
 pub fn watch_fence_root(
     on_change: impl Fn(FenceChange) + Send + 'static,
@@ -167,7 +167,8 @@ mod tests {
 
     #[test]
     fn watcher_can_live_in_tauri_state() {
-        // Tauri `manage` 要求 Send + Sync：Mutex<FenceWatcher> 需要 FenceWatcher: Send
+        // 旧 Tauri 版（已删除）的 `manage` 托管状态要求 Send + Sync；app 现在把它放在 GPUI Global（`FenceRuntime`）里，
+        // 不再强制 Send，断言保留：FenceWatcher 仍可跨线程转移
         fn assert_send<T: Send + 'static>() {}
         assert_send::<FenceWatcher>();
     }

@@ -1,18 +1,16 @@
 # Sync Protocol (PC ↔ WebDAV ↔ cloud)
 
 > Code-spec for the shared `sync-data.json.gz` channel. Two independent writers implement it:
-> PC (`pc/src-tauri/src/commands/sync_cmd.rs` + `db/sync_store.rs`) and cloud
+> PC (`pc-gpui/crates/core/src/sync/mod.rs` + `db/sync_store.rs` + `db/time.rs` + `db/settings_kv.rs` + `services/webdav.rs`) and cloud
 > (`cloud/src/sync/*`). Every rule below must hold on **both** sides — a rule implemented on one side
 > only silently loses or resurrects data on the other.
-> Established in task `10-02-full-optimization` (2026-10-02); server behaviour measured against
-> Apache 2.4 mod_dav and nginx 1.24 dav/dav_ext, then verified end-to-end with the real app
-> (`pc/scripts/e2e-linux/`, suites S01–S10 run once per server).
+> Established in task `10-02-full-optimization` (2026-10-02, on the old Tauri PC app whose sync code core copied verbatim);
+> server behaviour measured against Apache 2.4 mod_dav and nginx 1.24 dav/dav_ext, then verified end-to-end with the real app.
+> Current e2e: `pc-gpui/scripts/e2e-linux/` S-suites, run once per server.
 >
-> 同样适用于 GPUI 版 PC 端的 `pc-gpui/crates/core`：`sync/mod.rs`（= `sync_cmd.rs`，去掉 Tauri 外壳，`webdav_sync` /
-> `webdav_force_pull` / `webdav_force_push` 合并为 `sync::run(db, SyncMode)`，`sync-completed` 事件改为返回 `SyncReport`）、
-> `db/sync_store.rs` / `db/time.rs` / `db/settings_kv.rs` / `services/webdav.rs`（原样复制）。与 `pc/` 并存期间它是第三个实现，
-> 本文每条规则在三处都必须成立（见 [pc-gpui/core-parity.md](../pc-gpui/core-parity.md)）；e2e 另有
-> `pc-gpui/scripts/e2e-linux/` 的 S 组（Apache + nginx）。
+> 旧 Tauri 版（已删除）的 `webdav_sync` / `webdav_force_pull` / `webdav_force_push` 三个命令在 core 里合并为 `sync::run(db, SyncMode)`，
+> `sync-completed` 事件改为返回值 `SyncReport`（app 的 `services::sync::run_sync` → `AppState::apply_sync_report`）。仍在用旧版本的设备
+> 也是这份文档的写入方，改文档形状前读 [pc-gpui/data-compat.md](../pc-gpui/data-compat.md)。
 
 ---
 
@@ -23,20 +21,23 @@
 - Applies to any change to: the sync document shape, record fields, timestamps written to
   `updated_at` / `deleted_at`, tombstones, settings that sync, WebDAV request headers, the 412 retry
   loop, or the "base version" bookkeeping.
-- Also applies to every **local write path** that touches `todos` / `subtasks` (Tauri commands,
+- Also applies to every **local write path** that touches `todos` / `subtasks` (core `todo` functions,
   import, cloud REST handlers): they feed the LWW comparison.
 
 ### 2. Signatures
 
 ```rust
-// PC — commands/sync_cmd.rs (all async; blocking work in spawn_blocking; one sync at a time)
-#[tauri::command] pub async fn webdav_sync(app: AppHandle, full: Option<bool>) -> Result<SyncReport, String>; // smart sync; full=Some(true): unconditional first GET (manual sync)
-#[tauri::command] pub async fn webdav_force_pull(app: AppHandle) -> Result<SyncReport, String>; // local := remote
-#[tauri::command] pub async fn webdav_force_push(app: AppHandle) -> Result<SyncReport, String>; // remote := local
-// re-entry while a sync runs -> Err("同步正在进行中")
+// PC — pc-gpui/crates/core/src/sync/mod.rs (blocking; reqwest::blocking, never inside a tokio runtime; one sync at a time)
+pub enum SyncMode { Smart { full: bool }, ForcePull, ForcePush }
+pub fn run(db: &Database, mode: SyncMode) -> Result<SyncReport, String>;
+//   Smart { full: true }:  title-bar button / Settings "立即同步" — unconditional first GET
+//   Smart { full: false }: auto sync (every FULL_GET_EVERY-th round is unconditional anyway)
+//   ForcePull: local := remote;  ForcePush: remote := local
+// re-entry while a sync runs -> Err("同步正在进行中"); not configured -> Err("未配置 WebDAV 服务器")
 // SyncReport (camelCase): status no_changes|pulled|pushed|merged, lastSyncAt,
 //   todos/subtasks Inserted/Updated/Deleted, recordsSkipped, imagesUploaded/Downloaded, settingsApplied
-// emits "sync-completed"(SyncReport) to all windows when local data or settings changed
+// SyncReport::local_changed() / settings_applied tell the app what to reload:
+//   app services::sync::run_sync (background) -> AppState::apply_sync_report (refetch todos / reload settings)
 
 // PC — db/time.rs
 pub const CANONICAL_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
@@ -76,7 +77,7 @@ cloud keeps the equivalent in `meta` (`dirty`, `base_etag`, `base_last_modified`
 ```
 
 - `entityId` is an integer (PC ids are `i64`; cloud-created ids are `millis * 1000 + rand(0..999)`,
-  always < 2^53 so the JS frontend keeps them exact).
+  always < 2^53 so consumers that parse JSON numbers as doubles — the old Tauri JS frontend did — keep them exact).
 - Tombstones older than 30 days are dropped on write and purged locally.
 
 #### 3.2 Time (K1)
@@ -127,14 +128,14 @@ cloud keeps the equivalent in `meta` (`dirty`, `base_etag`, `base_last_modified`
 | New base | ETag from the PUT response → HEAD → PROPFIND Depth 0 `getetag`. If the probed size ≠ uploaded size, record no base (next sync does a full GET). Never record a base for content that was not merged. |
 | Images | Upload missing images **before** the document; list remote images with one PROPFIND Depth 1 (any namespace prefix, single- or multi-line XML); names must pass `is_safe_image_name` (`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`, no `..`). |
 | Self-heal | After merging, if the remote document lacks local records/tombstones (a server that ignores preconditions let someone overwrite us), upload again even when nothing changed locally. |
-| Full GET (both) | Unconditional GET on every 10th round — cloud pull loop (`FULL_PULL_EVERY`), PC smart sync (`FULL_GET_EVERY`, process-wide counter) — and on every manual sync (cloud `/sync`, `/sync/pull`; PC `webdav_sync { full: true }` from the title-bar button and Settings "立即同步"): nginx ETags have 1-second resolution and hide same-second, same-size rewrites behind 304. |
+| Full GET (both) | Unconditional GET on every 10th round — cloud pull loop (`FULL_PULL_EVERY`), PC smart sync (`FULL_GET_EVERY`, process-wide counter) — and on every manual sync (cloud `/sync`, `/sync/pull`; PC `SyncMode::Smart { full: true }` from the title-bar button and Settings "立即同步"): nginx ETags have 1-second resolution and hide same-second, same-size rewrites behind 304. |
 
 #### 3.5 Force operations (PC)
 
-- `webdav_force_pull`: local := remote; deletes local-only records **without** tombstones; applies
-  remote settings (device keys excluded) regardless of `settingsUpdatedAt`. Missing remote → `Err`.
-- `webdav_force_push`: remote := local; writes tombstones for remote-only records (otherwise cloud's
-  next push merges them straight back), bumps local versions with the monotonic rule, conditional PUT.
+- `SyncMode::ForcePull` (Settings「用云端覆盖本地」, with confirmation): local := remote; deletes local-only records
+  **without** tombstones; applies remote settings (device keys excluded) regardless of `settingsUpdatedAt`. Missing remote → `Err`.
+- `SyncMode::ForcePush` (Settings「用本地覆盖云端」, with confirmation): remote := local; writes tombstones for remote-only
+  records (otherwise cloud's next push merges them straight back), bumps local versions with the monotonic rule, conditional PUT.
 
 #### 3.6 设备本地数据（不同步）
 
@@ -153,11 +154,11 @@ cloud keeps the equivalent in `meta` (`dirty`, `base_etag`, `base_last_modified`
 
 - 三张收纳箱表**不接** `sync_meta.local_seq` 的变更计数触发器、不写 `tombstones`：写它们不能让同步认为"有本地变更"去上传。
 - 设备本地的 settings 键不进 `AppSettings`、不进 `db::settings_kv::SYNCED_SETTING_KEYS`，`read_app_settings` / `write_app_settings`
-  不读写它们，因此导入备份、`webdav_force_pull` 应用远端设置时也不会覆盖它们。`fence_onedrive_notice_shown` 是对 `CLAUDE.md`
+  不读写它们，因此导入备份、强制拉取（`SyncMode::ForcePull`）应用远端设置时也不会覆盖它们。`fence_onedrive_notice_shown` 是对 `CLAUDE.md`
   「维护检查清单」第 1 条的**有意偏离**（原因见 [desktop-fences.md §3.3](./desktop-fences.md)）。
 - 新增设备本地数据时：在本表登记，并在 `CLAUDE.md`「当前同步覆盖范围」表里标"否"。
 - 测试：`migrations::v29_fence_writes_do_not_count_as_sync_changes`（增删改收纳箱表后 `local_seq` 不变、墓碑数为 0）、
-  `fence_items::onedrive_notice_is_claimed_once_and_stays_device_local`（不在 `SYNCED_SETTING_KEYS`，导出的 `AppSettings` JSON 里没有它）。
+  `fence::items` 的 `onedrive_notice_is_claimed_once_and_stays_device_local`（不在 `SYNCED_SETTING_KEYS`，导出的 `AppSettings` JSON 里没有它）。
 
 ### 4. Validation & Error Matrix
 
@@ -183,16 +184,16 @@ cloud keeps the equivalent in `meta` (`dirty`, `base_etag`, `base_last_modified`
 
 ### 6. Tests Required
 
-- PC `cargo test` (`pc/src-tauri`): `sync_store` merge/tombstone/settings cases, `db::time`
-  parsing + `superseding`, and the `sync_cmd` interop tests that run the full sync against a
-  `tiny_http` mock server in Apache and nginx modes (weak ETag window, IUS 412, missing validators).
+- PC `cargo test -p mini-todo-core` (in `pc-gpui/`): `db/sync_store.rs` merge/tombstone/settings cases, `db::time`
+  parsing + `superseding`, and `sync/tests.rs` — the full sync against an in-process `tiny_http` mock WebDAV in
+  Apache and nginx modes (weak ETag window, IUS 412, missing validators, nginx same-second blind spot).
 - cloud `cargo test`: `sync/merge.rs` unit tests, `sync/scenario_tests.rs` on `mock_dav`
   (`MockDav::start_apache` / `start_nginx`), API integration tests incl. "no-op PATCH does not bump
   `updatedAt`".
-- e2e (`pc/scripts/e2e-linux/run_e2e.py`, S01–S10 per server): first sync / no change, A1 same-day
-  merge, deletion both ways without resurrection, concurrent edits, cloud validation and aliases,
-  images, settings LWW + unknown top-level key preserved, force pull/push, PC + cloud concurrent
-  writes, UI sync button.
+- e2e (`pc-gpui/scripts/e2e-linux/run_e2e.py`, S-suites once per server, driven through the real GPUI UI): first sync / no change,
+  title-bar sync, cloud writes and aliases, deletion both ways without resurrection, two devices, monotonic versions,
+  images, settings LWW + unknown top-level key preserved, force pull/push, PC + cloud concurrent writes, auto sync
+  (case list in that README).
 
 ### 7. Wrong vs Correct
 

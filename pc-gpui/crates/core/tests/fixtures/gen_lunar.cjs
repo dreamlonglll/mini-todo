@@ -1,13 +1,19 @@
-// 生成农历对照数据：用旧版前端同一个库（lunar-javascript，pc/src/utils/lunar.ts 的依赖）
-// 逐日算出 getLunarInfo 的各字段，写入同目录的 lunar_fixture.json，供 core 的 lunar 单测逐日比对。
+// 生成农历对照数据：用旧 Tauri 版前端（已删除，见 git 历史）同一个库 lunar-javascript，
+// 逐日算出旧前端 `utils/lunar.ts` 里 getLunarInfo 的各字段，写入同目录的 lunar_fixture.json，供 core 的 lunar 单测逐日比对。
 //
-// 用法（仓库根目录下，需先在 pc/ 执行过 npm ci）：
-//   node pc-gpui/crates/core/tests/fixtures/gen_lunar.cjs
+// 用法：先在任意临时目录装好与旧前端锁定版本相同的 lunar-javascript（1.7.7），再在仓库根目录用
+// NODE_PATH 指向它的 node_modules 运行（不要装进仓库目录）：
+//   Git Bash / Linux：
+//     mkdir -p /tmp/lunar-js && npm i --prefix /tmp/lunar-js lunar-javascript@1.7.7
+//     NODE_PATH=/tmp/lunar-js/node_modules node pc-gpui/crates/core/tests/fixtures/gen_lunar.cjs
+//   PowerShell：
+//     npm i --prefix "$env:TEMP\lunar-js" lunar-javascript@1.7.7
+//     $env:NODE_PATH = "$env:TEMP\lunar-js\node_modules"; node pc-gpui/crates/core/tests/fixtures/gen_lunar.cjs
 //
-// 字段与 pc/src/utils/lunar.ts 的 getLunarInfo 一一对应。
+// 字段与旧前端 getLunarInfo 一一对应（Rust 侧见 crates/core/src/lunar.rs 的 LunarInfo）。
 const path = require('path')
 const fs = require('fs')
-const { Solar } = require(path.join(__dirname, '../../../../../pc/node_modules/lunar-javascript'))
+const { Solar } = require('lunar-javascript')
 
 const START = Date.UTC(2024, 0, 1)
 const END = Date.UTC(2027, 11, 31)

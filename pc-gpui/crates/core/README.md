@@ -1,7 +1,8 @@
 # mini-todo-core
 
-GPUI 版 PC 端（`pc-gpui/`）的业务核心库：package `mini-todo-core`，lib `mini_todo_core`。
-由旧版 `pc/src-tauri/src` **复制**（不是移动）而来，`pc/` 下文件一律未改。
+PC 端（`pc-gpui/`，GPUI 版，3.0 起是唯一的 PC 实现）的业务核心库：package `mini-todo-core`，lib `mini_todo_core`。
+由旧 Tauri 版的 `src-tauri/src` 复制改写而来。旧版源码已在 3.0 删除，需要对照时从 git 历史取：
+`git show 749405a:pc/src-tauri/src/<路径>`（`749405a` 是删除前的最后一个提交）。下文的"旧版 / 旧命令 / 旧前端"都指它。
 
 - **不依赖 GPUI / Tauri / tokio**（`tokio` 只作为 `reqwest::blocking` 的内部实现间接出现）。
 - 全部函数是**阻塞**的（数据库 / 文件 / 网络 / Shell）。app 层用 `cx.background_executor().spawn(...)`
@@ -15,7 +16,7 @@ GPUI 版 PC 端（`pc-gpui/`）的业务核心库：package `mini-todo-core`，l
 
 ```text
 crates/core/
-├── Cargo.toml                 # 依赖版本与 pc/src-tauri/Cargo.toml 一致；feature test-util
+├── Cargo.toml                 # 依赖版本沿用旧版；feature test-util
 ├── README.md                  # 本文件
 ├── src/
 │   ├── lib.rs
@@ -32,7 +33,7 @@ crates/core/
 │   ├── holiday.rs             # ← commands/holiday.rs（async reqwest → blocking）
 │   ├── reminder.rs            # ← services/notification.rs 的纯逻辑
 │   ├── window_logic.rs        # ← commands/window.rs + lib.rs 的纯函数
-│   ├── lunar.rs               # 新增：农历（tyme4rs），等价于 pc/src/utils/lunar.ts
+│   ├── lunar.rs               # 新增：农历（tyme4rs），等价于旧前端 utils/lunar.ts
 │   └── fence/
 │       ├── mod.rs             # ← commands/fence.rs 中与窗口无关的部分
 │       └── items.rs           # ← commands/fence_items.rs 中与窗口无关的部分
@@ -52,9 +53,12 @@ cargo test -p mini-todo-core
 # Windows 目标交叉检查（覆盖 cfg(windows) 的 COM / Shell / DPAPI / DirectWrite 代码）
 cargo clippy -p mini-todo-core --all-targets --target x86_64-pc-windows-gnu -- -D warnings
 
-# 重新生成农历对照数据（需先在 pc/ 下 npm ci）
-node pc-gpui/crates/core/tests/fixtures/gen_lunar.cjs      # 在仓库根目录执行
+# 重新生成农历对照数据（在仓库根目录执行；lunar-javascript 装在临时目录，版本与旧前端锁定的 1.7.7 相同）
+mkdir -p /tmp/lunar-js && npm i --prefix /tmp/lunar-js lunar-javascript@1.7.7
+NODE_PATH=/tmp/lunar-js/node_modules node pc-gpui/crates/core/tests/fixtures/gen_lunar.cjs
 ```
+
+PowerShell 写法见 `tests/fixtures/gen_lunar.cjs` 文件头。
 
 Windows 专属测试（`fence_fs` 的 shell / sta / 真实图标提取 / Windows 监听、`secret` 的 DPAPI 往返）只在 Windows 上编译运行；
 `fence_fs::location` 有 1 个测试只在 `--release` 下编译（与旧版相同）。
@@ -84,7 +88,7 @@ Windows 专属测试（`fence_fs` 的 shell / sta / 真实图标提取 / Windows
 
 ## 公开 API
 
-签名里的 `Result<_, String>` 省略为 `R<_>`。"旧命令"列是 `pc/src-tauri` 里对应的 `#[tauri::command]`。
+签名里的 `Result<_, String>` 省略为 `R<_>`。"旧命令"列是旧 Tauri 版里对应的 `#[tauri::command]`（历史对照，排查行为差异时用）。
 
 ### `db`（原样复制）
 
@@ -243,7 +247,8 @@ app 持有 `AutoHideState` 与 `TOP_ON_WAKE: AtomicBool`，200ms 前台定时器
 | `reset_window_position(monitor, scale) -> WindowPosition`、`RESET_WINDOW_WIDTH/HEIGHT`（380×600 逻辑） | 托盘「重置位置」：主显示器左上起 10% 边距 | `reset_window_impl` |
 | `EDGE_SNAP_THRESHOLD_PX` 等常量 | 10px / 420ms / 3s / 600ms / 4px / 2px / 40px | |
 
-不在 core（app 的 Win32 平台层，参考 `pc/src-tauri/src/commands/window.rs`）：`apply_fixed_ex_style_hwnd`（L829）、
+不在 core（app 的 Win32 平台层 `crates/app/src/platform/` 与 `services/window_mode.rs`；括号里是旧版 `src-tauri/src/commands/window.rs`
+删除前的行号）：`apply_fixed_ex_style_hwnd`（L829）、
 `desktop_host` / `desktop_attach_hwnd` / `desktop_detach`（L1013-1106）、`win32_set_topmost`（L861）、`win32_show`（L894）、
 `set_window_bounds_physical`（L1293）、`tick_embedded_windows`（L1336）、`restore_if_minimized`（L618）、
 DWM 圆角（`lib.rs` L55）、`MessageBoxW` 致命错误（`lib.rs` L139）；以及 tao `always_on_bottom` 的替代（`WM_WINDOWPOSCHANGING` 子类化）。
@@ -273,7 +278,7 @@ DWM 圆角（`lib.rs` L55）、`MessageBoxW` 致命错误（`lib.rs` L139）；�
 | `screen_switch(db, previous, current, &[(id, Option<PxRect>, scale)]) -> Vec<(Fence, PxRect)>` | 组合变化后的新存储几何（有记录用记录，否则沿用窗口当前位置、只记内存）；app 再按 `fence_view(.., !fence.collapsed, ..)` 摆窗 | `apply_screen_switch` |
 | `delete(db, id, owner_hwnd: Option<isize>) -> R<DeleteFenceResult { deleted, restored, remaining, failures }>` | 先全部移回原位置；文件夹清空并删除才删记录（`deleted = true` → app 销毁窗口）；否则整个保留、删掉已移回项的行，app 用 `items::refresh` 刷新窗口。**后台线程** | `delete_fence` |
 
-app 层负责（参考 `pc/src-tauri/src/commands/fence.rs`）：建窗参数（L833-898：无边框透明、不可缩放 / 最小化、`show:false` → 嵌入 → 显示、
+app 层负责（`crates/app/src/services/fences.rs`、`windows/fence/`；行号指旧版 `src-tauri/src/commands/fence.rs`）：建窗参数（L833-898：无边框透明、不可缩放 / 最小化、`show:false` → 嵌入 → 显示、
 关闭拦截）、`set_fence_bounds`（缩放手柄逐帧 `SetWindowPos`，不落库）、`set_fence_view`（`Placement::for_screen(..).rect(..)` → `fence_view` → 摆窗）、
 显示 / 隐藏全部（`FENCES_HIDDEN` 运行时状态，不持久化）、嵌入窗口登记与 200ms 守护。
 

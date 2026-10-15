@@ -1,5 +1,5 @@
 //! 记录字段契约（跨端契约 K6），以 PC 端 `Todo` / `SubTask` 强类型模型为准
-//! （`pc/src-tauri/src/db/models.rs`）。
+//! （`pc-gpui/crates/core/src/db/models.rs`；旧 Tauri 版的同名文件与它一致）。
 //!
 //! PC 合并远端时用强类型反序列化：未知字段直接丢弃，类型不符的记录整条跳过（两端从此
 //! 分叉）。云端存的是原始 JSON（KV-style），所以每条进入缓存的路径都要守住契约：
@@ -21,7 +21,8 @@ use serde_json::{json, Map, Value};
 
 use crate::time::{normalize_datetime, CANONICAL_FORMAT};
 
-/// 高 / 中 / 低优先级在 PC 端对应的颜色（`pc/src/types/todo.ts` 的预设色）。
+/// 高 / 中 / 低优先级在 PC 端对应的颜色（PC 编辑窗口的预设色，`pc-gpui/crates/app/src/windows/editor/mod.rs`
+/// 的 `PRESET_COLORS`）。
 pub const COLOR_HIGH: &str = "#EF4444";
 pub const COLOR_MEDIUM: &str = "#F59E0B";
 pub const COLOR_LOW: &str = "#10B981";

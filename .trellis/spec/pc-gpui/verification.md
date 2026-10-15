@@ -15,7 +15,8 @@
 | `cfg(windows)` 代码：`platform/`、`services/{tray,single_instance,autostart,notify,window_mode,fences}`、`build.rs`；core 的 `services/secret.rs`、`services/fence_fs/`、`settings::system_fonts` | + §3 Windows 交叉 clippy |
 | 可见界面（窗口布局、控件、`theme.rs`、文案、字体） | + §4 `regress.py`：相关场景 `--only`，逐张看 `compare/`；改共享控件 / `theme.rs` 时跑全部场景并看控件样例（`gallery`） |
 | 跨窗口流程（新建 / 编辑 / 子任务 / 设置即时生效 / 导入导出 / 已完成 / 提醒 / 收纳箱新建改名） | + `regress.py --smoke` |
-| core 的同步、导入导出、迁移、提醒调度；单实例、日志 | + §5 Linux e2e（F / S / L 组；同步改动跑 S 组 Apache + nginx），并按 [core-parity.md](./core-parity.md) 确认 `pc/` 也改了 |
+| core 的同步、导入导出、迁移、提醒调度；单实例、日志 | + §5 Linux e2e（F / S / L 组；同步改动跑 S 组 Apache + nginx），并按 [data-compat.md](./data-compat.md) 确认 cloud 侧也改了 |
+| 版本号、`release.yml` / `cache-warm.yml`、NSIS 安装器 | 见 [release.md](./release.md) |
 | Windows 窗口行为（窗口模式、嵌入桌面、透明、通知窗口定位、收纳箱、托盘、开机自启、单实例、DPAPI、Toast、release 构建） | + §6 Windows e2e（CI 或本机），交付说明里列出需要用户实机验收的项 |
 | 升级 `gpui-kit` | 以上全部（[gpui-conventions.md §3](./gpui-conventions.md)） |
 
@@ -37,13 +38,15 @@ cargo test -p mini-todo-core
 - Linux 构建依赖（Ubuntu 24.04）：`libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libvulkan-dev
   libfontconfig-dev libfreetype-dev libssl-dev libzstd-dev libasound2-dev pkg-config clang`（与 CI 相同）。
 - 测试放哪：
-  - core：随 `pc/src-tauri` 迁移来的全部测试（`sync_store` 合并、迁移、时间、WebDAV 互操作（`tiny_http` 模拟 Apache / nginx）、
+  - core：随旧 Tauri 版代码迁移来的全部测试（`sync_store` 合并、迁移、时间、WebDAV 互操作（`tiny_http` 模拟 Apache / nginx）、
     `fence_fs` 纯逻辑……）+ 新增的 `lunar`（逐日比对 `tests/fixtures/lunar_fixture.json`）。新业务逻辑优先写在 core 并带单测。
   - app：纯逻辑放在 `util/`、`windows/*/logic.rs`、`services/*` 等不依赖窗口的函数里并就地 `#[cfg(test)]`（旧 vitest 用例已移植到
     `util/*.rs`）。没有使用 GPUI 的 headless 测试（`gpui-kit/test-support` 会扰动 `Cargo.lock`，见 gpui-api.md §C1）——界面用 §4 验证。
   - app 测试需要内存库时依赖 `mini-todo-core` 的 feature `test-util`（`Database::new_in_memory()`，dev-dependencies 已开）。
   - Windows 专属测试（`fence_fs` 的 shell / sta / 图标、`secret` 的 DPAPI 往返）只在 Windows 上编译运行（CI Windows job 覆盖）。
-- 重新生成农历对照数据（需先在 `pc/` 下 `npm ci`；在仓库根目录执行）：`node pc-gpui/crates/core/tests/fixtures/gen_lunar.cjs`。
+- 重新生成农历对照数据（在仓库根目录执行；lunar-javascript 1.7.7 装在临时目录，不要装进仓库）：
+  `npm i --prefix /tmp/lunar-js lunar-javascript@1.7.7`，再 `NODE_PATH=/tmp/lunar-js/node_modules node pc-gpui/crates/core/tests/fixtures/gen_lunar.cjs`
+  （PowerShell 写法见脚本文件头）。
 
 ---
 
@@ -79,9 +82,10 @@ scripts/shot.sh --open main,gallery --window 控件样例 /tmp/shots    # ui/ �
   `MINI_TODO_DEBUG_OPEN` 启动 debug 构建 → 交互 → 按窗口截图（与参考截图同名）。网络被断开（节假日走缓存、版本检查失败），结果确定。
 - 输出：`<out>/<场景>.png`、`<out>/compare/<场景>.png`（左：参考图｜中：`--before`｜右：本次）、`<out>/logs/<场景>.log`，
   冒烟另有 `<out>/results.json`。默认输出目录 `pc-gpui/target/regress`。
-- **参考截图不在仓库里**：由旧 Vue 前端（`pc/`）在 Playwright Chromium 里按真实窗口逻辑尺寸渲染（时间冻结在 2026-10-15 10:00
-  Asia/Shanghai，1920×1080 @100%，Windows UA）。用 `--ref` 或环境变量 `MINI_TODO_REF_DIR`（冒号分隔多个目录）指定；生成方法见
-  `crates/app/README.md` §1。没有参考图时用 `--before`（改动前跑一遍的输出）做自身回归——`pc/` 删除后这是唯一的基线。
+- **基线用 `--before`**（改动前跑一遍的输出）做自身回归——旧 Tauri 版删除后这是唯一能随时生成的基线。
+- `--ref` / 环境变量 `MINI_TODO_REF_DIR`（冒号分隔多个目录）是**可选**的：重写期间由旧 Vue 前端在 Playwright Chromium 里按真实窗口
+  逻辑尺寸渲染的参考截图（时间冻结在 2026-10-15 10:00 Asia/Shanghai，1920×1080 @100%，Windows UA），在仓库外生成、不在仓库里，
+  旧前端删除后无法再从仓库重新生成（见 `crates/app/README.md` §1）。
 - 看对照图时：透明窗口（主窗口 / 通知 / 收纳箱）圆角外在 Xvfb 下是黑色，忽略四角；日历 / 提醒相关场景与真实时间有关，只比较布局；
   Linux 字体是 Liberation Sans + Noto Sans CJK SC 代替 Segoe UI + 微软雅黑（与参考截图相同）；中文折行位置可能差一个字（GPUI 不做
   避头尾，见 [gpui-conventions.md §2.13](./gpui-conventions.md)）。
@@ -137,4 +141,5 @@ Linux 与 CI 虚拟机覆盖不到真实环境的部分，交付说明里逐项�
 - 透明窗口与深色主题的观感、DWM 圆角
 - 桌面收纳箱真实拖入（含公共桌面 UAC、OneDrive 重定向桌面）、移回、删除保留语义
 - 托盘菜单、开机自启（注册表项与旧版共用）、系统通知（Toast，AppUserModelID 与旧版一致）
-- 与旧版（`pc/`）切换：同一数据目录、单实例互认（运行中的一版会被唤起、新启动的一版退出）、WebDAV 同步混用
+- 从旧 Tauri 版（2.5.0）升级：安装包原地升级（[release.md](./release.md) §5）、数据目录沿用、单实例互认（运行中的一版会被唤起、
+  新启动的一版退出）、与仍在用旧版的设备经 WebDAV 混用

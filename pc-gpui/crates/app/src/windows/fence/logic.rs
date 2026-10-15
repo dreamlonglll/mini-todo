@@ -1,4 +1,5 @@
-//! 收纳箱窗口用到的纯函数（旧 `pc/src/utils/fence.ts` 的 1:1 移植，测试向量照抄 `fence.test.ts` / 规格 §5）。
+//! 收纳箱窗口用到的纯函数（旧 Tauri 版前端 `utils/fence.ts` 的 1:1 移植，测试向量照抄 `fence.test.ts` / 规格 §5；
+//! 旧前端已删除，见 git 历史）。
 
 use std::time::Instant;
 

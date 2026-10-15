@@ -58,7 +58,7 @@ python3 run_e2e.py <app> <cloud> S03[apache] F06b
 | `MT_E2E_DISPLAYS` | `:78,:79` | Xvfb 显示号（第二个只给 S05 的设备 B 用） |
 | `MT_E2E_DAV_ROOT` | `/srv/mtodo-e2e` | `setup.sh` 建的 WebDAV 根 |
 | `MT_E2E_SEED` | `<app 同目录>/examples/seed` | core 的 seed 示例 |
-| `MT_E2E_REF_SHOTS` | 空 | 参考截图目录（Vue 版渲染）；设置后 F00 在结果里附 RMSE 差异度量（只报告，不断言） |
+| `MT_E2E_REF_SHOTS` | 空 | **可选**：参考截图目录（旧 Tauri 版 Vue 前端渲染，不在仓库里，见 `../README.md`）；设置后 F00 在结果里附 RMSE 差异度量（只报告，不断言） |
 
 输出：`$MT_E2E_WORK/run/results.txt`（PASS / FAIL / N/A 汇总）、`run/shots/*.png`、`run/app-<会话>.log`（应用标准输出）、
 `run/sessions/<会话>/data/`（每台"设备"的数据目录，含 `logs/mini-todo.log`）、`run/cloud-<webdav>/`。
@@ -109,7 +109,9 @@ python3 run_e2e.py <app> <cloud> S03[apache] F06b
 三张收纳箱表、两次迁移新增的 settings 键与迁移记录），最后按旧版写法插入 `T` 分隔 / 无秒 / 小数秒 / 仅日期的存量时间。
 v1~v27 的表结构与旧版 Tauri 应用是同一份迁移 SQL；不需要构建旧版（旧套件要求一个 v28 之前的旧版二进制）。
 
-## 与旧版套件（`pc/scripts/e2e-linux/`）的差异
+## 与旧版套件的差异
+
+旧 Tauri 版自己的 Linux e2e 套件已随旧版在 3.0 删除（见 git 历史），下表只作历史对照。
 
 | | 旧版（Tauri） | GPUI 版 |
 |---|---|---|

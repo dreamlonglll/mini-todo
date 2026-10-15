@@ -1,7 +1,7 @@
 # GPUI 约定（`pc-gpui/crates/app`）
 
 > app crate 的可执行约定。来源：`pc-gpui/crates/app/README.md` §3「约定」与 §2.1「维护规则」、
-> `.trellis/tasks/10-15-gpui-rewrite/research/gpui-api.md` §0「结论速览」，以及实现过程中踩过的坑。
+> `.trellis/tasks/archive/2026-10/10-15-gpui-rewrite/research/gpui-api.md` §0「结论速览」，以及实现过程中踩过的坑。
 > 版本：`gpui-kit =0.7.3`（re-export gpui-pre 0.3.9、gpui-pre-platform、gpui-base 0.7.3、gpui-component 0.7.3）。
 > API 以本机 `~/.cargo/registry/src/index.crates.io-*/gpui-pre-0.3.9`、`gpui-pre-windows-0.3.9`、`gpui-component-0.7.3`
 > 等源码为准——gpui-pre 是 Zed 的每周快照，网上的示例、文档常常对不上这个版本。
@@ -54,8 +54,8 @@
   `platform::set_geometry_locked`（子类化 `WM_NCHITTEST` / `WM_SYSCOMMAND`），永远不可缩放的窗口建窗时就给 `resizable: false`。
 - 不要给 GPUI 窗口加 `WS_EX_LAYERED`（与 DirectComposition 透明冲突）；不要设 `GPUI_DISABLE_DIRECT_COMPOSITION`（透明失效）。
 - **几何一律按客户区（= 可见区域）**：GPUI 窗口在左 / 右 / 下有系统的不可见边框（96 DPI 下各 8px；不可缩放、`PopUp` 的窗口也有——
-  没有 `WS_POPUP` 的顶层窗口会被系统补上 `WS_CAPTION`），只有顶边被 GPUI 的 `WM_NCCALCSIZE` 去掉。旧版 Tauri 无边框窗口外框 = 客户区，
-  所以库里的主窗口 / 收纳箱几何、通知的定位算法都是客户区。摆窗用 `platform::set_client_rect_physical` / `set_client_position_physical`
+  没有 `WS_POPUP` 的顶层窗口会被系统补上 `WS_CAPTION`），只有顶边被 GPUI 的 `WM_NCCALCSIZE` 去掉。旧 Tauri 版（已删除）的无边框窗口外框 = 客户区，
+  库里的主窗口 / 收纳箱几何、通知的定位算法沿用它，都是客户区。摆窗用 `platform::set_client_rect_physical` / `set_client_position_physical`
   或 `Hwnd::set_client_rect` / `set_client_position`，读用 `client_rect_physical` / `Hwnd::client_rect`；外框（`window_rect_physical`、
   `Hwnd::rect` / `set_rect`）只用于换算。
 - GPUI 建窗时 `calculate_window_rect` 把只在底部的边框高度对半分到上下，按 `WindowOptions.window_bounds` 建出的客户区比请求的高
@@ -215,7 +215,8 @@
 
 - `crates/app/Cargo.toml`：`gpui-kit = "=0.7.3"`（**精确**版本）。gpui-pre 是 Zed 的每周快照，次版本之间就有不兼容的 API 变化；
   不要改成 `^`，也不要单独升级 gpui-pre / gpui-component（由 gpui-kit 统一 re-export）。
-- `windows` crate：app 用 0.62（与 gpui-pre-windows 同一版本，避免再编一份）；core 用 0.58（`pc/src-tauri` 的副本，独立，不要为了统一去改）。
+- `windows` crate：app 用 0.62（与 gpui-pre-windows 同一版本，避免再编一份）；core 用 0.58（沿用旧 Tauri 版代码时的版本，与 app 独立；
+  要统一须单独立项，并跑 core 的 Windows 专属测试与 Windows e2e）。
   app 缺 feature 时追加到列表末尾。
 - `Cargo.lock` 提交；CI 一律 `--locked`。
 

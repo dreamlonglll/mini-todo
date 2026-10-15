@@ -1,11 +1,11 @@
-# Backend (Rust / Tauri) Development Guidelines
+# Backend Development Guidelines（PC 业务与平台层契约）
 
-> Code-specs for `pc/src-tauri/`. Each file is an executable contract: signatures, persisted keys,
+> Code-specs for the PC data / platform contracts. Each file is an executable contract: signatures, persisted keys,
 > ordering rules, error matrix, required tests.
 >
-> 同样适用于 GPUI 版的业务核心 `pc-gpui/crates/core`（`mini-todo-core`，由 `pc/src-tauri/src` 复制而来：`db/`、`services/` 原样，
-> `commands/*.rs` 去掉 Tauri 外壳）。窗口 / 平台部分在 `pc-gpui/crates/app`，按 [pc-gpui 规范](../pc-gpui/index.md) 实现同样的语义契约；
-> 文件对应与两边一起改的规则见 [pc-gpui/core-parity.md](../pc-gpui/core-parity.md)。
+> 3.0 起 PC 端只有 GPUI 版 `pc-gpui/`（旧 Tauri 版 `pc/` 已删除，见 git 历史）：业务核心在 `pc-gpui/crates/core`（`mini-todo-core`，
+> 阻塞函数，不依赖 GPUI / Tauri / tokio），窗口 / 平台部分在 `pc-gpui/crates/app`。GPUI 的写法约定见 [pc-gpui 规范](../pc-gpui/index.md)，
+> 数据结构改动对 cloud 与已安装旧版本的影响见 [pc-gpui/data-compat.md](../pc-gpui/data-compat.md)。
 
 ---
 
@@ -13,54 +13,48 @@
 
 | Guide | Description | Status |
 |-------|-------------|--------|
-| [Window Modes](./window-modes.md) | Normal / fixed / fixed+embedded-in-desktop: atomics, Tauri commands, Win32 ordering rules, persistence, Explorer-restart recovery, e2e harness | Active |
+| [Window Modes](./window-modes.md) | 主窗口普通 / 经典固定 / 固定 + 嵌入桌面：模式状态表、`services::window_mode` 的切换与 200ms 轮询、`platform::embed` / `subclass`、持久化键、Explorer 重启自愈、e2e | Active |
 | [Sync Protocol](./sync-protocol.md) | PC ↔ WebDAV ↔ cloud: document shape, time format, monotonic `updated_at`, record LWW + tombstones, settings LWW, WebDAV precondition rules measured on Apache / nginx | Active |
-| [Desktop Fences](./desktop-fences.md) | 桌面收纳箱：始终嵌入桌面层的附属窗口（建窗标志、`EMBEDDED_WINDOWS` 登记与 200ms 轮询、移动 / 缩放 / 几何落库）、19 个命令与 `fence-items-changed`、v29 三张表、文件层（文件夹为 source of truth、对账、`FenceActivity`、删除保留语义）、按屏幕组合记忆位置、debug 专用环境变量、asset scope | Active |
+| [Desktop Fences](./desktop-fences.md) | 桌面收纳箱：始终嵌入桌面层的窗口（建窗参数、嵌入守护、移动 / 缩放 / 几何落库）、core `fence` / `fence::items` 接口与 `FenceRefresh`、v29 三张表、文件层（文件夹为 source of truth、对账、`FenceActivity`、删除保留语义）、按屏幕组合记忆位置、debug 专用环境变量 | Active |
 
 ---
 
 ## Pre-Development Checklist
 
-Before touching `pc/src-tauri/src/commands/window.rs` or anything that changes the main window's
-style, owner, Z-order or minimizability:
+改主窗口的样式、owner、Z 序、可最小化或几何锁定（`pc-gpui/crates/app/src/services/window_mode.rs`、`platform/embed.rs`、
+`platform/subclass.rs`、`platform/windows.rs`）之前：
 
-- [ ] Read [Window Modes](./window-modes.md) — especially "Ordering rules" and "Wrong vs Correct"
+- [ ] Read [Window Modes](./window-modes.md) — especially §3 "Ordering rules" and "Wrong vs Correct"
 
-改桌面收纳箱（`commands/fence.rs`、`commands/fence_items.rs`、`services/fence_fs/`、`window.rs` 的嵌入附属窗口 /
-`desktop_attach_hwnd`、`FenceView.vue` / `FenceItemGrid.vue`、`fences` / `fence_items` / `fence_layouts` 表）之前：
+改桌面收纳箱（core `fence/`、`services/fence_fs/`；app `services/fences.rs`、`windows/fence/`、`platform/embed.rs`；`fences` /
+`fence_items` / `fence_layouts` 表）之前：
 
-- [ ] 读 [Desktop Fences](./desktop-fences.md) —— 尤其 §3.1（建窗标志与可做的窗口操作）、§3.4（对账、upsert、登记与锁顺序、删除保留）、§7
+- [ ] 读 [Desktop Fences](./desktop-fences.md) —— 尤其 §3.1（建窗参数与可做的窗口操作）、§3.4（对账、upsert、登记与锁顺序、删除保留）、§7
 - [ ] 会移动用户文件的改动：只在隔离环境（`MINI_TODO_DATA_DIR` + `MINI_TODO_FENCES_ROOT`）和 `__fence_e2e_` 测试文件上验证
 
 Before touching sync, import/export, or any write path of `todos` / `subtasks` / `settings`
-(PC commands or cloud REST handlers):
+(core functions or cloud REST handlers):
 
 - [ ] Read [Sync Protocol](./sync-protocol.md) — §3.2 (time + monotonic `updated_at`) and §3.4 (WebDAV rules)
 - [ ] Settings writes go through `db::settings_kv` only; synced keys live in `db::settings_kv::SYNCED_SETTING_KEYS`
 - [ ] Any new `settings` key / table / record field: walk the "维护检查清单" in `CLAUDE.md`
-  (models → data.rs → sync_store → cloud `src/model.rs`)
-
-改 `pc-gpui/crates/core`（或改 `pc/src-tauri` 里 core 也有副本的部分）：
-
-- [ ] 同时遵守 [pc-gpui 规范](../pc-gpui/index.md)：读 [Core Parity](../pc-gpui/core-parity.md)——数据库迁移、settings 键、记录字段、
-      同步 / 合并 / 时间 / 墓碑规则、导出格式**两边一起改**（同号同 SQL），直到 `pc/` 删除；core 保持阻塞函数、不引入 GPUI / Tauri / tokio
-- [ ] 两边 `cargo test` 都绿（`pc/src-tauri` 与 `pc-gpui/`），`db/`、`services/{webdav,secret}.rs`、`services/fence_fs/` 用 `diff` 自查一致
+  (models → data.rs → sync_store → cloud `src/model.rs`) and [pc-gpui/data-compat.md](../pc-gpui/data-compat.md)
 
 General:
 
-- [ ] Commands doing network / file / bulk SQL work are `async` and run the blocking part in `spawn_blocking`
-  （pc-gpui：core 函数保持阻塞，由 app 用 `db::spawn_db` / `background_executor` 放后台，见 [GPUI Conventions §2.1](../pc-gpui/gpui-conventions.md)）
-- [ ] Use `log::{info,warn,error}!` (persisted by tauri-plugin-log), not `println!`
-- [ ] Any new `screen_configs` column: `SCREEN_CONFIG_COLUMNS` + `screen_config_from_row` + `save_screen_config`
-- [ ] Any new Tauri command: register in `lib.rs` `use commands::{…}` **and** `generate_handler![…]`
-- [ ] Commands that act on the main window resolve it with `app_handle.get_webview_window("main")`, never `window: Window`
+- [ ] core 函数保持阻塞；网络 / 文件 / 批量 SQL 由 app 用 `db::spawn_db` / `background_executor` 放后台（[GPUI Conventions §2.1](../pc-gpui/gpui-conventions.md)），
+      UI 主线程上不做阻塞调用
+- [ ] 带 `owner_hwnd` 的收纳箱移动（`fence::delete`、`fence::items::{move_in, restore, move_to}`）绝不在 UI 主线程调用
+- [ ] Use `log::{info,warn,error}!`（app 的 `services::logging` 落盘），not `println!`
+- [ ] Any new `screen_configs` column: core `settings.rs` 的 `SCREEN_CONFIG_COLUMNS` + `screen_config_from_row` + `save_screen_config`
+- [ ] 窗口代码里不直接写 Win32：新能力加在 `crates/app/src/platform/`（Windows 实现 + `fallback.rs`），写操作遵守 App 借用规则
+      （[GPUI Conventions §2.2](../pc-gpui/gpui-conventions.md)）
 
 ## Quality Check
 
-- `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` green (`pc/src-tauri`, and `cloud/` when touched)
-  ——core 有副本的改动另外在 `pc-gpui/` 下跑 `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings`、
-  `cargo test --workspace`（门槛见 [pc-gpui/verification.md](../pc-gpui/verification.md)）
-- Sync changes: run `pc/scripts/e2e-linux/run_e2e.py` S-suites (Apache + nginx) before claiming done
-  （改了 core 的同步再跑 `pc-gpui/scripts/e2e-linux/run_e2e.py` 的 S 组）
-- Window-mode changes: run the e2e harness in [Window Modes §6](./window-modes.md#6-tests-required) before claiming done
-- 收纳箱改动：跑 [Desktop Fences §6](./desktop-fences.md) 的单测与 e2e（含 `npm run test` 的 `utils/fence.test.ts`）
+- 在 `pc-gpui/` 下 `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、
+  `cargo test --workspace --locked` 全绿（门槛见 [pc-gpui/verification.md](../pc-gpui/verification.md)）；改了 `cloud/` 再跑 cloud 的
+  `cargo test --locked`
+- Sync changes: run `pc-gpui/scripts/e2e-linux/run_e2e.py` S-suites (Apache + nginx) before claiming done
+- Window-mode changes: run the e2e in [Window Modes §6](./window-modes.md#6-tests-required) before claiming done
+- 收纳箱改动：跑 [Desktop Fences §6](./desktop-fences.md) 的单测与 Windows e2e（F 组）

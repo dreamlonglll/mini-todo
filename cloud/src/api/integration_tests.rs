@@ -2304,7 +2304,7 @@ async fn access_log_records_requests_but_never_credentials() {
 // 跨端契约：云端写出的记录必须能被 PC 的强类型模型反序列化（K6）
 // =============================================================================
 
-/// 与 `pc/src-tauri/src/db/models.rs::Todo` 相同的 serde 约束（字段、类型、默认值）。
+/// 与 `pc-gpui/crates/core/src/db/models.rs::Todo` 相同的 serde 约束（字段、类型、默认值）。
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[allow(dead_code)]

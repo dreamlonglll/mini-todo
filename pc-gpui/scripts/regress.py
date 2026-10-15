@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """pc-gpui 一键回归：Xvfb 下逐个场景启动真实应用（debug 构建、隔离数据目录、样例数据），用 xdotool 交互后截图，
-再与参考截图（Vue 版）拼成并排对照图；`--smoke` 跑跨窗口端到端冒烟并按数据库断言给出 PASS / FAIL。
+再与基线截图（`--before` 改动前的输出；可选 `--ref` 旧 Tauri 版 Vue 前端渲染的参考截图，不在仓库里）拼成并排对照图；
+`--smoke` 跑跨窗口端到端冒烟并按数据库断言给出 PASS / FAIL。
 
 用法与场景说明见同目录 README.md（「regress.py」一节）。只依赖 Python 3 标准库 + Xvfb / xdotool / ImageMagick。
 """

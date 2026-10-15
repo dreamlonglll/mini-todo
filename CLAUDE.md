@@ -4,151 +4,57 @@
 
 ## 项目简介
 
-Mini-Todo 是一款基于 **Tauri 2.x + Vue 3 + TypeScript** 开发的 Windows 桌面待办事项管理应用，定位为简洁、聚焦的本地待办工具，支持子任务、四象限、日历、重复提醒、系统通知与 WebDAV 云同步，另有收纳桌面图标的桌面收纳箱。
+Mini-Todo 是一款 Windows 桌面待办事项管理应用，定位为简洁、聚焦的本地待办工具，支持子任务、四象限、日历、重复提醒、系统通知与
+WebDAV 云同步，另有收纳桌面图标的桌面收纳箱。
 
-仓库按平台拆子目录，`pc/` 是 Windows 桌面端，`cloud/` 是云端 HTTP API（mini-todo 在远程 VPS 上的复刻，通过同一个 WebDAV 通道与 PC 同步数据，供 AI / Claude Code Skill 通过 REST 读写）。详见 `cloud/README.md`。
+PC 端是 `pc-gpui/`：用 **Rust + GPUI**（`gpui-kit =0.7.3` = gpui-pre 0.3.9 + gpui-component 0.7.3）实现，**不依赖 WebView2**，单个
+`mini-todo.exe`。3.0 起它是唯一的 PC 实现（目录名暂未改成 `pc/`）。早期的 Tauri 2 + Vue 3 版（原 `pc/`）已在 3.0 删除，需要对照旧代码时从
+git 历史取（删除前的最后一个提交是 `749405a`，例如 `git show 749405a:pc/src-tauri/src/commands/window.rs`）。GPUI 版与旧版**数据完全兼容**
+（同一数据目录、同一数据库迁移、同一同步文档、同一导出格式、同一 settings 键），安装包原地升级旧版，见「兼容旧版沿用的名字」。
 
-`pc-gpui/` 是用 **Rust + GPUI**（`gpui-kit =0.7.3` = gpui-pre 0.3.9 + gpui-component 0.7.3）重写的 PC 端，**不依赖 WebView2**，
-元素 / 样式 / 功能与 `pc/` 一致，目标是取代 `pc/`。`pc/` 暂时保留，待用户在 Windows 上实机验收 GPUI 版后再删除。两套 PC 实现**数据完全兼容**
-（同一数据目录、同一数据库迁移、同一同步文档、同一导出格式、同一 settings 键），关系与双改规则见下文「pc-gpui（GPUI 版 PC 端）」一节。
+`cloud/` 是云端 HTTP API（mini-todo 在远程 VPS 上的复刻，通过同一个 WebDAV 通道与 PC 同步数据，供 AI / Claude Code Skill 通过 REST 读写），
+详见下文「cloud/ 子项目」与 `cloud/README.md`。
 
 ## 技术栈
-
-### `pc/`（Tauri 版）
-
-| 层级 | 技术选型 | 说明 |
-|------|----------|------|
-| 前端框架 | Vue 3 + TypeScript | 组合式 API，类型安全 |
-| UI 组件库 | Element Plus | `unplugin-vue-components` 按需引入；图标 @element-plus/icons-vue 逐个 SFC 显式导入 |
-| 富文本编辑 | Milkdown 7.22.x | 描述 / 子任务 Markdown 编辑器；`prosemirror-model` 经 overrides 钉在 1.25.11（1.25.12 校验 `title: null`，会静默丢弃无标题图片） |
-| 状态管理 | Pinia | Vue 官方推荐状态管理 |
-| 桌面框架 | Tauri 2.x | tauri 2.9.5；插件 single-instance / log / notification / dialog / fs / opener / autostart |
-| 后端语言 | Rust | 高性能，内存安全 |
-| 数据库 | SQLite (rusqlite) | 轻量级本地数据库 |
-| 拖拽功能 | vuedraggable | Vue 拖拽排序库（vite 把 `vue` 精确别名到 runtime 构建，避免带入模板编译器） |
-| 异步运行时 | Tokio | Rust 异步任务调度 |
-| WebDAV 客户端 | reqwest | 远端同步（blocking 客户端，只在 `spawn_blocking` 中使用） |
-| 前端单测 | vitest | `npm run test`，`src/**/*.test.ts` |
-| 端到端验证 | selenium + tauri-driver | `pc/scripts/e2e-linux/`（Linux 真实应用 + WebDAV + cloud），`pc/scripts/e2e/`（Windows 窗口模式 / 桌面收纳箱） |
-
-### `pc-gpui/`（GPUI 版）
 
 | 层级 | 技术选型 | 说明 |
 |------|----------|------|
 | UI 框架 | gpui-kit `=0.7.3`（gpui-pre 0.3.9 + gpui-base / gpui-component 0.7.3） | Zed 的 GPUI 每周快照，**精确钉版本**；Windows 走 DirectX 11 + DirectComposition（透明窗口），Linux 走 wgpu（Vulkan，CI / Xvfb 用 mesa lavapipe） |
-| 控件 | 自绘 Element Plus 风格控件（`crates/app/src/ui/`） | 外观数值照抄旧版；复杂输入基于 gpui-component（`InputState` 等），主题调成 EP（`#409EFF`） |
+| 控件 | 自绘 Element Plus 风格控件（`crates/app/src/ui/`） | 外观数值照抄 UI 规格；复杂输入基于 gpui-component（`InputState` 等），主题调成 EP（`#409EFF`） |
 | 图标 | Element Plus Icons SVG | 从 `@element-plus/icons-vue` 抽取，`crates/app/assets/icons/{ep,app}/`，经 `assets.rs` 嵌入 |
-| Markdown | gpui-base `TextView` + 自写块级排版（`markdown` crate） | 编辑为"源码 + 预览"（已知偏差，见下文） |
-| 业务核心 | `mini-todo-core`（`crates/core`） | 由 `pc/src-tauri/src` 复制：rusqlite 0.32 bundled、reqwest 0.12 blocking、windows 0.58；不依赖 GPUI / Tauri / tokio，函数全部阻塞 |
-| 农历 | tyme4rs | lunar-javascript 同一作者的 Rust 库，结果与旧前端逐日比对 |
-| 平台集成 | windows 0.62（与 gpui 同版本）、tray-icon、notify-rust、auto-launch、rfd、embed-resource | 托盘、Toast、开机自启（与旧版同名同键）、带过滤器的文件对话框、exe 图标；单实例与旧版 Tauri 插件同名同格式 |
+| Markdown | gpui-base `TextView` + 自写块级排版（`markdown` crate，GFM：表格 / 任务清单 / 删除线 / 自动链接） | 编辑为"源码 + 预览"（已知偏差，见下文） |
+| 业务核心 | `mini-todo-core`（`crates/core`） | rusqlite 0.32 bundled（SQLite）、reqwest 0.12 blocking（WebDAV / 节假日）、windows 0.58；不依赖 GPUI / Tauri / tokio，函数全部阻塞 |
+| 农历 | tyme4rs | lunar-javascript 同一作者的 Rust 库，结果与旧前端逐日比对（`tests/fixtures/lunar_fixture.json`） |
+| 平台集成 | windows 0.62（与 gpui 同版本）、tray-icon、notify-rust、auto-launch、rfd、embed-resource | 托盘、Toast、开机自启、带过滤器的文件对话框、exe 图标与版本信息 |
+| 安装包 | NSIS（`pc-gpui/scripts/windows-installer.nsi`）+ 便携 zip | 由 `release.yml` 构建，仅 Windows x64 |
 | 测试 | cargo test、`scripts/regress.py`（Xvfb 截图对照 + 冒烟）、`scripts/e2e-linux/`、`scripts/e2e-windows/` | 见 `.trellis/spec/pc-gpui/verification.md` |
 
 ## 项目结构
 
-> 项目按平台拆分子目录。`pc/` 为 Windows 桌面端（Tauri），`pc-gpui/` 为 GPUI 重写版（将取代 `pc/`），未来可平行加入 `mobile/`、`web/`。
+> 项目按平台拆分子目录。`pc-gpui/` 为 Windows 桌面端（GPUI），`cloud/` 为云端 API，未来可平行加入 `mobile/`、`web/`。
 
 ```
 mini-todo/
 ├── docs/                                   # 共享文档（跨平台）
 │   └── 开发文档/                            # 开发相关文档
-├── pc/                                     # PC 端（Tauri 2.x + Vue 3）
-│   ├── src/                                # Vue 前端源码
-│   │   ├── assets/                         # 静态资源
-│   │   ├── components/                     # Vue 组件
-│   │   │   ├── CalendarView.vue            # 日历视图（MainView 中 defineAsyncComponent 懒加载）
-│   │   │   ├── FenceItemGrid.vue           # 收纳箱项目网格（图标懒加载、打开、自绘右键菜单、箱内排序、Ctrl+滚轮）
-│   │   │   ├── MarkdownEditor.vue          # 可复用 Milkdown 编辑器（编辑/只读、图片上传、链接白名单）
-│   │   │   ├── QuadrantView.vue            # 四象限视图
-│   │   │   ├── TitleBar.vue                # 标题栏
-│   │   │   ├── TodoItem.vue                # 待办项组件
-│   │   │   └── TodoList.vue                # 待办列表
-│   │   ├── plugins/element.ts              # ElMessage / ElMessageBox 唯一入口（含样式）
-│   │   ├── components.d.ts                 # unplugin-vue-components 生成，需提交
-│   │   ├── router/                         # 路由配置
-│   │   ├── stores/                         # Pinia 状态管理
-│   │   │   ├── appStore.ts                 # 应用全局状态
-│   │   │   └── todoStore.ts                # 待办状态（fetchTodos 单飞 + 过期响应丢弃）
-│   │   ├── types/                          # TypeScript 类型定义
-│   │   │   ├── app.ts                      # 应用类型（含 SyncReport / SyncSettings）
-│   │   │   ├── fence.ts                    # 收纳箱类型与前后端共用常量
-│   │   │   └── todo.ts                     # 待办类型
-│   │   ├── utils/                          # 工具函数（*.test.ts 为 vitest 单测）
-│   │   │   ├── datetime.ts                 # 时间解析/格式化，写入统一 YYYY-MM-DD HH:MM:SS
-│   │   │   ├── imageRef.ts                 # Markdown 图片引用 minitodo-image://<name> ⇄ 本机 asset URL
-│   │   │   ├── fileLink.ts                 # 链接点击协议白名单
-│   │   │   ├── editorShortcuts.ts          # 编辑类窗口 Esc / Ctrl+Enter
-│   │   │   ├── fence.ts                    # 收纳箱纯函数（几何落库闸门、缩放矩形、图标档位、提示文案）
-│   │   │   ├── notify.ts                   # notifyError 统一失败提示
-│   │   │   ├── syncReport.ts               # SyncReport 提示文案与刷新判断
-│   │   │   ├── quadrant.ts / color.ts      # 象限与颜色
-│   │   │   ├── holiday.ts                  # 节假日工具
-│   │   │   └── lunar.ts                    # 农历工具
-│   │   ├── views/                          # 页面视图
-│   │   │   ├── CompletedView.vue           # 已完成视图
-│   │   │   ├── EditorView.vue              # 待办编辑主视图
-│   │   │   ├── FenceView.vue               # 桌面收纳箱窗口（独立 WebView，label fence-{id}，路由 #/fence?id=）
-│   │   │   ├── MainView.vue                # 主视图（待办列表）
-│   │   │   ├── SubtaskEditorView.vue       # 子任务编辑视图（独立 WebView）
-│   │   │   ├── NotificationView.vue        # 通知视图
-│   │   │   └── SettingsView.vue            # 设置视图
-│   │   ├── App.vue                         # 根组件
-│   │   └── main.ts                         # 入口文件
-│   ├── src-tauri/                          # Tauri/Rust 后端源码
-│   │   ├── src/
-│   │   │   ├── commands/                   # Tauri 命令（前后端桥接）
-│   │   │   │   ├── data.rs                 # 数据导入导出、AppSettings 读写（唯一来源）
-│   │   │   │   ├── fence.rs                # 收纳箱元数据 CRUD、窗口生命周期、按屏幕组合记忆位置
-│   │   │   │   ├── fence_items.rs          # 收纳箱内容：对账、移入/移回/跨箱、打开、图标、目录监听
-│   │   │   │   ├── holiday.rs              # 节假日命令
-│   │   │   │   ├── notification_cmd.rs     # 通知命令
-│   │   │   │   ├── settings_cmd.rs         # 设置命令
-│   │   │   │   ├── sync_cmd.rs             # WebDAV 同步（webdav_sync / force_pull / force_push）
-│   │   │   │   ├── todo.rs                 # 待办 CRUD 命令
-│   │   │   │   └── window.rs               # 窗口管理命令
-│   │   │   ├── db/                         # 数据库层
-│   │   │   │   ├── connection.rs           # 连接管理、迁移前备份、外键处理
-│   │   │   │   ├── migrations.rs           # 数据库迁移（v1~v29，迁移表驱动）
-│   │   │   │   ├── models.rs               # 数据模型定义
-│   │   │   │   ├── settings_kv.rs          # settings 读写助手（只在值变化时刷新 updated_at）
-│   │   │   │   ├── sync_store.rs           # 变更计数、墓碑、记录读写与规范化
-│   │   │   │   ├── time.rs                 # 规范时间格式解析/规范化
-│   │   │   │   ├── paths.rs                # 数据 / 图片目录、图片文件名校验（debug 构建可用 MINI_TODO_DATA_DIR 隔离）
-│   │   │   │   └── backup.rs               # VACUUM INTO 备份（保留最近 5 份）
-│   │   │   ├── services/                   # 业务服务层
-│   │   │   │   ├── fence_fs/               # 收纳箱文件层（与数据库无关）：命名、IFileOperation 移动、图标提取缓存、notify 监听、打开
-│   │   │   │   ├── notification.rs         # 通知服务（含定时调度、应用内通知窗口定位）
-│   │   │   │   ├── webdav.rs               # WebDAV 客户端（条件 GET/PUT、PROPFIND）
-│   │   │   │   └── secret.rs               # WebDAV 密码保护（Windows DPAPI）
-│   │   │   ├── lib.rs                      # 库入口（插件注册、托盘、轮询线程）
-│   │   │   └── main.rs                     # 主入口
-│   │   ├── Cargo.toml                      # Rust 依赖配置
-│   │   └── tauri.conf.json                 # Tauri 配置（含 CSP 与 asset 协议范围）
-│   ├── scripts/
-│   │   ├── e2e/                            # Windows 窗口模式 / 收纳箱 e2e 工具（e2e.ps1、fence.ps1、cdp.mjs 等）
-│   │   └── e2e-linux/                      # Linux 端到端验证套件（见其 README）
-│   ├── public/                             # 公共静态资源
-│   ├── index.html                          # Vite 入口 HTML
-│   ├── package.json                        # Node 依赖配置
-│   ├── tsconfig.json                       # TypeScript 配置
-│   ├── vitest.config.ts                    # 前端单测配置
-│   └── vite.config.ts                      # Vite 构建配置
-├── pc-gpui/                                # PC 端 GPUI 重写版（Cargo workspace，将取代 pc/；详见各 crate README）
-│   ├── Cargo.toml                          # [workspace] members = crates/core、crates/app；版本 2.5.0；release thin LTO + strip
+├── pc-gpui/                                # PC 端（Cargo workspace；详见各 crate README）
+│   ├── Cargo.toml                          # [workspace] members = crates/core、crates/app；[workspace.package] version 是
+│   │                                       # 版本号唯一来源（当前 3.0.0-pre）；release thin LTO + strip
 │   ├── Cargo.lock                          # 提交；CI 一律 --locked
 │   ├── crates/
 │   │   ├── core/                           # mini-todo-core：业务核心（不依赖 GPUI / Tauri / tokio，全部阻塞函数）
-│   │   │   ├── README.md                   # 公开 API、线程约束、旧命令 → 新函数对照
+│   │   │   ├── README.md                   # 公开 API、线程约束、与旧 Tauri 命令的对照
 │   │   │   ├── src/
-│   │   │   │   ├── db/                     # ← pc/src-tauri/src/db 原样复制（迁移 v1~v29、sync_store、time、settings_kv、paths…）
-│   │   │   │   ├── services/               # ← 原样复制：webdav.rs、secret.rs（DPAPI）、fence_fs/（收纳箱文件层）
-│   │   │   │   ├── todo.rs / data.rs       # ← commands/todo.rs、data.rs（导入导出、AppSettings 读写）
-│   │   │   │   ├── sync/                   # ← commands/sync_cmd.rs：sync::run(db, SyncMode) -> SyncReport（测试在 sync/tests.rs）
-│   │   │   │   ├── settings.rs             # ← settings_cmd.rs + window.rs 的设置 / screen_configs + 屏幕组合 ID
+│   │   │   │   ├── db/                     # 连接 / 迁移前备份（connection、backup）、迁移 v1~v29（migrations）、模型（models）、
+│   │   │   │   │                           # settings 读写助手（settings_kv）、变更计数 / 墓碑 / 合并（sync_store）、时间（time）、路径（paths）
+│   │   │   │   ├── services/               # webdav.rs（条件 GET/PUT、PROPFIND）、secret.rs（DPAPI）、fence_fs/（收纳箱文件层）
+│   │   │   │   ├── todo.rs / data.rs       # 待办 / 子任务 CRUD、图片保存；导入导出、AppSettings 读写（唯一来源）
+│   │   │   │   ├── sync/                   # sync::run(db, SyncMode) -> SyncReport（测试在 sync/tests.rs）
+│   │   │   │   ├── settings.rs             # 单项设置、运行时偏好、屏幕组合 ID、screen_configs
 │   │   │   │   ├── holiday.rs / reminder.rs  # 节假日（blocking）/ 提醒调度纯逻辑与通知窗口槽位、定位
 │   │   │   │   ├── window_logic.rs         # 贴边隐藏状态机、needs_reattach、lacks_tool_window_style 等纯函数
-│   │   │   │   ├── lunar.rs                # 新增：农历（tyme4rs），等价于 pc/src/utils/lunar.ts
-│   │   │   │   └── fence/                  # ← fence.rs / fence_items.rs 中与窗口无关的部分（几何、对账、移入移回）
+│   │   │   │   ├── lunar.rs                # 农历（tyme4rs）
+│   │   │   │   └── fence/                  # 收纳箱元数据 / 几何 / 屏幕组合布局（mod.rs）与内容对账、移入移回（items.rs）
 │   │   │   ├── examples/seed.rs            # 把导出格式 4.0 的 JSON 导入隔离数据目录（截图 / e2e 用）
 │   │   │   └── tests/fixtures/             # 农历对照数据（gen_lunar.cjs 用 lunar-javascript 生成）
 │   │   └── app/                            # mini-todo：GPUI 界面、窗口、平台集成（lib mini_todo + bin mini-todo）
@@ -158,10 +64,10 @@ mini-todo/
 │   │       └── src/
 │   │           ├── lib.rs / main.rs        # run()：日志 → 单实例 → 数据库 → Application(QuitMode::Explicit) → 主窗口 → 后台服务
 │   │           ├── theme.rs                # 颜色 / 字体 / 圆角 / 间距 / 阴影 token 的唯一来源（按窗口分节）
-│   │           ├── state.rs                # AppState（Entity + Global）：替代 Pinia store 与跨 WebView 事件
+│   │           ├── state.rs                # AppState（Entity + Global）：跨窗口共享状态与待办 / 设置写操作
 │   │           ├── db.rs                   # Db 全局（Arc<Database>）、spawn_db（阻塞调用放后台）
 │   │           ├── assets.rs               # EpIcon / AppIcon 嵌入表
-│   │           ├── util/                   # 旧前端 utils 的 1:1 移植（datetime、image_ref、file_link、editor_shortcuts）
+│   │           ├── util/                   # datetime、image_ref（minitodo-image://）、file_link（链接白名单）、editor_shortcuts
 │   │           ├── windows/                # WindowManager（mod.rs，含 DebugOpen）+ main_window/、editor/、subtask、completed、
 │   │           │                           # notification、settings/、fence/、gallery（控件样例，仅调试）
 │   │           ├── ui/                     # Element Plus 风格共享控件（button、input、ep_*、message、message_box、markdown*…）
@@ -169,27 +75,14 @@ mini-todo/
 │   │           └── platform/               # GPUI 没有的窗口能力：windows.rs（Win32）、fallback.rs（Linux）、embed.rs、subclass.rs…
 │   └── scripts/
 │       ├── README.md                       # regress.py / shot.sh / MINI_TODO_DEBUG_OPEN 说明
-│       ├── regress.py                      # Xvfb 一键回归：场景截图 + 与参考截图并排对照 + 端到端冒烟
+│       ├── regress.py                      # Xvfb 一键回归：场景截图 + 并排对照图 + 端到端冒烟
 │       ├── shot.sh                         # 单个场景截图 / xdotool 交互
 │       ├── sample-data.json                # 样例数据（导出格式 4.0）
+│       ├── windows-installer.nsi           # NSIS 安装器（安装身份沿用旧 Tauri 版，见 .trellis/spec/pc-gpui/release.md）
 │       ├── e2e-linux/                      # Linux 端到端（真实应用 + Apache / nginx WebDAV + cloud + Skill）
 │       └── e2e-windows/                    # Windows 端到端（真实窗口 + 真实输入 + Win32 断言；CI pc-gpui-e2e-windows.yml）
-├── cloud/                                  # 云端 HTTP API（独立 Rust crate）
-│   ├── Cargo.toml                          # axum + tokio + rusqlite + reqwest + ...
-│   ├── config.example.toml                 # 配置示例
-│   ├── README.md                           # 部署 / 配置说明
-│   ├── deploy/
-│   │   ├── minitodo-cloud.service          # systemd unit 示例（沙箱加固）
-│   │   └── Caddyfile.example               # Caddy 反代示例
-│   ├── skill/minitodo/                     # Claude Code Skill：SKILL.md + minitodo.py + 安装脚本
-│   └── src/
-│       ├── main.rs                         # tokio + axum 启动、优雅停机
-│       ├── config.rs                       # config.toml 解析
-│       ├── time.rs                         # 与 PC 一致的时间格式（按时区实时换算）
-│       ├── model.rs                        # 写入字段校验与别名归一化（与 PC 模型一致）
-│       ├── db/                             # rusqlite + KV-style schema（normalize.rs：存量归一化）
-│       ├── sync/                           # WebDAV 客户端、pull/push、merge、doc、worker、图片镜像
-│       └── api/                            # axum router + Bearer auth + /health
+├── cloud/                                  # 云端 HTTP API（独立 Rust crate，见下文）
+├── .github/workflows/                      # release / cache-warm / pc-gpui-ci / pc-gpui-e2e-windows / cloud-ci
 ├── CLAUDE.md                               # 项目指南（本文档）
 ├── README.md
 └── AGENTS.md
@@ -199,36 +92,35 @@ mini-todo/
 
 ### 待办管理
 - 创建、编辑、删除待办事项
-- 描述字段支持 Markdown（Milkdown 编辑器，支持图片粘贴/拖入上传，存于 `description` 字段）；
-  支持粘贴 MD 源码自动解析（clipboard 插件）、GFM 表格/任务清单/删除线，编辑模式提供源码/预览分栏的放大编辑弹窗（联动窗口最大化）
-- Markdown 中的图片统一存为 `minitodo-image://<文件名>`（`utils/imageRef.ts`），渲染时换成本机 images 目录的
-  asset URL；兼容旧数据里的 `http://asset.localhost/<绝对路径>` / `asset://localhost/...`（按文件名映射到本机，
-  修复跨设备裂图）。上传走 raw body：`invoke('save_subtask_image', bytes, { headers: { 'x-image-ext': 'png' } })`
-  （IPC 退回 postMessage 时的数字数组同样接受），扩展名白名单 png/jpg/jpeg/webp/gif/bmp、单张 ≤20MB，文件名由后端生成
-- 链接点击走协议白名单（`utils/fileLink.ts`）：http/https/mailto 交给系统程序，`file:///` 在资源管理器定位
-  （拒绝 UNC），其余（javascript:/data: 等）一律拦截且不让 WebView 导航
+- 描述字段支持 Markdown（存于 `description`）：编辑为"源码 + 预览"——平时显示渲染结果，单击切到源码编辑，失焦回到渲染；
+  粘贴普通文字 / Markdown 源码原样插入；渲染支持 GFM 表格 / 任务清单 / 删除线 / 自动链接。编辑模式另有源码 / 预览分栏的放大编辑弹窗
+  （`windows/editor/desc_dialog.rs`，「最大化」联动窗口最大化）
+- Markdown 中的图片统一存为 `minitodo-image://<文件名>`（`crates/app/src/util/image_ref.rs`），渲染时映射成本机 images 目录下的文件
+  （`img(PathBuf)`）；兼容旧数据里的 `http://asset.localhost/<绝对路径>` / `asset://localhost/...`（按文件名映射到本机，修复跨设备裂图，
+  保存时换回规范形式）。粘贴 / 拖入图片 → 后台 `core::todo::save_image(bytes, ext)`：扩展名白名单 png/jpg/jpeg/webp/gif/bmp、单张 ≤20MB、
+  文件名由后端生成，插入 `![<文件名>](minitodo-image://<name>)`；点图片打开预览
+- 链接点击走协议白名单（`util/file_link.rs`）：http/https/mailto 交给系统程序，`file:///` 在资源管理器定位（拒绝 UNC），
+  其余（javascript:/data: 等）一律拦截；只读排版普通单击即打开，编辑排版下 Ctrl/Cmd+单击
 - 编辑类窗口支持 Esc 关闭（有未保存修改时确认）、Ctrl/Cmd+Enter 保存；保存有防重入
-- 只读详情模式：从列表/四象限/日历/已完成视图点击待办默认进入（`#/editor?id=x&mode=view`），
+- 只读详情模式：从列表 / 四象限 / 日历 / 已完成视图点击待办默认进入（`editor::open(.., Some(id), EditorMode::View)`），
   左侧简化展示标题、Markdown 渲染描述、通知状态、优先级，右侧子任务面板功能照常，[编辑] 按钮原地切换
-- 支持一级子任务（含 Markdown 详情、图片上传）
+- 支持一级子任务（含 Markdown 详情、图片上传；可从 .md/.txt 文件或文件夹批量导入）
 - 四象限分类（重要紧急 / 重要不紧急 / 紧急不重要 / 不紧急不重要）
-- 自定义颜色标识
-- 完成状态标记
-- 拖拽排序
+- 自定义颜色标识、完成状态标记、拖拽排序（列表 / 四象限）、置顶
 - 开始/截止时间
 
 ### 子任务
-- 标题 + Markdown 内容（Milkdown 富文本编辑器）
+- 标题 + Markdown 内容
 - 支持图片粘贴/拖入上传
-- 独立 WebView 详情窗口（编辑/查看双模式）
+- 独立的子任务窗口（查看 / 编辑双模式，800×750）；子任务列表双击标题行内改名
+- 新建待办（尚未入库）时子任务暂存在内存：子任务窗口直接读写编辑窗口的 `Entity<DraftSubtasks>`
 - 完成态切换、排序
 
 ### 通知提醒
-- Windows 系统通知 / 应用内通知
-- 预设提前提醒（5/15/30 分钟）
-- 自定义提前时间
-- 应用内通知窗口按显示器 work area 与缩放比例换算逻辑坐标，自下而上叠放、超出换列；按窗口实际尺寸（平台可能强加最小高度）
-  重新定位并记住，保证不出屏
+- Windows 系统通知（Toast，`notify-rust`）/ 应用内通知窗口
+- 预设提前提醒（5/15/30 分钟）、自定义提前时间
+- 应用内通知窗口（320×120、置顶、不抢焦点）按主显示器工作区（逻辑像素）定位，自下而上叠放、超出换列（core `reminder` 的槽位与叠放算法）；
+  按窗口实际尺寸重新定位并记住，保证不出屏
 
 ### 重复提醒
 - 按天 / 周 / 周几 / 月几号循环
@@ -239,81 +131,80 @@ mini-todo/
 ### 视图模式
 - **列表视图**：按排序/优先级展示
 - **四象限视图**：拖拽分类
-- **日历视图**：按日期展示（含农历、节假日）
+- **日历视图**：按日期展示（含农历、节气、传统节日、法定节假日与调休；跨天条，点击打开只读详情），开启后主窗口加宽
 
 ### 数据导入导出
-- 导出版本：`4.0`（位于 `pc/src-tauri/src/commands/data.rs`）
-- 导出为 ZIP 压缩包（内含 `data.json`）
-- 导入兼容 v3.0 和 v4.0 两个版本
-  - v3.0 是历史导出格式（含已移除的 AI Agent 字段），新版本反序列化时通过 `#[serde(default)]` 静默忽略多余字段
-- 直接 JSON 导入也支持
+- 导出版本：`4.0`（`pc-gpui/crates/core/src/data.rs` 的 `EXPORT_VERSION`）
+- 导出为 ZIP 压缩包（内含 `data.json`），默认文件名 `mini-todo-backup-YYYY-MM-DD.zip`
+- 导入兼容 v3.0 和 v4.0 两个版本（按 `PK` 魔数区分 ZIP / JSON，直接 JSON 也支持）
+  - v3.0 是历史导出格式（含已移除的 AI Agent 字段），反序列化时通过 serde 的未知字段忽略与 `#[serde(default)]` 静默跳过
 - 导入是"恢复备份"语义：导入前自动 `VACUUM INTO` 备份到 `backups/`；保留原 id；导入后消失的记录写墓碑，
   被导入记录的 `updated_at` 刷新为当前时间（保证恢复结果在同步中胜出）
 
 ### WebDAV 云同步
-- 智能同步 `webdav_sync`：先 GET 远端并逐条合并（LWW + 墓碑），本地有变化才条件 PUT；手动按钮、设置页
-  「立即同步」与自动同步共用（手动传 `{ full: true }` 无条件 GET；自动同步每 10 轮也做一次无条件 GET）。另有带二次确认的「用云端覆盖本地」`webdav_force_pull`、「用本地覆盖云端」
-  `webdav_force_push`。不再有整库二选一的冲突对话框
+- 智能同步 `sync::run(db, SyncMode::Smart { full })`：先 GET 远端并逐条合并（LWW + 墓碑），本地有变化才条件 PUT；标题栏同步按钮与设置页
+  「立即同步」传 `full: true`（无条件 GET），自动同步传 `false`（每第 10 轮也做一次无条件 GET）。设置页另有带二次确认的
+  「用云端覆盖本地」（`SyncMode::ForcePull`）、「用本地覆盖云端」（`SyncMode::ForcePush`）。不再有整库二选一的冲突对话框
 - 同步范围：todos / subtasks / 墓碑 / 10 个应用设置项（按 `settingsUpdatedAt` 做 LWW，窗口位置与尺寸不从远端应用）/ 图片
-- 自动同步可选（按间隔轮询）；同步命令在 `spawn_blocking` 中执行，不阻塞 UI 线程；同一时刻只允许一个同步
+- 自动同步可选（按间隔轮询，失败段只提示一次）；同步在后台线程执行，不阻塞界面；同一时刻只允许一个同步（`"同步正在进行中"`）
 - gzip 压缩传输；**数据本身不加密**（传输安全取决于 https，WebDAV 服务商可读取内容）；
-  WebDAV 密码在 Windows 上用 DPAPI 加密保存，前端只拿到 `hasPassword`，http:// 地址会提示明文风险
+  WebDAV 密码在 Windows 上用 DPAPI 加密保存，界面只拿到 `has_password`，http:// 地址会提示明文风险
 
 ### 窗口特殊功能
-- **普通模式**：浅色主题，可拖拽移动
-- **固定模式**：
-  - 透明背景
-  - 固定在用户指定位置
-  - 忽略 Win+D（显示桌面）
-  - 禁用关闭、最小化、拖拽
-- **固定模式时嵌入桌面**（设置 → 常规「固定模式时，嵌入桌面中」，仅 Windows 可见，Win11 24H2+ 保证 Win+D 免疫）：
-  - 不是第三种模式，而是固定模式的一个全局开关：开启后进入固定模式即走后端"桌面模式"路径，
-    关闭则是原来的固定模式；当前已固定时切换开关立即生效（`set_fixed_embed_desktop`）
-  - 主窗口仍是顶层窗口：owner=Progman（`GWLP_HWNDPARENT`）+ tao `always_on_bottom` +
-    `set_minimizable(false)` + `WS_EX_TOOLWINDOW`，位于桌面图标之上、所有应用窗口之下
-  - Win+D / Win+M / 任务栏"显示桌面"时随 Progman 一起被抬起，不最小化、不被盖住
-  - 透明背景 / 圆角 / DPI 与普通模式零差异（不做 SetParent 子窗口化；主窗口不挂 `body.fixed-mode`）
-  - 不可拖拽、不可缩放；不做贴边隐藏 / 唤起置顶；不在任务栏、不参与 Alt+Tab
-  - 200ms 轮询线程检测 Explorer 重启（`tick_desktop_mode`），owner 失效时自动重挂
-  - 入口不变：TitleBar 锁按钮、托盘 CheckMenuItem「固定模式」（嵌入态托盘同样勾选）
+- **普通模式**：可拖动、可缩放；主窗口是透明窗口，界面自己画圆角底色：浅色主题白底，深色主题用设置里的「界面底色」+「背景透明度」（透出桌面）
+- **固定模式**（标题栏锁按钮 / 托盘「固定模式」）：
+  - 固定在用户指定位置：不可拖动、不可缩放（`platform::subclass` 的 `FLAG_LOCK_GEOMETRY` 拦截命中测试）
+  - 不在任务栏、不参与 Alt+Tab（`WS_EX_TOOLWINDOW`）；被 Win+D / Win+M 最小化后由 200ms 轮询立即还原
+  - 可选贴边自动隐藏、唤起时置顶（设置 → 常规）；经典固定时没有圆角与描边
+- **固定模式时嵌入桌面**（设置 → 常规「固定模式时，嵌入桌面中」，仅 Windows 显示，Win11 24H2+ 保证 Win+D 免疫）：
+  - 不是第三种模式，而是固定模式的一个全局开关：开启后进入固定模式即走嵌入路径，关闭则是经典固定；当前已固定时切换开关立即生效
+    （主窗口观察到 `AppState.fixed_embed_desktop` 变化 → `window_mode::on_embed_preference_changed`）
+  - 主窗口仍是顶层窗口：owner=Progman（`GWLP_HWNDPARENT`）+ 永远置底（`SetWindowSubclass` 处理 `WM_WINDOWPOSCHANGING`，`FLAG_BOTTOM`）+
+    去掉 `WS_MINIMIZEBOX` + `WS_EX_TOOLWINDOW`，位于桌面图标之上、所有应用窗口之下；Win+D / Win+M / 任务栏"显示桌面"时随 Progman 一起被抬起
+  - 透明背景 / 圆角 / DPI 与普通模式零差异（不做 SetParent 子窗口化）；不可拖拽、不可缩放；贴边隐藏与唤起置顶不生效
+  - 200ms 轮询检测 Explorer 重启与样式被改（`platform::embed::needs_reattach`），自动重挂
   - 持久化：settings `fixed_embed_desktop`（v27）；当前是否固定仍由 `is_fixed` / `screen_configs.is_fixed` 记录
-  - 后端：`commands/window.rs` `IS_DESKTOP_MODE` / `set_window_desktop_mode` / `desktop_attach` / `desktop_detach`；
-    前端 `appStore.applyFixedMode` 按开关选择命令；与固定模式共用 `reassert_window_mode_state`
-    兜底 tao `apply_diff` 的 ex style 覆写
-  - 非 Windows：开关不显示；前端只在 `IS_WINDOWS && fixedEmbedDesktop` 时走桌面模式命令，
-    后端 `set_window_desktop_mode(true)` 回退为普通固定模式并返回 Ok（同步来的开关不会让固定失败）
-  - 启动竞态兜底：200ms 轮询线程发现固定 / 嵌入态的 ex style 被晚到的 tao 操作改成 APPWINDOW 时自愈
-    （`lacks_tool_window_style`，`tick_desktop_mode` / `tick_fixed_style`），残留约 200ms 任务栏闪烁
+  - 实现：`crates/app/src/services/window_mode.rs`（`TargetMode` / `apply_mode` / 200ms 轮询）、`platform/embed.rs`、`platform/subclass.rs`；
+    纯逻辑在 core `window_logic.rs`；契约见 `.trellis/spec/backend/window-modes.md`
+  - 非 Windows：开关不显示；`TargetMode::for_state` 只在 Windows 上选嵌入，同步来的开关不会让固定失败
+- **多屏幕位置记忆**：按屏幕组合（`screen_configs`）记住主窗口位置、尺寸与是否固定；托盘「重置位置」把主窗口放回主显示器左上区域
 
 ### 桌面收纳箱（仅 Windows）
 - 托盘「新增收纳箱」在光标所在显示器工作区的右上角找空位新建（默认 4 列 × 3 行、标题"收纳箱 / 收纳箱 2…"）。每个收纳箱是一个
-  无边框透明的独立 WebView 窗口（label `fence-{id}`，路由 `#/fence?id={id}` → `FenceView.vue`）
-- **始终嵌入桌面层**：owner=Progman + tao `always_on_bottom` + `WS_EX_TOOLWINDOW`（与主窗口嵌入共用 `desktop_attach_hwnd`），
-  Win+D 后可见、不进任务栏 / Alt+Tab、不盖住应用窗口；tao 标志建窗时一次给齐，`show()` / `hide()` 后必须 `reassert_embedded_window`；
-  `EMBEDDED_WINDOWS` 登记 + 200ms `tick_embedded_windows` 在 Explorer 重启后自动重挂
-- **真收纳**：拖入（`onDragDropEvent`）的文件 / 快捷方式 / 文件夹经 `IFileOperation` 从桌面移到 `%USERPROFILE%\MiniTodo收纳箱\<收纳箱名>\`，
+  无系统标题栏的透明 GPUI 窗口（`WindowKind::Fence`，登记 key `fence-{id}`，`crates/app/src/windows/fence/`）
+- **始终嵌入桌面层**：与主窗口嵌入共用 `platform::embed`（owner=Progman + 永远置底 + `WS_EX_TOOLWINDOW` + 无 `WS_MINIMIZEBOX`），
+  Win+D 后可见、不进任务栏 / Alt+Tab、不盖住应用窗口；建窗参数一次给齐（`resizable: false`、`minimizable: false`、Windows 上先隐藏建好、
+  定位并嵌入后再显示）；200ms 守护在 Explorer 重启后自动重挂（`services/fences.rs`）
+- **真收纳**：外部拖入（`ui::external_drop`）的文件 / 快捷方式 / 文件夹经 `IFileOperation` 从桌面移到 `%USERPROFILE%\MiniTodo收纳箱\<收纳箱名>\`，
   重名加 ` (2)` 绝不覆盖，公共桌面项弹 UAC；**文件夹是内容的 source of truth**（`notify` 监听，Explorer 里增删随之刷新），
   数据库只存元数据与项目的排序 / 原始路径。不允许整体收纳用户桌面 / 公共桌面文件夹本身
 - 双击打开（`ShellExecuteExW`）、自绘右键菜单（打开 / 打开所在位置 / 移回桌面 / 移动到…）、箱内拖动排序、Ctrl+滚轮图标大小、
   双击标题改名（收纳文件夹同步改名，失败则保留旧文件夹名并提示）、折叠（悬停 / 拖文件经过时临时展开）、
   「固定」= 锁定位置和大小（仍可拖入、折叠、改名）、每个收纳箱独立的背景色 / 透明度
-- 移动 / 缩放：标题栏超过 3px 才 `startDragging`（不用 `data-tauri-drag-region`），缩放用前端手柄 + `set_fence_bounds`
-  （窗口是 `resizable(false)`）；只有用户拖动 / 缩放结束与托盘重置才 `commit_fence_geometry` 落库，系统挪窗不落库
+- 移动 / 缩放：标题栏移动超过 3px 才 `platform::begin_window_drag`（标题栏不用 `drag_region()`，否则双击改名收不到），缩放用窗口内 8 个手柄 +
+  按客户区 `SetWindowPos`；只有用户拖动 / 缩放结束与托盘重置才 `fence::commit_geometry` / `reset_positions` 落库，系统挪窗不落库。几何一律是客户区的物理像素
 - 删除收纳箱：项目全部移回原位置（原目录不存在则回桌面）、空文件夹删除后才删记录并关窗口；有项目移不回去时删除中止、
   整个收纳箱保留并提示原因
-- 按屏幕组合记忆位置（`fence_layouts`，ID 与 `screen_configs.config_id` / `generateScreenConfigId()` 同格式），约 2 秒检测一次
+- 按屏幕组合记忆位置（`fence_layouts`，ID 与 `screen_configs.config_id` 同格式，都由 core `settings::screen_config_id` 计算），约 2 秒检测一次
   屏幕组合变化；设置里删除屏幕配置时连带删除对应布局
 - 托盘「显示/隐藏所有收纳箱」「重置收纳箱位置」作为兜底入口；首次从 OneDrive 重定向的桌面收纳时提示一次
-- 关键实现：`commands/fence.rs`、`commands/fence_items.rs`、`services/fence_fs/`、`commands/window.rs`（嵌入附属窗口一节）、
-  `views/FenceView.vue`、`components/FenceItemGrid.vue`；契约与易错点见 `.trellis/spec/backend/desktop-fences.md`
-- 已知限制：Win10 / Win11 ≤23H2 上 Win+D 可能盖住收纳箱；每个收纳箱一个 WebView2 渲染进程（开发版每个约 +45~60MB，
-  暂不加 `--process-per-site`）
+- 关键实现：core `fence/`、`services/fence_fs/`；app `services/fences.rs`、`windows/fence/`、`platform/embed.rs`；
+  契约与易错点见 `.trellis/spec/backend/desktop-fences.md`
+- 已知限制：Win10 / Win11 ≤23H2 上 Win+D 可能盖住收纳箱
+
+### 系统功能
+- 托盘（Windows）：左键单击唤起主窗口（300ms 去抖）；右键菜单：添加待办项、新增收纳箱、显示/隐藏所有收纳箱、重置收纳箱位置、
+  固定模式（勾选）、重置位置、打开设置、开机自启动（勾选）、退出
+- 单实例：再次启动时把参数转交给已运行的实例并唤起其主窗口（开机自启拉起的不唤起）
+- 开机自启、版本更新检查（GitHub `releases/latest`，标题栏版本号旁红点；不会提示预发布版）
+- 运行日志落盘（2MB 轮转，保留 1 份旧日志）
 
 ## 开发规范
 
 ### UI 设计规范
-- **组件库**：Element Plus
-- **图标库**：Element Plus Icons（@element-plus/icons-vue）
+- **控件**：`crates/app/src/ui/` 下自绘的 Element Plus 风格控件，同一种控件只保留一个实现（缺能力就给现有控件加 builder 方法）
+- **图标库**：Element Plus Icons（SVG 放 `crates/app/assets/icons/{ep,app}/`，在 `assets.rs` 表里登记）
+- **颜色 / 尺寸 / 字体只从 `theme.rs` 取**，数值照抄 UI 规格（`.trellis/tasks/archive/2026-10/10-15-gpui-rewrite/research/ui-*.md`）
 - **禁止使用 emoji 图标**
 - 设计理念：简洁现代、去除卡片边框、极简列表
 
@@ -325,16 +216,16 @@ mini-todo/
 | 低 | #10B981 (绿色) | 不紧急任务 |
 
 ### 数据库设计
-- **数据库类型**：SQLite
-- **存储位置**：`%LOCALAPPDATA%\mini-todo\`（`dirs::data_local_dir()`；Linux 为 `~/.local/share/mini-todo/`）
+- **数据库类型**：SQLite（rusqlite，bundled）
+- **存储位置**：`%LOCALAPPDATA%\mini-todo\`（core `db::paths::app_data_dir()` = `dirs::data_local_dir()/mini-todo`；Linux 为 `~/.local/share/mini-todo/`）
   - `data.db`、`images/`（用户图片）、`backups/`（迁移/导入前的 `VACUUM INTO` 快照，保留最近 5 份）、`holidays/`、
-    `fence-icons/`（收纳箱图标 PNG 缓存，启动对账后清理过期项）
-  - 日志：`%LOCALAPPDATA%\com.tauri-app.mini-todo\logs\mini-todo.log`（tauri-plugin-log，2MB 轮转）
+    `fence-icons/`（收纳箱图标 PNG 缓存，启动对账后清理过期项）、`ui-state.json`（展开全部子任务等界面状态）
+  - 这个目录同时是安装包的默认安装目录（与旧 Tauri 版一致）；安装器卸载只删自己装的程序文件，绝不递归删除该目录
+  - 日志：`%LOCALAPPDATA%\com.tauri-app.mini-todo\logs\mini-todo.log`（app `services::logging`，2MB 轮转；目录名为兼容旧版沿用）
   - 收纳箱文件：`%USERPROFILE%\MiniTodo收纳箱\<收纳箱文件夹>\`（用户可见的真实文件夹，有收纳箱后才创建；不在数据目录里，
     卸载 / 删库都不会丢文件）
-  - GPUI 版（`pc-gpui/`）用**完全相同**的数据目录、收纳根目录与日志文件（日志由 app 的 `services::logging` 写，同样 2MB 轮转）
-- **迁移版本**：当前 v1~v29，通过 `pc/src-tauri/src/db/migrations.rs` 的迁移表管理（`pc-gpui/crates/core/src/db/migrations.rs`
-  是逐字相同的副本，两边必须同号同 SQL）；有待执行迁移时先备份，迁移期间关闭外键、提交前 `foreign_key_check`
+- **迁移版本**：当前 v1~v29，通过 `pc-gpui/crates/core/src/db/migrations.rs` 的迁移表管理（`LATEST_VERSION`）；有待执行迁移时先备份，
+  迁移期间关闭外键、提交前 `foreign_key_check`；库版本比程序新时只记警告、按现状继续运行（没有降级）
   - v23：移除所有 AI Agent / 任务调度 / 工作流相关表和字段（详见迁移注释）
   - v24：新增 `webdav_last_modified` settings key
   - v25：新增 `top_on_wake` settings key，贴边唤起时是否临时置顶
@@ -360,12 +251,13 @@ mini-todo/
 | `fence_layouts` | 收纳箱按屏幕组合记忆的位置 `(fence_id, screen_config_id)` |
 | `migrations` | 迁移版本记录 |
 
-#### 时间格式约定（PC / cloud / 前端一致）
+#### 时间格式约定（PC / cloud 一致）
 
 - 存储与同步一律 `YYYY-MM-DD HH:MM:SS`（本地墙钟、无时区）：`notifyAt` / `startTime` / `endTime` /
   `createdAt` / `updatedAt` / 墓碑 `deletedAt` / `settingsUpdatedAt`
 - 读取兼容空格 / `T`、有无秒、小数秒、`Z`/`±HH:MM` 后缀（换算本地）、仅日期（开始 00:00:00、截止 23:59:00、提醒 09:00:00）
-- Rust 用 `db::time`，前端用 `utils/datetime.ts`；**禁止** `split('T')` 之类的手写解析
+- 存储格式以 core `db::time` 为准（`normalize_datetime`、`format_canonical`、`parse_local_datetime`），界面显示 / 输入用
+  `crates/app/src/util/datetime.rs`；**禁止**手写 `split('T')` 之类的解析
 - 对已有记录写 `updated_at` 时取 `max(now, 旧值 + 1 秒)`（Rust `db::time::superseding`，SQL 片段 `SQL_SET_UPDATED_AT`），
   保证同一记录的新版本时间戳严格递增（秒级 LWW 下同秒两次编辑不丢）；参与同步的设置项按整个设置块的版本同样递增；
   删除墓碑 `deleted_at = max(now, 记录 updated_at)`；无法解析的时间在比较中视为最旧
@@ -373,21 +265,18 @@ mini-todo/
 ### 数据导入导出与同步
 
 > **重要**：当数据库结构变更（新增表/字段/设置项）时，必须同步更新导入导出、WebDAV 同步与 cloud 的字段校验！
+> 同一份数据还会被 cloud 与其它设备上已安装的旧版本读写，规则见 `.trellis/spec/pc-gpui/data-compat.md`。
 
-- **导出版本号**：当前 `4.0`（位于 `pc/src-tauri/src/commands/data.rs`）
-- **关键文件**：
-  - 模型定义：`pc/src-tauri/src/db/models.rs` → `ExportData`、`AppSettings`
-  - 设置读写（唯一来源）：`pc/src-tauri/src/commands/data.rs` → `read_app_settings` / `write_app_settings`；
+- **导出版本号**：当前 `4.0`（`pc-gpui/crates/core/src/data.rs` → `EXPORT_VERSION`）
+- **关键文件**（均在 `pc-gpui/crates/core/src/` 下）：
+  - 模型定义：`db/models.rs` → `Todo`、`SubTask`、`ExportData`、`AppSettings`
+  - 设置读写（唯一来源）：`data.rs` → `read_app_settings` / `write_app_settings`；
     参与同步的键 `SYNCED_SETTING_KEYS` 与设置版本 `settings_version` 在 `db/settings_kv.rs`
-  - 导入导出：`data.rs` → `export_data_internal`、`import_data_raw`（仅手动导入导出使用）
-  - WebDAV 同步：`commands/sync_cmd.rs` → `SyncData`、`run_sync_blocking`、`build_sync_doc`；
+  - 导入导出：`data.rs` → `export_json` / `import_json` / `export_to_file` / `import_from_file`（仅手动导入导出使用）
+  - WebDAV 同步：`sync/mod.rs` → `SyncData`、`run`、`run_sync_blocking`、`build_sync_doc`；
     记录读写/合并/墓碑：`db/sync_store.rs`（`merge_remote`、`load_todos_with_subtasks`）
-  - cloud 写入校验：`cloud/src/model.rs`（新增记录字段必须同步加入允许字段表，否则 AI 写入会被 400）
-  - 前端类型：`pc/src/types/todo.ts` → `ExportData`（前端只传递 JSON 字符串，无需严格同步）
-  - GPUI 版对应文件（`pc-gpui/crates/core/src/`，与 `pc/` 并存期间两边一起改）：`db/models.rs`、`db/settings_kv.rs`、`db/sync_store.rs`
-    （原样复制）；`data.rs` → `read_app_settings` / `write_app_settings` / `export_json` / `import_json` / `export_to_file` /
-    `import_from_file`（`EXPORT_VERSION`）；`sync/mod.rs` → `SyncData`、`run_sync_blocking`、`build_sync_doc`、`sync::run`。
-    界面侧没有前端类型，`crates/app` 直接用 core 的 Rust 模型
+  - cloud 写入校验：`cloud/src/model.rs`（新增记录字段必须同步加入 `TODO_FIELDS` / `SUBTASK_FIELDS`，否则 AI 写入会被 400）
+  - 界面侧没有单独的前端类型：`crates/app` 直接用 core 的 Rust 模型
 
 #### sync-data.json.gz 结构
 
@@ -433,203 +322,175 @@ mini-todo/
   `agent_executions` 等字段，以及 todo/subtask 上的 agent/调度/工作流字段，在 v4.0 反序列化时
   通过 serde 的"未知字段忽略"机制自动跳过，不会报错。
 - `SyncData` 新字段一律 `#[serde(default)]`；未知顶层键经 `#[serde(flatten)] extra` 原样带回上传。
+- 其它设备上可能还在跑旧版本（≤ 2.5.0 的 Tauri 版或更早的 3.x）：新增字段 / 设置键在它们那里会被丢掉，见 `.trellis/spec/pc-gpui/data-compat.md`。
 
 #### 维护检查清单
 
-当新增数据库迁移时，请检查：
-1. 新增的 **settings 键值** 是否已加入 `AppSettings`（含 `#[serde(default)]`）、`read_app_settings` / `write_app_settings`；
-   需要跨设备同步的再加入 `SYNCED_SETTING_KEYS`（设备相关的不要加）。
+当新增数据库迁移时，请检查（路径均在 `pc-gpui/crates/core/src/` 下，另注明的除外）：
+1. 新增的 **settings 键值** 是否已加入 `AppSettings`（含 `#[serde(default)]`）、`data.rs` 的 `read_app_settings` / `write_app_settings`；
+   需要跨设备同步的再加入 `SYNCED_SETTING_KEYS`（设备相关的不要加）；需要界面的再改 `crates/app`（`state.rs`、`windows/settings/`）。
    例外：纯设备本地的提示 / 状态键（如 v29 的 `fence_onedrive_notice_shown`）有意不进 `AppSettings`，
    登记在 `.trellis/spec/backend/sync-protocol.md` §3.6
 2. 所有 settings 写入走 `db::settings_kv::set_setting`（禁止 `INSERT OR REPLACE`，否则每次写都会刷新同步版本）
-3. 新增的 **数据表** 是否需要同步：需要则加触发器维护 `local_seq`、在 `sync_store` 中实现读写/合并/墓碑，
-   并纳入 `build_sync_doc` 与 cloud 的 `sync/doc.rs`、`sync/merge.rs`
-4. 新增的 **记录字段**：`models.rs`（`#[serde(default)]`）、`sync_store` 的行读写、`export_data_internal` / `import_data_raw`、
+3. 新增的 **数据表** 是否需要同步：需要则加触发器维护 `local_seq`、在 `db/sync_store.rs` 中实现读写/合并/墓碑，
+   并纳入 `sync/mod.rs` 的 `build_sync_doc` 与 cloud 的 `sync/doc.rs`、`sync/merge.rs`
+4. 新增的 **记录字段**：`db/models.rs`（`#[serde(default)]`）、`db/sync_store.rs` 的行读写、`data.rs` 的导入导出、
    cloud `src/model.rs` 允许字段与类型
-5. 时间字段经 `db::time::normalize_datetime` 规范化；前端经 `utils/datetime.ts`（GPUI 版界面经 `crates/app/src/util/datetime.rs`）
-6. 旧版数据导入的兼容性（新字段必须有默认值）
+5. 时间字段经 `db::time::normalize_datetime` 规范化；界面经 `crates/app/src/util/datetime.rs`
+6. 旧版数据导入的兼容性（新字段必须有默认值），以及对仍在用旧版本的设备的影响（`.trellis/spec/pc-gpui/data-compat.md`）
 7. 导出版本号是否需要递增
-8. **GPUI 版 core 同步修改**（直到 `pc/` 删除）：以上 1~7 在 `pc-gpui/crates/core` 里同样做一遍——迁移加到
-   `crates/core/src/db/migrations.rs`（与 `pc/` **同号同 SQL**，`LATEST_VERSION` 相等）；`db/models.rs` / `db/settings_kv.rs` /
-   `db/sync_store.rs` 与 `pc/src-tauri/src/db/` 保持逐字一致；`data.rs` 的 `read_app_settings` / `write_app_settings` /
-   `export_json` / `import_json`；`sync/mod.rs` 的 `build_sync_doc`。需要界面的设置项再改 `crates/app`（`state.rs`、
-   `windows/settings/`）。用 `diff -r pc/src-tauri/src/db pc-gpui/crates/core/src/db` 自查（只应剩 `connection.rs` 的 `test-util` cfg），
-   两边 `cargo test` 都要绿。细则见 `.trellis/spec/pc-gpui/core-parity.md`
+8. `pc-gpui/` 下 `cargo test --workspace --locked` 与 `cloud/` 下 `cargo test --locked` 都要绿；同步相关的再跑 Linux e2e 的 S 组
+
+## 兼容旧版沿用的名字
+
+旧 Tauri 版（≤ 2.5.0）用过的这些名字全部原样沿用，保证安装包原地升级、数据与设置不丢、两版不会同时运行。**不要改**：
+
+| 项 | 值 | 位置 |
+|---|---|---|
+| 数据目录 | `%LOCALAPPDATA%\mini-todo\` | core `db/paths.rs` |
+| 日志 | `%LOCALAPPDATA%\com.tauri-app.mini-todo\logs\mini-todo.log`（旧 Tauri identifier 作目录名） | app `services/logging.rs` |
+| 单实例 | 命名互斥量 `com.tauri-app.mini-todo-sim`；接收窗口类名 `com.tauri-app.mini-todo-sic`、标题 `com.tauri-app.mini-todo-siw`；`WM_COPYDATA`（`dwData = 1542`，内容 `"<cwd>\|<arg0>\|…"`）——与旧版 `tauri-plugin-single-instance` 同名同格式，新旧两版互相识别 | app `services/single_instance.rs` |
+| 开机自启 | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\mini-todo = "<exe>" --autostart`；已开启时每次启动把路径刷新为当前 exe | app `services/autostart.rs` |
+| 系统通知 AppUserModelID | `com.tauri-app.mini-todo` | app `lib.rs` 的 `APP_IDENTIFIER` |
+| 安装身份 | 产品名 `mini-todo`、卸载键 `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\mini-todo`、默认目录 `%LOCALAPPDATA%\mini-todo`（= 数据目录，卸载只删程序文件）、`$SMPROGRAMS\mini-todo.lnk`；已装旧版时先以 `/S /UPDATE` 调用旧卸载器再安装 | `pc-gpui/scripts/windows-installer.nsi`，契约见 `.trellis/spec/pc-gpui/release.md` |
+| 收纳根目录 | `%USERPROFILE%\MiniTodo收纳箱\` | core `services/fence_fs/location.rs` |
 
 ## 核心架构概念
 
-> 本节描述 `pc/`（Tauri 版）的实现；业务流程（调度、同步、对账……）在 `pc-gpui/crates/core` 里逻辑相同，GPUI 版的窗口 / 事件 / 通信
-> 对应关系见下文「pc-gpui（GPUI 版 PC 端）」。
+### crate 划分与线程模型
+
+- `crates/core`（`mini-todo-core`）：数据库、同步、导入导出、提醒、收纳箱文件层等全部业务逻辑，**阻塞函数**，错误是面向用户的中文 `String`；
+  不依赖 GPUI / Tauri / tokio（`reqwest::blocking` 不能在 tokio runtime 里调用）。公开 API 见 `pc-gpui/crates/core/README.md`。
+- `crates/app`（`mini-todo`）：一个进程一个 GPUI `Application`（`QuitMode::Explicit`，托盘常驻），所有窗口共享同一个 `App`。
+  阻塞调用一律放后台：`db::spawn_db(cx, |db| core::…)` 返回 `Task<Result<T, String>>`，回前台用 `WeakEntity::update`。
+- App 被借用时（事件处理 / `update` / `render`）不能同步调用会给窗口发消息的 Win32：`platform::*(window, cx, …)` 写操作已自动延后，
+  `platform::Hwnd` 原始调用只在 `cx.spawn` 的 async 块里、`update` 之外用（`.trellis/spec/pc-gpui/gpui-conventions.md` §2.2）。
+
+### 启动顺序（`crates/app/src/lib.rs` 的 `run()`）
+
+```
+日志 → 单实例（已有实例：转交参数后退出）→ 打开数据库（失败弹框退出）→ Application(QuitMode::Explicit)
+  → 主题 / UiLayer / Db / WindowManager / AppState → 单实例唤起监听 → 主窗口（按屏幕配置恢复几何与固定模式）
+  → 托盘 → 自动同步定时器 → 提醒调度 → 恢复收纳箱窗口 → 开机自启自愈 → 加载设置与待办 →（debug）MINI_TODO_DEBUG_OPEN
+```
+
+### 跨窗口状态与通信
+
+旧版的 Tauri invoke / emit 在 GPUI 版里都变成同进程的直接调用：
+
+| 旧版（Tauri / WebView） | GPUI 版 |
+|---|---|
+| Pinia `todoStore` / `appStore` | `state::AppState`（`Entity` + Global），各窗口 `cx.observe`；写操作经 `AppState` 方法在后台执行 |
+| `invoke` 命令 / `spawn_blocking` | `db::spawn_db(cx, \|db\| core::…)` 放后台，`WeakEntity::update` 回前台 |
+| `sync-completed` | `services::sync::run_sync` → `AppState::apply_sync_report`（本地数据变了 → 重新拉待办；`settings_applied` → 重读设置） |
+| `data-imported` / `app-settings-changed` / `todo-font-changed` | 直接改 `AppState`，所有窗口随之刷新 |
+| `subtask-memory-ready` / `-init` / `-save` | 子任务窗口直接读写新建待办窗口的 `Entity<DraftSubtasks>`（`subtask::open_draft`） |
+| `fence-items-changed` | `fence::items::FenceRefresh`：目录监听回调（`fence-watch` 线程）经 channel 回前台 → 对应收纳箱窗口 |
+| 托盘事件 | tray-icon 回调只把事件投进 channel → 前台执行动作（`services::tray`） |
+| 独立 WebView 窗口（label） | GPUI 窗口：`windows::WindowManager` 统一登记 / 模态子窗口 / 遮罩 / owner / 关闭后刷新 / 居中 |
+| tao 窗口能力 + `commands/window.rs` Win32 | `platform/`（`windows.rs` Win32、`fallback.rs` Linux、`embed.rs` 嵌入桌面、`subclass.rs` 置底与几何锁定） |
+
+### 窗口一览（`windows::WindowManager`，`WindowKind`）
+
+| 窗口 | 入口 | 说明 |
+|---|---|---|
+| 主窗口 | `main_window::open` / `show_and_activate` | 380×600，最小 320×400，透明，可缩放；开日历时加宽 |
+| 待办详情 / 编辑 | `editor::open(cx, parent, todo_id, EditorMode::{View, Edit})` | 1080×600；`todo_id = None` 为新建 |
+| 子任务 | `subtask::open` / `subtask::open_draft` | 800×750，查看 / 编辑 |
+| 已完成 | `completed::open` | 460×550，搜索、恢复、删除 |
+| 设置 | `settings::open(cx, parent, SettingsTab::{General, Appearance, Data, Screen, About})` | 680×560；常规 / 外观 / 数据与同步 / 屏幕配置 / 关于 |
+| 应用内通知 | `notification::open` | 320×120，透明、`WindowKind::PopUp`、不抢焦点 |
+| 收纳箱 | `services::fences`（`fence::open` 等转发） | 每个收纳箱一个窗口，key `fence-{id}`，始终嵌入桌面层，不可关闭（删除走 `close_deleted`） |
+| 控件样例 | `gallery::open` | 仅调试（`MINI_TODO_DEBUG_OPEN=gallery`） |
+
+打开方是主窗口 / 已完成 / 编辑窗口时，子窗口是模态的（同一时刻一个，打开方显示遮罩，Windows 上以打开方为 owner）；
+打开方是主窗口时，子窗口关闭后自动 `reload_todos`，设置窗口关闭后再重读设置并重启自动同步。
 
 ### 通知调度流程
 
 ```
-NotificationService::start_scheduler() (后台任务，对齐整分钟 tick)
-  ├── 扫描 completed = 0 AND notified = 0 AND notify_at - COALESCE(notify_before,0) <= now（按时间排序）
-  ├── 逐条处理，单条出错只记日志、不影响其它提醒
-  ├── 触发系统通知 / 应用内通知窗口（work area + 缩放换算坐标，叠放与换列）
-  ├── 重复提醒：解析 notify_at（空格 / T 均可）→ 计算下一次 → 写规范格式并重置 notified = 0
-  └── 非重复：notified = 1
+services::scheduler（后台线程）
+  ├── 启动 5s 后 reminder::catch_up_missed_repeats（补发错过的重复提醒）
+  └── 每到整分钟：notification_kind(db) → reminder::run_due(db, deliver)
+        ├── 扫描 completed = 0 AND notified = 0 AND notify_at - COALESCE(notify_before,0) <= now（按时间排序）
+        ├── 逐条投递，单条出错只记日志、不影响其它提醒
+        ├── System → 系统通知（Toast）；App → 经通道交给前台建应用内通知窗口（建窗失败不推进、下一分钟重试）
+        ├── 重复提醒：解析 notify_at（空格 / T 均可）→ 计算下一次 → 写规范格式并重置 notified = 0
+        └── 非重复：notified = 1
 ```
 
 ### 待办编辑/详情流程
 
 ```
-TodoList / QuadrantView / CalendarView / CompletedView
-  └── 点击待办 → 打开独立 WebView：/editor?id={todoId}&mode=view（新建时无 id，直接编辑模式）
-       └── EditorView 双排版：只读详情（标题 + MD 渲染 + 通知状态 + 优先级）⇄ [编辑] 原地切换表单排版
-            ├── 单条加载用 get_todo；子任务操作后只刷新当前待办
-            └── 描述字段使用 MarkdownEditor 组件（Milkdown，modelValue 为存储形式）
+列表 / 四象限 / 日历 / 已完成
+  └── 点击待办 → editor::open(.., Some(id), EditorMode::View)（新建：FAB / 托盘「添加待办项」→ None，直接编辑）
+       └── 编辑窗口：只读详情（标题 + MD 渲染 + 通知状态 + 优先级）⇄ [编辑] 原地切换表单
+            ├── 写操作经 AppState（create_todo / update_todo / …，后台执行、更新本地副本）
+            └── 描述字段使用 ui::markdown_editor（源码 + 预览，值为存储形式 minitodo-image://）
 ```
 
 ### 子任务编辑流程
 
 ```
-TodoItem / EditorView
-  └── 点击编辑/查看
-       └── 打开独立 WebView：/subtask-editor?id={subtaskId}&mode={view|edit}
-            └── SubtaskEditorView 使用 MarkdownEditor 组件（Milkdown）加载 Markdown
-                 └── 图片粘贴 → save_subtask_image（raw body）→ images 目录 → Markdown 写 minitodo-image://<name>
+编辑窗口子任务面板
+  └── 查看 / 编辑 → subtask::open（已落库）/ subtask::open_draft（新建待办的暂存子任务）
+       └── ui::markdown_editor 加载 Markdown
+            └── 图片粘贴 / 拖入 → 后台 core::todo::save_image → images 目录 → Markdown 写 minitodo-image://<name>
 ```
 
 ### 主窗口刷新
 
-- 每 5s 调 `get_change_seq`（`sync_meta.local_seq`），变化时才 `fetchTodos`；聚焦、子窗口关闭、
-  `sync-completed`、`data-imported` 也走同一个单飞 `fetchTodos`（过期响应丢弃）
+- 每 5s `AppState::refresh_if_changed`（读 `todo::change_seq` = `sync_meta.local_seq`，变化时才 `fetch_todos`）；子窗口关闭、同步完成也走同一个
+  单飞 `fetch_todos`（拉取期间有本地写操作则丢弃并补拉）；主窗口有模态子窗口时后台刷新跳过
 
 ### WebDAV 同步流程
 
 ```
-webdav_sync()（async → spawn_blocking，单同步互斥，"同步正在进行中"）
-  ├── GET sync-data（有基准 ETag 时 If-None-Match；本地有未上传变更 / 手动同步 / 每第 10 轮时无条件 GET）
-  │     ├── 304 → 远端未变
-  │     ├── 200 → 解析（失败直接报错）→ 单事务逐条合并（LWW + 墓碑 + 设置 LWW）→ 下载缺失图片
-  │     └── 404 → 首次上传
-  ├── 需要上传？（local_seq ≠ synced_seq / 设置更新 / 远端缺本地记录或墓碑）
-  │     ├── 先上传缺失图片（一次 PROPFIND Depth:1 列清单）
-  │     └── 条件 PUT：已知 ETag 时 If-Match（去 W/），从不发 If-Unmodified-Since
-  │           412 → 等 1.1s → 重新 GET → 合并 → PUT（最多 4 次）
-  └── 成功：基准取 PUT 响应 ETag → HEAD → PROPFIND；记录 synced_seq；emit sync-completed(SyncReport)
-webdav_force_pull()  让本地等于远端（删除本地独有记录，不写墓碑）
-webdav_force_push()  让远端等于本地（为远端独有记录写墓碑后上传）
-```
-
-### 桌面收纳箱流程
-
-```
-托盘「新增收纳箱」/ create_fence（async：同步命令 / 菜单回调里建窗会死锁）
-  └── create_fence_folder（先建文件夹）→ INSERT fences → save_layout（当前屏幕组合）→ open_fence_window（tao 标志一次给齐）
-       └── embed_window_in_desktop → EMBEDDED_WINDOWS 登记 → 200ms tick_embedded_windows 守护（每 10 tick 检测屏幕组合）
-拖入 → fence_move_in（async，begin_moving 登记 → spawn_blocking）→ IFileOperation → upsert fence_items（搬运 / 记录原始路径）
-目录变化 → notify（300ms 去抖）→ 数据库锁内列举对账 → emit_to("fence-{id}", "fence-items-changed")
-删除 → delete_fence → restore_all → 文件夹已清空才删记录 + destroy 窗口，否则整个收纳箱保留
+services::sync::run_sync(cx, SyncMode)（后台线程；AppState.syncing 期间标题栏图标旋转）
+  └── core sync::run(db, mode)（单同步互斥，"同步正在进行中"）
+        ├── GET sync-data（有基准 ETag 时 If-None-Match；本地有未上传变更 / 手动同步 / 每第 10 轮时无条件 GET）
+        │     ├── 304 → 远端未变
+        │     ├── 200 → 解析（失败直接报错）→ 单事务逐条合并（LWW + 墓碑 + 设置 LWW）→ 下载缺失图片
+        │     └── 404 → 首次上传
+        ├── 需要上传？（local_seq ≠ synced_seq / 设置更新 / 远端缺本地记录或墓碑）
+        │     ├── 先上传缺失图片（一次 PROPFIND Depth:1 列清单）
+        │     └── 条件 PUT：已知 ETag 时 If-Match（去 W/），从不发 If-Unmodified-Since
+        │           412 → 等 1.1s → 重新 GET → 合并 → PUT（最多 4 次）
+        └── 成功：基准取 PUT 响应 ETag → HEAD → PROPFIND；记录 synced_seq；返回 SyncReport
+  └── AppState::apply_sync_report（本地数据变了 → 重新拉待办；settings_applied → 重读设置与运行时偏好）
+SyncMode::ForcePull  让本地等于远端（删除本地独有记录，不写墓碑）
+SyncMode::ForcePush  让远端等于本地（为远端独有记录写墓碑后上传）
 ```
 
 WebDAV 服务端差异（实测，见 `.trellis/spec/backend/sync-protocol.md`）：Apache mod_dav 的 `If-Unmodified-Since`
 对未改动文件也会 412、写入后 1 秒内 ETag 为弱；nginx/Caddy 忽略 PUT 前置条件、PROPFIND 不返回 getetag、
 `If-Modified-Since` 按整秒比较。所以两端只用 `If-Match` / `If-None-Match`，并且写前总是先 GET 合并。
 
-### 前后端通信
+### 桌面收纳箱流程
 
-- **Tauri invoke**：前端调用后端 Rust 命令（请求-响应）。会触网、读写大文件或做批量 SQL 的命令一律写成
-  `async` 并在 `tokio::task::spawn_blocking` 里执行（Tauri 2 的同步命令跑在主线程，会卡住所有窗口）
-- **Tauri emit/listen**：事件驱动通信（实时推送）
-  - `tray-toggle-fixed`、`tray-reset-window`、`tray-add-todo`、`tray-open-settings`：托盘菜单事件
-  - 托盘「新增收纳箱」「显示/隐藏所有收纳箱」「重置收纳箱位置」（菜单 id `new_fence` / `toggle_fences` / `reset_fences`，
-    位于「添加待办项」之后，仅 Windows）由后端直接处理，不发前端事件；对应命令 `create_fence` / `toggle_fences_visibility` /
-    `reset_fence_positions` 是同一实现
-  - `fence-items-changed`（payload `FenceEntry[]`）：后端对账后 `emit_to("fence-{id}")`，只发给对应收纳箱窗口
-  - `sync-completed`（payload `SyncReport`）：后端同步改动了本地数据后发出（手动 / 自动同步都会），主窗口据此刷新
-  - `data-imported`：设置窗口导入数据后通知主窗口重载
-  - `app-settings-changed`：设置窗口改动应用设置后通知主窗口按 `key` 重载（含 `fixedEmbedDesktop`）
-  - `todo-font-changed`：字体设置变更通知
-  - `subtask-memory-ready` / `-init` / `-save`：新建待办（尚未入库）时，编辑窗口与子任务窗口之间传递内存中的子任务
+```
+托盘「新增收纳箱」→ services::fences::create_fence
+  └── 后台 fence::create（先建文件夹 → INSERT fences → 记当前屏幕组合布局）
+       → open_fence_window（Windows 先隐藏建窗 → 按客户区定位 → TOOLWINDOW + 嵌入桌面层 → 显示；失败 rollback_create）
+       → ensure_watcher；200ms 守护（Explorer 重启重挂；每 10 tick 检测屏幕组合）
+拖入 → 后台 fence::items::move_in（先登记 begin_moving → IFileOperation → upsert fence_items，搬运 / 记录原始路径）→ FenceRefresh
+目录变化 → notify（300ms 去抖）→ fence-watch 线程里数据库锁内列举对账 → FenceRefresh 经 channel → 对应收纳箱窗口
+删除 → 后台 fence::delete → restore_all → 文件夹已清空才删记录 + close_deleted 关窗，否则整个收纳箱保留
+```
 
-### 独立 WebView 窗口
+### 已知偏差与限制
 
-部分功能使用独立 Tauri WebView 窗口：
-- **EditorView**：待办详情 / 编辑
-- **SubtaskEditorView**：子任务详情编辑（Markdown + 图片）
-- **SettingsView**：设置
-- **CompletedView**：已完成列表
-- **NotificationView**：应用内通知弹窗（当通知类型为 "app" 时；按显示器 work area 与缩放换算位置，多条叠放）
-- **FenceView**：桌面收纳箱（每个收纳箱一个窗口，label `fence-{id}`；后端 `commands/fence.rs` 建窗，始终嵌入桌面层，
-  不可关闭，删除走 `destroy()`）
-
-## pc-gpui（GPUI 版 PC 端）
-
-`pc-gpui/` 是 `pc/` 的 Rust + GPUI 重写（任务 `10-15-gpui-rewrite`），去掉 WebView2，元素 / 样式 / 功能与旧版一致（上文「核心功能」
-同样适用，已知偏差见下）。维护者入口：
-
-- `pc-gpui/crates/app/README.md`：模块地图、约定、`AppState` / `WindowManager` / `ui::*` / `platform::*` / `services::*` 接口表、调试开关
-- `pc-gpui/crates/core/README.md`：业务 API（逐个对照旧 `#[tauri::command]`）、线程与调用约束、旧事件 → 返回值
-- `pc-gpui/scripts/README.md`：`regress.py` / `shot.sh` / `MINI_TODO_DEBUG_OPEN`；`scripts/e2e-linux/`、`scripts/e2e-windows/` 各有 README
-- `.trellis/spec/pc-gpui/`：GPUI 约定（`gpui-conventions.md`）、与 `pc/` 的双改规则（`core-parity.md`）、验证门槛（`verification.md`）
-
-### 与 `pc/` 的关系
-
-- **数据完全兼容**：同一数据目录 `%LOCALAPPDATA%\mini-todo\`（库 / 图片 / 备份 / 节假日 / 图标缓存）、同一迁移 v1~v29、同一同步文档
-  `sync-data.json.gz`（同一 `webdav_device_id`，切换版本不会被当成新设备）、同一导出格式 4.0、同一 settings 键、同一日志文件与收纳根目录。
-  用户可以在两版之间直接切换，多台设备也可以混用（与 cloud 的协作不变）。
-- **不要同时运行两版**：单实例与旧版 Tauri 插件同名同格式（互斥量 `com.tauri-app.mini-todo-sim`、接收窗口、`WM_COPYDATA`），两版互相识别——
-  后启动的一版把参数转交给已运行的那一版（唤起其主窗口）后退出。
-- 开机自启沿用同一注册表项 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\mini-todo`（`"<exe>" --autostart`）；已开启时每次启动都把路径
-  刷新为当前 exe，因此指向最后启动的那一版。系统通知的 AppUserModelID 沿用 `com.tauri-app.mini-todo`。
-- **双改规则（直到 `pc/` 删除）**：数据库迁移、settings 键、记录字段、同步 / 合并 / 时间 / 墓碑规则、导出格式必须 `pc/src-tauri` 与
-  `pc-gpui/crates/core` 一起改（迁移同号同 SQL，否则混用版本时数据结构分叉或设置被重置）；`db/`、`services/{webdav,secret}.rs`、
-  `services/fence_fs/` 两边保持逐字一致（`diff` 自查）；旧前端 `pc/src/utils/*.ts` 已 1:1 移植到 `crates/app/src/util/` 等处，修逻辑 bug
-  两边一起修。纯界面改动以 pc-gpui 为准。细则 `.trellis/spec/pc-gpui/core-parity.md`。
-- `.trellis/spec/backend/*` 的契约（同步协议、窗口模式语义、收纳箱数据与文件层）对 `pc-gpui/crates/core` 与 app 的对应实现同样适用。
-
-### 架构要点
-
-- `crates/core`（`mini-todo-core`）：`db/`、`services/{webdav,secret,fence_fs}` 原样复制；`commands/*.rs` 去掉 Tauri 外壳成为普通阻塞函数
-  （`todo`、`data`、`sync`、`settings`、`holiday`、`reminder`、`window_logic`、`fence`）；新增 `lunar`（tyme4rs）。不依赖 GPUI / Tauri / tokio，
-  错误仍是面向用户的中文 `String`。
-- `crates/app`（`mini-todo`）：一个进程一个 GPUI `Application`（`QuitMode::Explicit`，托盘常驻），所有窗口共享同一个 `App`：
-
-  | 旧版（Tauri / WebView） | GPUI 版 |
-  |---|---|
-  | Pinia `todoStore` / `appStore` | `state::AppState`（`Entity` + Global），各窗口 `cx.observe`；写操作经 `AppState` 方法在后台执行 |
-  | `invoke` 同步命令 / `spawn_blocking` | `db::spawn_db(cx, \|db\| core::…)` 放后台，`WeakEntity::update` 回前台 |
-  | `sync-completed` | `services::sync::run_sync` → `AppState::apply_sync_report` |
-  | `data-imported` / `app-settings-changed` / `todo-font-changed` | 直接改 `AppState`，所有窗口随之刷新 |
-  | `subtask-memory-ready` / `-init` / `-save` | 子任务窗口直接读写新建待办窗口的 `Entity<DraftSubtasks>`（`subtask::open_draft`） |
-  | `fence-items-changed` | 目录监听回调（`fence-watch` 线程）经 channel 回前台 → 对应收纳箱窗口 |
-  | 托盘事件 | tray-icon 回调 → 前台直接执行动作（`services::tray`） |
-  | 独立 WebView 窗口（label） | GPUI 窗口：`windows::WindowManager` 统一登记 / 模态子窗口 / 遮罩 / owner / 关闭后刷新 / 居中 |
-  | tao 窗口能力 + `commands/window.rs` Win32 | `platform/`（`windows.rs` Win32、`fallback.rs` Linux、`embed.rs` 嵌入桌面、`subclass.rs` 置底与几何锁定） |
-  | Element Plus / Milkdown | `ui/` 下自绘的 EP 风格控件（每种一个实现）、`ui::markdown*` |
-
-- 主窗口刷新与旧版相同：5s `change_seq` 轮询、子窗口关闭、同步完成都走 `AppState::fetch_todos`（单飞 + 过期丢弃），主窗口有模态子窗口时后台刷新跳过。
-- 关键约定（详见 `.trellis/spec/pc-gpui/gpui-conventions.md`）：阻塞调用一律放后台；App 被借用时（事件处理 / `update` / `render`）不能同步调用
-  会给窗口发消息的 Win32（`platform::*(window, cx, …)` 已自动延后）；Windows 上 `start_window_move()` 是空操作，标题栏用
-  `ui::title_bar::drag_region()`；GPUI 没有 z-index（后绘制者在上，弹层只能画在窗口内）；本地图片 `img(PathBuf)`；颜色 / 尺寸 / 字体只从
-  `theme.rs` 取；`gpui-kit` 精确钉 `=0.7.3`，升级按 spec 的步骤逐项核对。
-
-### 已知偏差（相对 `pc/`）
-
-1. **Markdown 编辑**：Milkdown 所见即所得无法在 GPUI 中 1:1 还原，编辑模式改为"Markdown 源码 + 渲染预览"（放大编辑弹窗仍是源码 / 预览分栏）；
+1. **Markdown 编辑**：旧版 Milkdown 所见即所得无法在 GPUI 中 1:1 还原，编辑模式改为"Markdown 源码 + 渲染预览"（放大编辑弹窗是源码 / 预览分栏）；
    只读渲染、图片粘贴 / 拖入上传、`minitodo-image://` 引用、链接白名单规则不变。
 2. **中文换行**：GPUI 的换行器不做避头尾，全角标点（`，。、；：！？）`）可能落到行首，多行中文的折行位置与浏览器可能差一个字。
 3. GPUI 没有文字阴影、多色标渐变、位图变换等，个别装饰用近似实现（见 spec `gpui-conventions.md` §2.13）。
 4. **Linux 仅用于 CI、截图回归与 e2e**：没有托盘 / 单实例 / 开机自启 / 嵌入桌面 / 收纳箱真实文件操作，最后一个窗口关闭即退出，设置里的字体下拉为空。
    Windows 专有能力（嵌入桌面、收纳箱、DPAPI、Toast、托盘、DirectComposition 透明）在 Linux 上只做交叉 clippy，靠 CI 的 Windows e2e 与用户实机验收。
-
-### 构建与运行要点
-
-- Windows release 构建必须在装了 Windows SDK 的 Windows 上做（gpui 的 build.rs 用 `fxc.exe` 预编译 HLSL 着色器，可用 `GPUI_FXC_PATH` 指定）：
-  `cd pc-gpui && cargo build --release -p mini-todo` → `pc-gpui/target/release/mini-todo.exe`（单个 exe，不需要 WebView2 Runtime，暂无安装包）。
-  Linux 无法交叉构建可运行的 Windows 版。
-- debug 构建的 exe 在运行时按**构建机**上 cargo registry 的绝对路径编译着色器，只能在构建它的那台机器上运行。
-- 试用：CI `pc-gpui-ci.yml` 的 Windows job 上传 release 产物 `mini-todo-gpui-windows-x64`（`mini-todo.exe`）。
-- debug 专用环境变量：除下文「开发命令」表中的三个（同名同义）外，GPUI 版另有 `MINI_TODO_DEBUG_OPEN`（启动后打开指定窗口）、
-  `MINI_TODO_DEBUG_LATEST_VERSION`、`MINI_TODO_DEBUG_DIALOG_PATH`、`MINI_TODO_DEBUG_WINDOWS_UI`、`MINI_TODO_DEBUG_FENCE_STATE`，
-  同样只在 debug 构建读取（见 `pc-gpui/crates/app/README.md` §5）。
+5. Win10 / Win11 ≤23H2 上 Win+D 可能盖住嵌入桌面的主窗口与收纳箱（显示桌面抬起的是 `WorkerW` 而不是 Progman）。
 
 ## cloud/ 子项目（云端 API）
 
-`cloud/` 是一个独立的 Rust crate（**不在** `pc/` 的 Cargo workspace 里），部署到 VPS 上为
+`cloud/` 是一个独立的 Rust crate（**不在** `pc-gpui/` 的 Cargo workspace 里），部署到 VPS 上为
 AI / Claude Code Skill 提供 mini-todo 数据的 HTTP REST 访问能力。部署、配置、Skill 见 `cloud/README.md`。
 与 PC 的契约（和上文"时间格式约定""合并规则"是同一套）：
 
@@ -638,7 +499,7 @@ AI / Claude Code Skill 提供 mini-todo 数据的 HTTP REST 访问能力。部�
 - **时间**：`YYYY-MM-DD HH:MM:SS`，按 `config.toml` 的 `timezone`（IANA，须与 PC 一致）每次重新换算墙钟（DST 安全）
 - **写冲突**：写前先 GET 合并，条件 PUT 只用 `If-Match`（去 `W/`）；412 等待后重新 GET → 合并 → PUT
 - **字段契约**：SQLite 是 KV-style（`todos(id, data_json, updated_at)`），但 API 写入只接受 PC 模型里的字段
-  （`src/model.rs`），未知字段 / 类型错误 → 400；合并远端时未知字段原样保留（可能是更新版 PC 加的新字段）
+  （`src/model.rs`，以 `pc-gpui/crates/core/src/db/models.rs` 为准），未知字段 / 类型错误 → 400；合并远端时未知字段原样保留（可能是更新版 PC 加的新字段）
 - **墓碑**：DELETE 写 `tombstones`，随 sync-data 双向传播，保留 30 天
 - **短码**：`todo_seq` 表给每个 todo 分配 `C{seq}`，API 路径与 CLI 都可用；只存在于 cloud，不进同步文档
 
@@ -657,6 +518,7 @@ cloud/
 ├── src/sync/images.rs        # 图片镜像（缺什么下什么，失败退避重试）
 ├── src/sync/mock_dav.rs      # 测试用进程内 WebDAV，可按 Apache / nginx 实测语义模拟
 ├── src/api/                  # axum：Bearer 鉴权、X-Sync-Status 头、5xx 不外泄内部细节
+├── deploy/                   # minitodo-cloud.service（systemd 沙箱加固）、Caddyfile.example
 └── skill/minitodo/           # Claude Code Skill：SKILL.md + minitodo.py（含单测）+ install.{sh,ps1}
 ```
 
@@ -694,79 +556,76 @@ todo 可写字段以 `src/model.rs` 的 `TODO_FIELDS` 为准（`title` / `descri
 ## 开发命令
 
 ```bash
-# PC 前端（在 pc/ 下）
-npm ci                     # 安装依赖（lockfile 只指向 registry.npmjs.org）
-npm run tauri dev          # 开发模式运行
-npm run tauri build        # 构建生产版本
-npm run typecheck          # vue-tsc
-npm run lint               # eslint
-npm run test               # vitest 单测（src/utils/*.test.ts）
-npm run build              # 类型检查 + vite 构建
-
-# PC Rust（在 pc/src-tauri/ 下）
+# PC（在 pc-gpui/ 下），门槛见 .trellis/spec/pc-gpui/verification.md
 cargo fmt --all -- --check
-cargo clippy --all-targets --locked -- -D warnings
-cargo test --locked        # 含 sync_store 合并、迁移、WebDAV 互操作（tiny_http 模拟服务端）等测试
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked                          # core（合并、迁移、WebDAV 互操作 tiny_http 模拟、农历对照……）+ app（util / 纯逻辑）
+cargo test -p mini-todo-core                             # 只测 core（不编译 GPUI）
+# Windows 目标交叉检查（Linux 上开发时用；覆盖全部 cfg(windows) 代码；需 rustup target add x86_64-pc-windows-gnu + mingw gcc；只 check 不链接）
+cargo clippy --workspace --all-targets --target x86_64-pc-windows-gnu -- -D warnings
+MINI_TODO_DATA_DIR=/tmp/mt cargo run -p mini-todo        # 隔离数据目录运行 debug 构建（Windows 上与安装版并存实测时必须带上）
+cargo build --release -p mini-todo --locked              # 仅 Windows（需 Windows SDK 的 fxc.exe，可用 GPUI_FXC_PATH 指定）→ target/release/mini-todo.exe
+scripts/regress.py --before <改动前的输出> --out /tmp/regress  # Xvfb 视觉回归：场景截图 + 并排对照图（--only 'main-*' 只跑部分）
+scripts/regress.py --smoke --no-build                    # 跨窗口端到端冒烟（按数据库断言）
+scripts/shot.sh --name main-list --window "Mini Todo" /tmp/shots   # 单个场景截图 / xdotool 交互
 
 # cloud（在 cloud/ 下）
 cargo test --locked        # 含 mock_dav 场景测试（Apache / nginx 语义）
 python3 -m unittest discover -s skill/minitodo -p 'test_*.py'
 
-# 端到端（Linux，真实应用 + 双 WebDAV + cloud + Skill），见 pc/scripts/e2e-linux/README.md
-python3 pc/scripts/e2e-linux/run_e2e.py <app> <cloud> <old-app>
-
-# GPUI 版（在 pc-gpui/ 下），门槛见 .trellis/spec/pc-gpui/verification.md
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --locked                          # core（迁移来的全部测试 + 农历对照）+ app（util / 纯逻辑）
-cargo test -p mini-todo-core                             # 只测 core（不编译 GPUI）
-# Windows 目标交叉检查（覆盖全部 cfg(windows) 代码；需 rustup target add x86_64-pc-windows-gnu + mingw gcc；只 check 不链接）
-cargo clippy --workspace --all-targets --target x86_64-pc-windows-gnu -- -D warnings
-MINI_TODO_DATA_DIR=/tmp/mt cargo run -p mini-todo        # 隔离数据目录运行 debug 构建
-cargo build --release -p mini-todo                       # 仅 Windows（需 Windows SDK 的 fxc.exe）→ target/release/mini-todo.exe
-scripts/regress.py --ref <参考截图目录> --out /tmp/regress  # Xvfb 视觉回归：场景截图 + 并排对照图（--only 'main-*' 只跑部分）
-scripts/regress.py --smoke --no-build                    # 跨窗口端到端冒烟（按数据库断言）
-scripts/shot.sh --name main-list --window "Mini Todo" /tmp/shots   # 单个场景截图 / xdotool 交互
-
-# GPUI 版端到端（仓库根目录）：Linux 见 pc-gpui/scripts/e2e-linux/README.md；Windows 见 pc-gpui/scripts/e2e-windows/README.md
+# 端到端（仓库根目录）：Linux 见 pc-gpui/scripts/e2e-linux/README.md；Windows 见 pc-gpui/scripts/e2e-windows/README.md
 python3 pc-gpui/scripts/e2e-linux/run_e2e.py pc-gpui/target/debug/mini-todo cloud/target/debug/minitodo-cloud [用例前缀 ...]
 python pc-gpui/scripts/e2e-windows/run_e2e.py --exe pc-gpui/target/debug/mini-todo.exe --seed pc-gpui/target/debug/examples/seed.exe --out <输出目录>
 ```
 
+- debug 构建的 exe 在运行时按**构建机**上 cargo registry 的绝对路径编译着色器，只能在构建它的那台机器上运行；分发一律用 release 构建。
+- 安装包与便携 zip 只由 `release.yml` 构建（NSIS 脚本 `pc-gpui/scripts/windows-installer.nsi`，本地编译方法见 `.trellis/spec/pc-gpui/release.md`）。
+
 debug 专用环境变量（**只在 debug 构建读取，release 一律忽略**；与正在运行的安装版并存做实测时必须带上，详见
-`.trellis/spec/backend/desktop-fences.md` §3.6 与 `pc/scripts/e2e/README.md`）：
+`.trellis/spec/backend/desktop-fences.md` §3.6、`pc-gpui/crates/app/README.md` §5 与 `pc-gpui/scripts/README.md`）：
 
 | 变量 | 作用 |
 |---|---|
-| `MINI_TODO_DATA_DIR` | 数据目录（库 / 图片 / 备份 / 图标缓存）、日志（`<dir>\logs`）、WebView2 用户数据（`<dir>\EBWebView`）都改到该目录；不注册单实例插件、不刷新开机自启注册表项；托盘提示"Mini Todo（开发版）"；asset 协议额外放行隔离目录的 images / fence-icons |
+| `MINI_TODO_DATA_DIR` | 数据目录（库 / 图片 / 备份 / 图标缓存）、日志（`<dir>\logs`）都改到该目录；不启用单实例、不刷新开机自启注册表项；托盘提示"Mini Todo（开发版）" |
 | `MINI_TODO_FENCES_ROOT` | 收纳根目录改为该目录（代替 `%USERPROFILE%\MiniTodo收纳箱`） |
 | `MINI_TODO_SCREEN_ID_FILE` | 文件内容非空时替代屏幕组合 ID，用于模拟显示器组合变化 |
+| `MINI_TODO_DEBUG_OPEN` | 加载完数据后额外打开的窗口（`main`、`editor:<id>[:view\|:edit]`、`settings[:<页>]`、`fence:new` 等，格式见 `pc-gpui/scripts/README.md`） |
+| `MINI_TODO_DEBUG_LATEST_VERSION` | 版本检查不联网，直接当作 GitHub 最新版本（如 `v2.6.0`） |
+| `MINI_TODO_DEBUG_DIALOG_PATH` | 导出 / 导入的文件对话框不弹出，直接返回该路径 |
+| `MINI_TODO_DEBUG_WINDOWS_UI` | `1` 时 Linux 上也显示 Windows 专有的设置项 |
+| `MINI_TODO_DEBUG_FENCE_STATE` | `onedrive` / `drag-hover`：收纳箱直接显示 OneDrive 提示面板 / 拖入悬停框 |
 
-GPUI 版读取同样三个变量（同名同义；没有 WebView2 / asset 协议相关部分），另有 `MINI_TODO_DEBUG_OPEN` 等 GPUI 版专用的 debug 开关，
-见 `pc-gpui/crates/app/README.md` §5 与 `pc-gpui/scripts/README.md`。
+### CI 与发布（`.github/workflows/`）
 
-CI：`.github/workflows/pc-ci.yml`（Windows fmt/clippy/test、Linux clippy/test、前端 typecheck/lint/test/build）、
-`cloud-ci.yml`（fmt/clippy/test + Skill 单测）、`pc-gpui-ci.yml`（GPUI 版：Windows fmt/clippy/test + release 构建并上传
-`mini-todo-gpui-windows-x64` 产物，Linux fmt/clippy/test）、`pc-gpui-e2e-windows.yml`（GPUI 版 Windows e2e：debug 套件 + release 冒烟 / 单实例；
-手动触发，或推送到 `claude/**` 分支且改动 `pc-gpui/**` 时运行）。
+- `release.yml`：推 `v*` tag → 先建 **draft** release（tag 含 `-` 自动标 pre-release）→ Windows 作业构建 pc-gpui release 版并打 NSIS 安装包
+  `mini-todo_<版本>_x64-setup.exe` + 便携包 `mini-todo_<版本>_x64-portable.zip`、cloud 作业构建 `minitodo-cloud`（linux x86_64 / aarch64）→
+  全部成功后 publish 作业上传 `SHA256SUMS.txt` 并把 draft 转正；`workflow_dispatch`（tag + platforms）给已有 release 补建产物。
+  tag 必须等于 `v<pc-gpui 工作区版本>`，否则直接失败
+- `cache-warm.yml`：在 main 上预热 release 用的 Rust 缓存（`release.yml` 只读缓存）
+- `pc-gpui-ci.yml`：Windows fmt / clippy / test + release 构建（上传 `mini-todo-gpui-windows-x64` 产物），Linux clippy / test
+- `pc-gpui-e2e-windows.yml`：Windows e2e（debug 套件 + release 冒烟 / 单实例）；手动触发，或推送到 `claude/**` 分支且改动 `pc-gpui/**` 时运行
+- `cloud-ci.yml`：fmt / clippy / test + Skill 单测
+- **版本号只有一处**：`pc-gpui/Cargo.toml` 的 `[workspace.package] version`（改完 `Cargo.lock` 同步），当前 `3.0.0-pre`。cloud 版本在
+  `cloud/Cargo.toml`，与 tag 无关。发布步骤与安装器契约见 `.trellis/spec/pc-gpui/release.md`
 
 ## 注意事项
 
-1. **目标平台**：Windows 10/11；Linux 可编译运行（CI 与 e2e 用），嵌入桌面、桌面收纳箱等 Win32 特性在 Linux 上不可用
-2. **运行环境**：需要 Node.js 和 Rust 开发环境（`pc-gpui/` 只需 Rust stable；Windows release 构建另需 Windows SDK）
+1. **目标平台**：Windows 10/11（x64）；Linux 可编译运行（CI 与 e2e 用），嵌入桌面、桌面收纳箱等 Win32 特性在 Linux 上不可用。
+   3.0 起不再提供 macOS / Linux 桌面包
+2. **运行环境**：开发只需 Rust stable；Windows release 构建另需 Windows SDK（`fxc.exe`）。用户运行不需要 WebView2
 3. **图标使用**：仅使用 Element Plus Icons，禁止 emoji
-4. **代码规范**：使用 TypeScript 类型定义，遵循 Vue 3 组合式 API；`<el-*>` 组件按需引入，
-   `ElMessage` / `ElMessageBox` 只能从 `src/plugins/element.ts` 导入（eslint 强制）
-5. **Serde 命名**：Rust 模型使用 `#[serde(rename_all = "camelCase")]`，前端使用驼峰命名
+4. **GPUI 约定**：改 `pc-gpui/crates/app` 前读 `.trellis/spec/pc-gpui/gpui-conventions.md`（后台执行、App 借用期间不同步调 Win32、
+   拖动窗口、z 序与弹层、`img(PathBuf)`、theme token 唯一来源、`ui/` 控件复用、debug 开关只在 debug 构建生效）；
+   `gpui-kit` 精确钉 `=0.7.3`，不要随手升级；改了界面跑 `scripts/regress.py` 并逐张看对照图
+5. **Serde 命名**：Rust 模型使用 `#[serde(rename_all = "camelCase")]`（同步文档、导出文件、cloud API 都是驼峰）
 6. **进程管理**：Windows 平台需要外部子进程时使用 `taskkill` 终止子进程树
-7. **日志**：Rust 侧用 `log::info!` / `warn!` / `error!`（落盘到日志文件），不要用 `println!` / `eprintln!`
+7. **日志**：Rust 侧用 `log::info!` / `warn!` / `error!`（app `services::logging` 落盘），不要用 `println!` / `eprintln!`
+   （release 是 Windows 子系统程序，没有控制台）
 8. **设置读写**：一律经 `db::settings_kv`（只在值变化时更新 `updated_at`，否则会干扰设置同步）
-9. **安全边界**：CSP `script-src 'self'`（禁止 `eval` / 内联脚本）；本地图片只经 asset 协议
-   （scope 只有 `$LOCALDATA/mini-todo/images/**` 与收纳箱图标缓存 `$LOCALDATA/mini-todo/fence-icons/**`，不要放宽）访问，Markdown 里存 `minitodo-image://<name>`（`utils/imageRef.ts`）；
-   链接只放行 http(s) / mailto / 本地文件（`utils/fileLink.ts`）；图片文件名经 `is_safe_image_name` 校验
-10. **时间**：见"时间格式约定"，前后端都只用统一的工具函数解析与格式化
-11. **两套 PC 实现并存**：`pc/`（Tauri）与 `pc-gpui/`（GPUI）共用数据，影响数据的改动（迁移 / settings 键 / 字段 / 同步规则 / 导出格式）
-    必须两边一起改，直到 `pc/` 删除（见「pc-gpui」一节与 `.trellis/spec/pc-gpui/core-parity.md`）；不要在同一台机器上同时运行两版
-12. **GPUI 版约定**：改 `pc-gpui/crates/app` 前读 `.trellis/spec/pc-gpui/gpui-conventions.md`（后台执行、App 借用期间不同步调 Win32、
-    拖动窗口、z 序与弹层、`img(PathBuf)`、theme token 唯一来源、`ui/` 控件复用、debug 开关只在 debug 构建生效）；
-    `gpui-kit` 精确钉 `=0.7.3`，不要随手升级；改了界面跑 `scripts/regress.py` 并逐张看对照图
+9. **安全边界**：本地图片只按文件名映射到本机 images 目录（`util/image_ref.rs`），Markdown 里存 `minitodo-image://<name>`；
+   链接只放行 http(s) / mailto / 本地文件（`util/file_link.rs`，拒绝 UNC）；图片文件名经 `is_safe_image_name` 校验；
+   收纳箱图标只从 `fence-icons/` 缓存加载
+10. **时间**：见"时间格式约定"，只用 `db::time` 与 `util/datetime.rs` 解析与格式化
+11. **兼容名字不要改**：数据目录、日志目录、单实例 / 开机自启 / AppUserModelID / 安装身份沿用旧版（见「兼容旧版沿用的名字」）；
+    数据结构改动按 `.trellis/spec/pc-gpui/data-compat.md` 考虑 cloud 与仍在用旧版本的设备
+12. **带 owner HWND 的收纳箱移动**（`fence::delete`、`fence::items::{move_in, restore, move_to}`）绝不在 UI 主线程调用（系统对话框会死锁）

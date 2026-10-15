@@ -60,7 +60,7 @@ fn ts(offset_minutes: i64) -> String {
         .to_string()
 }
 
-/// PC 端形态的完整 todo 记录（字段与 `pc/src-tauri/src/db/models.rs::Todo` 一致）。
+/// PC 端形态的完整 todo 记录（字段与 `pc-gpui/crates/core/src/db/models.rs::Todo` 一致）。
 fn pc_todo(id: i64, title: &str, updated_at: &str, subtasks: Vec<Value>) -> Value {
     json!({
         "id": id,
