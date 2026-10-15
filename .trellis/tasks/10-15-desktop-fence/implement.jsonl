@@ -1,0 +1,14 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "后端规范索引"}
+{"file": ".trellis/spec/backend/window-modes.md", "reason": "主窗口嵌入桌面的 Win32 契约，多窗口泛化必须遵守的顺序约束"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "前端规范索引"}
+{"file": ".trellis/spec/frontend/component-guidelines.md", "reason": "Vue 组件规范（FenceView）"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "Pinia / 跨窗口状态"}
+{"file": ".trellis/spec/frontend/type-safety.md", "reason": "前后端类型契约"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "跨层（Rust 命令 ↔ 前端）数据流"}
+{"file": ".trellis/spec/guides/desktop-window-e2e-guide.md", "reason": "桌面窗口 e2e 验证清单"}
+{"file": ".trellis/tasks/10-15-desktop-fence/research/tech-feasibility.md", "reason": "技术方案与坑（建窗、拖放、图标、启动、移动文件、DPI）"}
+{"file": ".trellis/tasks/10-15-desktop-fence/research/comparable-tools.md", "reason": "同类产品交互惯例"}
+{"file": ".trellis/tasks/10-15-desktop-fence/info.md", "reason": "两条并行工作线的分工、文件归属与共享契约"}
+{"file": ".trellis/spec/backend/sync-protocol.md", "reason": "上游新同步协议：新表不得被误纳入同步 / 变更计数"}
+{"file": ".trellis/tasks/10-15-desktop-fence/fence-fs-api.md", "reason": "B 交付的文件层 API（集成阶段包装成 Tauri 命令）"}
+{"file": ".trellis/tasks/10-15-desktop-fence/research/spike-icons.md", "reason": "图标 spike 结论"}

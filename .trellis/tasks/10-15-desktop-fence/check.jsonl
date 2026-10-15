@@ -1,0 +1,9 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "后端规范索引"}
+{"file": ".trellis/spec/backend/window-modes.md", "reason": "主窗口模式回归检查"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "前端质量规范"}
+{"file": ".trellis/spec/frontend/type-safety.md", "reason": "类型契约"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "复用检查"}
+{"file": ".trellis/spec/guides/desktop-window-e2e-guide.md", "reason": "e2e 验证清单"}
+{"file": ".trellis/tasks/10-15-desktop-fence/info.md", "reason": "分工与共享契约"}
+{"file": ".trellis/spec/backend/sync-protocol.md", "reason": "同步协议回归"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "Pinia / 跨窗口状态"}
