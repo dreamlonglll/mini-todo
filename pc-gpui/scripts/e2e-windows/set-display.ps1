@@ -28,9 +28,9 @@ namespace E2E {
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int ChangeDisplaySettings(ref DEVMODE dm, int flags);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern bool SystemParametersInfo(int action, int param, string vparam, int winIni);
     [DllImport("user32.dll")] public static extern bool SetSysColors(int n, int[] elements, int[] colors);
-    public static DEVMODE New() { var d = new DEVMODE(); d.dmSize = (short)Marshal.SizeOf(typeof(DEVMODE)); return d; }
+    public static DEVMODE Blank() { var d = new DEVMODE(); d.dmSize = (short)Marshal.SizeOf(typeof(DEVMODE)); return d; }
     public static List<int[]> Modes() {
-      var l = new List<int[]>(); var d = New();
+      var l = new List<int[]>(); var d = Blank();
       for (int i = 0; EnumDisplaySettings(null, i, ref d); i++) l.Add(new int[] { d.dmPelsWidth, d.dmPelsHeight, d.dmBitsPerPel, d.dmDisplayFrequency });
       return l;
     }
@@ -38,7 +38,7 @@ namespace E2E {
 }
 '@
 
-$cur = [E2E.Display]::New()
+$cur = [E2E.Display]::Blank()
 [void][E2E.Display]::EnumDisplaySettings($null, -1, [ref]$cur)
 "current mode: $($cur.dmPelsWidth)x$($cur.dmPelsHeight) @$($cur.dmBitsPerPel)bpp"
 $modes = [E2E.Display]::Modes() | Where-Object { $_[2] -ge 24 } | ForEach-Object { "$($_[0])x$($_[1])" } | Sort-Object -Unique

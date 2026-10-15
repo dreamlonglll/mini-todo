@@ -40,6 +40,7 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: './pc-gpui -> target'
+          cache-on-failure: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -55,6 +56,7 @@ jobs:
           cargo build -p mini-todo-core --example seed --locked
 
       - name: Prepare display (1920x1080, solid desktop color)
+        continue-on-error: true
         run: pwsh -NoProfile -File scripts/e2e-windows/set-display.ps1
 
       - name: Run e2e (debug suite)
@@ -106,6 +108,7 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: './pc-gpui -> target'
+          cache-on-failure: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -120,6 +123,7 @@ jobs:
         run: cargo build --release -p mini-todo --locked
 
       - name: Prepare display (1920x1080, solid desktop color)
+        continue-on-error: true
         run: pwsh -NoProfile -File scripts/e2e-windows/set-display.ps1
 
       - name: Run e2e (release suite)

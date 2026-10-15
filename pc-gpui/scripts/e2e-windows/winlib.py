@@ -661,6 +661,14 @@ def emit_image(img, name: str, budget: int | None, max_w: int = 360, quality: in
     buf = io.BytesIO()
     im.save(buf, "JPEG", quality=quality)
     b64 = base64.b64encode(buf.getvalue()).decode()
+    if os.environ.get("GITHUB_ACTIONS"):
+        # GitHub Actions：作为 notice 注解输出（可经 check-runs annotations API 取回，不占日志；每步最多 10 条 notice）
+        chunk = 60000
+        parts = [b64[i:i + chunk] for i in range(0, len(b64), chunk)]
+        for k, part in enumerate(parts):
+            print(f"::notice title=IMG {name} {k + 1}/{len(parts)}::{part}")
+        print(f"(图片 {name}：{im.width}×{im.height}，{len(b64)} 个 base64 字符，{len(parts)} 条注解)", flush=True)
+        return True
     print(f"===IMG-BEGIN {name}===")
     for i in range(0, len(b64), 1000):
         print(b64[i:i + 1000])
