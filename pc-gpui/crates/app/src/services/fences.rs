@@ -6,8 +6,12 @@
 //! `create_fence_at_cursor` / `toggle_all_fences` / `reset_all_fence_positions` / `tick_fence_screen_layouts`。
 //!
 //! GPUI 下的做法（`research/backend-port.md` §5.3、§7.1）：
-//! - 建窗 `is_resizable: false`、`is_minimizable: false`、Windows 上 `show: false` → 按物理像素 `SetWindowPos` 定位 →
+//! - 建窗 `is_resizable: false`、`is_minimizable: false`、Windows 上 `show: false` → 按物理像素把**客户区**摆到库里的几何 →
 //!   `WS_EX_TOOLWINDOW` + 嵌入桌面层（`platform::embed`，与主窗口嵌入共用）→ `SW_SHOWNOACTIVATE` 显示；拦截关闭（Alt+F4 无效）。
+//! - 几何一律是**客户区 = 可见区域**（与旧版 Tauri 无边框窗口的外框相同，库里的几何就是它）：GPUI 窗口在左 / 右 / 下另有
+//!   不可见边框（96 DPI 下各 8px），摆窗用 `set_client_rect`，读几何（落库、缩放起点、屏幕组合切换）用 `client_rect`。
+//!   不用子类化 `WM_NCCALCSIZE` 去掉边框：GPUI 只在建窗与 `WM_DPICHANGED` 时缓存边框差值（`border_offset`），
+//!   之后改掉边框会让它的 `WM_GETMINMAXINFO` 最小尺寸、`resize` 与 `window_bounds` 都按旧差值算错。
 //! - 显示 / 隐藏用 `ShowWindow`，不改 ex style（GPUI 不会像 tao 那样重写样式），之后照样重挂一次（幂等）。
 //! - 所有会给窗口同步发消息的 Win32 调用都在 `cx.spawn` 的 async 块里、`update` 闭包之外执行。
 //! - 目录监听回调在 `fence-watch` 线程，经 channel 回前台交给对应收纳箱窗口。
@@ -103,13 +107,13 @@ pub fn to_phys(r: PxRect) -> PhysRect {
     PhysRect::new(r.x, r.y, r.width, r.height)
 }
 
-/// 把收纳箱窗口摆到 `rect`（物理像素）。Windows：一次 `SetWindowPos`（延后执行）；其它平台 GPUI 不能移动窗口，
-/// 只改尺寸（截图 / 冒烟测试用）
+/// 把收纳箱窗口的客户区（= 可见区域）摆到 `rect`（物理像素）。Windows：换算成外框一次 `SetWindowPos`（延后执行）；
+/// 其它平台 GPUI 不能移动窗口，只改尺寸（截图 / 冒烟测试用）
 pub fn apply_window_rect(window: &mut gpui_kit::Window, cx: &App, rect: PxRect, scale: f64) {
     #[cfg(windows)]
     {
         let _ = scale;
-        platform::set_window_rect_physical(window, cx, to_phys(rect));
+        platform::set_client_rect_physical(window, cx, to_phys(rect));
     }
     #[cfg(not(windows))]
     {
@@ -146,6 +150,7 @@ pub fn open_fence_window(
         ),
     );
     let mut spec = WindowSpec::new(fence.title.clone(), bounds);
+    spec.client_rect = Some(to_phys(rect));
     spec.transparent = true;
     spec.resizable = false;
     spec.minimizable = false;
@@ -202,7 +207,7 @@ pub fn open_fence_window(
     Some(handle)
 }
 
-/// Windows：建窗后（App 未借用时）按物理像素定位、改样式、嵌入桌面层、显示
+/// Windows：建窗后（App 未借用时）按物理像素定位客户区、改样式、嵌入桌面层、显示
 fn embed_after_open(cx: &mut App, hwnd: Option<Hwnd>, rect: PxRect) {
     #[cfg(windows)]
     {
@@ -211,8 +216,9 @@ fn embed_after_open(cx: &mut App, hwnd: Option<Hwnd>, rect: PxRect) {
         };
         let hidden = is_hidden(cx);
         cx.spawn(async move |_| {
-            // 先位置后尺寸的效果：一次 SetWindowPos 同时给出（混合 DPI 下逻辑坐标建窗会差几个像素）
-            h.set_rect(to_phys(rect));
+            // open_window 已按客户区校正过（这里已到位时什么都不做）；显示之前再确认一次：混合 DPI 下逻辑坐标建窗会差几个像素，
+            // 跨 DPI 时 set_client_rect 会按新边框再校正
+            h.set_client_rect(to_phys(rect));
             h.set_tool_window(true);
             h.set_minimizable(false);
             h.set_round_corners(true);
@@ -327,7 +333,7 @@ fn check_screen_layout(cx: &mut App) {
     for (id, handle) in records {
         let info = cx
             .update_window(handle, |_, window, _| {
-                let rect = platform::window_rect_physical(window).map(to_px);
+                let rect = platform::client_rect_physical(window).map(to_px);
                 let scale = f64::from(window.scale_factor());
                 (rect, scale)
             })

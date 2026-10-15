@@ -24,6 +24,7 @@ use gpui_kit::{
 };
 
 use crate::theme::{self, editor_theme, hex};
+use crate::ui::external_drop::{DropScope, ExternalDrop};
 use crate::ui::markdown::{ImageClickHandler, MarkdownView};
 use crate::ui::message::{self, MessageKind};
 use crate::util::image_ref::{self, MAX_IMAGE_BYTES};
@@ -110,6 +111,8 @@ pub struct MarkdownEditor {
     /// 源码区自动增高的行数范围（`None` = 撑满父元素）
     rows: Option<(usize, usize)>,
     on_image_click: Option<ImageClickHandler>,
+    /// 拖入图片（不用 GPUI `on_drop`：刚打过字的键盘模态下它收不到松手，见 `ui::external_drop`）
+    external_drop: ExternalDrop,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -154,6 +157,7 @@ impl MarkdownEditor {
             padding: (8., 12.),
             rows,
             on_image_click: None,
+            external_drop: ExternalDrop::new(),
             _subscriptions: subscriptions,
         }
     }
@@ -386,7 +390,7 @@ impl Render for MarkdownEditor {
             .read(cx)
             .focus_handle(cx)
             .contains_focused(window, cx);
-        div()
+        let root = div()
             .id(SharedString::from(format!("{}-root", self.id)))
             .w_full()
             .min_h_full()
@@ -407,14 +411,22 @@ impl Render for MarkdownEditor {
             })
             .when(!self.readonly, |this| {
                 this.drag_over::<ExternalPaths>(|style, _, _, _| style)
-                    .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
-                        this.handle_drop(paths, window, cx)
-                    }))
             })
             .when(focused && editing, |this| {
                 this.text_color(theme::light().text_primary)
             })
-            .child(body)
+            .child(body);
+        if self.readonly {
+            return root;
+        }
+        self.external_drop.attach(
+            root,
+            DropScope::Element,
+            cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                this.handle_drop(paths, window, cx)
+            }),
+            |_, _, _| {},
+        )
     }
 }
 

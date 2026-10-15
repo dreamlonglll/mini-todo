@@ -25,7 +25,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_THICKFRAME,
 };
 
-use super::{Hwnd, MonitorInfo, PhysRect};
+use super::{FrameInsets, Hwnd, MonitorInfo, PhysRect};
 
 const MONITORINFOF_PRIMARY: u32 = 1;
 
@@ -78,15 +78,15 @@ pub fn window_rect_physical(window: &Window) -> Option<PhysRect> {
     raw::rect(hwnd(window)?)
 }
 
-pub fn set_window_rect_physical(window: &Window, cx: &App, rect: PhysRect) {
+pub fn set_client_rect_physical(window: &Window, cx: &App, rect: PhysRect) {
     defer(window, cx, move |h| {
-        raw::set_rect(h, rect);
+        raw::set_client_rect(h, rect);
     });
 }
 
-pub fn set_window_position_physical(window: &Window, cx: &App, x: i32, y: i32) {
+pub fn set_client_position_physical(window: &Window, cx: &App, x: i32, y: i32) {
     defer(window, cx, move |h| {
-        raw::set_position(h, x, y);
+        raw::set_client_position(h, x, y);
     });
 }
 
@@ -448,34 +448,60 @@ pub mod raw {
         ))
     }
 
-    /// 客户区 → 外框的换算量：(左, 上, 宽差, 高差)
-    fn frame_offsets(h: Hwnd) -> Option<(i32, i32, i32, i32)> {
+    /// 跨 DPI 移动时 GPUI 的 `WM_DPICHANGED` 会把窗口改成系统建议的外框，边框厚度也随 DPI 变：按新边框再校正
+    const CLIENT_PLACE_ATTEMPTS: usize = 3;
+
+    /// 当前的外框、客户区与两者之间的边框
+    fn frame(h: Hwnd) -> Option<(PhysRect, FrameInsets)> {
         let outer = rect(h)?;
         let client = client_rect(h)?;
-        Some((
-            client.x - outer.x,
-            client.y - outer.y,
-            outer.width - client.width,
-            outer.height - client.height,
-        ))
+        Some((client, FrameInsets::between(outer, client)))
     }
 
     pub fn set_client_rect(h: Hwnd, target: PhysRect) -> bool {
-        let (left, top, extra_w, extra_h) = frame_offsets(h).unwrap_or_default();
-        set_rect(
-            h,
-            PhysRect::new(
-                target.x - left,
-                target.y - top,
-                target.width + extra_w,
-                target.height + extra_h,
-            ),
-        )
+        if is_minimized(h) {
+            // 最小化时客户区是 0×0，算不出边框；只按外框摆一次（与还原后的位置无关）
+            return set_rect(h, target);
+        }
+        for _ in 0..CLIENT_PLACE_ATTEMPTS {
+            let Some((client, insets)) = frame(h) else {
+                return set_rect(h, target);
+            };
+            if client == target {
+                return true;
+            }
+            if !set_rect(h, insets.outer_for(target)) {
+                return false;
+            }
+        }
+        if let Some((client, _)) = frame(h)
+            && client != target
+        {
+            log::debug!(
+                "[platform] 客户区没能摆到 {target:?}（{:#x} 实际 {client:?}）",
+                h.0
+            );
+        }
+        true
     }
 
     pub fn set_client_position(h: Hwnd, x: i32, y: i32) -> bool {
-        let (left, top, _, _) = frame_offsets(h).unwrap_or_default();
-        set_position(h, x - left, y - top)
+        if is_minimized(h) {
+            return set_position(h, x, y);
+        }
+        for _ in 0..CLIENT_PLACE_ATTEMPTS {
+            let Some((client, insets)) = frame(h) else {
+                return set_position(h, x, y);
+            };
+            if (client.x, client.y) == (x, y) {
+                return true;
+            }
+            let outer = insets.outer_for(PhysRect::new(x, y, client.width, client.height));
+            if !set_position(h, outer.x, outer.y) {
+                return false;
+            }
+        }
+        true
     }
 
     pub fn set_geometry_locked(h: Hwnd, locked: bool) {

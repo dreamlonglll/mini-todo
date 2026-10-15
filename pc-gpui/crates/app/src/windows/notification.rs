@@ -49,7 +49,8 @@ impl From<&Reminder> for NotificationContent {
 /// ├─ content                 flex:1；标题 14px/600 单行省略 + 描述 12px/1.4 最多两行（320×120 时被裁掉，与旧版一致）
 /// └─ footer                  padding 8 14 12，右对齐 "Mini Todo"
 /// ```
-/// 单击窗口任意位置关闭。建窗后按真实尺寸校正位置（`fit_to_actual_size`），窗口尺寸变化时再校正一次。
+/// 单击窗口任意位置关闭。建窗后 `open_window` 先按客户区摆到槽位，再按真实尺寸校正位置（`fit_to_actual_size`），
+/// 窗口尺寸变化时再校正一次。
 pub struct NotificationWindow {
     pub label: String,
     pub content: NotificationContent,
@@ -81,7 +82,8 @@ impl NotificationWindow {
         }
     }
 
-    /// 旧 `fit_to_actual_size`：记下真实尺寸；与摆放时假设的不同就按真实尺寸重算本槽位并移过去
+    /// 旧 `fit_to_actual_size`：记下真实尺寸；与摆放时假设的不同就按真实尺寸重算本槽位并移过去。
+    /// 尺寸与位置都按**客户区**（GPUI `window.bounds()` 就是客户区；外框另有不可见边框）
     fn fit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let bounds = window.bounds();
         let actual = NotificationSize {
@@ -96,7 +98,7 @@ impl NotificationWindow {
         {
             self.placed_for = actual;
             let scale = f64::from(window.scale_factor());
-            platform::set_window_position_physical(
+            platform::set_client_position_physical(
                 window,
                 cx,
                 (x * scale).round() as i32,

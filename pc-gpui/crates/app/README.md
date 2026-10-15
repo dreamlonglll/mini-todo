@@ -190,8 +190,8 @@ editor::open(cx, Some(parent), None, EditorMode::Edit);
 | 方法 | 说明 |
 |---|---|
 | `open_child(cx, parent: Option<&ChildOf>, kind, key, spec: WindowSpec, build) -> Option<AnyWindowHandle>` | 各窗口 `open` 的公共实现：打开方已有模态子窗口 → 带到前台并返回 `None`；在打开方显示器（整块）居中；登记；Windows 设 owner（去掉 `WS_EX_APPWINDOW`）；记模态关系。**打开方是主窗口时，子窗口关闭后自动 `reload_todos`，设置窗口再重读设置 + `auto_sync::start`** |
-| `open_window(cx, &spec, build)`（模块函数） | 不走模态逻辑的底层开窗（Root 包装 + 透明处理） |
-| `WindowSpec::new(title, bounds)` + 字段 `resizable / minimizable / transparent / focus / show / kind / min_size / display_id` | 统一窗口参数 |
+| `open_window(cx, &spec, build)`（模块函数） | 不走模态逻辑的底层开窗（Root 包装 + 透明处理）；建好后（Windows）按**客户区**把窗口摆到规格位置（GPUI 按逻辑 `window_bounds` 建出的客户区偏高半个底边框，见 §4.5） |
+| `WindowSpec::new(title, bounds)` + 字段 `client_rect / resizable / minimizable / transparent / focus / show / kind / min_size / display_id` | 统一窗口参数；`bounds` 是客户区的逻辑矩形，`client_rect` 是精确的物理客户区（主窗口按屏幕配置恢复、收纳箱），`None` 时取 `bounds` × 目标显示器缩放 |
 | `register(cx, kind, key, handle)` / `on_closed(cx, handle, FnOnce(&mut App))` / `close(cx, handle)` | 登记、关闭回调、关闭 |
 | `main(cx)` / `all(cx, kind)` / `find(cx, kind, key)` / `kind_of(cx, id)` | 查询 |
 | `modal_child(cx, opener_id)` / `has_modal_child` / `main_has_modal_child(cx)` / `focus_modal_child(cx, opener_id)` | 模态关系 |
@@ -214,6 +214,7 @@ editor::open(cx, Some(parent), None, EditorMode::Edit);
 | `EpColorPicker`（`ep_color_picker`） | `cx.new(\|cx\| EpColorPicker::new(id, window, cx).predefine(colors))`、`set_value(Option<String>) / value() / set_disabled / is_open / close`；事件 `EpColorPickerEvent::Change(Option<String>)`（OK = 小写 `#rrggbb`，Clear = `None`） |
 | `EpRadioButtons`（`ep_radio`）、`EpSlider`（`ep_slider`，`on_input` / `on_change`）、`EpInputNumber`（`ep_input_number`）、`EpDatePicker` / `EpTimePicker`（`ep_date_picker` / `ep_time_picker`） | 见各文件头部 |
 | Markdown（`markdown` / `markdown_editor` / `markdown_image_viewer`） | 只读渲染（`minitodo-image://` 映射到本机图片、链接白名单）、源码 + 预览编辑器（图片粘贴 / 拖入上传）、图片预览 |
+| 外部文件拖入（`external_drop`） | 视图构造时 `ExternalDrop::new()`，render 末尾 `drop.attach(root, DropScope::Window \| Element, on_drop, on_exit)`。**不要用 `.on_drop::<ExternalPaths>()`**：gpui-pre 0.3.9 的文件拖放不改输入模态，`on_drop` 要求 `is_hovered`，窗口最后一次输入是键盘时（打完字、改名回车后）松手被丢掉、悬停状态残留 |
 | 原生 title tooltip | `.tooltip(ui::tooltip::native("设置"))`（任意 `.id()` 元素；光标右下、500ms） |
 | EP 深色 tooltip | `EpTooltip::new(id, "每天重复", child).show_after_ms(300).placement(Placement::Top).max_width(px(..))` |
 | ElMessage | `ui::message::{success, info, warning, error}(window, cx, text)`、`show_for(..)`、`error_with(window, cx, "保存待办失败", &err)`（= `notifyError`，含 200 字截断）、`show_in(handle, cx, kind, text)`、`error_text(prefix, detail)` |
@@ -237,7 +238,7 @@ editor::open(cx, Some(parent), None, EditorMode::Edit);
 |---|---|
 | `hwnd(window) -> Option<Hwnd>` | 只有 Windows 有 |
 | `begin_window_drag(window, cx)` / `toggle_maximize(window, cx)` | 程序化拖动（Windows：延后 `ReleaseCapture` + `WM_NCLBUTTONDOWN/HTCAPTION`；Linux：`start_window_move`） |
-| `window_rect_physical(window)` / `set_window_rect_physical(window, cx, rect)` / `set_window_position_physical(window, cx, x, y)`、`client_rect_physical(window)`、`set_geometry_locked(window, cx, b)` | 物理像素几何（`SetWindowPos(NOZORDER\|NOACTIVATE)`；Linux 无法移动窗口，no-op）；固定模式锁定位置与尺寸 |
+| `client_rect_physical(window)` / `set_client_rect_physical(window, cx, rect)` / `set_client_position_physical(window, cx, x, y)`、`window_rect_physical(window)`、`set_geometry_locked(window, cx, b)` | 物理像素几何，**一律按客户区（= 可见区域）**：GPUI 窗口在左 / 右 / 下有不可见边框（96 DPI 各 8px，可缩放与否都有），外框只用于换算；设置时换算成外框 `SetWindowPos(NOZORDER\|NOACTIVATE)`，跨 DPI 按新边框再校正（Linux 无法移动窗口，no-op）；固定模式锁定位置与尺寸 |
 | `monitors(cx)` / `primary_monitor` / `monitor_of_window(window, cx)` / `monitor_at_cursor(cx)` | `MonitorInfo { display_id, rect, work, scale, primary }`（物理像素；`logical_rect()` / `logical_work()`）；Linux 缩放按 1 |
 | `cursor_position_physical()`、`screen_config_id(cx)` | 光标（Linux `None`）、屏幕组合 ID（debug 下 `MINI_TODO_SCREEN_ID_FILE` 可覆盖） |
 | `set_topmost` / `show_window`（不激活）/ `hide_window` / `is_window_visible` / `set_tool_window` / `set_minimizable` / `set_resizable_frame` / `set_owner` / `restore_if_minimized` / `bring_to_front` / `set_round_corners` | 窗口样式与显隐；`set_resizable_frame` 只改系统样式，缩放热区由 `subclass` 锁定 |

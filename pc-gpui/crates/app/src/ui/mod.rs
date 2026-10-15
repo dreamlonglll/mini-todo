@@ -22,6 +22,7 @@
 //! | [`ep_input_number`] | `el-input-number`（带后缀） |
 //! | [`ep_date_picker`] / [`ep_time_picker`] | `el-date-picker` / `el-time-select` 面板 |
 //! | [`markdown`] / [`markdown_editor`] / [`markdown_image_viewer`] | Markdown 渲染、源码 + 预览编辑器（图片上传、链接白名单）、图片预览 |
+//! | [`external_drop`] | 外部文件拖入的放置区（替代 `on_drop::<ExternalPaths>`：GPUI 在键盘模态下会丢掉松手） |
 //!
 //! 新控件放在 `ui/` 下单独文件，外观数值照抄 UI 规格；同一种 Element Plus 控件只保留一个实现。
 
@@ -37,6 +38,7 @@ pub mod ep_select;
 pub mod ep_slider;
 pub mod ep_switch;
 pub mod ep_time_picker;
+pub mod external_drop;
 pub mod icon;
 pub mod input;
 pub mod layers;

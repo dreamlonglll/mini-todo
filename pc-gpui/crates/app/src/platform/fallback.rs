@@ -29,9 +29,9 @@ pub fn window_rect_physical(window: &Window) -> Option<PhysRect> {
 }
 
 /// GPUI 在 Linux 上没有移动窗口的 API：no-op（需要改尺寸时调用方自己 `window.resize(..)`）
-pub fn set_window_rect_physical(_window: &Window, _cx: &App, _rect: PhysRect) {}
+pub fn set_client_rect_physical(_window: &Window, _cx: &App, _rect: PhysRect) {}
 
-pub fn set_window_position_physical(_window: &Window, _cx: &App, _x: i32, _y: i32) {}
+pub fn set_client_position_physical(_window: &Window, _cx: &App, _x: i32, _y: i32) {}
 
 pub fn monitors(cx: &App) -> Vec<MonitorInfo> {
     let primary = cx.primary_display().map(|d| d.id());

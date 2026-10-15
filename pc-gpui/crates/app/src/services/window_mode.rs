@@ -557,7 +557,10 @@ pub fn bring_main_to_front(cx: &mut App) {
 }
 
 /// 托盘「重置位置」（旧 `reset_window_impl` + 前端 `tray-reset-window`）：清贴边状态、撤置顶、
-/// 主显示器左上起 10% 边距、380×600（逻辑）；固定中则退回普通模式；然后保存窗口状态
+/// 主显示器左上起 10% 边距、380×600（逻辑）；固定中则退回普通模式；然后保存窗口状态。
+///
+/// 屏幕组合 ID 只在启动时算（旧版也是：运行中插拔显示器不切换配置），旧版在重置后重跑 `initSettings` 重算；这里在保存
+/// 之前重算，重置后的几何写进**当前**屏幕组合的记录（不会写到启动时那个已经过时的组合上）
 pub fn reset_main_window(cx: &mut App) {
     let Some(main) = WindowManager::main(cx) else {
         crate::windows::main_window::open(cx);
@@ -587,6 +590,7 @@ pub fn reset_main_window(cx: &mut App) {
             });
         }
         cx.update(|cx| {
+            refresh_screen_config_id(cx);
             let state = AppState::global(cx);
             if state.read(cx).is_fixed {
                 // 固定模式不允许挪窗口：重置后退回普通模式（toggle_fixed 内会保存）
@@ -597,6 +601,21 @@ pub fn reset_main_window(cx: &mut App) {
         });
     })
     .detach();
+}
+
+/// 重新计算当前屏幕组合 ID（旧 `initSettings` 的 `generateScreenConfigId`）；之后的保存写进新组合的记录
+pub fn refresh_screen_config_id(cx: &mut App) {
+    let id = platform::screen_config_id(cx);
+    let state = AppState::global(cx);
+    let previous = state.read(cx).current_screen_config_id.clone();
+    if previous == id {
+        return;
+    }
+    log::info!("[window] 屏幕组合 ID：{previous} → {id}");
+    state.update(cx, |state, cx| {
+        state.current_screen_config_id = id;
+        cx.notify();
+    });
 }
 
 // ----------------------------------------------------------------------

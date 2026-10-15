@@ -14,6 +14,9 @@
 > 窗口、嵌入与 200ms 守护在 `pc-gpui/crates/app/src/services/fences.rs` + `windows/fence/` + `platform/embed.rs`。建窗标志按 GPUI 实现
 > （`resizable(false)` / 不可最小化 / `show: false` → 定位 → 嵌入 → `SW_SHOWNOACTIVATE`），`asset` scope 不再适用（GPUI 用 `img(PathBuf)`
 > 直接读图标缓存）。带 `owner_hwnd` 的移动必须在后台线程调用（[pc-gpui/gpui-conventions.md §2.1](../pc-gpui/gpui-conventions.md)）。
+> 下文的"窗口外框"在 GPUI 版一律读作**客户区**（= 可见区域）：旧版 Tauri 无边框窗口外框 = 客户区，GPUI 窗口在左 / 右 / 下另有
+> 不可见边框（96 DPI 各 8px），所以摆窗用 `set_client_rect`、落库 / 缩放起点 / 屏幕组合切换读 `client_rect`（e2e F07 断言
+> 可见区域 = 库里的几何）。外部拖入不用 GPUI `on_drop`（键盘模态下会丢第一次松手，e2e F10），见 gpui-conventions §2.5.1。
 
 ---
 

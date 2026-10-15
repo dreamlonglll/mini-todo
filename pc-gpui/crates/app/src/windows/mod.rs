@@ -42,7 +42,7 @@ use gpui_kit::{
     WindowKind as GpuiWindowKind, WindowOptions, div, point, px, size, transparent_black,
 };
 
-use crate::platform::{self, Hwnd, MonitorInfo};
+use crate::platform::{self, Hwnd, MonitorInfo, PhysRect};
 use crate::theme;
 
 /// 窗口种类
@@ -150,7 +150,11 @@ pub fn centered_bounds(
 pub struct WindowSpec {
     /// 系统窗口标题（任务栏 / Alt+Tab）
     pub title: SharedString,
+    /// 客户区（= 可见区域）的逻辑矩形，`display_id` 显示器上的逻辑坐标
     pub bounds: Bounds<Pixels>,
+    /// 客户区的精确物理矩形（主窗口按屏幕配置恢复、收纳箱按库里的几何）。`None` 时取 `bounds` × 目标显示器缩放。
+    /// 建窗后 [`open_window`] 按它校正一次（GPUI 按 `bounds` 建出的客户区会偏，见 `platform` 模块文档）
+    pub client_rect: Option<PhysRect>,
     pub display_id: Option<DisplayId>,
     pub resizable: bool,
     pub minimizable: bool,
@@ -167,6 +171,7 @@ impl WindowSpec {
         Self {
             title: title.into(),
             bounds,
+            client_rect: None,
             display_id: None,
             resizable: true,
             minimizable: true,
@@ -207,14 +212,14 @@ impl WindowSpec {
     }
 }
 
-/// 打开一个窗口（根视图包一层 `Root`，透明窗口把 Root 背景覆盖为透明）
+/// 打开一个窗口（根视图包一层 `Root`，透明窗口把 Root 背景覆盖为透明），建好后按客户区校正位置与尺寸
 pub fn open_window<V: Render>(
     cx: &mut App,
     spec: &WindowSpec,
     build: impl FnOnce(&mut Window, &mut App) -> Entity<V>,
 ) -> gpui_kit::Result<WindowHandle<Root>> {
     let transparent = spec.transparent;
-    cx.open_window(spec.options(), move |window, cx| {
+    let handle = cx.open_window(spec.options(), move |window, cx| {
         let view = build(window, cx);
         cx.new(|cx| {
             let root = Root::new(view, window, cx);
@@ -224,7 +229,39 @@ pub fn open_window<V: Render>(
                 root
             }
         })
+    })?;
+    place_client_area(cx, handle.into(), spec);
+    Ok(handle)
+}
+
+/// 建窗后的客户区目标（物理像素）：显式给出的 `client_rect`，否则 `bounds` × 目标显示器（没指定时主显示器）缩放
+fn client_target(spec: &WindowSpec, monitors: &[MonitorInfo]) -> PhysRect {
+    spec.client_rect.unwrap_or_else(|| {
+        let scale = spec
+            .display_id
+            .and_then(|id| monitors.iter().find(|m| m.display_id == id))
+            .or_else(|| monitors.iter().find(|m| m.primary))
+            .map_or(1.0, |m| m.scale);
+        PhysRect::from_logical(spec.bounds, scale)
     })
+}
+
+/// GPUI 按逻辑 `window_bounds` 建窗时把不可见边框算错（客户区比请求的高半个底边框，见 `platform` 模块文档）：
+/// 建好后（App 未借用时）按客户区摆到规格位置。通知的叠放、主窗口居中、子窗口居中、收纳箱几何都靠它；
+/// 窗口自己之后再摆（通知按真实尺寸、主窗口切模式）的操作排在它后面执行。其它平台没有 HWND，不做
+fn place_client_area(cx: &mut App, handle: AnyWindowHandle, spec: &WindowSpec) {
+    let Some(hwnd) = cx
+        .update_window(handle, |_, window, _| platform::hwnd(window))
+        .ok()
+        .flatten()
+    else {
+        return;
+    };
+    let target = client_target(spec, &platform::monitors(cx));
+    cx.spawn(async move |_| {
+        hwnd.set_client_rect(target);
+    })
+    .detach();
 }
 
 struct Registered {
@@ -737,5 +774,46 @@ mod tests {
         let opener = Bounds::new(point(px(100.), px(100.)), logical_size(380., 600.));
         let bounds = centered_bounds(None, Some(opener), logical_size(680., 560.));
         assert_eq!(bounds.origin, point(px(-50.), px(120.)));
+    }
+
+    #[test]
+    fn client_target_uses_explicit_rect_or_the_target_display_scale() {
+        let primary = MonitorInfo {
+            display_id: DisplayId::new(1),
+            rect: platform::PhysRect::new(0, 0, 1920, 1080),
+            work: platform::PhysRect::new(0, 0, 1920, 1032),
+            scale: 1.0,
+            primary: true,
+        };
+        let second = MonitorInfo {
+            display_id: DisplayId::new(2),
+            rect: platform::PhysRect::new(1920, 0, 2880, 1620),
+            work: platform::PhysRect::new(1920, 0, 2880, 1560),
+            scale: 1.5,
+            primary: false,
+        };
+        let monitors = vec![primary.clone(), second.clone()];
+        // 主窗口无记录：主显示器居中 380×600 → 客户区 (770, 240)（e2e 期望 y = 240，GPUI 直接建出来是 236）
+        let mut spec = WindowSpec::new(
+            "Mini Todo",
+            centered_bounds(Some(&primary), None, logical_size(380., 600.)),
+        );
+        assert_eq!(
+            client_target(&spec, &monitors),
+            PhysRect::new(770, 240, 380, 600)
+        );
+        // 指定显示器：按它的缩放换算
+        spec.bounds = centered_bounds(Some(&second), None, logical_size(1080., 600.));
+        spec.display_id = Some(second.display_id);
+        assert_eq!(
+            client_target(&spec, &monitors),
+            PhysRect::new(2550, 360, 1620, 900)
+        );
+        // 显式给出的物理客户区优先（收纳箱 / 按屏幕配置恢复的主窗口）
+        spec.client_rect = Some(PhysRect::new(3000, 100, 552, 504));
+        assert_eq!(
+            client_target(&spec, &monitors),
+            PhysRect::new(3000, 100, 552, 504)
+        );
     }
 }

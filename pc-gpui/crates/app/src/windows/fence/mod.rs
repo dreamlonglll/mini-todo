@@ -10,8 +10,9 @@
 //! | `grid.rs` | 项目网格：图标懒加载、选中 / 打开、自绘右键菜单（含「移动到…」）、箱内拖动排序、Ctrl+滚轮调图标大小 |
 //! | `logic.rs` | 纯函数（标题规范化、拖动阈值、几何闸门、缩放矩形、图标档位、结果提示文案） |
 //!
-//! 几何一律物理像素（`mini_todo_core::fence::fence_view` + `platform::set_window_rect_physical`）；只有用户拖动 / 缩放结束
-//! 才落库（`commit_geometry`），折叠 / 展开、启动夹回、系统挪窗都不落库。
+//! 几何一律物理像素的**客户区**（= 可见区域，与旧版 Tauri 无边框窗口的外框相同；GPUI 窗口另有不可见边框）：
+//! `mini_todo_core::fence::fence_view` + `platform::set_client_rect_physical` 摆窗，`platform::client_rect_physical` 读几何。
+//! 只有用户拖动 / 缩放结束才落库（`commit_geometry`），折叠 / 展开、启动夹回、系统挪窗都不落库。
 
 mod grid;
 pub mod logic;
@@ -39,6 +40,7 @@ use crate::platform;
 use crate::services::fences as runtime;
 use crate::theme::{self, fence_tokens};
 use crate::ui::ep_popper::Anchor;
+use crate::ui::external_drop::{DropScope, ExternalDrop};
 use crate::ui::icon::icon;
 use crate::ui::input::EpInput;
 use crate::ui::message;
@@ -74,7 +76,7 @@ struct ResizeSession {
     dir: ResizeDir,
     /// 按下时的光标（Windows：屏幕物理像素；其它平台：窗口逻辑坐标）
     start_cursor: (f64, f64),
-    /// 按下时的窗口外框（物理像素）
+    /// 按下时的窗口客户区（物理像素）
     start: PxRect,
     dpr: f64,
 }
@@ -104,6 +106,8 @@ pub struct FenceWindow {
     title_input: Entity<InputState>,
     drag_hover: bool,
     drag_epoch: u64,
+    /// 外部拖入（窗口任何位置松手都收；不依赖 GPUI `on_drop`，见 `ui::external_drop`）
+    external_drop: ExternalDrop,
     hovered: bool,
     hover_epoch: u64,
     alpha_preview: Option<f64>,
@@ -189,6 +193,7 @@ impl FenceWindow {
             title_input,
             drag_hover: false,
             drag_epoch: 0,
+            external_drop: ExternalDrop::new(),
             hovered: false,
             hover_epoch: 0,
             alpha_preview: None,
@@ -596,11 +601,11 @@ impl FenceWindow {
         .detach();
     }
 
-    /// 读窗口当前外框落库（折叠视图只落位置和宽度）。落库后不关闸门：按住不放停顿后继续拖仍然算数
+    /// 读窗口当前客户区（= 可见区域）落库（折叠视图只落位置和宽度）。落库后不关闸门：按住不放停顿后继续拖仍然算数
     fn commit_geometry(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Task<()> {
         self.commit_pending = false;
         self.commit_epoch += 1;
-        let Some(rect) = platform::window_rect_physical(window) else {
+        let Some(rect) = platform::client_rect_physical(window) else {
             return Task::ready(());
         };
         let expanded = self.view_expanded();
@@ -716,7 +721,7 @@ impl FenceWindow {
             return;
         }
         self.flush_geometry(window, cx).detach();
-        let Some(start) = platform::window_rect_physical(window) else {
+        let Some(start) = platform::client_rect_physical(window) else {
             return;
         };
         self.resizing = Some(ResizeSession {
@@ -1172,7 +1177,7 @@ impl Render for FenceWindow {
         let expanded = self.view_expanded();
         self.pump_icons(window, cx);
 
-        div()
+        let root = div()
             .id("fence-window")
             .key_context("FenceWindow")
             .track_focus(&self.focus)
@@ -1206,12 +1211,6 @@ impl Render for FenceWindow {
                     this.on_external_drag_over(window, cx)
                 },
             ))
-            .on_drop::<ExternalPaths>(cx.listener(|this, paths: &ExternalPaths, window, cx| {
-                this.on_external_drop(paths, window, cx)
-            }))
-            .on_file_drop_exit(cx.listener(|this, _: &FileDropEvent, window, cx| {
-                this.on_external_drag_end(window, cx)
-            }))
             .capture_any_mouse_up(cx.listener(|this, _, window, cx| {
                 // 箱内拖动排序在网格外松手：收尾
                 if this.sorting.is_some() {
@@ -1221,7 +1220,19 @@ impl Render for FenceWindow {
             .child(self.render_title_bar(window, cx))
             .when(expanded, |this| this.child(self.render_body(window, cx)))
             .children(self.render_resize_handles(cx))
-            .children(self.render_item_menu(window, cx))
+            .children(self.render_item_menu(window, cx));
+        // 松手 / 拖出不用 GPUI 的 on_drop / on_file_drop_exit：它们要求悬停命中，键盘模态下（例如刚改完名按了回车）
+        // 一律不命中，第一次拖入会被丢掉、悬停框残留（e2e F10）。窗口任何位置松手都收进本收纳箱（旧版 onDragDropEvent 语义）
+        self.external_drop.attach(
+            root,
+            DropScope::Window,
+            cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                this.on_external_drop(paths, window, cx)
+            }),
+            cx.listener(|this, _: &FileDropEvent, window, cx| {
+                this.on_external_drag_end(window, cx)
+            }),
+        )
     }
 }
 

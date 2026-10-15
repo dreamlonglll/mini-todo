@@ -5,6 +5,8 @@
 //! - 超过 2MB 轮转：当前文件改名为 `mini-todo_<YYYY-MM-DD_HH-MM-SS>.log`，只保留 1 份旧日志
 //! - 本地时间；格式 `[YYYY-MM-DD][HH:MM:SS][target][LEVEL] message`
 //! - 级别：本应用与 core 为 Info，其它 crate（GPUI / wgpu 等）为 Warn；同时输出到标准输出
+//! - 已知无害的第三方错误降为 Debug（不落盘）：GPUI 的拖放图像助手 `IDropTargetHelper` 在拖放源的数据对象没有拖动图像时
+//!   每次 DragEnter / DragOver / Drop 都报 `DV_E_FORMATETC`（"Invalid FORMATETC structure (0x80040064)"），不影响拖入
 //!
 //! release 版是 Windows 子系统程序（没有控制台），日志必须落盘；业务代码统一用 `log::{info,warn,error}!`。
 
@@ -54,13 +56,32 @@ fn level_for(target: &str) -> Level {
     }
 }
 
+/// `DV_E_FORMATETC`：GPUI（gpui-pre-windows `window.rs`）的 `drop_target_helper.DragEnter / DragOver / Drop(..).log_err()`
+/// 在数据对象没有拖动图像格式（.NET `DataObject` 等）时每次都返回它；只是拖动图像画不出来
+const DROP_HELPER_NOISE: &str = "0x80040064";
+
+/// 实际记录的级别：GPUI 拖放图像助手的已知无害错误降为 Debug，其它不变。
+/// GPUI 的 `log_err` 按调用处文件推 target（注册表路径里没有 `crates/` 时为空串），所以按源文件判断
+fn effective_level(record: &Record) -> Level {
+    if record.level() == Level::Error
+        && !record.target().starts_with("mini_todo")
+        && record.file().is_some_and(|f| f.contains("gpui"))
+        && record.args().to_string().contains(DROP_HELPER_NOISE)
+    {
+        Level::Debug
+    } else {
+        record.level()
+    }
+}
+
 impl Log for AppLogger {
     fn enabled(&self, metadata: &Metadata) -> bool {
         metadata.level() <= level_for(metadata.target())
     }
 
     fn log(&self, record: &Record) {
-        if !self.enabled(record.metadata()) {
+        if !self.enabled(record.metadata()) || effective_level(record) > level_for(record.target())
+        {
             return;
         }
         let now = chrono::Local::now();
@@ -184,6 +205,46 @@ mod tests {
         names.sort();
         assert_eq!(names, vec!["mini-todo_2026-10-03_00-00-00.log".to_string()]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gpui_drop_helper_formatetc_errors_are_demoted() {
+        let file = r"C:\Users\me\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\gpui-pre-windows-0.3.9\src\window.rs";
+        let noise = format_args!("Invalid FORMATETC structure (0x80040064)");
+        let record = Record::builder()
+            .target("")
+            .level(Level::Error)
+            .file(Some(file))
+            .args(noise)
+            .build();
+        assert_eq!(effective_level(&record), Level::Debug);
+        assert!(effective_level(&record) > level_for(record.target()));
+
+        // 同一处的其它错误、别的 crate 的同样文字、本应用自己的错误都不降级
+        let other = format_args!("unable to set window content size");
+        let record = Record::builder()
+            .target("")
+            .level(Level::Error)
+            .file(Some(file))
+            .args(other)
+            .build();
+        assert_eq!(effective_level(&record), Level::Error);
+        let elsewhere = format_args!("Invalid FORMATETC structure (0x80040064)");
+        let record = Record::builder()
+            .target("rfd")
+            .level(Level::Error)
+            .file(Some("/src/rfd/lib.rs"))
+            .args(elsewhere)
+            .build();
+        assert_eq!(effective_level(&record), Level::Error);
+        let ours = format_args!("Invalid FORMATETC structure (0x80040064)");
+        let record = Record::builder()
+            .target("mini_todo::windows::fence")
+            .level(Level::Error)
+            .file(Some("crates/app/src/windows/fence/mod.rs"))
+            .args(ours)
+            .build();
+        assert_eq!(effective_level(&record), Level::Error);
     }
 
     #[test]

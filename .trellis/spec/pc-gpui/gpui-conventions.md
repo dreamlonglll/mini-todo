@@ -53,6 +53,16 @@
   `WindowControlArea` 命中测试按**建窗时**的 `is_resizable` 计算，没有运行时开关 → 运行时锁定位置 / 尺寸用
   `platform::set_geometry_locked`（子类化 `WM_NCHITTEST` / `WM_SYSCOMMAND`），永远不可缩放的窗口建窗时就给 `resizable: false`。
 - 不要给 GPUI 窗口加 `WS_EX_LAYERED`（与 DirectComposition 透明冲突）；不要设 `GPUI_DISABLE_DIRECT_COMPOSITION`（透明失效）。
+- **几何一律按客户区（= 可见区域）**：GPUI 窗口在左 / 右 / 下有系统的不可见边框（96 DPI 下各 8px；不可缩放、`PopUp` 的窗口也有——
+  没有 `WS_POPUP` 的顶层窗口会被系统补上 `WS_CAPTION`），只有顶边被 GPUI 的 `WM_NCCALCSIZE` 去掉。旧版 Tauri 无边框窗口外框 = 客户区，
+  所以库里的主窗口 / 收纳箱几何、通知的定位算法都是客户区。摆窗用 `platform::set_client_rect_physical` / `set_client_position_physical`
+  或 `Hwnd::set_client_rect` / `set_client_position`，读用 `client_rect_physical` / `Hwnd::client_rect`；外框（`window_rect_physical`、
+  `Hwnd::rect` / `set_rect`）只用于换算。
+- GPUI 建窗时 `calculate_window_rect` 把只在底部的边框高度对半分到上下，按 `WindowOptions.window_bounds` 建出的客户区比请求的高
+  `height_offset / 2`（96 DPI 下 4px，e2e N02 / 主窗口居中 y=236）。`windows::open_window` 建好后统一按客户区校正一次
+  （`WindowSpec::client_rect` 给精确物理矩形，否则 `bounds` × 目标显示器缩放），窗口代码不要再各写一遍。
+- 不要子类化 `WM_NCCALCSIZE` 去掉这圈边框：GPUI 只在建窗和 `WM_DPICHANGED` 时缓存边框差值（`border_offset`），之后改边框会让它的
+  `WM_GETMINMAXINFO` 最小尺寸、`resize`、`window_bounds` 都按旧差值算错。代价是外框外沿那圈不可见边框仍会接住鼠标（`HTBORDER`）。
 
 ### 2.3 拖动窗口
 
@@ -84,6 +94,16 @@
   水平夹回窗口；在小窗口（主窗口 380×600、收纳箱、通知 320×120）里设计弹层时先确认放得下（`max_height`、换方向）。
 - 圆角容器**裁不掉**子元素的背景（GPUI 内容遮罩只有矩形）：贴边的子元素自己带对应圆角。
 - GPUI 的外阴影会透过半透明背景显示（CSS 不会）：带阴影的浅色块用 `theme::editor_theme::tint(color, alpha)` 的等效不透明色。
+
+### 2.5.1 外部文件拖入：用 `ui::external_drop`，不要用 `on_drop::<ExternalPaths>`
+
+- gpui-pre 0.3.9 把系统文件拖放转成鼠标事件（`Entered` / `Pending` → `MouseMove`，`Submit` → `MouseUp`），但输入模态按转换前的
+  `FileDrop` 判断、不会变成"鼠标"；`on_drop` 只在 `hitbox.is_hovered` 时触发，而 `is_hovered` 在键盘模态下恒为 false。拖放期间鼠标被
+  拖放源捕获，目标窗口收不到真实的鼠标移动——于是窗口里最后一次输入是键盘时（收纳箱改名回车后、Markdown 编辑器里打完字）
+  **第一次拖入的松手被静默丢掉**，`drag_over` / 悬停状态残留（e2e F10；Linux XDND 同样复现）。
+- 放置区：视图构造时 `ExternalDrop::new()`，render 里 `drop.attach(root, DropScope::Window | Element, on_drop, on_exit)`（`on_drag_move`
+  记路径 + 窗口级 `MouseUp` / `FileDropEvent::Exited` 监听，命中检测用不看模态的 `should_handle_scroll`）。悬停反馈照常用
+  `on_drag_move::<ExternalPaths>` / `drag_over`（它们不看模态）。
 
 ### 2.6 图片与图标
 
@@ -191,7 +211,9 @@
 
 1. 读新版本源码，逐项核对本项目依赖的行为：`start_window_move` 在 Windows 上是否仍为空操作；`GWLP_USERDATA` 占用；是否开始处理
    `WM_WINDOWPOSCHANGING` / 改写 ex style；`WindowControlArea::Drag` → `HTCAPTION`；缩放热区是否仍按建窗时的 `is_resizable`；
-   `WindowKind::PopUp` 的样式映射；透明窗口（DirectComposition）实现；`QuitMode` 默认值；`Root` / `RootPlugin` 接口
+   `WindowKind::PopUp` 的样式映射；`calculate_window_rect` 的边框对半分（客户区偏高）与 `WM_NCCALCSIZE` 只去顶边是否还在
+   （`windows::open_window` 的客户区校正、`platform::FrameInsets` 的单测依赖它）；文件拖放是否仍不改输入模态、`on_drop` 是否仍要求
+   `is_hovered`（`ui::external_drop` 依赖它）；透明窗口（DirectComposition）实现；`QuitMode` 默认值；`Root` / `RootPlugin` 接口
    （`UiLayer` 依赖）；`gpui_kit::base::TextView::markdown(..).image_source(..)`；`img(&str)` 的 URI 判定；换行器规则；
    Windows release 构建的 `fxc.exe` 着色器预编译（`gpui-pre-windows/build.rs`）。
 2. 对齐 app 的 `windows` crate 版本与 gpui-pre-windows 一致。
@@ -244,7 +266,7 @@ fn load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
 
 ```rust
 .on_click(cx.listener(|_, _, window, cx| {
-    platform::set_window_rect_physical(window, cx, rect);   // 延后到下一个前台任务
+    platform::set_client_rect_physical(window, cx, rect);   // 延后到下一个前台任务（按客户区）
 }))
 ```
 

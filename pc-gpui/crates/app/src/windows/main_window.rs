@@ -737,6 +737,9 @@ pub fn open(cx: &mut App) -> Option<AnyWindowHandle> {
     };
     spec.transparent = true;
     spec.min_size = Some(logical_size(MIN_WIDTH, MIN_HEIGHT));
+    // 有记录时客户区按记录的物理像素摆（中心不在任何显示器上 / 换算取整也以记录为准）；没有记录时按居中的逻辑矩形。
+    // 两种情况都由 open_window 建窗后按客户区校正（GPUI 直接建出的客户区偏高半个底边框）
+    spec.client_rect = geometry.saved;
 
     // 状态先就位（窗口第一帧就按固定模式外观画）
     let runtime_prefs = {
@@ -780,15 +783,6 @@ pub fn open(cx: &mut App) -> Option<AnyWindowHandle> {
         .flatten();
     window_mode::on_main_opened(cx, hwnd);
 
-    // 记录与实际位置有偏差（中心不在任何显示器上 / 换算取整）时按物理像素校正
-    if let (Some(saved), Some(hwnd)) = (geometry.saved, hwnd) {
-        cx.spawn(async move |_| {
-            if hwnd.client_rect() != Some(saved) {
-                hwnd.set_client_rect(saved);
-            }
-        })
-        .detach();
-    }
     if geometry.is_fixed {
         let target = window_mode::TargetMode::for_state(true, geometry.embed_desktop);
         window_mode::apply_mode(cx, target).detach();
