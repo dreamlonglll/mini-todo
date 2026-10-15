@@ -848,3 +848,40 @@ PC 前端（D1 正确性 / 安全 / 同步 UI、D2 性能 / 清理 / 测试）�
 ### Next Steps
 
 - None - task complete
+
+
+## Session 23: GPUI 版合入、删除 Tauri 版并发布 v3.0.0-pre
+
+**Date**: 2026-10-16
+**Task**: GPUI 版合入、删除 Tauri 版并发布 v3.0.0-pre
+**Branch**: `main`
+
+### Summary
+
+快进合入 claude 分支（GPUI 重写）；参考 mini-term 新建 release.yml（draft→Windows NSIS+便携 zip、cloud×2→SHA256SUMS→转正，tag 含 - 为 pre-release）与 cache-warm.yml；NSIS 安装器沿用 Tauri 安装身份原地升级、只删程序文件；删除 pc/ 与 build.yml/pc-ci.yml/cloud-release.yml，文档与 spec 以 pc-gpui 为准；compare_versions 识别预发布；本机 e2e 无产品缺陷（输入法/壁纸为环境问题），修复 e2e 误删自启值与 Windows 上 reminder 测试精度；CI 全绿后发布 v3.0.0-pre（7 个资产，校验通过），中文 release notes 已改写
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `0422e7a` | (see git log) |
+| `b0f26d6` | (see git log) |
+| `ee8f287` | (see git log) |
+| `8117b1f` | (see git log) |
+| `5e09540` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
