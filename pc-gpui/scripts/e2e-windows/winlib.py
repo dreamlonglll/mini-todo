@@ -919,6 +919,8 @@ class Report:
         self.results: list[dict] = []
         self.current: str | None = None
         self.snapped: set[str] = set()
+        # --skip 点名跳过的用例（不执行 fn，记 SKIP）
+        self.skip: set[str] = set()
         out_dir.mkdir(parents=True, exist_ok=True)
         CURRENT_REPORT[0] = self
 
@@ -945,6 +947,8 @@ class Report:
         status, detail = "PASS", ""
         try:
             try:
+                if cid in self.skip:
+                    raise Skip("--skip 指定跳过")
                 detail = fn() or ""
             except Skip as e:
                 status, detail = "SKIP", str(e)

@@ -36,7 +36,10 @@ release job 只跑 P 组（加上 release 构建本身：`build.rs` 用 fxc 预�
 ## 本地运行（自己的 Windows 机器）
 
 前置：Rust（MSVC）、Python 3.10+、`pip install pillow wsgidav cheroot`；屏幕不锁定、前台不是管理员窗口
-（否则模拟输入会被丢弃）；**中文输入法切到英文**；测试期间不要动鼠标键盘。
+（否则模拟输入会被丢弃）；**键盘布局切到 en-US（Win+Space）**——只把中文输入法切到"英"模式不够：输入法的中 / 英
+状态按窗口记，新开的测试窗口仍是中文模式，键入的文字会被篡改（`E2E created todo` → `eEcreatedtodo`、数字被吞）、
+之后的点击也可能切不走焦点，I01–I04 / D01–D04 / F03 / F10 会连锁失败（ENV 行的 `kbd=` 应为 `0x04090409`）；
+测试期间不要动鼠标键盘。
 
 ```powershell
 cd pc-gpui
@@ -51,9 +54,12 @@ python scripts/e2e-windows/run_e2e.py --exe target/debug/mini-todo.exe --seed ta
 - 开始时会把屏幕上其它程序的窗口**最小化**（避免挡住桌面、干扰取色与 Z 序断言）。
 - 不加 `--allow-real-profile` 时 P 组跳过：P 组不隔离，会使用真实的 `%LOCALAPPDATA%\mini-todo` 数据目录、与正在运行的
   安装版冲突（单实例会把它唤起）。只在一次性虚拟机 / 没装正式版的机器上加。
-- S06 / F06 会 `taskkill explorer.exe` 再拉起；I06 会写入再删除 `HKCU\…\Run\mini-todo`（与安装版共用的值名，
-  已开启开机自启的机器上跑完需要重新打开）；F08 会打开一个资源管理器窗口。
-- `--only S` 只跑某几组；`--emit-shots F08,N01` 把这些用例的截图另存到 `<out>/emit/`；截图、各实例日志在 `--out` 目录。
+- S06 / F06 会 `taskkill explorer.exe` 再拉起；I06 会写入再删除 `HKCU\…\Run\mini-todo`（与安装版共用的值名；
+  I 组开始前记下原值、收尾时恢复原样，已开启开机自启的机器上跑也不会丢；不想动它就 `--skip I06`）；F08 会打开一个资源管理器窗口。
+- `--only S` 只跑某几组；`--skip I06,F08` 按用例 ID 跳过（记 SKIP）；`--emit-shots F08,N01` 把这些用例的截图另存到
+  `<out>/emit/`；截图、各实例日志在 `--out` 目录。
+- W01（主窗口四角透出桌面）、I05（深色半透明透出桌面色）拿启动前桌面取样的众数色做对照：桌面是照片壁纸时众数没有意义，
+  这两条会 FAIL（不是产品问题，看 `W01-*.png` / `I05-main-dark.png` 能直接看到壁纸透出）；要它们有效就先跑 `set-display.ps1`。
 - release 冒烟：`cargo build --release -p mini-todo`，然后 `--exe target/release/mini-todo.exe --suite release --allow-real-profile`。
 
 ## 取回结果（CI）

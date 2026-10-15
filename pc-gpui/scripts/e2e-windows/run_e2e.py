@@ -889,6 +889,9 @@ def group_interactions() -> None:
         c.ok(not bad, f"日志无发送失败（{bad[:2]}）")
         return c.done()
 
+    # HKCU Run\mini-todo 与安装版共用：先记下原值，收尾时恢复成原样（原来没有就删、原来有就写回）。
+    # 不能见值就删 —— 已开启开机自启的机器上（哪怕 --skip I06）会把安装版的自启项删掉
+    run_before = run_value()
     try:
         C.report.case("I00", "交互准备：主窗口列表识别", i00)
         C.report.case("I01", "FAB → 新建窗口 → 输入标题 → Ctrl+Enter → 落库且主窗口刷新", i01)
@@ -905,9 +908,14 @@ def group_interactions() -> None:
             if errs:
                 print("  I 组日志 ERROR：\n  " + "\n  ".join(errs[:10]))
         app.stop()
-        if run_value() is not None:
-            subprocess.run(["reg", "delete", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "/v", "mini-todo",
-                            "/f"], capture_output=True)
+        run_key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run"
+        now = run_value()
+        if run_before is None and now is not None:
+            subprocess.run(["reg", "delete", run_key, "/v", "mini-todo", "/f"], capture_output=True)
+        elif run_before is not None and now != run_before:
+            subprocess.run(["reg", "add", run_key, "/v", "mini-todo", "/t", "REG_SZ", "/d", run_before, "/f"],
+                           capture_output=True)
+            print(f"  已恢复 Run\\mini-todo = {run_before!r}")
 
 
 # ----------------------------------------------------------------------------- D：WebDAV
@@ -1495,6 +1503,8 @@ def main() -> int:
     ap.add_argument("--work")
     ap.add_argument("--suite", choices=["debug", "release"], default="debug")
     ap.add_argument("--only", default="")
+    # 按用例 ID 跳过（逗号分隔，如 I06 —— 它会写入再删除与安装版共用的 HKCU Run\mini-todo）
+    ap.add_argument("--skip", default="")
     ap.add_argument("--allow-real-profile", action="store_true")
     ap.add_argument("--emit-shots", default="")
     ap.add_argument("--emit-failures", type=int, default=1)
@@ -1511,6 +1521,7 @@ def main() -> int:
     C.out.mkdir(parents=True, exist_ok=True)
     C.work.mkdir(parents=True, exist_ok=True)
     C.report = Report(C.out, f"mini-todo GPUI Windows e2e（{args.suite}）", emit_budget=args.emit_failures)
+    C.report.skip = {s.strip().upper() for s in args.skip.split(",") if s.strip()}
     only = {s.strip().upper() for s in args.only.split(",") if s.strip()}
 
     def want(g: str) -> bool:
