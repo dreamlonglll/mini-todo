@@ -11,18 +11,18 @@ use windows::Win32::Graphics::Dwm::{
     DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWMWCP_ROUND, DwmSetWindowAttribute,
 };
 use windows::Win32::Graphics::Gdi::{
-    EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO,
-    MonitorFromWindow,
+    ClientToScreen, EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITOR_DEFAULTTONEAREST,
+    MONITORINFO, MonitorFromWindow,
 };
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GWL_EXSTYLE, GWL_STYLE, GWLP_HWNDPARENT, GetClassNameW, GetCursorPos, GetWindowLongPtrW,
-    GetWindowRect, HTCAPTION, HWND_NOTOPMOST, HWND_TOPMOST, IsIconic, IsWindow, IsWindowVisible,
-    IsZoomed, SW_HIDE, SW_MAXIMIZE, SW_RESTORE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetForegroundWindow,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_NCLBUTTONDOWN, WS_EX_APPWINDOW,
-    WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_THICKFRAME,
+    GWL_EXSTYLE, GWL_STYLE, GWLP_HWNDPARENT, GetClassNameW, GetClientRect, GetCursorPos,
+    GetWindowLongPtrW, GetWindowRect, HTCAPTION, HWND_NOTOPMOST, HWND_TOPMOST, IsIconic, IsWindow,
+    IsWindowVisible, IsZoomed, SW_HIDE, SW_MAXIMIZE, SW_RESTORE, SW_SHOWNOACTIVATE,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageW,
+    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_NCLBUTTONDOWN,
+    WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_THICKFRAME,
 };
 
 use super::{Hwnd, MonitorInfo, PhysRect};
@@ -199,6 +199,14 @@ pub fn set_minimizable(window: &Window, cx: &App, minimizable: bool) {
 
 pub fn set_resizable_frame(window: &Window, cx: &App, resizable: bool) {
     defer(window, cx, move |h| raw::set_resizable_frame(h, resizable));
+}
+
+pub fn client_rect_physical(window: &Window) -> Option<PhysRect> {
+    raw::client_rect(hwnd(window)?)
+}
+
+pub fn set_geometry_locked(window: &Window, cx: &App, locked: bool) {
+    defer(window, cx, move |h| raw::set_geometry_locked(h, locked));
 }
 
 pub fn set_round_corners(window: &Window, round: bool) {
@@ -420,5 +428,61 @@ pub mod raw {
         let mut buf = [0u16; 256];
         let len = unsafe { GetClassNameW(to_hwnd(h), &mut buf) };
         (len > 0).then(|| String::from_utf16_lossy(&buf[..len as usize]))
+    }
+
+    pub fn client_rect(h: Hwnd) -> Option<PhysRect> {
+        let hwnd = to_hwnd(h);
+        let mut client = RECT::default();
+        let mut origin = POINT::default();
+        unsafe {
+            GetClientRect(hwnd, &mut client).ok()?;
+            if !ClientToScreen(hwnd, &mut origin).as_bool() {
+                return None;
+            }
+        }
+        Some(PhysRect::new(
+            origin.x,
+            origin.y,
+            client.right - client.left,
+            client.bottom - client.top,
+        ))
+    }
+
+    /// 客户区 → 外框的换算量：(左, 上, 宽差, 高差)
+    fn frame_offsets(h: Hwnd) -> Option<(i32, i32, i32, i32)> {
+        let outer = rect(h)?;
+        let client = client_rect(h)?;
+        Some((
+            client.x - outer.x,
+            client.y - outer.y,
+            outer.width - client.width,
+            outer.height - client.height,
+        ))
+    }
+
+    pub fn set_client_rect(h: Hwnd, target: PhysRect) -> bool {
+        let (left, top, extra_w, extra_h) = frame_offsets(h).unwrap_or_default();
+        set_rect(
+            h,
+            PhysRect::new(
+                target.x - left,
+                target.y - top,
+                target.width + extra_w,
+                target.height + extra_h,
+            ),
+        )
+    }
+
+    pub fn set_client_position(h: Hwnd, x: i32, y: i32) -> bool {
+        let (left, top, _, _) = frame_offsets(h).unwrap_or_default();
+        set_position(h, x - left, y - top)
+    }
+
+    pub fn set_geometry_locked(h: Hwnd, locked: bool) {
+        super::super::subclass::set_flag(h, super::super::subclass::FLAG_LOCK_GEOMETRY, locked);
+    }
+
+    pub fn set_foreground(h: Hwnd) -> bool {
+        unsafe { SetForegroundWindow(to_hwnd(h)) }.as_bool()
     }
 }

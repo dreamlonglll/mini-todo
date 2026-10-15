@@ -525,6 +525,8 @@ pub enum DebugOpen {
     Confirm(String, String),
     /// 控件样例窗口（`gallery`）
     Gallery,
+    /// 运行时打开日历（`calendar`，W1：与设置里打开「展示日历」相同，主窗口按公式加宽）
+    Calendar,
 }
 
 /// 解析 `main,editor:1:view,editor:new,subtask:3:edit,settings:general,completed,notification:1,fence:1`；
@@ -572,6 +574,7 @@ pub fn parse_debug_open(spec: &str) -> Vec<DebugOpen> {
                     .map(|id| DebugOpen::Notification { todo_id: Some(id) }),
                 ["fence", id] => id.parse().ok().map(DebugOpen::Fence),
                 ["gallery"] => Some(DebugOpen::Gallery),
+                ["calendar"] => Some(DebugOpen::Calendar),
                 ["toast", kind, text @ ..] if !text.is_empty() => {
                     use crate::ui::message::MessageKind;
                     let kind = match *kind {
@@ -644,6 +647,11 @@ pub fn open_debug(cx: &mut App, items: &[DebugOpen]) {
             }
             DebugOpen::Gallery => {
                 gallery::open(cx);
+            }
+            DebugOpen::Calendar => {
+                crate::state::AppState::global(cx)
+                    .update(cx, |state, cx| state.set_show_calendar(true, cx))
+                    .detach();
             }
             DebugOpen::Toast(kind, text) => {
                 if let Some(main) = WindowManager::main(cx) {

@@ -9,6 +9,8 @@
 //! | [`tray`] | 托盘 | W1（现为空实现） |
 //! | [`auto_sync`] | 自动同步定时器 | W1（现为空实现） |
 //! | [`scheduler`] | 提醒调度与系统通知 | W2（现为空实现） |
+//! | [`window_mode`] | 主窗口固定 / 嵌入桌面 / 贴边隐藏、位置记忆、托盘唤起、重置 | W1 |
+//! | [`update_check`] | GitHub 版本检查 | W1 |
 
 pub mod auto_sync;
 pub mod autostart;
@@ -17,3 +19,6 @@ pub mod scheduler;
 pub mod single_instance;
 pub mod sync;
 pub mod tray;
+// ---- W1 追加 ----
+pub mod update_check;
+pub mod window_mode;

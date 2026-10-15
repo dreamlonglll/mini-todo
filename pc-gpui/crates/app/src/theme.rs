@@ -526,6 +526,134 @@ pub fn init(cx: &mut App) {
     });
 }
 
+// ---- W1：主窗口（`research/ui-main-window.md`，深色值为层叠后的最终值） ----
+
+/// 主窗口专用颜色（由 [`Palette`] 推出浅 / 深两套；规格 §5~§10）
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MainColors {
+    /// 待办行 hover 底：浅 `rgba(0,0,0,0.03)`；深色无变化（透明）
+    pub row_hover: Hsla,
+    /// 拖拽占位底：浅 `rgba(59,130,246,0.1)`；深色透明
+    pub row_dragging: Hsla,
+    /// 操作条底：浅 `rgba(255,255,255,0.95)` / 深 `rgba(30,30,30,0.9)`
+    pub actions_bg: Hsla,
+    /// 操作条阴影色：浅 `rgba(0,0,0,0.1)` / 深 `rgba(0,0,0,0.3)`（`0 1px 4px`）
+    pub actions_shadow: Hsla,
+    /// 子任务计数 hover 底（深色下也是这个值）`rgba(0,0,0,0.05)`
+    pub subtask_count_hover: Hsla,
+    /// 空状态底：深色 `rgba(0,0,0,0.1)`，浅色透明
+    pub empty_bg: Hsla,
+    /// 四象限格底（深色统一 `rgba(0,0,0,0.15)`；浅色按象限另算）、边框、hover 边框、头部底、头部下边框、计数胶囊
+    pub quadrant_dark_bg: Hsla,
+    pub quadrant_border: Hsla,
+    pub quadrant_border_hover_dark: Hsla,
+    pub quadrant_header_bg: Hsla,
+    pub quadrant_header_border: Hsla,
+    pub quadrant_count_bg: Hsla,
+    pub quadrant_count_fg: Hsla,
+    pub quadrant_title: Hsla,
+    /// 日历网格线：浅 `#E2E8F0` / 深 `rgba(255,255,255,0.6)`
+    pub calendar_line: Hsla,
+    /// 日历导航按钮：颜色、hover 色、hover 底
+    pub nav_fg: Hsla,
+    pub nav_hover_fg: Hsla,
+    pub nav_hover_bg: Hsla,
+    /// 「今天」按钮：字 / 底 / 边，hover 字 / 底 / 边
+    pub today_fg: Hsla,
+    pub today_bg: Hsla,
+    pub today_border: Hsla,
+    pub today_hover_fg: Hsla,
+    pub today_hover_bg: Hsla,
+    pub today_hover_border: Hsla,
+}
+
+impl MainColors {
+    pub fn new(p: &Palette) -> MainColors {
+        let clear = hexa(0x00000000);
+        if p.is_dark {
+            MainColors {
+                row_hover: clear,
+                row_dragging: clear,
+                actions_bg: rgba_css(30, 30, 30, 0.9),
+                actions_shadow: rgba_css(0, 0, 0, 0.3),
+                subtask_count_hover: rgba_css(0, 0, 0, 0.05),
+                empty_bg: rgba_css(0, 0, 0, 0.1),
+                quadrant_dark_bg: rgba_css(0, 0, 0, 0.15),
+                quadrant_border: rgba_css(255, 255, 255, 0.1),
+                quadrant_border_hover_dark: rgba_css(255, 255, 255, 0.2),
+                quadrant_header_bg: rgba_css(0, 0, 0, 0.1),
+                quadrant_header_border: rgba_css(128, 128, 128, 0.1),
+                quadrant_count_bg: rgba_css(255, 255, 255, 0.1),
+                quadrant_count_fg: p.text_secondary,
+                quadrant_title: p.text_primary,
+                calendar_line: rgba_css(255, 255, 255, 0.6),
+                nav_fg: hex(0xFFFFFF),
+                nav_hover_fg: p.primary_light,
+                nav_hover_bg: rgba_css(255, 255, 255, 0.1),
+                today_fg: hex(0xFFFFFF),
+                today_bg: clear,
+                today_border: rgba_css(255, 255, 255, 0.4),
+                today_hover_fg: hex(0xFFFFFF),
+                today_hover_bg: rgba_css(255, 255, 255, 0.15),
+                today_hover_border: rgba_css(255, 255, 255, 0.5),
+            }
+        } else {
+            MainColors {
+                row_hover: rgba_css(0, 0, 0, 0.03),
+                row_dragging: rgba_css(59, 130, 246, 0.1),
+                actions_bg: rgba_css(255, 255, 255, 0.95),
+                actions_shadow: rgba_css(0, 0, 0, 0.1),
+                subtask_count_hover: rgba_css(0, 0, 0, 0.05),
+                empty_bg: clear,
+                quadrant_dark_bg: rgba_css(0, 0, 0, 0.15),
+                quadrant_border: rgba_css(128, 128, 128, 0.1),
+                quadrant_border_hover_dark: rgba_css(255, 255, 255, 0.2),
+                quadrant_header_bg: rgba_css(128, 128, 128, 0.05),
+                quadrant_header_border: rgba_css(128, 128, 128, 0.1),
+                quadrant_count_bg: rgba_css(128, 128, 128, 0.1),
+                quadrant_count_fg: p.text_tertiary,
+                quadrant_title: p.text_secondary,
+                calendar_line: p.border,
+                nav_fg: p.text_secondary,
+                nav_hover_fg: p.primary,
+                nav_hover_bg: p.bg_tertiary,
+                today_fg: p.text_secondary,
+                today_bg: p.bg_secondary,
+                today_border: p.border,
+                today_hover_fg: p.primary,
+                today_hover_bg: p.bg_tertiary,
+                today_hover_border: p.primary,
+            }
+        }
+    }
+}
+
+/// FAB：`0 4px 12px rgba(59,130,246,0.4)`，hover `0 6px 16px rgba(59,130,246,0.5)`
+pub fn fab_shadow(hovered: bool) -> Vec<BoxShadow> {
+    if hovered {
+        vec![shadow(0., 6., 16., 0., rgba_css(59, 130, 246, 0.5))]
+    } else {
+        vec![shadow(0., 4., 12., 0., rgba_css(59, 130, 246, 0.4))]
+    }
+}
+
+/// 主窗口尺寸 token
+pub mod main_window {
+    /// 标题栏按钮 28×28、图标 16
+    pub const TITLE_BUTTON: f32 = 28.;
+    pub const TITLE_ICON: f32 = 16.;
+    /// FAB 48×48，距右下 20
+    pub const FAB_SIZE: f32 = 48.;
+    pub const FAB_INSET: f32 = 20.;
+    /// 主列表滚动条宽 6；四象限 4
+    pub const SCROLLBAR: f32 = 6.;
+    pub const QUADRANT_SCROLLBAR: f32 = 4.;
+    /// 日历待办条：高 20、间距 2、距格顶 28
+    pub const BAR_HEIGHT: f32 = 20.;
+    pub const BAR_GAP: f32 = 2.;
+    pub const BAR_TOP_OFFSET: f32 = 28.;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

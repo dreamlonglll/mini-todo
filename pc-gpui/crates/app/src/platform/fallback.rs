@@ -76,6 +76,10 @@ pub fn set_tool_window(_window: &Window, _cx: &App, _tool: bool) {}
 pub fn set_minimizable(_window: &Window, _cx: &App, _minimizable: bool) {}
 pub fn set_resizable_frame(_window: &Window, _cx: &App, _resizable: bool) {}
 pub fn set_round_corners(_window: &Window, _round: bool) {}
+pub fn client_rect_physical(window: &Window) -> Option<PhysRect> {
+    window_rect_physical(window)
+}
+pub fn set_geometry_locked(_window: &Window, _cx: &App, _locked: bool) {}
 pub fn set_owner(_window: &Window, _cx: &App, _owner: Option<Hwnd>) {}
 pub fn restore_if_minimized(_window: &Window, _cx: &App) {}
 
@@ -130,5 +134,18 @@ pub mod raw {
     pub fn set_round_corners(_hwnd: Hwnd, _round: bool) {}
     pub fn class_name(_hwnd: Hwnd) -> Option<String> {
         None
+    }
+    pub fn client_rect(_hwnd: Hwnd) -> Option<PhysRect> {
+        None
+    }
+    pub fn set_client_rect(_hwnd: Hwnd, _rect: PhysRect) -> bool {
+        false
+    }
+    pub fn set_client_position(_hwnd: Hwnd, _x: i32, _y: i32) -> bool {
+        false
+    }
+    pub fn set_geometry_locked(_hwnd: Hwnd, _locked: bool) {}
+    pub fn set_foreground(_hwnd: Hwnd) -> bool {
+        false
     }
 }

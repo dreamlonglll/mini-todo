@@ -32,6 +32,8 @@ mod fallback;
 use self::fallback as imp;
 
 pub mod embed;
+#[cfg(windows)]
+mod subclass;
 
 /// 原生窗口句柄（Windows 上是 HWND 的整数值；其它平台不会出现）
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -312,5 +314,49 @@ impl Hwnd {
     /// 窗口类名（`GetClassNameW`）
     pub fn class_name(self) -> Option<String> {
         imp::raw::class_name(self)
+    }
+}
+
+// ----------------------------------------------------------------------
+// W1 追加：客户区几何（主窗口位置记忆、贴边隐藏）与固定模式的几何锁定
+// ----------------------------------------------------------------------
+
+/// 客户区（物理像素，虚拟屏幕坐标）。
+///
+/// 可缩放的 GPUI 窗口（`is_resizable: true`）在左 / 右 / 下有系统不可见的缩放边框，`GetWindowRect` 比界面大一圈；
+/// 旧版 Tauri 无边框窗口的外框就是客户区，库里存的位置 / 尺寸也是客户区——主窗口的保存、恢复与贴边计算都用它。
+/// 不可缩放的窗口（收纳箱、通知）两者相同。其它平台 = `window_rect_physical`
+pub fn client_rect_physical(window: &Window) -> Option<PhysRect> {
+    imp::client_rect_physical(window)
+}
+
+/// 固定模式的几何锁定：边框缩放热区、标题栏拖动区、系统菜单 / 键盘的移动与缩放一律不响应
+/// （Windows 子类化 `WM_NCHITTEST` / `WM_SYSCOMMAND`；GPUI 的缩放热区按建窗时的 `is_resizable`，没有运行时开关）。
+/// 延后执行；其它平台 no-op（拖动区由界面自己不渲染）
+pub fn set_geometry_locked(window: &Window, cx: &App, locked: bool) {
+    imp::set_geometry_locked(window, cx, locked)
+}
+
+/// 立即执行的原始调用（W1 追加；同样只在 App 未被借用时调用）
+impl Hwnd {
+    /// 客户区（物理像素）
+    pub fn client_rect(self) -> Option<PhysRect> {
+        imp::raw::client_rect(self)
+    }
+    /// 按客户区设置位置与尺寸（换算成外框后一次 `SetWindowPos(SWP_NOZORDER | SWP_NOACTIVATE)`）
+    pub fn set_client_rect(self, rect: PhysRect) -> bool {
+        imp::raw::set_client_rect(self, rect)
+    }
+    /// 按客户区左上角移动（不改尺寸）
+    pub fn set_client_position(self, x: i32, y: i32) -> bool {
+        imp::raw::set_client_position(self, x, y)
+    }
+    /// 见 [`set_geometry_locked`]
+    pub fn set_geometry_locked(self, locked: bool) {
+        imp::raw::set_geometry_locked(self, locked)
+    }
+    /// 激活并带到前台（`SetForegroundWindow`；被前台锁限制时只会闪任务栏，调用方再配合 `activate_window`）
+    pub fn set_foreground(self) -> bool {
+        imp::raw::set_foreground(self)
     }
 }
