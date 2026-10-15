@@ -45,6 +45,11 @@ pub fn hex_to_rgb_channels(color: &str) -> (u8, u8, u8) {
     parse_hex_color(color).unwrap_or((0, 0, 0))
 }
 
+/// HEX 颜色比较（旧 `utils/color.ts` 的 `isSameColor`：去空白、忽略大小写）
+pub fn is_same_color(a: &str, b: &str) -> bool {
+    a.trim().eq_ignore_ascii_case(b.trim())
+}
+
 /// 解析 `#RGB` / `#RRGGBB`；非法返回 `None`
 pub fn parse_hex_color(color: &str) -> Option<(u8, u8, u8)> {
     let s = color.trim();
@@ -526,7 +531,7 @@ pub fn init(cx: &mut App) {
     });
 }
 
-// ---- W1：主窗口（`research/ui-main-window.md`，深色值为层叠后的最终值） ----
+// ---- 主窗口（`research/ui-main-window.md`，深色值为层叠后的最终值） ----
 
 /// 主窗口专用颜色（由 [`Palette`] 推出浅 / 深两套；规格 §5~§10）
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -654,7 +659,7 @@ pub mod main_window {
     pub const BAR_TOP_OFFSET: f32 = 28.;
 }
 
-// ---- W3：设置窗口（ui-settings-fence.md §2；Tailwind slate 系，与 `light()` 重合的直接取 `light()`） ----
+// ---- 设置窗口（ui-settings-fence.md §2；Tailwind slate 系，与 `light()` 重合的直接取 `light()`） ----
 
 /// 设置窗口专用颜色
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -733,7 +738,7 @@ pub fn settings_tokens() -> &'static SettingsTokens {
     &SETTINGS_TOKENS
 }
 
-// ---- W3：桌面收纳箱（ui-settings-fence.md §3、§4；深色半透明，白字） ----
+// ---- 桌面收纳箱（ui-settings-fence.md §3、§4；深色半透明，白字） ----
 
 /// 收纳箱窗口专用颜色
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -823,6 +828,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn colors_compare_case_insensitively() {
+        assert!(is_same_color("#0f2942", "#0F2942"));
+        assert!(is_same_color(" #000000 ", "#000000"));
+        assert!(!is_same_color("#000000", "#1E293B"));
+    }
+
+    #[test]
     fn hex_channels_match_frontend_rules() {
         assert_eq!(hex_to_rgb_channels("#1E293B"), (0x1E, 0x29, 0x3B));
         assert_eq!(hex_to_rgb_channels("#abc"), (0xAA, 0xBB, 0xCC));
@@ -857,10 +869,10 @@ mod tests {
     }
 }
 
-// ---- W2：编辑 / 子任务 / 已完成 / 通知窗口与 Markdown（`ui-editor-windows.md`）----
+// ---- 编辑 / 子任务 / 已完成 / 通知窗口与 Markdown（`ui-editor-windows.md`）----
 
-/// W2 窗口与 Markdown 渲染的 token（`0xRRGGBB`，用 [`hex`] 取色；尺寸单位逻辑像素）
-pub mod w2 {
+/// 编辑类窗口与 Markdown 渲染的 token（`0xRRGGBB`，用 [`hex`] 取色；尺寸单位逻辑像素）
+pub mod editor_theme {
     use gpui_kit::{Font, FontFallbacks, FontFeatures, FontStyle, FontWeight, Hsla};
 
     // 编辑类窗口里直接写在 scoped CSS 里的 Tailwind slate / blue / red …

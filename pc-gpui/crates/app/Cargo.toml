@@ -31,13 +31,13 @@ url = "2"
 regex = "1"
 # 开机自启：与旧版 tauri-plugin-autostart 2.5（底层 auto-launch 0.5）同一库、同名同键
 auto-launch = "0.5"
-# 版本检查（W1，GitHub latest release）：与 core 相同版本与特性，不多编一份
+# 版本检查（GitHub latest release）：与 core 相同版本与特性，不多编一份
 reqwest = { version = "0.12", features = ["json", "blocking"] }
-# W2：Markdown 解析（与 gpui-base 同一版本，只在块级排版用；行内交给 gpui-base TextView）
+# Markdown 解析（与 gpui-base 同一版本，只在块级排版用；行内交给 gpui-base TextView）
 markdown = "1"
-# W2：系统通知（Windows Toast，AppUserModelID 与 set_app_identity 一致；与旧版 tauri-plugin-notification 底层同一库）
+# 系统通知（Windows Toast，AppUserModelID 与 set_app_identity 一致；与旧版 tauri-plugin-notification 底层同一库）
 notify-rust = "4"
-# W2：读图片尺寸（Markdown 图片按原始宽高比缩放）与图片预览旋转；gpui 已启用这些格式，不会多编一份
+# 读图片尺寸（Markdown 图片按原始宽高比缩放）与图片预览旋转；gpui 已启用这些格式，不会多编一份
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 
 [target.'cfg(windows)'.dependencies]
@@ -54,10 +54,10 @@ windows = { version = "0.62", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
-    # 收纳箱「自定义颜色」的系统取色对话框 ChooseColorW（W3）
+    # 收纳箱「自定义颜色」的系统取色对话框 ChooseColorW
     "Win32_UI_Controls_Dialogs",
 ] }
-# 托盘（W1）：tray-icon 自带 muda 菜单；只在 Windows 编译（Linux 只用于 CI 与截图）
+# 托盘：tray-icon 自带 muda 菜单；只在 Windows 编译（Linux 只用于 CI 与截图）
 tray-icon = { version = "0.21", default-features = false }
 # 带扩展名过滤器 / 标题的文件对话框（GPUI 自带的没有过滤器）；只在 Windows 编译
 rfd = { version = "0.16", default-features = false }

@@ -1,4 +1,4 @@
-//! 收纳箱专用的平台能力（W3）。
+//! 收纳箱专用的平台能力。
 //!
 //! - [`choose_color`]：收纳箱外观面板的「自定义颜色」。旧版是 WebView2 里的 `<input type="color">`，在 Windows 上弹出
 //!   系统 `ChooseColor` 通用对话框；这里直接调用 `ChooseColorW`（父窗口为收纳箱窗口），在独立线程里运行，不阻塞

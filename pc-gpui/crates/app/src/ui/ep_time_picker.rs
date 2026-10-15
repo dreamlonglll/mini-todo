@@ -16,7 +16,7 @@ use gpui_kit::{
 
 use crate::assets::EpIcon;
 use crate::theme::{self, ep};
-use crate::ui::ep2_popper::{self, Anchor, Placement, PopperOptions};
+use crate::ui::ep_popper::{self, Anchor, Placement, PopperOptions};
 use crate::ui::icon::icon;
 use crate::ui::input::EpInput;
 
@@ -321,7 +321,7 @@ impl EpTimePicker {
                     }))
                     .child(label)
             };
-        ep2_popper::frame()
+        ep_popper::frame()
             .w(px(PANEL_WIDTH))
             .font(theme::ui_font())
             .flex()
@@ -384,7 +384,7 @@ impl Render for EpTimePicker {
             .suffix(clear);
         let popper = if self.open && !self.disabled {
             let entity = cx.entity().downgrade();
-            ep2_popper::popper(
+            ep_popper::popper(
                 &self.anchor,
                 window,
                 PopperOptions {

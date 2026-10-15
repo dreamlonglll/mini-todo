@@ -30,8 +30,7 @@ use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, FocusHandle,
     InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, ScrollHandle,
-    SharedString, Styled as _, Subscription, WeakEntity, Window, div, prelude::FluentBuilder as _,
-    relative,
+    Styled as _, Subscription, WeakEntity, Window, div, prelude::FluentBuilder as _, relative,
 };
 use mini_todo_core::db::Todo;
 
@@ -40,12 +39,12 @@ use super::{ChildOf, WindowKind, WindowManager, WindowSpec, logical_size};
 use crate::db::spawn_db;
 use crate::state::DEFAULT_TODO_COLOR;
 use crate::theme::{self, hex};
+use crate::ui::ep_color_picker::{EpColorPicker, EpColorPickerEvent};
 use crate::ui::ep_date_picker::{EpDatePicker, EpDatePickerEvent};
 use crate::ui::ep_input_number::{EpInputNumber, EpInputNumberEvent};
+use crate::ui::ep_popper::Anchor;
+use crate::ui::ep_select::{EpSelect, EpSelectEvent, EpSelectOption};
 use crate::ui::ep_time_picker::{EpTimePicker, EpTimePickerEvent};
-use crate::ui::ep2_color_picker::{EpColorPicker, EpColorPickerEvent};
-use crate::ui::ep2_popper::Anchor;
-use crate::ui::ep2_select::{EpSelect, EpSelectEvent};
 use crate::ui::markdown_editor::{MarkdownEditor, MarkdownEditorEvent};
 use crate::ui::markdown_image_viewer::ImageViewer;
 use crate::ui::{message, message_box};
@@ -108,15 +107,12 @@ pub fn quadrant_color(quadrant: i32) -> &'static str {
     }
 }
 
-/// `isSameColor`：trim + 小写后比较
-pub fn is_same_color(a: &str, b: &str) -> bool {
-    a.trim().eq_ignore_ascii_case(b.trim())
-}
-
 /// `resolveQuadrantColor`：颜色还是旧象限的默认色（用户没改过）时跟随新象限，否则保留
 pub fn resolve_quadrant_color(current: Option<&str>, prev: i32, next: i32) -> Option<String> {
     match current {
-        Some(c) if is_same_color(c, quadrant_color(prev)) => Some(quadrant_color(next).to_string()),
+        Some(c) if theme::is_same_color(c, quadrant_color(prev)) => {
+            Some(quadrant_color(next).to_string())
+        }
         other => other.map(str::to_string),
     }
 }
@@ -224,7 +220,7 @@ pub struct EditorWindow {
     quadrant: i32,
     notify_before: i32,
     is_custom_notify_before: bool,
-    notify_before_select: Entity<EpSelect>,
+    notify_before_select: Entity<EpSelect<i32>>,
     custom_notify_before: Entity<EpInputNumber>,
     notify_date: Entity<EpDatePicker>,
     notify_time: Entity<EpTimePicker>,
@@ -234,7 +230,7 @@ pub struct EditorWindow {
     end_time: Entity<EpTimePicker>,
     repeat_enabled: bool,
     repeat_type: RepeatType,
-    repeat_type_select: Entity<EpSelect>,
+    repeat_type_select: Entity<EpSelect<i32>>,
     repeat_interval: Entity<EpInputNumber>,
     repeat_weekdays: Vec<u8>,
     repeat_month_day: Entity<EpInputNumber>,
@@ -285,13 +281,13 @@ impl EditorWindow {
             MarkdownEditor::new("editor-desc", images_dir.clone(), Some((5, 12)), window, cx)
         });
         let predefine = PRESET_COLORS.iter().map(|(_, c)| c.to_string()).collect();
-        let color_picker = cx.new(|cx| EpColorPicker::new("editor-color", predefine, window, cx));
-        let notify_before_select = cx.new(|_| {
-            EpSelect::new(
-                "editor-notify-before",
+        let color_picker =
+            cx.new(|cx| EpColorPicker::new("editor-color", window, cx).predefine(predefine));
+        let notify_before_select = cx.new(|cx| {
+            EpSelect::new("editor-notify-before", window, cx).with_options(
                 NOTIFY_BEFORE_OPTIONS
                     .iter()
-                    .map(|(v, l)| (*v, SharedString::from(*l)))
+                    .map(|(v, l)| EpSelectOption::new(*v, *l))
                     .collect(),
             )
         });
@@ -307,11 +303,12 @@ impl EditorWindow {
         let start_time = cx.new(|cx| EpTimePicker::new("editor-start-time", "时间", window, cx));
         let end_date = cx.new(|cx| EpDatePicker::new("editor-end-date", "截止日期", window, cx));
         let end_time = cx.new(|cx| EpTimePicker::new("editor-end-time", "时间", window, cx));
-        let repeat_type_select = cx.new(|_| {
-            EpSelect::new(
-                "editor-repeat-type",
-                vec![(0, "每天".into()), (1, "每周".into()), (2, "每月".into())],
-            )
+        let repeat_type_select = cx.new(|cx| {
+            EpSelect::new("editor-repeat-type", window, cx).with_options(vec![
+                EpSelectOption::new(0, "每天"),
+                EpSelectOption::new(1, "每周"),
+                EpSelectOption::new(2, "每月"),
+            ])
         });
         let repeat_interval =
             cx.new(|cx| EpInputNumber::new("editor-repeat-interval", 1, 1, 99, window, cx));
@@ -353,9 +350,10 @@ impl EditorWindow {
             cx.subscribe_in(
                 &notify_before_select,
                 window,
-                |this, _, event: &EpSelectEvent, window, cx| {
-                    let EpSelectEvent::Change(value) = event;
-                    this.on_notify_before_change(*value, window, cx);
+                |this, _, event: &EpSelectEvent<i32>, window, cx| {
+                    if let EpSelectEvent::Change(Some(value)) = event {
+                        this.on_notify_before_change(*value, window, cx);
+                    }
                 },
             ),
             cx.subscribe_in(
@@ -366,10 +364,11 @@ impl EditorWindow {
             cx.subscribe_in(
                 &repeat_type_select,
                 window,
-                |this, _, event: &EpSelectEvent, _, cx| {
-                    let EpSelectEvent::Change(value) = event;
-                    this.repeat_type = RepeatType::from_index(*value);
-                    cx.notify();
+                |this, _, event: &EpSelectEvent<i32>, _, cx| {
+                    if let EpSelectEvent::Change(Some(value)) = event {
+                        this.repeat_type = RepeatType::from_index(*value);
+                        cx.notify();
+                    }
                 },
             ),
             cx.subscribe_in(

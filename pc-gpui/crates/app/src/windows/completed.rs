@@ -20,7 +20,7 @@ use super::{ChildOf, WindowKind, WindowManager, WindowSpec, logical_size};
 use crate::assets::{AppIcon, EpIcon};
 use crate::db::spawn_db;
 use crate::state::{AppState, update_request};
-use crate::theme::{self, hex, light, w2};
+use crate::theme::{self, editor_theme, hex, light};
 use crate::ui::icon::icon;
 use crate::ui::title_bar::drag_region;
 use crate::ui::tooltip::EpTooltip;
@@ -232,7 +232,7 @@ impl CompletedWindow {
                     .rounded(px(6.))
                     .cursor_pointer()
                     .text_color(palette.text_tertiary)
-                    .hover(|s| s.bg(hex(w2::RED_100)))
+                    .hover(|s| s.bg(hex(editor_theme::RED_100)))
                     .on_click(|_: &ClickEvent, window, _| window.remove_window())
                     .child(
                         icon(AppIcon::CloseThin, 10., palette.text_tertiary)
@@ -260,7 +260,7 @@ impl CompletedWindow {
                 .border_1()
                 .when(focused, |this| {
                     this.bg(hex(0xFFFFFF))
-                        .border_color(hex(w2::BLUE_300))
+                        .border_color(hex(editor_theme::BLUE_300))
                         .shadow(vec![theme::shadow(
                             0.,
                             0.,
@@ -279,7 +279,7 @@ impl CompletedWindow {
                         .flex_1()
                         .min_w_0()
                         .text_size(px(13.))
-                        .text_color(hex(w2::SLATE_700))
+                        .text_color(hex(editor_theme::SLATE_700))
                         .child(
                             Input::new(&self.search)
                                 .appearance(false)
@@ -353,9 +353,9 @@ impl CompletedWindow {
         let restore = action(
             "restore",
             EpIcon::RefreshLeft,
-            w2::BLUE_100,
+            editor_theme::BLUE_100,
             palette.primary,
-            w2::BLUE_200,
+            editor_theme::BLUE_200,
             0x2563EB,
         )
         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -365,10 +365,10 @@ impl CompletedWindow {
         let delete = action(
             "delete",
             EpIcon::Delete,
-            w2::RED_100,
+            editor_theme::RED_100,
             palette.error,
-            w2::RED_200,
-            w2::RED_600,
+            editor_theme::RED_200,
+            editor_theme::RED_600,
         )
         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
             cx.stop_propagation();

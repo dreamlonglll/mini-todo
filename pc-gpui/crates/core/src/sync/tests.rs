@@ -564,6 +564,87 @@ fn sync_merges_both_ways_and_preserves_unknown_data() {
     assert_eq!(fx.count(PUT_DOC), 0);
 }
 
+/// 按相反的键顺序手写 JSON（模拟键顺序不同的其它写入方；与 serde_json 是否开 `preserve_order` 无关）
+fn reversed_keys_json(v: &Value) -> String {
+    match v {
+        Value::Object(map) => {
+            let parts: Vec<String> = map
+                .iter()
+                .rev()
+                .map(|(k, v)| format!("{}:{}", Value::String(k.clone()), reversed_keys_json(v)))
+                .collect();
+            format!("{{{}}}", parts.join(","))
+        }
+        Value::Array(items) => {
+            let parts: Vec<String> = items.iter().map(reversed_keys_json).collect();
+            format!("[{}]", parts.join(","))
+        }
+        other => other.to_string(),
+    }
+}
+
+/// 远端文档的键顺序（其它写入方、serde_json `preserve_order` 开关——workspace 里 gpui 会打开它）不影响合并、
+/// "是否需要上传"的判断与未知顶层键的保留：判断都按记录 id / updatedAt / 墓碑集合做，不比较 JSON 文本
+#[test]
+fn remote_key_order_does_not_affect_merge_or_upload() {
+    let fx = Fixture::new("key-order");
+    add_local_todo(&fx.db, 1, "本地", "2026-09-01 10:00:00");
+    fx.engine().sync(false).expect("首次上传");
+
+    let mut remote = fx.remote();
+    remote["todos"]
+        .as_array_mut()
+        .unwrap()
+        .push(todo_json(2, "远端", "2026-09-02 10:00:00"));
+    remote["zzFuture"] = json!({"y": [1, {"q": 1, "p": 2}], "x": null});
+    let text = reversed_keys_json(&remote);
+    assert_ne!(
+        text,
+        serde_json::to_string(&remote).unwrap(),
+        "前提：键顺序确实不同"
+    );
+    fx.server()
+        .write(SYNC_DATA_FILE, gzip_compress(text.as_bytes()).unwrap());
+
+    fx.clear_log();
+    let report = fx.engine().sync(true).expect("合并");
+    assert_eq!(report.status, SyncStatus::Pulled);
+    assert_eq!(report.todos_inserted, 1);
+    assert_eq!(
+        local_titles(&fx.db),
+        vec![(1, "本地".to_string()), (2, "远端".to_string())]
+    );
+    assert_eq!(
+        fx.count(PUT_DOC),
+        0,
+        "内容已等价，只是键顺序不同：不重新上传"
+    );
+
+    // 本地修改后上传：未知顶层键按值原样带回
+    fx.db
+        .with_connection(|c| {
+            c.execute(
+                "UPDATE todos SET title = '本地改', updated_at = '2026-09-03 10:00:00' WHERE id = 1",
+                [],
+            )
+        })
+        .unwrap();
+    fx.clear_log();
+    let report = fx.engine().sync(false).expect("上传");
+    assert_eq!(report.status, SyncStatus::Pushed);
+    assert_eq!(fx.count(PUT_DOC), 1);
+    let after = fx.remote();
+    assert_eq!(after["zzFuture"], remote["zzFuture"]);
+    assert_eq!(remote_ids(&after), vec![1, 2]);
+    let first = after["todos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == 1)
+        .unwrap();
+    assert_eq!(first["title"], "本地改");
+}
+
 #[test]
 fn sync_retries_after_precondition_failure_and_merges_concurrent_write() {
     let fx = Fixture::new("412");
@@ -816,19 +897,21 @@ fn nginx_same_second_same_size_rewrite_is_caught_by_a_full_get() {
     let base = setting(&fx.db, KEY_REMOTE_ETAG);
     let base_len = fx.server().files[SYNC_DATA_FILE].body.len();
 
-    // 同一秒内另一台设备改了标题与 updatedAt，写回的文件与原文件等长。文档里有 deviceId / 时间等随运行时刻
-    // 变化的内容，不能指望碰巧压缩到等长：取一个压缩后不比原文件大的改写，再用 gzip 头补齐到等长
+    // 同一秒内另一台设备改了标题与 updatedAt，写回的文件与原文件等长：先构造一个压缩后比原文件小的改写，
+    // 再用 gzip 头（FNAME）补齐到等长。
+    // 原文件里的 deviceId（随机）与文档 updatedAt（运行时刻）几乎不可压缩，改写方把这两个元信息字段换成空串
+    // （它们不参与合并判断），压缩后一定比原文件小几十字节，与标题改动无关。不能指望"碰巧"压缩得更小：
+    // 键顺序随 serde_json 的 `preserve_order` 特性变化（workspace 里 gpui 会打开它，Value 重新序列化时保持原顺序；
+    // 单独编译 core 时按字母序重排），两种情况下压缩率不同。
     let original = fx.remote();
-    let (title, rewritten) = (1..=4)
-        .flat_map(|len| (b'b'..=b'z').map(move |c| (c as char).to_string().repeat(len)))
-        .find_map(|title| {
-            let mut doc = original.clone();
-            doc["todos"][0]["title"] = json!(title);
-            doc["todos"][0]["updatedAt"] = json!("2026-09-02 10:00:00");
-            let bytes = gzip_padded_to(&serde_json::to_vec(&doc).unwrap(), base_len)?;
-            Some((title, bytes))
-        })
-        .expect("应能构造出与原文件等长的改写");
+    let title = "bbbb".to_string();
+    let mut doc = original.clone();
+    doc["deviceId"] = json!("");
+    doc["updatedAt"] = json!("");
+    doc["todos"][0]["title"] = json!(title);
+    doc["todos"][0]["updatedAt"] = json!("2026-09-02 10:00:00");
+    let rewritten = gzip_padded_to(&serde_json::to_vec(&doc).unwrap(), base_len)
+        .expect("去掉元信息后的改写压缩后应比原文件小");
     fx.server().write(SYNC_DATA_FILE, rewritten);
     assert_eq!(
         fx.server().files[SYNC_DATA_FILE].etag,

@@ -103,7 +103,7 @@ impl SettingsWindow {
         self.device_id = settings.device_id.clone();
         let interval = settings.sync_interval.to_string();
         self.interval_select
-            .update(cx, |s, cx| s.set_selected(Some(interval.into()), cx));
+            .update(cx, |s, cx| s.set_value(Some(interval.into()), cx));
         cx.notify();
     }
 

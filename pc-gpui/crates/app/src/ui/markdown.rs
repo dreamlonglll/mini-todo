@@ -31,7 +31,7 @@ use gpui_kit::{
 };
 use markdown::mdast::{self, AlignKind, Node};
 
-use crate::theme::{self, hex, w2};
+use crate::theme::{self, editor_theme, hex};
 use crate::util::file_link;
 use crate::util::image_ref;
 
@@ -101,7 +101,7 @@ impl Block {
     fn margins(&self) -> (f32, f32) {
         match self {
             Block::Paragraph(_) | Block::Images(_) | Block::EmptyLine | Block::RawText(_) => {
-                (w2::MD_P_MARGIN, w2::MD_P_MARGIN)
+                (editor_theme::MD_P_MARGIN, editor_theme::MD_P_MARGIN)
             }
             Block::Heading(level, _) => {
                 let (_, _, top, bottom) = heading_metrics(*level);
@@ -110,18 +110,21 @@ impl Block {
             Block::Quote(children) => {
                 let (first, last) = edge_margins(children);
                 (
-                    w2::MD_QUOTE_MARGIN.max(first),
-                    w2::MD_QUOTE_MARGIN.max(last),
+                    editor_theme::MD_QUOTE_MARGIN.max(first),
+                    editor_theme::MD_QUOTE_MARGIN.max(last),
                 )
             }
             Block::List(list) => {
                 let first = list.items.first().map_or(0., |item| item_margins(item).0);
                 let last = list.items.last().map_or(0., |item| item_margins(item).1);
-                (w2::MD_LIST_MARGIN.max(first), w2::MD_LIST_MARGIN.max(last))
+                (
+                    editor_theme::MD_LIST_MARGIN.max(first),
+                    editor_theme::MD_LIST_MARGIN.max(last),
+                )
             }
             Block::Code(_) => (0., 0.),
-            Block::Table(_) => (w2::MD_TABLE_MARGIN, w2::MD_TABLE_MARGIN),
-            Block::Rule => (w2::MD_HR_MARGIN, w2::MD_HR_MARGIN),
+            Block::Table(_) => (editor_theme::MD_TABLE_MARGIN, editor_theme::MD_TABLE_MARGIN),
+            Block::Rule => (editor_theme::MD_HR_MARGIN, editor_theme::MD_HR_MARGIN),
         }
     }
 
@@ -132,23 +135,23 @@ impl Block {
                 let (size, line, _, _) = heading_metrics(*level);
                 size * line
             }
-            Block::Code(_) => w2::MD_PRE_LINE + 24.,
+            Block::Code(_) => editor_theme::MD_PRE_LINE + 24.,
             Block::Quote(children) => children
                 .first()
-                .map_or(w2::MD_P_LINE, Block::first_line_height),
+                .map_or(editor_theme::MD_P_LINE, Block::first_line_height),
             Block::List(list) => list
                 .items
                 .first()
                 .and_then(|item| item.blocks.first())
-                .map_or(w2::MD_P_LINE, Block::first_line_height),
-            _ => w2::MD_P_LINE,
+                .map_or(editor_theme::MD_P_LINE, Block::first_line_height),
+            _ => editor_theme::MD_P_LINE,
         }
     }
 }
 
 /// (字号, 行高倍数, 上外边距, 下外边距)
 fn heading_metrics(level: u8) -> (f32, f32, f32, f32) {
-    w2::MD_HEADINGS[usize::from(level.clamp(1, 6)) - 1]
+    editor_theme::MD_HEADINGS[usize::from(level.clamp(1, 6)) - 1]
 }
 
 /// 子块的首块上边距、末块下边距（透出到外层）
@@ -162,7 +165,7 @@ fn edge_margins(blocks: &[Block]) -> (f32, f32) {
 /// 列表项的 (上, 下) 外边距：li 自身 `margin-bottom: 4px` 与首尾子块折叠
 fn item_margins(item: &MdItem) -> (f32, f32) {
     let (first, last) = edge_margins(&item.blocks);
-    (first, w2::MD_LI_MARGIN.max(last))
+    (first, editor_theme::MD_LI_MARGIN.max(last))
 }
 
 // ---------------------------------------------------------------------------
@@ -638,7 +641,7 @@ impl RenderOnce for MarkdownView {
             .flex_col()
             .w_full()
             .min_w_0()
-            .text_color(hex(w2::MD_TEXT))
+            .text_color(hex(editor_theme::MD_TEXT))
             .text_size(px(14.))
             .refine_style(&self.style)
             .children(render_blocks(&blocks, &ctx, "b", false, &mut image_counter))
@@ -673,18 +676,18 @@ fn render_blocks(
 }
 
 fn text_view_style(foreground: Hsla) -> TextViewStyle {
-    let accent = hex(w2::MD_ACCENT);
+    let accent = hex(editor_theme::MD_ACCENT);
     TextViewStyle::default()
         .with_foreground(foreground)
-        .with_muted_foreground(hex(w2::MD_QUOTE_TEXT))
+        .with_muted_foreground(hex(editor_theme::MD_QUOTE_TEXT))
         .with_link(foreground)
         .with_selection(theme::rgba_css(59, 130, 246, 0.3))
-        .with_code_background(hex(w2::MD_CODE_BG))
-        .with_border(hex(w2::MD_RULE))
+        .with_code_background(hex(editor_theme::MD_CODE_BG))
+        .with_border(hex(editor_theme::MD_RULE))
         .with_paragraph_gap(rems(0.))
         .with_inline_code(HighlightStyle {
             color: Some(accent),
-            background_color: Some(hex(w2::MD_CODE_BG)),
+            background_color: Some(hex(editor_theme::MD_CODE_BG)),
             ..Default::default()
         })
 }
@@ -721,12 +724,12 @@ fn inline_view(ctx: &Ctx, path: &str, markdown: &str, foreground: Hsla) -> TextV
 }
 
 fn render_block(block: &Block, ctx: &Ctx, path: &str, image_counter: &mut usize) -> AnyElement {
-    let text = hex(w2::MD_TEXT);
+    let text = hex(editor_theme::MD_TEXT);
     match block {
         Block::Paragraph(markdown) => div()
             .w_full()
-            .text_size(px(w2::MD_P_SIZE))
-            .line_height(px(w2::MD_P_LINE))
+            .text_size(px(editor_theme::MD_P_SIZE))
+            .line_height(px(editor_theme::MD_P_LINE))
             .child(inline_view(ctx, path, markdown, text))
             .into_any_element(),
         Block::RawText(raw) => {
@@ -734,12 +737,15 @@ fn render_block(block: &Block, ctx: &Ctx, path: &str, image_counter: &mut usize)
             escape_text(raw, &mut escaped);
             div()
                 .w_full()
-                .text_size(px(w2::MD_P_SIZE))
-                .line_height(px(w2::MD_P_LINE))
+                .text_size(px(editor_theme::MD_P_SIZE))
+                .line_height(px(editor_theme::MD_P_LINE))
                 .child(inline_view(ctx, path, &escaped, text))
                 .into_any_element()
         }
-        Block::EmptyLine => div().w_full().h(px(w2::MD_P_LINE)).into_any_element(),
+        Block::EmptyLine => div()
+            .w_full()
+            .h(px(editor_theme::MD_P_LINE))
+            .into_any_element(),
         Block::Heading(level, markdown) => {
             let (size, line, _, _) = heading_metrics(*level);
             let weight = match level {
@@ -757,16 +763,16 @@ fn render_block(block: &Block, ctx: &Ctx, path: &str, image_counter: &mut usize)
                 .into_any_element()
         }
         Block::Quote(children) => {
-            let quote_text = hex(w2::MD_QUOTE_TEXT);
+            let quote_text = hex(editor_theme::MD_QUOTE_TEXT);
             let inner = ctx.clone();
             div()
                 .w_full()
                 .flex()
                 .flex_col()
                 .border_l(px(3.))
-                .border_color(hex(w2::MD_QUOTE_BORDER))
+                .border_color(hex(editor_theme::MD_QUOTE_BORDER))
                 .pl(px(12.))
-                .font(w2::serif_font())
+                .font(editor_theme::serif_font())
                 .text_color(quote_text)
                 .children(render_quote_children(
                     children,
@@ -782,11 +788,11 @@ fn render_block(block: &Block, ctx: &Ctx, path: &str, image_counter: &mut usize)
             .px(px(16.))
             .py(px(12.))
             .rounded(px(8.))
-            .bg(hex(w2::MD_PRE_BG))
-            .text_color(hex(w2::MD_PRE_TEXT))
-            .font(w2::mono_font())
-            .text_size(px(w2::MD_PRE_SIZE))
-            .line_height(px(w2::MD_PRE_LINE))
+            .bg(hex(editor_theme::MD_PRE_BG))
+            .text_color(hex(editor_theme::MD_PRE_TEXT))
+            .font(editor_theme::mono_font())
+            .text_size(px(editor_theme::MD_PRE_SIZE))
+            .line_height(px(editor_theme::MD_PRE_LINE))
             .child(
                 gpui_kit::base::SelectableText::new(
                     SharedString::from(format!("{}/{path}", ctx.base_id)),
@@ -799,7 +805,7 @@ fn render_block(block: &Block, ctx: &Ctx, path: &str, image_counter: &mut usize)
         Block::Rule => div()
             .w_full()
             .h(px(1.))
-            .bg(hex(w2::MD_RULE))
+            .bg(hex(editor_theme::MD_RULE))
             .into_any_element(),
         Block::Images(images) => render_images(images, ctx, path, image_counter),
     }
@@ -812,7 +818,7 @@ fn render_quote_children(
     path: &str,
     image_counter: &mut usize,
 ) -> Vec<AnyElement> {
-    let quote_text = hex(w2::MD_QUOTE_TEXT);
+    let quote_text = hex(editor_theme::MD_QUOTE_TEXT);
     let mut out = Vec::with_capacity(blocks.len());
     let mut prev_bottom: Option<f32> = None;
     for (ix, block) in blocks.iter().enumerate() {
@@ -822,8 +828,8 @@ fn render_quote_children(
         let element = match block {
             Block::Paragraph(markdown) => div()
                 .w_full()
-                .text_size(px(w2::MD_P_SIZE))
-                .line_height(px(w2::MD_P_LINE))
+                .text_size(px(editor_theme::MD_P_SIZE))
+                .line_height(px(editor_theme::MD_P_LINE))
                 .child(inline_view(ctx, &child_path, markdown, quote_text))
                 .into_any_element(),
             other => render_block(other, ctx, &child_path, image_counter),
@@ -835,7 +841,7 @@ fn render_quote_children(
 }
 
 fn render_list(list: &MdList, ctx: &Ctx, path: &str, image_counter: &mut usize) -> AnyElement {
-    let accent = hex(w2::MD_ACCENT);
+    let accent = hex(editor_theme::MD_ACCENT);
     let mut items = Vec::with_capacity(list.items.len());
     let mut prev_bottom: Option<f32> = None;
     for (ix, item) in list.items.iter().enumerate() {
@@ -845,19 +851,19 @@ fn render_list(list: &MdList, ctx: &Ctx, path: &str, image_counter: &mut usize) 
         let line = item
             .blocks
             .first()
-            .map_or(w2::MD_P_LINE, Block::first_line_height);
+            .map_or(editor_theme::MD_P_LINE, Block::first_line_height);
         let marker: AnyElement = match item.checked {
             Some(checked) => task_box(checked).into_any_element(),
             None if list.ordered => div()
                 .absolute()
                 .top_0()
-                .left(px(-w2::MD_LIST_INDENT))
-                .w(px(w2::MD_LIST_INDENT - 4.))
+                .left(px(-editor_theme::MD_LIST_INDENT))
+                .w(px(editor_theme::MD_LIST_INDENT - 4.))
                 .h(px(line))
                 .flex()
                 .items_center()
                 .justify_end()
-                .text_size(px(w2::MD_MARKER_SIZE))
+                .text_size(px(editor_theme::MD_MARKER_SIZE))
                 .text_color(accent)
                 .whitespace_nowrap()
                 .child(format!("{}.", list.start as usize + ix))
@@ -865,8 +871,8 @@ fn render_list(list: &MdList, ctx: &Ctx, path: &str, image_counter: &mut usize) 
             None => div()
                 .absolute()
                 .top_0()
-                .left(px(-w2::MD_LIST_INDENT))
-                .w(px(w2::MD_LIST_INDENT - 14. + 2.5))
+                .left(px(-editor_theme::MD_LIST_INDENT))
+                .w(px(editor_theme::MD_LIST_INDENT - 14. + 2.5))
                 .h(px(line))
                 .flex()
                 .items_center()
@@ -901,7 +907,7 @@ fn render_list(list: &MdList, ctx: &Ctx, path: &str, image_counter: &mut usize) 
         .w_full()
         .flex()
         .flex_col()
-        .pl(px(w2::MD_LIST_INDENT))
+        .pl(px(editor_theme::MD_LIST_INDENT))
         .children(items)
         .into_any_element()
 }
@@ -909,7 +915,7 @@ fn render_list(list: &MdList, ctx: &Ctx, path: &str, image_counter: &mut usize) 
 /// 任务项方框：13×13、1.5px `#94A3B8` 边、圆角 3、白底；勾选时底 / 边 `#3B82F6` + 白色对勾。
 /// 位置 `left: -20px; top: 0.4em`（li 14px → 5.6）
 fn task_box(checked: bool) -> impl IntoElement {
-    let blue = hex(w2::MD_QUOTE_BORDER);
+    let blue = hex(editor_theme::MD_QUOTE_BORDER);
     div()
         .absolute()
         .left(px(-20.))
@@ -920,7 +926,7 @@ fn task_box(checked: bool) -> impl IntoElement {
         .border_color(if checked {
             blue
         } else {
-            hex(w2::MD_TASK_BORDER)
+            hex(editor_theme::MD_TASK_BORDER)
         })
         .bg(if checked { blue } else { hex(0xFFFFFF) })
         .when(checked, |this| {
@@ -946,9 +952,9 @@ fn render_table(table: &MdTable, ctx: &Ctx, path: &str) -> AnyElement {
             let markdown = row.get(c).map(String::as_str).unwrap_or("");
             let align = table.aligns.get(c).copied().unwrap_or_default();
             let bg = if header {
-                hex(w2::MD_TH_BG)
+                hex(editor_theme::MD_TH_BG)
             } else if c % 2 == 0 {
-                hex(w2::MD_TD_ODD_BG)
+                hex(editor_theme::MD_TD_ODD_BG)
             } else {
                 hex(0xFFFFFF)
             };
@@ -961,14 +967,14 @@ fn render_table(table: &MdTable, ctx: &Ctx, path: &str) -> AnyElement {
                 .py(px(12.))
                 .bg(bg)
                 .when(!last_col, |this| {
-                    this.border_r_1().border_color(hex(w2::MD_RULE))
+                    this.border_r_1().border_color(hex(editor_theme::MD_RULE))
                 })
                 .when(header && c == 0, |this| this.rounded_tl(radius))
                 .when(header && last_col, |this| this.rounded_tr(radius))
                 .when(last_row && c == 0, |this| this.rounded_bl(radius))
                 .when(last_row && last_col, |this| this.rounded_br(radius))
-                .text_size(px(w2::MD_P_SIZE))
-                .line_height(px(w2::MD_P_LINE))
+                .text_size(px(editor_theme::MD_P_SIZE))
+                .line_height(px(editor_theme::MD_P_LINE))
                 .when(header, |this| this.font_weight(theme::WEIGHT_SEMIBOLD))
                 .map(|this| match align {
                     ColumnAlign::Left => this,
@@ -979,14 +985,14 @@ fn render_table(table: &MdTable, ctx: &Ctx, path: &str) -> AnyElement {
                     ctx,
                     &format!("{path}t{r}.{c}"),
                     markdown,
-                    hex(w2::MD_TEXT),
+                    hex(editor_theme::MD_TEXT),
                 ))
         });
         div()
             .w_full()
             .flex()
             .when(!last_row, |this| {
-                this.border_b_1().border_color(hex(w2::MD_RULE))
+                this.border_b_1().border_color(hex(editor_theme::MD_RULE))
             })
             .children(cells)
     });

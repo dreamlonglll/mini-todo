@@ -18,7 +18,7 @@ use mini_todo_core::reminder::{
 use super::{WindowKind, WindowManager, WindowSpec, logical_size};
 use crate::assets::EpIcon;
 use crate::platform;
-use crate::theme::{self, hex, light, w2};
+use crate::theme::{self, editor_theme, hex, light};
 use crate::ui::icon::icon;
 
 /// 通知内容
@@ -133,7 +133,7 @@ impl Render for NotificationWindow {
                     .bg(linear_gradient(
                         135.,
                         linear_color_stop(palette.primary, 0.),
-                        linear_color_stop(hex(w2::CYAN_500), 1.),
+                        linear_color_stop(hex(editor_theme::CYAN_500), 1.),
                     ))
                     .child(icon(EpIcon::Bell, 24., hex(0xFFFFFF))),
             )
@@ -156,7 +156,7 @@ impl Render for NotificationWindow {
                     .child(
                         icon(EpIcon::Close, 14., palette.text_secondary)
                             .group_hover("notification-close", |s| {
-                                s.text_color(hex(w2::SLATE_700))
+                                s.text_color(hex(editor_theme::SLATE_700))
                             }),
                     ),
             );

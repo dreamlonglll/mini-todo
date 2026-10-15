@@ -21,11 +21,11 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::{
-    AnyElement, AnyWindowHandle, App, AppContext as _, Bounds, ClickEvent, Context, CursorStyle,
+    AnyElement, AnyWindowHandle, App, AppContext as _, ClickEvent, Context, CursorStyle,
     DragMoveEvent, Empty, Entity, ExternalPaths, FileDropEvent, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, ParentElement as _, Pixels, Point, Render, ScrollHandle, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, canvas, div,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div,
     prelude::FluentBuilder as _, px, relative,
 };
 use mini_todo_core::db::{Fence, UpdateFenceRequest};
@@ -38,6 +38,7 @@ use crate::db::spawn_db;
 use crate::platform;
 use crate::services::fences as runtime;
 use crate::theme::{self, fence_tokens};
+use crate::ui::ep_popper::Anchor;
 use crate::ui::icon::icon;
 use crate::ui::input::EpInput;
 use crate::ui::message;
@@ -109,7 +110,7 @@ pub struct FenceWindow {
     delete_count: Option<usize>,
     deleting: bool,
     title_menu_open: bool,
-    more_bounds: Option<Bounds<Pixels>>,
+    more_anchor: Anchor,
     press_point: Option<Point<Pixels>>,
     gate: GeometryCommitGate,
     commit_epoch: u64,
@@ -194,7 +195,7 @@ impl FenceWindow {
             delete_count: None,
             deleting: false,
             title_menu_open: false,
-            more_bounds: None,
+            more_anchor: Anchor::new(),
             press_point: None,
             gate: GeometryCommitGate::new(timing::GEOMETRY_ARM_MS),
             commit_epoch: 0,
@@ -1027,7 +1028,6 @@ impl FenceWindow {
         };
 
         let actions = has_fence.then(|| {
-            let more_entity = cx.entity().downgrade();
             div()
                 .flex()
                 .flex_none()
@@ -1075,17 +1075,7 @@ impl FenceWindow {
                             |this, window, cx| this.toggle_title_menu(window, cx),
                             cx,
                         ))
-                        .child(
-                            canvas(
-                                move |bounds, _, cx| {
-                                    let _ = more_entity
-                                        .update(cx, |this, _| this.more_bounds = Some(bounds));
-                                },
-                                |_, _, _, _| {},
-                            )
-                            .absolute()
-                            .inset_0(),
-                        ),
+                        .child(self.more_anchor.measure()),
                 )
         });
 

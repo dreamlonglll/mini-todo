@@ -16,7 +16,6 @@ mod appearance;
 mod data;
 mod general;
 mod screen;
-mod update;
 
 use gpui_kit::component::input::InputState;
 use gpui_kit::{
@@ -302,12 +301,12 @@ impl SettingsWindow {
         let family = state.todo_font_family.clone();
         let report = state.last_sync_report.clone();
         self.bg_picker.update(cx, |picker, cx| {
-            picker.set_value(color, cx);
+            picker.set_value(Some(color), cx);
             picker.set_disabled(!dark, cx);
         });
         self.font_select.update(cx, |select, cx| {
             let value = (!family.trim().is_empty()).then(|| SharedString::from(family));
-            select.set_selected(value, cx);
+            select.set_value(value, cx);
         });
         if report.is_some() && report != self.seen_report {
             if let Some(report) = &report {

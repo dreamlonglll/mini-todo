@@ -23,7 +23,7 @@ use gpui_kit::{
     prelude::FluentBuilder as _, px, relative,
 };
 
-use crate::theme::{self, hex, w2};
+use crate::theme::{self, editor_theme, hex};
 use crate::ui::markdown::{ImageClickHandler, MarkdownView};
 use crate::ui::message::{self, MessageKind};
 use crate::util::image_ref::{self, MAX_IMAGE_BYTES};
@@ -354,10 +354,10 @@ impl Render for MarkdownEditor {
                 .when(self.rows.is_none(), |this| this.size_full())
                 .px(px(pad_x - TEXTAREA_INSET_X))
                 .py(px(pad_y))
-                .font(w2::mono_font())
+                .font(editor_theme::mono_font())
                 .text_size(px(13.))
                 .line_height(relative(1.6))
-                .text_color(hex(w2::SLATE_700))
+                .text_color(hex(editor_theme::SLATE_700))
                 .child(textarea)
                 .into_any_element()
         } else {

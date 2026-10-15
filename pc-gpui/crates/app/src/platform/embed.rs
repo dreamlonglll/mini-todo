@@ -2,7 +2,7 @@
 //! 主窗口"固定模式时嵌入桌面"与桌面收纳箱共用（旧版 `commands/window.rs` 的 `desktop_host` /
 //! `desktop_attach_hwnd` / `desktop_detach` L1013-1106、`tick_embedded_windows` L1336）。
 //!
-//! **负责人：W1（主窗口）实现；W3（收纳箱）只调用这些入口。**
+//! 主窗口（`services::window_mode`）与收纳箱（`services::fences`）都只经这里的入口嵌入 / 解除。
 //!
 //! - 置底：GPUI 不处理 `WM_WINDOWPOSCHANGING`，用 `SetWindowSubclass` 挂子类过程（`platform/subclass.rs`），
 //!   开启时把每次 `SetWindowPos` 的 `hwndInsertAfter` 改成 `HWND_BOTTOM`；owned 窗口总在 owner 之上，于是

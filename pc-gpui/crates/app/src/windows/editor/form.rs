@@ -12,9 +12,10 @@ use gpui_kit::{
 
 use super::{EditorWindow, PRESET_COLORS, QUADRANTS, RepeatType, WEEKDAYS};
 use crate::assets::EpIcon;
-use crate::theme::{self, ep, hex, light, w2};
+use crate::theme::{self, editor_theme, ep, hex, light};
 use crate::ui::button::EpButton;
-use crate::ui::ep2_switch::{EpCheckbox, EpSwitch};
+use crate::ui::ep_checkbox::EpCheckbox;
+use crate::ui::ep_switch::EpSwitch;
 use crate::ui::icon::icon;
 use crate::ui::input::EpInput;
 
@@ -124,7 +125,8 @@ impl EditorWindow {
                 let weak = cx.entity().downgrade();
                 EpSwitch::new("editor-repeat")
                     .checked(self.repeat_enabled)
-                    .on_change(move |checked, _, cx| {
+                    .on_change(move |checked: &bool, _, cx| {
+                        let checked = *checked;
                         let _ = weak.update(cx, |this, cx| {
                             this.repeat_enabled = checked;
                             cx.notify();
@@ -176,7 +178,7 @@ impl EditorWindow {
                 .justify_center()
                 .rounded(px(4.))
                 .cursor_pointer()
-                .hover(|s| s.bg(hex(w2::BLUE_50)))
+                .hover(|s| s.bg(hex(editor_theme::BLUE_50)))
                 .tooltip(crate::ui::tooltip::native("放大编辑"))
                 .on_click(
                     cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -277,7 +279,7 @@ impl EditorWindow {
                 .px(px(12.))
                 .py(px(10.))
                 // 10% 象限色叠在白底上的不透明等效色（GPUI 的阴影会透过半透明背景显示出来）
-                .bg(w2::tint(color, 0.1))
+                .bg(editor_theme::tint(color, 0.1))
                 .border_2()
                 .border_color(if active {
                     color
@@ -298,7 +300,7 @@ impl EditorWindow {
                     div()
                         .text_size(px(12.))
                         .line_height(px(32.))
-                        .text_color(hex(w2::SLATE_700))
+                        .text_color(hex(editor_theme::SLATE_700))
                         .child(name),
                 )
         };
@@ -336,7 +338,8 @@ impl EditorWindow {
                 EpCheckbox::new(SharedString::from(format!("editor-weekday-{day}")), *name)
                     .checked(self.repeat_weekdays.contains(&day))
                     .last(index + 1 == WEEKDAYS.len())
-                    .on_change(move |checked, _, cx| {
+                    .on_change(move |checked: &bool, _, cx| {
+                        let checked = *checked;
                         let _ = weak.update(cx, |this, cx| {
                             this.repeat_weekdays.retain(|d| *d != day);
                             if checked {

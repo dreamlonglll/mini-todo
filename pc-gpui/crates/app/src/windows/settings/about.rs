@@ -7,8 +7,8 @@ use gpui_kit::{
 };
 
 use super::SettingsWindow;
-use super::update as update_check;
 use crate::assets::EpIcon;
+use crate::services::update_check;
 use crate::state::APP_VERSION;
 use crate::theme::{self, settings_tokens};
 use crate::ui::icon::{icon, spinning};
@@ -22,23 +22,23 @@ impl SettingsWindow {
         }
         self.checking_update = true;
         cx.notify();
-        let task = update_check::check_for_updates(cx);
+        // 与启动检查、标题栏红点共用 `services::update_check`；失败只记日志（旧版 `checkForUpdates` 吞掉错误）
+        let task = update_check::check(cx);
         cx.spawn_in(window, async move |this, cx| {
-            let has_update = task.await;
+            if let Err(e) = task.await {
+                log::info!("[update] 检查更新失败（忽略）: {e}");
+            }
             let _ = this.update_in(cx, |this, window, cx| {
                 this.checking_update = false;
                 cx.notify();
-                if !has_update {
+                // 以检查后的全局状态为准（启动检查已发现的新版本也算）
+                let state = this.state.read(cx);
+                if !state.has_update {
                     message::success(window, cx, "当前已是最新版本");
                     return;
                 }
-                let (latest, url) = {
-                    let state = this.state.read(cx);
-                    (
-                        state.latest_version.clone().unwrap_or_default(),
-                        update_check::releases_url(state),
-                    )
-                };
+                let latest = state.latest_version.clone().unwrap_or_default();
+                let url = update_check::releases_url(cx);
                 message_box::confirm(
                     window,
                     cx,

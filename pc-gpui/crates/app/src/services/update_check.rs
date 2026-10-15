@@ -1,5 +1,6 @@
 //! 版本检查（旧 `appStore.checkForUpdates`）：GitHub 最新 release 的 `tag_name` 比当前版本新 →
 //! `AppState.has_update / latest_version / release_url`，标题栏版本号旁出现红点。失败静默（只记日志）。
+//! 启动检查（[`check_for_updates`]）、设置「关于 → 检查更新」（[`check`]）共用这一份实现。
 //!
 //! debug 构建可用 `MINI_TODO_DEBUG_LATEST_VERSION=v2.6.0` 跳过网络、直接当作最新版本（截图 / 冒烟用；release 忽略）。
 
@@ -13,6 +14,7 @@ use crate::state::{APP_VERSION, AppState, GITHUB_OWNER, GITHUB_REPO};
 use crate::windows::main_window::logic::compare_versions;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Deserialize)]
 struct Release {
@@ -60,6 +62,7 @@ fn fetch_latest() -> Result<Release, String> {
     }
     let client = reqwest::blocking::Client::builder()
         .timeout(REQUEST_TIMEOUT)
+        .connect_timeout(CONNECT_TIMEOUT)
         .user_agent(format!("mini-todo/{APP_VERSION}"))
         .build()
         .map_err(|e| e.to_string())?;

@@ -1,4 +1,4 @@
-//! 桌面收纳箱生命周期（W3）：建窗与嵌入桌面、启动恢复、托盘三个入口（新增 / 显示隐藏 / 重置位置）、
+//! 桌面收纳箱生命周期：建窗与嵌入桌面、启动恢复、托盘三个入口（新增 / 显示隐藏 / 重置位置）、
 //! 目录监听 → 前台刷新、200ms 嵌入守护（Explorer 重启后重挂）、约 2 秒一次的屏幕组合检测。
 //!
 //! 契约：`.trellis/spec/backend/desktop-fences.md` §3.1（建窗参数、可做的窗口操作、几何落库）、§3.4（文件层与线程）、
@@ -7,7 +7,7 @@
 //!
 //! GPUI 下的做法（`research/backend-port.md` §5.3、§7.1）：
 //! - 建窗 `is_resizable: false`、`is_minimizable: false`、Windows 上 `show: false` → 按物理像素 `SetWindowPos` 定位 →
-//!   `WS_EX_TOOLWINDOW` + 嵌入桌面层（`platform::embed`，W1 实现）→ `SW_SHOWNOACTIVATE` 显示；拦截关闭（Alt+F4 无效）。
+//!   `WS_EX_TOOLWINDOW` + 嵌入桌面层（`platform::embed`，与主窗口嵌入共用）→ `SW_SHOWNOACTIVATE` 显示；拦截关闭（Alt+F4 无效）。
 //! - 显示 / 隐藏用 `ShowWindow`，不改 ex style（GPUI 不会像 tao 那样重写样式），之后照样重挂一次（幂等）。
 //! - 所有会给窗口同步发消息的 Win32 调用都在 `cx.spawn` 的 async 块里、`update` 闭包之外执行。
 //! - 目录监听回调在 `fence-watch` 线程，经 channel 回前台交给对应收纳箱窗口。

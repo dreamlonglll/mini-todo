@@ -294,7 +294,7 @@ impl UiLayer {
                     .line_height(px(24.))
                     .text_color(ep.text_regular)
                     .children(status_icon)
-                    // 正文按对话框宽度折行（长文本 / 长单词都不溢出；W1 修复确认框正文不换行）
+                    // 正文按对话框宽度折行（长文本 / 长单词都不溢出）
                     .child(
                         div()
                             .flex_1()

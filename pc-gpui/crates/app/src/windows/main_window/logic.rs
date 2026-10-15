@@ -8,6 +8,8 @@ use chrono::{Datelike, Duration, NaiveDate};
 use mini_todo_core::db::Todo;
 use mini_todo_core::db::time::{DefaultTime, parse_local_datetime_with};
 
+use crate::theme::is_same_color;
+
 // ----------------------------------------------------------------------
 // 待办行
 // ----------------------------------------------------------------------
@@ -139,11 +141,6 @@ pub fn quadrant_color(quadrant: i32) -> &'static str {
         .iter()
         .find(|q| q.id == quadrant)
         .map_or(DEFAULT_COLOR, |q| q.color)
-}
-
-/// HEX 颜色比较（`isSameColor`：去空白、忽略大小写）
-pub fn is_same_color(a: &str, b: &str) -> bool {
-    a.trim().eq_ignore_ascii_case(b.trim())
 }
 
 /// 切换象限时的颜色（`resolveQuadrantColor`）：仍是旧象限默认色 → 跟随新象限；用户自选色保留

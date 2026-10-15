@@ -2,7 +2,7 @@
 //! `pc/src/utils/syncReport.ts` 的提示文案（逐字移植）。
 //!
 //! ```ignore
-//! // 标题栏同步按钮（旧 MainView.handleSync，W1）
+//! // 标题栏同步按钮（旧 MainView.handleSync）
 //! let task = services::sync::run_sync(cx, SyncMode::Smart { full: true });
 //! cx.spawn_in(window, async move |_, cx| {
 //!     match task.await {
@@ -13,7 +13,7 @@
 //! }).detach();
 //! ```
 //!
-//! 自动同步定时器（间隔、失败段只提示一次）由主窗口实现者（W1）基于 [`run_sync`] 实现。
+//! 自动同步定时器（间隔、失败段只提示一次）见 [`super::auto_sync`]，同样基于 [`run_sync`]。
 
 use gpui_kit::{App, Task};
 use mini_todo_core::sync::{self, SyncMode, SyncReport, SyncStatus};

@@ -1,47 +1,54 @@
-//! `el-color-picker size="small"`（不带 alpha）：有状态视图，构造宿主视图时创建。
+//! `el-color-picker size="small"`（Element Plus 2.13，不带 alpha，可选预设色）：有状态视图，构造宿主视图时创建。
 //!
-//! 触发器 24×24：1px `#DCDFE6`（悬停 `#C0C4CC`、展开 `#409EFF`）、圆角 4、padding 4；内部 14×14 色块（1px `#909399`
-//! 边框、圆角 2）+ 白色 ArrowDown；禁用时底 `#F5F7FA`、色块 `opacity .3`、`cursor: not-allowed`。
-//! 弹层（触发器正下方、无箭头、贴窗口边）：白底、1px `#EBEEF5`、圆角 4、浅阴影、padding 12、内容宽 300：
-//! 左 SV 面板 280×180（色相底 + 白→透明横向渐变 + 透明→黑纵向渐变，4px 圆形光标）、右竖直色相条 12×180
-//! （上下 2px 内边距，4px 宽滑块）；下方 12px：160 宽 small 输入框（hex，回车 / 失焦解析）+ 文字按钮 `Clear` 与
-//! plain 按钮 `OK`（项目没配置 Element Plus 语言，内置文案是英文）。点 `OK` 才发 [`EpColorPickerEvent::Change`]
-//! （`#RRGGBB` 大写），点 `Clear` 发 `Change(None)`；点外面 / Esc 收起并放弃未确认的修改。
+//! 触发器 24×24：`padding 4px`、1px `#DCDFE6` 边（悬停 `#C0C4CC`、展开 `#409EFF`）、圆角 4；内部色块 1px `#909399` 边、
+//! 圆角 2，中间白色 ArrowDown（缩放 0.8）；无值时显示灰色 Close；禁用时底 `#F5F7FA`、色块 `opacity .3`、`cursor: not-allowed`。
+//! 弹层（[`ep_popper`]，`offset 0`、无箭头、默认在触发器下方居中，放不下翻到上方）：浅色弹层、`padding 12px`、内容宽 300：
+//! SV 面板 280×180（色相底 + 白→透明横向渐变 + 透明→黑纵向渐变，4px 圆形光标）+ 右侧竖向色相条 12×180（上下 2px 内边距，
+//! 4px 高滑块）；有预设色时下方 8px 处一排 20×20、间距 8、圆角 4（与草稿同色的加 `box-shadow: 0 0 3px 2px #409EFF`）；
+//! 底部 12px 处 hex 输入框（160px、small，回车 / 失焦解析）与 `Clear`（文字按钮）、`OK`（plain 按钮）——项目没配置
+//! Element Plus 语言，内置文案是英文。拖动 / 点选只改草稿；点 `OK` 发 [`EpColorPickerEvent::Change`]（小写 `#rrggbb`，
+//! 与 EP 的 TinyColor 输出一致），点 `Clear` 发 `Change(None)`；点外面 / Esc 收起并放弃草稿。
 //!
 //! ```ignore
-//! let picker = cx.new(|cx| EpColorPicker::new("bg-color", window, cx));
+//! let picker = cx.new(|cx| EpColorPicker::new("bg-color", window, cx).predefine(colors));
 //! cx.subscribe_in(&picker, window, |this, _, e: &EpColorPickerEvent, window, cx| match e {
 //!     EpColorPickerEvent::Change(color) => this.set_color(color.clone().unwrap_or("#000000".into()), window, cx),
 //! }).detach();
-//! picker.update(cx, |p, cx| p.set_value("#1E293B", cx));
+//! picker.update(cx, |p, cx| p.set_value(Some("#1E293B".into()), cx));
 //! ```
 
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::{
-    Anchor, AnchoredPositionMode, AppContext as _, Bounds, Context, CursorStyle, DragMoveEvent,
-    ElementId, Empty, Entity, EventEmitter, Hsla, InteractiveElement as _, IntoElement,
-    KeyDownEvent, MouseButton, ParentElement as _, Pixels, Point, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, anchored, canvas, deferred,
-    div, linear_color_stop, linear_gradient, point, prelude::FluentBuilder as _, px,
+    AppContext as _, ClickEvent, Context, CursorStyle, DragMoveEvent, ElementId, Empty, Entity,
+    EventEmitter, FocusHandle, InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton,
+    MouseDownEvent, ParentElement as _, Pixels, Point, Render, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Window, div, linear_color_stop, linear_gradient,
+    prelude::FluentBuilder as _, px,
 };
 
 use crate::assets::EpIcon;
 use crate::theme::{self, ep};
 use crate::ui::button::EpButton;
+use crate::ui::ep_popper::{self, Anchor, Placement, PopperOptions};
 use crate::ui::icon::icon;
 use crate::ui::input::EpInput;
 
-/// 确认（`Some("#RRGGBB")`）或清空（`None`）
-#[derive(Debug, Clone, PartialEq)]
+/// 确认（`Some("#rrggbb")`）或清空（`None`）
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EpColorPickerEvent {
-    Change(Option<SharedString>),
+    Change(Option<String>),
 }
 
 const SV_W: f32 = 280.;
 const SV_H: f32 = 180.;
 const HUE_W: f32 = 12.;
-/// 弹层外框高度：padding 12 + SV 180 + 6 + 页脚（12 + 24）+ padding 12 + 边框 2
-const PANEL_HEIGHT: f32 = 248.;
+/// 弹层外框宽：内容 300 + padding 24 + 边框 2
+const PANEL_WIDTH: f32 = 326.;
+
+/// 弹层外框高度：边框 2 + padding 24 + SV 180 +（预设色 8 + 20）+ 页脚（12 + 24）
+fn panel_height(has_predefine: bool) -> f32 {
+    2. + 24. + SV_H + if has_predefine { 28. } else { 0. } + 36.
+}
 
 /// HSV（h 0~360，s / v 0~1）→ RGB（0~255）
 pub(crate) fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
@@ -80,8 +87,16 @@ pub(crate) fn rgb_to_hsv(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
     (h, s, max)
 }
 
-pub(crate) fn to_hex(r: u8, g: u8, b: u8) -> String {
-    format!("#{r:02X}{g:02X}{b:02X}")
+/// `#RGB` / `#RRGGBB` → HSV
+pub fn hex_to_hsv(hex: &str) -> Option<(f32, f32, f32)> {
+    let (r, g, b) = theme::parse_hex_color(hex)?;
+    Some(rgb_to_hsv(r, g, b))
+}
+
+/// HSV → 小写 `#rrggbb`（EP 的输出格式）
+pub fn hsv_to_hex(h: f32, s: f32, v: f32) -> String {
+    let (r, g, b) = hsv_to_rgb(h, s, v);
+    format!("#{r:02x}{g:02x}{b:02x}")
 }
 
 #[derive(Clone)]
@@ -100,18 +115,20 @@ impl Render for DragGhost {
 /// 颜色选择器
 pub struct EpColorPicker {
     id: ElementId,
-    /// 已确认的值（`#RRGGBB`）
-    value: SharedString,
+    /// 已确认的值
+    value: Option<String>,
+    predefine: Vec<String>,
     disabled: bool,
     open: bool,
-    hovered: bool,
+    /// 草稿（HSV）
     hue: f32,
     sat: f32,
     val: f32,
-    trigger_bounds: Option<Bounds<Pixels>>,
-    sv_bounds: Option<Bounds<Pixels>>,
-    hue_bounds: Option<Bounds<Pixels>>,
+    anchor: Anchor,
+    sv_bounds: Anchor,
+    hue_bounds: Anchor,
     hex_input: Entity<InputState>,
+    focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -132,24 +149,34 @@ impl EpColorPicker {
         )];
         Self {
             id: id.into(),
-            value: "#000000".into(),
+            value: None,
+            predefine: Vec::new(),
             disabled: false,
             open: false,
-            hovered: false,
             hue: 0.,
             sat: 0.,
             val: 0.,
-            trigger_bounds: None,
-            sv_bounds: None,
-            hue_bounds: None,
+            anchor: Anchor::new(),
+            sv_bounds: Anchor::new(),
+            hue_bounds: Anchor::new(),
             hex_input,
+            focus: cx.focus_handle(),
             _subscriptions: subscriptions,
         }
     }
 
+    /// 预设色（`:predefine`）
+    pub fn predefine(mut self, colors: Vec<String>) -> Self {
+        self.predefine = colors;
+        self
+    }
+
+    pub fn value(&self) -> Option<String> {
+        self.value.clone()
+    }
+
     /// 设置已确认的值（不发事件）
-    pub fn set_value(&mut self, value: impl Into<SharedString>, cx: &mut Context<Self>) {
-        let value = value.into();
+    pub fn set_value(&mut self, value: Option<String>, cx: &mut Context<Self>) {
         if self.value != value {
             self.value = value;
             cx.notify();
@@ -164,18 +191,23 @@ impl EpColorPicker {
         cx.notify();
     }
 
-    fn current_rgb(&self) -> (u8, u8, u8) {
-        hsv_to_rgb(self.hue, self.sat, self.val)
+    pub fn is_open(&self) -> bool {
+        self.open
     }
 
-    fn current_hex(&self) -> String {
-        let (r, g, b) = self.current_rgb();
-        to_hex(r, g, b)
+    /// 收起并放弃草稿（宿主处理 Esc 时用）
+    pub fn close(&mut self, cx: &mut Context<Self>) {
+        if self.open {
+            self.open = false;
+            cx.notify();
+        }
     }
 
-    fn load_from_value(&mut self) {
-        let (r, g, b) = theme::hex_to_rgb_channels(&self.value);
-        let (h, s, v) = rgb_to_hsv(r, g, b);
+    fn draft_hex(&self) -> String {
+        hsv_to_hex(self.hue, self.sat, self.val)
+    }
+
+    fn set_draft(&mut self, (h, s, v): (f32, f32, f32)) {
         // 灰度色没有色相：保留上次的色相，避免色相条跳回红色
         if s > 0. {
             self.hue = h;
@@ -185,32 +217,35 @@ impl EpColorPicker {
     }
 
     fn sync_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let hex = self.current_hex();
+        let hex = self.draft_hex();
         self.hex_input
             .update(cx, |s, cx| s.set_value(hex, window, cx));
     }
 
-    fn set_open(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.open == open {
+    fn toggle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.open {
+            self.close(cx);
             return;
         }
-        self.open = open;
-        if open {
-            self.load_from_value();
-            self.sync_input(window, cx);
-        }
+        let draft = self
+            .value
+            .as_deref()
+            .and_then(hex_to_hsv)
+            .unwrap_or((self.hue, 0., 0.));
+        self.set_draft(draft);
+        self.open = true;
+        self.sync_input(window, cx);
+        self.focus.focus(window, cx);
         cx.notify();
     }
 
     fn apply_hex_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
-        match theme::parse_hex_color(text) {
-            Some((r, g, b)) => {
-                let (h, s, v) = rgb_to_hsv(r, g, b);
-                if s > 0. {
-                    self.hue = h;
-                }
-                self.sat = s;
-                self.val = v;
+        if !self.open {
+            return;
+        }
+        match hex_to_hsv(text) {
+            Some(hsv) => {
+                self.set_draft(hsv);
                 cx.notify();
             }
             None => self.sync_input(window, cx),
@@ -218,7 +253,7 @@ impl EpColorPicker {
     }
 
     fn pick_sv(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(bounds) = self.sv_bounds else {
+        let Some(bounds) = self.sv_bounds.bounds() else {
             return;
         };
         let x = f32::from(position.x - bounds.left()).clamp(0., SV_W);
@@ -230,7 +265,7 @@ impl EpColorPicker {
     }
 
     fn pick_hue(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(bounds) = self.hue_bounds else {
+        let Some(bounds) = self.hue_bounds.bounds() else {
             return;
         };
         let height = f32::from(bounds.size.height).max(1.);
@@ -241,101 +276,53 @@ impl EpColorPicker {
     }
 
     fn confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // 输入框里还没回车的文字也算（EP 失焦即解析）
         let text = self.hex_input.read(cx).value();
-        if let Some((r, g, b)) = theme::parse_hex_color(&text) {
-            let (h, s, v) = rgb_to_hsv(r, g, b);
-            if s > 0. {
-                self.hue = h;
-            }
-            self.sat = s;
-            self.val = v;
+        if let Some(hsv) = hex_to_hsv(&text) {
+            self.set_draft(hsv);
         }
-        let hex: SharedString = self.current_hex().into();
-        self.value = hex.clone();
-        self.set_open(false, window, cx);
+        let hex = self.draft_hex();
+        self.value = Some(hex.clone());
+        self.close(cx);
+        let _ = window;
         cx.emit(EpColorPickerEvent::Change(Some(hex)));
     }
 
-    fn clear(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.set_open(false, window, cx);
+    fn clear(&mut self, cx: &mut Context<Self>) {
+        self.value = None;
+        self.close(cx);
         cx.emit(EpColorPickerEvent::Change(None));
     }
 
-    fn render_panel(&self, window: &Window, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let bounds = self.trigger_bounds.filter(|_| self.open)?;
-        // 下方放不下就翻到上方（EP `fallback-placements: bottom → top`）
-        let viewport = window.viewport_size().height;
-        let below = bounds.bottom() + px(PANEL_HEIGHT) <= viewport
-            || bounds.top() - px(PANEL_HEIGHT) < px(0.);
+    fn render_sv(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let ep = ep();
         let id = cx.entity_id();
         let (hr, hg, hb) = hsv_to_rgb(self.hue, 1., 1.);
-        let hue_color = theme::rgba_css(hr, hg, hb, 1.);
-        let white = theme::rgba_css(255, 255, 255, 1.);
-        let clear_white = theme::rgba_css(255, 255, 255, 0.);
-        let black = theme::rgba_css(0, 0, 0, 1.);
-        let clear_black = theme::rgba_css(0, 0, 0, 0.);
-        let cursor_x = self.sat * SV_W;
-        let cursor_y = (1. - self.val) * SV_H;
-        let hue_y = self.hue / 360. * (SV_H - 4.);
-        let weak = cx.entity().downgrade();
-        let weak_hue = weak.clone();
-
-        // 色相条：6 段双色渐变拼接（GPUI 的线性渐变只有两个色标）
-        let hue_stops: [(u8, u8, u8); 7] = [
-            (255, 0, 0),
-            (255, 255, 0),
-            (0, 255, 0),
-            (0, 255, 255),
-            (0, 0, 255),
-            (255, 0, 255),
-            (255, 0, 0),
-        ];
-        let hue_bar = div()
-            .flex()
-            .flex_col()
-            .size_full()
-            .children(hue_stops.windows(2).map(|pair| {
-                let (a, b) = (pair[0], pair[1]);
-                div().flex_1().w_full().bg(linear_gradient(
-                    180.,
-                    linear_color_stop(theme::rgba_css(a.0, a.1, a.2, 1.), 0.),
-                    linear_color_stop(theme::rgba_css(b.0, b.1, b.2, 1.), 1.),
-                ))
-            }));
-
-        let sv_panel = div()
+        let white = theme::hex(0xFFFFFF);
+        let black = theme::hex(0x000000);
+        div()
             .id("sv")
             .relative()
             .w(px(SV_W))
             .h(px(SV_H))
-            .bg(hue_color)
+            .bg(theme::rgba_css(hr, hg, hb, 1.))
             .cursor_pointer()
-            .child(
-                canvas(
-                    move |bounds, _, cx| {
-                        let _ = weak.update(cx, |this, _| this.sv_bounds = Some(bounds));
-                    },
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .inset_0(),
-            )
+            .child(self.sv_bounds.measure())
             .child(div().absolute().inset_0().bg(linear_gradient(
                 90.,
                 linear_color_stop(white, 0.),
-                linear_color_stop(clear_white, 1.),
+                linear_color_stop(white.opacity(0.), 1.),
             )))
             .child(div().absolute().inset_0().bg(linear_gradient(
                 0.,
                 linear_color_stop(black, 0.),
-                linear_color_stop(clear_black, 1.),
+                linear_color_stop(black.opacity(0.), 1.),
             )))
             .child(
                 div()
                     .absolute()
-                    .left(px(cursor_x - 2.))
-                    .top(px(cursor_y - 2.))
+                    .left(px(self.sat * SV_W - 2.))
+                    .top(px((1. - self.val) * SV_H - 2.))
                     .size(px(4.))
                     .rounded_full()
                     .border_1()
@@ -350,10 +337,11 @@ impl EpColorPicker {
             )
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, event: &gpui_kit::MouseDownEvent, window, cx| {
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
                     this.pick_sv(event.position, window, cx)
                 }),
             )
+            // 拖动用 GPUI 的拖拽：指针离开面板后仍然跟随
             .on_drag(SvDrag(id), |_, _, _, cx| cx.new(|_| DragGhost))
             .on_drag_move::<SvDrag>(cx.listener(
                 move |this, event: &DragMoveEvent<SvDrag>, window, cx| {
@@ -361,9 +349,25 @@ impl EpColorPicker {
                         this.pick_sv(event.event.position, window, cx);
                     }
                 },
-            ));
+            ))
+    }
 
-        let hue_slider = div()
+    fn render_hue(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let ep = ep();
+        let id = cx.entity_id();
+        // 6 段双色渐变拼接（GPUI 的线性渐变只有两个色标）
+        let stops: [u32; 7] = [
+            0xFF0000, 0xFFFF00, 0x00FF00, 0x00FFFF, 0x0000FF, 0xFF00FF, 0xFF0000,
+        ];
+        let segments = stops.windows(2).map(|pair| {
+            div().flex_1().w_full().bg(linear_gradient(
+                180.,
+                linear_color_stop(theme::hex(pair[0]), 0.),
+                linear_color_stop(theme::hex(pair[1]), 1.),
+            ))
+        });
+        let thumb_top = self.hue / 360. * (SV_H - 4.);
+        div()
             .id("hue")
             .relative()
             .w(px(HUE_W))
@@ -375,23 +379,15 @@ impl EpColorPicker {
                 div()
                     .relative()
                     .size_full()
-                    .child(
-                        canvas(
-                            move |bounds, _, cx| {
-                                let _ =
-                                    weak_hue.update(cx, |this, _| this.hue_bounds = Some(bounds));
-                            },
-                            |_, _, _, _| {},
-                        )
-                        .absolute()
-                        .inset_0(),
-                    )
-                    .child(hue_bar)
+                    .flex()
+                    .flex_col()
+                    .child(self.hue_bounds.measure())
+                    .children(segments)
                     .child(
                         div()
                             .absolute()
                             .left_0()
-                            .top(px(hue_y))
+                            .top(px(thumb_top))
                             .w_full()
                             .h(px(4.))
                             .bg(ep.white)
@@ -409,7 +405,7 @@ impl EpColorPicker {
             )
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, event: &gpui_kit::MouseDownEvent, window, cx| {
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
                     this.pick_hue(event.position, window, cx)
                 }),
             )
@@ -420,111 +416,147 @@ impl EpColorPicker {
                         this.pick_hue(event.event.position, window, cx);
                     }
                 },
-            ));
+            ))
+    }
 
-        let footer = div()
-            .mt(px(12.))
-            .flex()
-            .items_center()
-            .justify_between()
-            .child(EpInput::new(&self.hex_input).small().w(px(160.)))
-            .child(
+    fn render_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let ep = ep();
+        let draft = self.draft_hex();
+        let sv = self.render_sv(cx).into_any_element();
+        let hue = self.render_hue(cx).into_any_element();
+        let swatches: Vec<_> = self
+            .predefine
+            .iter()
+            .enumerate()
+            .map(|(ix, color)| {
+                let selected = color.eq_ignore_ascii_case(&draft);
+                let value = color.clone();
                 div()
-                    .flex()
-                    .items_center()
-                    .gap(px(12.))
-                    .child(
-                        EpButton::new("cp-clear")
-                            .text()
-                            .small()
-                            .label("Clear")
-                            .on_click(cx.listener(|this, _, window, cx| this.clear(window, cx))),
-                    )
-                    .child(
-                        EpButton::new("cp-ok")
-                            .plain()
-                            .small()
-                            .label("OK")
-                            .on_click(cx.listener(|this, _, window, cx| this.confirm(window, cx))),
-                    ),
-            );
-
-        let panel = div()
+                    .id(("predefine", ix))
+                    .size(px(20.))
+                    .rounded(theme::radius::SM)
+                    .bg(theme::todo_color(color, ep.white))
+                    .cursor_pointer()
+                    .when(selected, |this| {
+                        this.shadow(vec![theme::shadow(0., 0., 3., 2., ep.primary)])
+                    })
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        if let Some(hsv) = hex_to_hsv(&value) {
+                            this.set_draft(hsv);
+                            this.sync_input(window, cx);
+                            cx.notify();
+                        }
+                    }))
+            })
+            .collect();
+        let has_predefine = !swatches.is_empty();
+        let footer =
+            div()
+                .mt(px(12.))
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(EpInput::new(&self.hex_input).small().w(px(160.)))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(12.))
+                        .child(
+                            EpButton::new("cp-clear")
+                                .text()
+                                .small()
+                                .label("Clear")
+                                .on_click(cx.listener(|this, _, _, cx| this.clear(cx))),
+                        )
+                        .child(
+                            EpButton::new("cp-ok").plain().small().label("OK").on_click(
+                                cx.listener(|this, _, window, cx| this.confirm(window, cx)),
+                            ),
+                        ),
+                );
+        ep_popper::frame()
             .id("cp-panel")
-            .occlude()
+            .w(px(PANEL_WIDTH))
             .p(px(12.))
-            .bg(ep.white)
-            .border_1()
-            .border_color(ep.border_lighter)
-            .rounded(theme::radius::SM)
-            .shadow(ep.box_shadow_light())
             .font(theme::ui_font())
-            .on_mouse_down_out(
-                cx.listener(|this, event: &gpui_kit::MouseDownEvent, window, cx| {
-                    if this
-                        .trigger_bounds
-                        .is_some_and(|b| b.contains(&event.position))
-                    {
-                        return;
-                    }
-                    this.set_open(false, window, cx);
-                }),
-            )
             .child(
                 div()
                     .w(px(300.))
-                    .mb(px(6.))
                     .flex()
                     .justify_between()
-                    .child(sv_panel)
-                    .child(hue_slider),
+                    .child(sv)
+                    .child(hue),
             )
-            .child(footer);
-
-        Some(
-            deferred(
-                anchored()
-                    .position_mode(AnchoredPositionMode::Window)
-                    .position(if below {
-                        point(bounds.center().x, bounds.bottom())
-                    } else {
-                        point(bounds.center().x, bounds.top())
-                    })
-                    .anchor(if below {
-                        Anchor::TopCenter
-                    } else {
-                        Anchor::BottomCenter
-                    })
-                    .snap_to_window_with_margin(px(4.))
-                    .child(panel),
-            )
-            .with_priority(2),
-        )
+            // EP：`__wrapper` 下边距 6 与预设色上边距 8 折叠成 8，与页脚上边距 12 折叠成 12
+            .when(has_predefine, |this| {
+                this.child(
+                    div()
+                        .mt(px(8.))
+                        .w(px(SV_W))
+                        .flex()
+                        .flex_wrap()
+                        .gap(px(8.))
+                        .children(swatches),
+                )
+            })
+            .child(footer)
     }
 }
 
 impl Render for EpColorPicker {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ep = ep();
+        let open = self.open;
         let disabled = self.disabled;
-        let border = if self.open && !disabled {
-            ep.primary
-        } else if self.hovered && !disabled {
-            ep.border_hover
-        } else {
-            ep.border
+        let inner = div()
+            .size_full()
+            .rounded(px(2.))
+            .border_1()
+            .border_color(ep.text_secondary)
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(disabled, |this| this.opacity(0.3));
+        let inner = match self.value.as_deref() {
+            Some(color) => inner.bg(theme::todo_color(color, ep.white)).child(icon(
+                EpIcon::ArrowDown,
+                9.6,
+                ep.white,
+            )),
+            None => inner.child(icon(EpIcon::Close, 9.6, ep.text_secondary)),
         };
-        let (r, g, b) = theme::hex_to_rgb_channels(&self.value);
-        let color: Hsla = theme::rgba_css(r, g, b, 1.);
-        let weak = cx.entity().downgrade();
+        let popper = if open {
+            let entity = cx.entity().downgrade();
+            ep_popper::popper(
+                &self.anchor,
+                window,
+                PopperOptions {
+                    placement: Placement::Bottom,
+                    flip: true,
+                    // EP 颜色选择器 `:offset="0"`、`:show-arrow="false"`
+                    gap: 0.,
+                    arrow: false,
+                    width: PANEL_WIDTH,
+                    height: panel_height(!self.predefine.is_empty()),
+                },
+                self.render_panel(cx),
+                move |_, cx| {
+                    let _ = entity.update(cx, |this, cx| this.close(cx));
+                },
+            )
+        } else {
+            None
+        };
         div()
             .id(self.id.clone())
+            .track_focus(&self.focus)
             .relative()
             .flex_none()
             .size(px(24.))
             .p(px(4.))
             .border_1()
-            .border_color(border)
+            .border_color(if open { ep.primary } else { ep.border })
             .rounded(theme::radius::SM)
             .when(disabled, |this| {
                 this.bg(ep.fill_light)
@@ -532,45 +564,26 @@ impl Render for EpColorPicker {
             })
             .when(!disabled, |this| {
                 this.cursor_pointer()
-                    .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                        this.hovered = *hovered;
-                        cx.notify();
-                    }))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        let open = !this.open;
-                        this.set_open(open, window, cx);
-                    }))
-                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                        if event.keystroke.key == "escape" && this.open {
-                            this.set_open(false, window, cx);
+                    .when(!open, |this| {
+                        this.hover(move |s| s.border_color(ep.border_hover))
+                    })
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            this.toggle(window, cx);
                             cx.stop_propagation();
-                        }
-                    }))
+                        }),
+                    )
             })
-            .child(
-                canvas(
-                    move |bounds, _, cx| {
-                        let _ = weak.update(cx, |this, _| this.trigger_bounds = Some(bounds));
-                    },
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .inset_0(),
-            )
-            .child(
-                div()
-                    .size_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .border_1()
-                    .border_color(ep.text_secondary)
-                    .rounded(px(2.))
-                    .bg(color)
-                    .when(disabled, |this| this.opacity(0.3))
-                    .child(icon(EpIcon::ArrowDown, 10., ep.white)),
-            )
-            .children(self.render_panel(window, cx))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" && this.open {
+                    this.close(cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .child(self.anchor.measure())
+            .child(inner)
+            .children(popper)
     }
 }
 
@@ -593,7 +606,26 @@ mod tests {
             let (h, s, v) = rgb_to_hsv(r, g, b);
             assert_eq!(hsv_to_rgb(h, s, v), (r, g, b), "{r},{g},{b}");
         }
-        assert_eq!(to_hex(0x1E, 0x29, 0x3B), "#1E293B");
         assert_eq!(hsv_to_rgb(120., 1., 1.), (0, 255, 0));
+    }
+
+    #[test]
+    fn hex_hsv_round_trip_is_lower_case() {
+        for hex in [
+            "#ef4444", "#10b981", "#3b82f6", "#000000", "#ffffff", "#eab308",
+        ] {
+            let (h, s, v) = hex_to_hsv(hex).unwrap();
+            assert_eq!(hsv_to_hex(h, s, v), hex, "{hex}");
+        }
+        let (h, s, v) = hex_to_hsv("#1E293B").unwrap();
+        assert_eq!(hsv_to_hex(h, s, v), "#1e293b");
+        assert_eq!(hex_to_hsv("red"), None);
+        assert_eq!(hex_to_hsv("#FF0000"), Some((0., 1., 1.)));
+    }
+
+    #[test]
+    fn panel_height_accounts_for_predefine_row() {
+        assert_eq!(panel_height(false), 242.);
+        assert_eq!(panel_height(true), 270.);
     }
 }

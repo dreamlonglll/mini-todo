@@ -375,9 +375,9 @@ pub fn delete_hint(count: Option<usize>) -> String {
     }
 }
 
-/// 大小写无关的颜色比较（旧 `isSameColor`）
-pub fn is_same_color(a: &str, b: &str) -> bool {
-    a.trim().eq_ignore_ascii_case(b.trim())
+/// 系统取色对话框的结果 → `#RRGGBB`（大写，与 core `fence::normalize_color` 一致）
+pub fn color_hex(r: u8, g: u8, b: u8) -> String {
+    format!("#{r:02X}{g:02X}{b:02X}")
 }
 
 #[cfg(test)]
@@ -608,10 +608,9 @@ mod tests {
     }
 
     #[test]
-    fn colors_compare_case_insensitively() {
-        assert!(is_same_color("#0f2942", "#0F2942"));
-        assert!(is_same_color(" #000000 ", "#000000"));
-        assert!(!is_same_color("#000000", "#1E293B"));
+    fn color_hex_is_upper_case() {
+        assert_eq!(color_hex(0x1E, 0x29, 0x3B), "#1E293B");
+        assert_eq!(color_hex(0, 0, 0), "#000000");
     }
 
     #[test]

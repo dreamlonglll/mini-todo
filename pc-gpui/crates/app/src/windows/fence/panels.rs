@@ -1,9 +1,8 @@
 //! 收纳箱的面板（外观 / 删除确认 / OneDrive 提示，§3.7–§3.9）与标题栏「更多」下拉菜单（§3.4.4）。
 
 use gpui_kit::{
-    Anchor, AnchoredPositionMode, AnyElement, AppContext as _, Context, InteractiveElement as _,
-    IntoElement, MouseDownEvent, ParentElement as _, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Window, anchored, canvas, deferred, div, point, px,
+    AnyElement, AppContext as _, Context, InteractiveElement as _, IntoElement, ParentElement as _,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, canvas, div, point, px,
 };
 use mini_todo_core::db::UpdateFenceRequest;
 
@@ -16,7 +15,7 @@ use crate::services::fences as runtime;
 use crate::theme::{self, PRESET_BG_COLORS, fence_tokens};
 use crate::ui::button::EpButton;
 use crate::ui::ep_dropdown::{EpDropdownItem, EpDropdownMenu};
-use crate::ui::ep_popper;
+use crate::ui::ep_popper::{self, Placement, PopperOptions};
 use crate::ui::ep_slider::EpSlider;
 use crate::ui::icon::icon;
 use crate::ui::message::{self, MessageKind};
@@ -102,7 +101,7 @@ impl FenceWindow {
         let same = self
             .fence
             .as_ref()
-            .is_some_and(|f| logic::is_same_color(&f.bg_color, &color));
+            .is_some_and(|f| theme::is_same_color(&f.bg_color, &color));
         if same {
             return;
         }
@@ -130,7 +129,7 @@ impl FenceWindow {
         let task = platform::fence_win::choose_color(cx, owner, initial);
         cx.spawn_in(window, async move |this, cx| {
             if let Some((r, g, b)) = task.await {
-                let color = crate::ui::ep_color_picker::to_hex(r, g, b);
+                let color = logic::color_hex(r, g, b);
                 let _ = this.update_in(cx, |this, window, cx| this.set_bg_color(color, window, cx));
             }
         })
@@ -191,15 +190,16 @@ impl FenceWindow {
         }
     }
 
-    /// 标题栏「更多」下拉菜单；关闭时不渲染任何元素（否则空元素会在标题栏里多占一个 gap）
+    /// 标题栏「更多」下拉菜单（`bottom-end`，右边与按钮右边对齐、箭头对准按钮中心）；
+    /// 关闭时不渲染任何元素（否则空元素会在标题栏里多占一个 gap）
     pub(super) fn render_title_menu(
         &mut self,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let more = self.more_bounds.filter(|_| self.title_menu_open)?;
-        // bottom-end：右边与按钮右边对齐，箭头对准按钮中心
-        let arrow_x = px(TITLE_MENU_WIDTH) - (more.right() - more.center().x);
+        if !self.title_menu_open {
+            return None;
+        }
         let menu = EpDropdownMenu::new("fence-more-menu")
             .item(EpDropdownItem::new("rename", "重命名").icon(EpIcon::EditPen))
             .item(EpDropdownItem::new("appearance", "外观").icon(EpIcon::Brush))
@@ -208,35 +208,29 @@ impl FenceWindow {
                     .icon(EpIcon::Delete)
                     .divided(),
             )
-            .arrow_at(arrow_x)
             .max_height(px(200.))
             .on_select(cx.listener(|this, command: &SharedString, window, cx| {
                 this.on_title_command(command, window, cx)
             }));
-        let more_bounds = more;
-        deferred(
-            anchored()
-                .position_mode(AnchoredPositionMode::Window)
-                .position(point(more.right(), more.bottom() + px(ep_popper::OFFSET)))
-                .anchor(Anchor::TopRight)
-                .snap_to_window_with_margin(px(4.))
-                .child(
-                    div()
-                        .w(px(TITLE_MENU_WIDTH))
-                        .on_mouse_down_out(cx.listener(
-                            move |this, event: &MouseDownEvent, window, cx| {
-                                // 点在「更多」按钮上交给按钮自己切换
-                                if !more_bounds.contains(&event.position) {
-                                    this.close_title_menu(window, cx);
-                                }
-                            },
-                        ))
-                        .child(menu),
-                ),
+        let dismiss = cx.entity().downgrade();
+        ep_popper::popper(
+            &self.more_anchor,
+            window,
+            PopperOptions {
+                placement: Placement::BottomEnd,
+                // 菜单只能在标题栏下方（折叠态打开时窗口已先展开）
+                flip: false,
+                gap: ep_popper::OFFSET,
+                arrow: true,
+                width: TITLE_MENU_WIDTH,
+                height: EpDropdownMenu::estimated_height(3, 1),
+            },
+            div().w(px(TITLE_MENU_WIDTH)).child(menu),
+            move |window, cx| {
+                // 点在「更多」按钮上不会走到这里（交给按钮自己切换）
+                let _ = dismiss.update(cx, |this, cx| this.close_title_menu(window, cx));
+            },
         )
-        .with_priority(2)
-        .into_any_element()
-        .into()
     }
 
     // ------------------------------------------------------------------
@@ -383,7 +377,7 @@ impl FenceWindow {
             .flex_wrap()
             .gap(px(6.))
             .children(PRESET_BG_COLORS.iter().map(|&(name, value)| {
-                let active = logic::is_same_color(&current, value);
+                let active = theme::is_same_color(&current, value);
                 let (r, g, b) = theme::hex_to_rgb_channels(value);
                 div()
                     .id(SharedString::from(format!("swatch-{value}")))

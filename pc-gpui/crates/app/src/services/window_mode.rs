@@ -1,5 +1,5 @@
 //! 主窗口的窗口模式与几何（旧版 `commands/window.rs` 的主窗口部分 + 前端 `appStore` 的
-//! `applyFixedMode` / `applyNormalMode` / `saveWindowState` / `initSettings` 定位）。**W1**。
+//! `applyFixedMode` / `applyNormalMode` / `saveWindowState` / `initSettings` 定位）。
 //!
 //! | 模式 | `classic_fixed` | `desktop` | owner | ex style | `WS_MINIMIZEBOX` | 几何锁定 | 置顶 |
 //! |---|---|---|---|---|---|---|---|

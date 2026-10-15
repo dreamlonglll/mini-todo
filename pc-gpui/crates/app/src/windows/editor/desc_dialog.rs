@@ -15,7 +15,7 @@ use gpui_kit::{
 use super::EditorWindow;
 use crate::assets::EpIcon;
 use crate::platform;
-use crate::theme::{self, ep, hex, light, w2};
+use crate::theme::{self, editor_theme, ep, hex, light};
 use crate::ui::button::EpButton;
 use crate::ui::icon::icon;
 use crate::ui::markdown::MarkdownView;
@@ -166,7 +166,7 @@ impl EditorWindow {
                     .justify_center()
                     .rounded(px(4.))
                     .cursor_pointer()
-                    .hover(|s| s.bg(hex(w2::BLUE_50)))
+                    .hover(|s| s.bg(hex(editor_theme::BLUE_50)))
                     .tooltip(native(if maximized { "还原" } else { "最大化" }))
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.toggle_desc_maximize(window, cx)
@@ -220,10 +220,10 @@ impl EditorWindow {
                     .px(px(14.))
                     .py(px(12.))
                     .bg(palette.bg_secondary)
-                    .font(w2::mono_font())
+                    .font(editor_theme::mono_font())
                     .text_size(px(13.))
                     .line_height(relative(1.6))
-                    .text_color(hex(w2::SLATE_700))
+                    .text_color(hex(editor_theme::SLATE_700))
                     .child(
                         div().h_full().mx(px(-TEXTAREA_INSET_X)).child(
                             Textarea::new(&dialog.source)

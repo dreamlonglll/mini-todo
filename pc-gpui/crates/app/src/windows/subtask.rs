@@ -25,7 +25,7 @@ use crate::assets::EpIcon;
 use crate::db::spawn_db;
 use crate::platform;
 use crate::state::AppState;
-use crate::theme::{self, hex, light, w2};
+use crate::theme::{self, editor_theme, hex, light};
 use crate::ui::button::EpButton;
 use crate::ui::icon::icon;
 use crate::ui::input::EpInput;
@@ -378,7 +378,7 @@ impl SubtaskWindow {
                 .occlude()
                 .hover(move |s| {
                     s.bg(if danger {
-                        hex(w2::RED_100)
+                        hex(editor_theme::RED_100)
                     } else {
                         palette.bg_tertiary
                     })
@@ -389,7 +389,7 @@ impl SubtaskWindow {
                         s.text_color(if danger {
                             palette.error
                         } else {
-                            hex(w2::SLATE_700)
+                            hex(editor_theme::SLATE_700)
                         })
                     }),
                 )
@@ -446,7 +446,7 @@ impl Render for SubtaskWindow {
             div()
                 .text_size(px(13.))
                 .font_weight(theme::WEIGHT_SEMIBOLD)
-                .text_color(hex(w2::SLATE_700))
+                .text_color(hex(editor_theme::SLATE_700))
                 .child(text)
         };
         let title_empty = self.title.read(cx).value().trim().is_empty();

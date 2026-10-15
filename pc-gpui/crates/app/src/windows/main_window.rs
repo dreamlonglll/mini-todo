@@ -1,5 +1,5 @@
 //! 主窗口（旧 `MainView.vue` + `TitleBar.vue` + `TodoList.vue` + `TodoItem.vue` + `QuadrantView.vue` +
-//! `CalendarView.vue`）。**W1**。规格：`research/ui-main-window.md`（全文）。
+//! `CalendarView.vue`）。规格：`research/ui-main-window.md`（全文）。
 //!
 //! | 子模块 | 内容 |
 //! |---|---|

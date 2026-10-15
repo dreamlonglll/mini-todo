@@ -21,9 +21,9 @@ use super::EditorWindow;
 use crate::assets::EpIcon;
 use crate::db::spawn_db;
 use crate::state::AppState;
-use crate::theme::{self, hex, light, w2};
-use crate::ui::ep2_dropdown::{self, MenuItem};
-use crate::ui::ep2_popper::{self, Placement, PopperOptions};
+use crate::theme::{self, editor_theme, hex, light};
+use crate::ui::ep_dropdown::{EpDropdownItem, EpDropdownMenu};
+use crate::ui::ep_popper::{self, Placement, PopperOptions};
 use crate::ui::icon::icon;
 use crate::ui::title_bar::drag_region;
 use crate::ui::tooltip::native;
@@ -119,13 +119,15 @@ fn checkbox_visual(checked: bool) -> gpui_kit::Div {
         .items_center()
         .justify_center()
         .border_2()
-        .when(!checked, |this| this.border_color(hex(w2::SLATE_300)))
+        .when(!checked, |this| {
+            this.border_color(hex(editor_theme::SLATE_300))
+        })
         .when(checked, |this| {
             this.border_color(gpui_kit::transparent_black())
                 .bg(linear_gradient(
                     135.,
                     linear_color_stop(light().primary, 0.),
-                    linear_color_stop(hex(w2::CYAN_500), 1.),
+                    linear_color_stop(hex(editor_theme::CYAN_500), 1.),
                 ))
                 .child(icon(EpIcon::Check, 12., hex(0xFFFFFF)))
         })
@@ -144,7 +146,7 @@ fn title_visual(title: &str, completed: bool) -> gpui_kit::Div {
         .text_color(if completed {
             palette.text_tertiary
         } else {
-            hex(w2::SLATE_700)
+            hex(editor_theme::SLATE_700)
         })
         .when(completed, |this| this.line_through())
         .child(title.to_string())
@@ -544,7 +546,7 @@ impl EditorWindow {
                     .text_size(px(16.))
                     .font_weight(theme::WEIGHT_SEMIBOLD)
                     .line_height(relative(1.2))
-                    .text_color(hex(w2::SLATE_700))
+                    .text_color(hex(editor_theme::SLATE_700))
                     .child("子任务"),
             );
 
@@ -569,10 +571,10 @@ impl EditorWindow {
                         .px(px(12.))
                         .py(px(8.))
                         .rounded(px(8.))
-                        .bg(hex(w2::AMBER_50))
-                        .text_color(hex(w2::AMBER_700))
+                        .bg(hex(editor_theme::AMBER_50))
+                        .text_color(hex(editor_theme::AMBER_700))
                         .text_size(px(12.))
-                        .child(icon(EpIcon::Warning, 14., hex(w2::AMBER_700)))
+                        .child(icon(EpIcon::Warning, 14., hex(editor_theme::AMBER_700)))
                         .child(format!("{pending} 个子任务尚未创建，点击「保存」重试")),
                 )
             })
@@ -603,7 +605,7 @@ impl EditorWindow {
             .h_full()
             .flex()
             .flex_col()
-            .bg(hex(w2::PANEL_BG))
+            .bg(hex(editor_theme::PANEL_BG))
             .border_l_1()
             .border_color(palette.border)
             .child(header)
@@ -635,11 +637,16 @@ impl EditorWindow {
                 .border_color(if self.import_menu_open {
                     palette.primary
                 } else {
-                    hex(w2::SLATE_300)
+                    hex(editor_theme::SLATE_300)
                 })
-                .when(self.import_menu_open, |this| this.bg(hex(w2::BLUE_50)))
+                .when(self.import_menu_open, |this| {
+                    this.bg(hex(editor_theme::BLUE_50))
+                })
                 .cursor_pointer()
-                .hover(|s| s.border_color(palette.primary).bg(hex(w2::BLUE_50)))
+                .hover(|s| {
+                    s.border_color(palette.primary)
+                        .bg(hex(editor_theme::BLUE_50))
+                })
                 .tooltip(native("导入子任务"))
                 .child(anchor.measure())
                 .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| {
@@ -686,7 +693,7 @@ impl EditorWindow {
             })
             .when(!focused, |this| {
                 this.bg(palette.bg_secondary)
-                    .border_color(hex(w2::SLATE_300))
+                    .border_color(hex(editor_theme::SLATE_300))
                     .border_dashed()
                     .hover(|s| {
                         s.border_color(palette.text_tertiary)
@@ -699,7 +706,7 @@ impl EditorWindow {
                     .flex_1()
                     .min_w_0()
                     .text_size(px(13.))
-                    .text_color(hex(w2::SLATE_700))
+                    .text_color(hex(editor_theme::SLATE_700))
                     .child(
                         Input::new(&self.add_input)
                             .appearance(false)
@@ -745,29 +752,25 @@ impl EditorWindow {
         if !self.import_menu_open || !self.is_edit() || self.is_view_mode {
             return None;
         }
-        let files = cx.entity().downgrade();
-        let folder = files.clone();
-        let dismiss = files.clone();
-        let items = vec![
-            MenuItem::new("选择文件 (.md/.txt)", move |window, cx| {
-                let _ = files.update(cx, |this, cx| this.import(false, window, cx));
-            }),
-            MenuItem::new("选择文件夹（递归导入）", move |window, cx| {
-                let _ = folder.update(cx, |this, cx| this.import(true, window, cx));
-            }),
-        ];
-        ep2_popper::popper(
+        let dismiss = cx.entity().downgrade();
+        let menu = EpDropdownMenu::new("editor-import-menu")
+            .item(EpDropdownItem::new("file", "选择文件 (.md/.txt)"))
+            .item(EpDropdownItem::new("folder", "选择文件夹（递归导入）"))
+            .on_select(cx.listener(|this, command: &SharedString, window, cx| {
+                this.import(command.as_ref() == "folder", window, cx)
+            }));
+        ep_popper::popper(
             &self.import_anchor,
             window,
             PopperOptions {
                 placement: Placement::Bottom,
                 flip: true,
-                gap: 12.,
+                gap: ep_popper::OFFSET,
                 arrow: true,
                 width: 186.,
-                height: ep2_dropdown::PADDING * 2. + ep2_dropdown::ITEM_HEIGHT * 2. + 2.,
+                height: EpDropdownMenu::estimated_height(2, 0),
             },
-            ep2_dropdown::menu("editor-import-menu", items),
+            menu,
             move |_, cx| {
                 let _ = dismiss.update(cx, |this, cx| {
                     this.import_menu_open = false;
@@ -880,7 +883,7 @@ impl EditorWindow {
                 .border_color(palette.primary)
                 .bg(hex(0xFFFFFF))
                 .text_size(px(13.))
-                .text_color(hex(w2::SLATE_700))
+                .text_color(hex(editor_theme::SLATE_700))
                 .child(
                     Input::new(&input)
                         .appearance(false)
@@ -959,8 +962,8 @@ impl EditorWindow {
                                 "view",
                                 EpIcon::View,
                                 "查看子任务",
-                                w2::INDIGO_100,
-                                w2::INDIGO_500,
+                                editor_theme::INDIGO_100,
+                                editor_theme::INDIGO_500,
                             )
                             .on_click(cx.listener(
                                 move |this, _: &ClickEvent, window, cx| {
@@ -970,24 +973,25 @@ impl EditorWindow {
                         )
                         .when(can_edit, |this| {
                             this.child(
-                                action("edit", EpIcon::Edit, "编辑子任务", w2::BLUE_100, 0x3B82F6)
-                                    .on_click(cx.listener(
-                                        move |this, _: &ClickEvent, window, cx| {
-                                            this.open_subtask_window(
-                                                id,
-                                                SubtaskMode::Edit,
-                                                window,
-                                                cx,
-                                            )
-                                        },
-                                    )),
+                                action(
+                                    "edit",
+                                    EpIcon::Edit,
+                                    "编辑子任务",
+                                    editor_theme::BLUE_100,
+                                    0x3B82F6,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _: &ClickEvent, window, cx| {
+                                        this.open_subtask_window(id, SubtaskMode::Edit, window, cx)
+                                    },
+                                )),
                             )
                             .child(
                                 action(
                                     "delete",
                                     EpIcon::Delete,
                                     "删除子任务",
-                                    w2::RED_100,
+                                    editor_theme::RED_100,
                                     0xEF4444,
                                 )
                                 .on_click(cx.listener(
@@ -1004,7 +1008,7 @@ impl EditorWindow {
             .id(SharedString::from(format!("subtask-row-{id}")))
             .when(!last, |this| this.mb(px(6.)))
             .when(hovered, |this| {
-                this.border_color(hex(w2::SLATE_300))
+                this.border_color(hex(editor_theme::SLATE_300))
                     .shadow(vec![theme::shadow(
                         0.,
                         2.,
@@ -1062,8 +1066,8 @@ fn progress_card(done: usize, total: usize) -> impl IntoElement {
         .rounded(px(10.))
         .bg(linear_gradient(
             135.,
-            linear_color_stop(hex(w2::SKY_50), 0.),
-            linear_color_stop(hex(w2::SKY_100), 1.),
+            linear_color_stop(hex(editor_theme::SKY_50), 0.),
+            linear_color_stop(hex(editor_theme::SKY_100), 1.),
         ))
         .child(
             div()
@@ -1074,7 +1078,7 @@ fn progress_card(done: usize, total: usize) -> impl IntoElement {
                     div()
                         .text_size(px(16.))
                         .font_weight(theme::WEIGHT_SEMIBOLD)
-                        .text_color(hex(w2::SKY_700))
+                        .text_color(hex(editor_theme::SKY_700))
                         .child(format!("{done} / {total}")),
                 )
                 .child(
@@ -1099,7 +1103,7 @@ fn progress_card(done: usize, total: usize) -> impl IntoElement {
                         .bg(linear_gradient(
                             90.,
                             linear_color_stop(light().primary, 0.),
-                            linear_color_stop(hex(w2::CYAN_500), 1.),
+                            linear_color_stop(hex(editor_theme::CYAN_500), 1.),
                         )),
                 ),
         )

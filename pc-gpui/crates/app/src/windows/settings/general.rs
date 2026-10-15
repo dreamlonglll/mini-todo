@@ -16,7 +16,6 @@ use crate::ui::ep_radio::EpRadioButtons;
 use crate::ui::ep_slider::EpSlider;
 use crate::ui::ep_switch::EpSwitch;
 use crate::ui::message;
-use crate::windows::fence::logic::is_same_color;
 
 /// `AppState` 上的布尔设置写入方法（`set_show_calendar` 等）：先改内存、后台写库，失败回滚并返回提示文本
 type SettingSetter = fn(&mut AppState, bool, &mut Context<AppState>) -> Task<Result<(), String>>;
@@ -202,7 +201,7 @@ impl SettingsWindow {
             .items_center()
             .gap(px(6.))
             .children(PRESET_BG_COLORS.iter().map(|&(name, value)| {
-                let active = is_same_color(&bg_color, value);
+                let active = theme::is_same_color(&bg_color, value);
                 let (r, g, b) = theme::hex_to_rgb_channels(value);
                 div()
                     .id(SharedString::from(format!("preset-{value}")))

@@ -75,11 +75,11 @@ pub fn run() {
 
             windows::main_window::open(cx);
 
-            // 各窗口实现者的启动钩子（现为空实现）
-            services::tray::start(cx); // W1：托盘
-            services::auto_sync::start(cx); // W1：自动同步定时器
-            services::scheduler::start(cx); // W2：提醒调度
-            windows::fence::restore_all(cx); // W3：恢复收纳箱窗口
+            // 后台服务：托盘（Windows）、自动同步定时器、提醒调度、恢复收纳箱窗口（Windows）
+            services::tray::start(cx);
+            services::auto_sync::start(cx);
+            services::scheduler::start(cx);
+            windows::fence::restore_all(cx);
 
             // 开机自启自愈：已开启时把注册表里的路径刷新为当前 exe（开发隔离时跳过，自启项与安装版共用）
             if paths::dev_data_dir_override().is_none() {

@@ -5,8 +5,8 @@
 //! - 写操作经 core 在后台执行，成功后更新本地副本并 `cx.notify()`；返回 `Task<Result<_, String>>`，
 //!   调用方按旧版文案提示失败（`ui::message::error(window, cx, "更新待办失败", &e)`）。
 //! - 需要整个主窗口提示的错误（加载待办失败）以 [`AppStateEvent::Message`] 发出，主窗口订阅后显示。
-//! - 窗口模式（固定 / 嵌入 / 贴边隐藏）、窗口位置保存等平台动作由主窗口实现者（W1）实现，
-//!   本文件只放状态字段与 TODO 标注的入口。
+//! - 窗口模式（固定 / 嵌入 / 贴边隐藏）、窗口位置保存等平台动作在 `services::window_mode`，
+//!   本文件只放状态字段与入口（`toggle_fixed_mode` / `save_window_state`）。
 
 use std::path::PathBuf;
 
@@ -123,10 +123,10 @@ pub struct AppState {
     pub is_fixed: bool,
     /// 深色主题（settings `text_theme == "light"`，注意语义反转）
     pub is_dark_theme: bool,
-    /// 主窗口位置 / 尺寸（物理像素；W1 维护）
+    /// 主窗口位置 / 尺寸（物理像素；`services::window_mode` 维护）
     pub window_position: Option<WindowPosition>,
     pub window_size: Option<WindowSize>,
-    /// 当前屏幕组合 ID（`platform::screen_config_id`；W1 维护）
+    /// 当前屏幕组合 ID（`platform::screen_config_id`；`services::window_mode` 维护）
     pub current_screen_config_id: String,
     pub screen_configs: Vec<ScreenConfig>,
     /// 展示日历（默认 false）
@@ -145,7 +145,7 @@ pub struct AppState {
     pub todo_font_family: String,
     pub todo_font_size: i32,
     pub notification_type: NotificationType,
-    /// 版本检查结果（W1）
+    /// 版本检查结果（`services::update_check`）
     pub has_update: bool,
     pub latest_version: Option<String>,
     pub release_url: Option<String>,
@@ -156,7 +156,7 @@ pub struct AppState {
     /// 是否有同步在进行（标题栏同步图标旋转、按钮禁用）；手动 / 自动 / 设置页共用
     pub syncing: bool,
     syncing_count: usize,
-    /// 自动同步处于连续失败段（同一段只提示一次；W1 维护）
+    /// 自动同步处于连续失败段（同一段只提示一次；`services::auto_sync` 维护）
     pub auto_sync_failing: bool,
     /// 最近一次同步报告（设置页显示"上次同步"时间用）
     pub last_sync_report: Option<SyncReport>,
@@ -335,7 +335,7 @@ impl AppState {
     // 加载
     // ------------------------------------------------------------------
 
-    /// 启动加载：设置（不含窗口定位，窗口定位由 W1 做）→ 待办。完成后 `initialized = true`。
+    /// 启动加载：设置（不含窗口定位，窗口定位在 `services::window_mode`）→ 待办。完成后 `initialized = true`。
     pub fn load_initial(&mut self, cx: &mut Context<Self>) -> Task<()> {
         let reload = self.reload_app_settings(cx);
         cx.spawn(async move |this, cx| {
@@ -767,7 +767,7 @@ impl AppState {
     }
 
     /// 贴边自动隐藏；错误文本 `设置贴边自动隐藏失败：…`。
-    /// 状态机（`AutoHideState::set_enabled`）的收尾由 W1 在观察到变化后处理。
+    /// 状态机（`AutoHideState::set_enabled`）的收尾由 `services::window_mode` 观察到变化后处理。
     pub fn set_auto_hide_enabled(
         &mut self,
         enabled: bool,
@@ -789,7 +789,7 @@ impl AppState {
         )
     }
 
-    /// 唤起时置顶；错误文本 `设置唤起置顶失败：…`（关闭时立即撤置顶由 W1 处理）
+    /// 唤起时置顶；错误文本 `设置唤起置顶失败：…`（关闭时立即撤置顶由 `services::window_mode` 处理）
     pub fn set_top_on_wake(
         &mut self,
         enabled: bool,
@@ -811,7 +811,7 @@ impl AppState {
         )
     }
 
-    /// 固定模式时嵌入桌面（只写键；已固定时切换窗口形态由 W1 观察到变化后处理）；
+    /// 固定模式时嵌入桌面（只写键；已固定时切换窗口形态由 `services::window_mode` 观察到变化后处理）；
     /// 错误文本 `设置嵌入桌面失败：…`
     pub fn set_fixed_embed_desktop(
         &mut self,
@@ -967,11 +967,11 @@ impl AppState {
     }
 
     // ------------------------------------------------------------------
-    // 平台相关动作（W1 实现）
+    // 平台相关动作（实现在 `services::window_mode`）
     // ------------------------------------------------------------------
 
     /// 切换固定模式（旧 `toggleFixedMode`）：翻转 `is_fixed` → 按"嵌入桌面"偏好进入经典固定 / 嵌入桌面，
-    /// 或退回普通模式 → 保存窗口状态；失败提示 `切换固定模式失败：…`（W1：`services::window_mode`）
+    /// 或退回普通模式 → 保存窗口状态；失败提示 `切换固定模式失败：…`（`services::window_mode`）
     pub fn toggle_fixed_mode(&mut self, cx: &mut Context<Self>) {
         self.is_fixed = !self.is_fixed;
         let fixed = self.is_fixed;

@@ -1,4 +1,4 @@
-//! 自动同步定时器（旧 `MainView.startAutoSync` / `runAutoSync`）。**W1**，基于 [`super::sync::run_sync`]：
+//! 自动同步定时器（旧 `MainView.startAutoSync` / `runAutoSync`），基于 [`super::sync::run_sync`]：
 //! - 间隔 `max(1, syncInterval || 15)` 分钟，`SyncMode::Smart { full: false }`（core 每第 10 轮自动无条件 GET）；
 //! - 已有同步在进行（`AppState.syncing`）时跳过这一轮；
 //! - 失败段只提示一次（`AppState.auto_sync_failing`），成功或手动同步成功后复位；"同步正在进行中"不算失败；

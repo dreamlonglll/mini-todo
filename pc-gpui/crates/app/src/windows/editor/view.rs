@@ -14,7 +14,7 @@ use gpui_kit::{
 
 use super::{EditorWindow, QUADRANTS, RepeatType, WEEKDAYS};
 use crate::assets::EpIcon;
-use crate::theme::{self, hex, light, w2};
+use crate::theme::{self, editor_theme, hex, light};
 use crate::ui::button::EpButton;
 use crate::ui::icon::icon;
 use crate::ui::markdown::MarkdownView;
@@ -200,7 +200,7 @@ impl EditorWindow {
                             .text_color(if completed {
                                 palette.text_tertiary
                             } else {
-                                hex(w2::MD_TEXT)
+                                hex(editor_theme::MD_TEXT)
                             })
                             .when(completed, |this| this.line_through())
                             .child(title),
