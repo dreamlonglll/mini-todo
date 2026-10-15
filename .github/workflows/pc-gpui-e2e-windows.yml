@@ -68,7 +68,7 @@ jobs:
           --work "$env:RUNNER_TEMP/e2e-work"
           --suite debug
           --allow-real-profile
-          --emit-shots W01,W08,N01,I05,D00,D01,F04
+          --emit-shots W01,N01,F08,F09
 
       # 产物 / 日志下载链接在某些环境下不可达：失败详情与关键截图另以注解输出（check-runs annotations API 可取回）
       - name: Report failures as annotations

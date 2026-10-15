@@ -1220,14 +1220,67 @@ def group_fences() -> None:
 
     def f04():
         fence = need_fence()
+        moved, diag = drag_file_into(fence, "winforms", "e2e-drop-winforms.txt")
+        shot(fence, "F04-after-drop")
+        if not moved:
+            raise AssertionError(diag)
+        return diag
+
+    def f09():
+        fence = need_fence()
         moved, diag = drag_file_into(fence, "shell", "e2e-drop-shell.txt")
-        img = shot(fence, "F04-after-drop")
-        maybe_emit("F04", img)
-        if moved:
-            return diag
-        # Shell 数据对象没成功时再用 .NET DataObject 试一次，帮助区分是拖放源还是放置目标的问题
-        moved2, diag2 = drag_file_into(fence, "winforms", "e2e-drop-winforms.txt")
-        raise AssertionError(f"Shell 拖放源拖入失败（{diag}）；对照 .NET DataObject：{diag2}")
+        img = shot(fence, "F09-after-drop")
+        maybe_emit("F09", img)
+        if not moved:
+            raise AssertionError(diag)
+        return diag
+
+    def f08():
+        fence = need_fence()
+        desk = Path(W.run_ps("[Environment]::GetFolderPath('Desktop')").strip().splitlines()[-1])
+        name = "e2e-desk-folder"
+        item = desk / name
+        shutil.rmtree(item, ignore_errors=True)
+        item.mkdir(parents=True)
+        (item / "inside.txt").write_text("from the desktop\n", encoding="utf-8")
+        W.park_cursor()
+        time.sleep(2)
+        out = W.run_ps(f"& '{HERE / 'uia-find.ps1'}' -Name '{name}' -TimeoutSec 15", timeout=90).splitlines()
+        found = next((l for l in reversed(out) if l.count(",") == 3), None)
+        if not found:
+            shutil.rmtree(item, ignore_errors=True)
+            raise Skip(f"桌面上找不到图标（UIA：{out[-3:]}；桌面 {desk}）")
+        ix, iy, iw, ih = (int(v) for v in found.split(","))
+        fx, fy, fw, fh = fence.client()
+        mark = app.log_size()
+        print(f"    桌面图标 {name} at ({ix},{iy},{iw}×{ih}) → 收纳箱中心 ({fx + fw // 2},{fy + fh // 2})")
+        W.drag(ix + iw // 2, iy + ih // 3, fx + fw // 2, fy + fh // 2, steps=40, hold=0.5, step_delay=0.04, settle=1.0)
+        W.park_cursor()
+        c = Checks()
+        try:
+            W.wait_until(lambda: (folder() / name).is_dir() and not item.exists(), 12, "桌面上的文件夹被移进收纳文件夹")
+            c.ok(True, f"已移入 {folder().name}")
+        except (W.Timeout, AssertionError) as e:
+            logs = [l.split("]", 3)[-1].strip() for l in app.log_since(mark).splitlines()][-6:]
+            c.ok(False, f"{e}；桌面上仍在={item.exists()} 收纳夹={[p.name for p in folder().iterdir()]} 日志={logs}")
+        img = shot(fence, "F08-after-desktop-drop")
+        maybe_emit("F08", img)
+        shutil.rmtree(item, ignore_errors=True)
+        return c.done()
+
+    def f07():
+        fence = need_fence()
+        row = app.q("SELECT x, y, width, height FROM fences ORDER BY id LIMIT 1")
+        if not row:
+            raise AssertionError("fences 表里没有记录")
+        x, y, w, h = row[0]
+        cx, cy, cw, ch = fence.client()
+        rect = fence.rect()
+        desc = f"数据库几何=({x},{y},{w}×{h}) 客户区=({cx},{cy},{cw}×{ch}) 窗口外框={rect}"
+        c = Checks()
+        c.ok(abs(cw - w) <= 1 and abs(ch - h) <= 1, f"可见（客户区）尺寸 = 记录的尺寸（{desc}）")
+        c.ok(abs(cx - x) <= 1 and abs(cy - y) <= 1, f"可见（客户区）位置 = 记录的位置（{desc}）")
+        return c.done(desc)
 
     def f05():
         fence = need_fence()
@@ -1263,7 +1316,10 @@ def group_fences() -> None:
         C.report.case("F01", "新增收纳箱：窗口嵌入桌面（owner=桌面宿主 / TOOLWINDOW）、收纳文件夹已创建", f01)
         C.report.case("F02", "往收纳文件夹放文件 → 监听刷新出图标", f02)
         C.report.case("F03", "双击标题改名 → 收纳文件夹同步改名", f03)
-        C.report.case("F04", "真实 OLE 拖放：文件被移进收纳文件夹", f04)
+        C.report.case("F04", "真实 OLE 拖放（.NET DataObject / FileDrop）：文件被移进收纳文件夹", f04)
+        C.report.case("F08", "从桌面把图标（文件夹）真实拖进收纳箱（资源管理器作拖放源）", f08)
+        C.report.case("F09", "真实 OLE 拖放（Shell 文件夹的数据对象，与资源管理器同款）：文件被移进收纳文件夹", f09)
+        C.report.case("F07", "收纳箱可见区域与数据库记录的物理像素几何一致", f07)
         C.report.case("F05", "收纳箱：Win+D 后仍可见", f05)
         C.report.case("F06", "收纳箱：Explorer 重启后自动重挂", f06)
     finally:
