@@ -31,6 +31,8 @@ url = "2"
 regex = "1"
 # 开机自启：与旧版 tauri-plugin-autostart 2.5（底层 auto-launch 0.5）同一库、同名同键
 auto-launch = "0.5"
+# 版本检查（W1，GitHub latest release）：与 core 相同版本与特性，不多编一份
+reqwest = { version = "0.12", features = ["json", "blocking"] }
 
 [target.'cfg(windows)'.dependencies]
 # 与 gpui-pre-windows 同一版本（0.62），避免再编一份 windows crate
@@ -46,6 +48,8 @@ windows = { version = "0.62", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
+    # 收纳箱「自定义颜色」的系统取色对话框 ChooseColorW（W3）
+    "Win32_UI_Controls_Dialogs",
 ] }
 # 托盘（W1）：tray-icon 自带 muda 菜单；只在 Windows 编译（Linux 只用于 CI 与截图）
 tray-icon = { version = "0.21", default-features = false }

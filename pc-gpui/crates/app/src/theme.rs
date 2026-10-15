@@ -526,6 +526,170 @@ pub fn init(cx: &mut App) {
     });
 }
 
+// ---- W3：设置窗口（ui-settings-fence.md §2；Tailwind slate 系，与 `light()` 重合的直接取 `light()`） ----
+
+/// 设置窗口专用颜色
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SettingsTokens {
+    /// 整窗底 `#F8FAFC`
+    pub window_bg: Hsla,
+    /// 标题栏 / 菜单 / 卡片 / 按钮白底
+    pub surface: Hsla,
+    /// 分隔线与卡片边框 `#E2E8F0`
+    pub border: Hsla,
+    /// 行之间的细线 / 菜单悬停底 `#F1F5F9`
+    pub border_light: Hsla,
+    /// 标题 `#1E293B`
+    pub title: Hsla,
+    /// 正文 / 标签 `#334155`
+    pub label: Hsla,
+    /// 次要文字 / 图标 `#64748B`
+    pub secondary: Hsla,
+    /// 说明文字 `#94A3B8`
+    pub tertiary: Hsla,
+    /// 应用主色 `#3B82F6` / 深 `#2563EB`
+    pub primary: Hsla,
+    pub primary_dark: Hsla,
+    /// 菜单选中底 / 当前屏幕配置底 `#EFF6FF`
+    pub active_bg: Hsla,
+    /// 按钮悬停边框 `#CBD5E1`
+    pub hover_border: Hsla,
+    /// 危险按钮：字 `#DC2626`、边 `#FECACA`、悬停底 `#FEF2F2`、悬停边 `#FCA5A5`
+    pub danger_text: Hsla,
+    pub danger_border: Hsla,
+    pub danger_hover_bg: Hsla,
+    pub danger_hover_border: Hsla,
+    /// http 明文警告：字 `#B45309`、图标 `#F59E0B`
+    pub warning_text: Hsla,
+    pub warning_icon: Hsla,
+    /// 「高级」区：边 `#FDE68A`、底 `#FFFBEB`
+    pub advanced_border: Hsla,
+    pub advanced_bg: Hsla,
+    /// 渐变（徽标、Logo）`#3B82F6 → #06B6D4`
+    pub gradient_from: Hsla,
+    pub gradient_to: Hsla,
+    /// 新版本徽标：底 `#FEE2E2`、字 `#EF4444`
+    pub update_badge_bg: Hsla,
+    pub update_badge_text: Hsla,
+}
+
+static SETTINGS_TOKENS: LazyLock<SettingsTokens> = LazyLock::new(|| SettingsTokens {
+    window_bg: hex(0xF8FAFC),
+    surface: hex(0xFFFFFF),
+    border: hex(0xE2E8F0),
+    border_light: hex(0xF1F5F9),
+    title: hex(0x1E293B),
+    label: hex(0x334155),
+    secondary: hex(0x64748B),
+    tertiary: hex(0x94A3B8),
+    primary: hex(0x3B82F6),
+    primary_dark: hex(0x2563EB),
+    active_bg: hex(0xEFF6FF),
+    hover_border: hex(0xCBD5E1),
+    danger_text: hex(0xDC2626),
+    danger_border: hex(0xFECACA),
+    danger_hover_bg: hex(0xFEF2F2),
+    danger_hover_border: hex(0xFCA5A5),
+    warning_text: hex(0xB45309),
+    warning_icon: hex(0xF59E0B),
+    advanced_border: hex(0xFDE68A),
+    advanced_bg: hex(0xFFFBEB),
+    gradient_from: hex(0x3B82F6),
+    gradient_to: hex(0x06B6D4),
+    update_badge_bg: hex(0xFEE2E2),
+    update_badge_text: hex(0xEF4444),
+});
+
+/// 设置窗口颜色
+pub fn settings_tokens() -> &'static SettingsTokens {
+    &SETTINGS_TOKENS
+}
+
+// ---- W3：桌面收纳箱（ui-settings-fence.md §3、§4；深色半透明，白字） ----
+
+/// 收纳箱窗口专用颜色
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FenceTokens {
+    /// 文字 `#FFF`
+    pub text: Hsla,
+    /// 外框 `rgba(255,255,255,.14)`
+    pub window_border: Hsla,
+    /// 展开时标题栏下边线 `rgba(255,255,255,.08)`
+    pub title_divider: Hsla,
+    /// 标题文字阴影 `rgba(0,0,0,.4)`
+    pub title_shadow: Hsla,
+    /// 标题栏按钮 `rgba(255,255,255,.85)`、悬停底 `rgba(255,255,255,.14)`、已固定 `#60A5FA`
+    pub button: Hsla,
+    pub button_hover_bg: Hsla,
+    pub button_active: Hsla,
+    /// 空态 `rgba(255,255,255,.55)`
+    pub empty: Hsla,
+    /// 面板底 `rgba(15,23,42,.92)`、标签 `rgba(255,255,255,.7)`、数值 `rgba(255,255,255,.8)`
+    pub panel_bg: Hsla,
+    pub panel_label: Hsla,
+    pub panel_value: Hsla,
+    /// 色块边框 `rgba(255,255,255,.25)`，当前色 `#FFF`
+    pub swatch_border: Hsla,
+    /// 拖文件经过时的虚线框 `rgba(255,255,255,.45)`
+    pub drop_outline: Hsla,
+    /// 项目悬停底 `rgba(255,255,255,.12)`；选中底 `rgba(96,165,250,.32)` + 内描边 `rgba(147,197,253,.65)`
+    pub item_hover: Hsla,
+    pub item_selected: Hsla,
+    pub item_selected_ring: Hsla,
+    /// 名称文字阴影 `rgba(0,0,0,.65)`
+    pub name_shadow: Hsla,
+    /// 占位图标 `rgba(255,255,255,.75)`
+    pub placeholder_icon: Hsla,
+    /// 滚动条滑块 `rgba(255,255,255,.25)`
+    pub scrollbar_thumb: Hsla,
+    /// 右键菜单：底 `rgba(15,23,42,.96)`、边 `rgba(255,255,255,.12)`、项文字 `rgba(255,255,255,.9)`、
+    /// 悬停 `rgba(255,255,255,.12)`、分隔线 `rgba(255,255,255,.1)`、附注 `rgba(255,255,255,.6)`、阴影 `rgba(0,0,0,.45)`
+    pub menu_bg: Hsla,
+    pub menu_border: Hsla,
+    pub menu_text: Hsla,
+    pub menu_hover: Hsla,
+    pub menu_divider: Hsla,
+    pub menu_note: Hsla,
+    pub menu_shadow: Hsla,
+}
+
+static FENCE_TOKENS: LazyLock<FenceTokens> = LazyLock::new(|| FenceTokens {
+    text: hex(0xFFFFFF),
+    window_border: rgba_css(255, 255, 255, 0.14),
+    title_divider: rgba_css(255, 255, 255, 0.08),
+    title_shadow: rgba_css(0, 0, 0, 0.4),
+    button: rgba_css(255, 255, 255, 0.85),
+    button_hover_bg: rgba_css(255, 255, 255, 0.14),
+    button_active: hex(0x60A5FA),
+    empty: rgba_css(255, 255, 255, 0.55),
+    panel_bg: rgba_css(15, 23, 42, 0.92),
+    panel_label: rgba_css(255, 255, 255, 0.7),
+    panel_value: rgba_css(255, 255, 255, 0.8),
+    swatch_border: rgba_css(255, 255, 255, 0.25),
+    drop_outline: rgba_css(255, 255, 255, 0.45),
+    item_hover: rgba_css(255, 255, 255, 0.12),
+    item_selected: rgba_css(96, 165, 250, 0.32),
+    item_selected_ring: rgba_css(147, 197, 253, 0.65),
+    name_shadow: rgba_css(0, 0, 0, 0.65),
+    placeholder_icon: rgba_css(255, 255, 255, 0.75),
+    scrollbar_thumb: rgba_css(255, 255, 255, 0.25),
+    menu_bg: rgba_css(15, 23, 42, 0.96),
+    menu_border: rgba_css(255, 255, 255, 0.12),
+    menu_text: rgba_css(255, 255, 255, 0.9),
+    menu_hover: rgba_css(255, 255, 255, 0.12),
+    menu_divider: rgba_css(255, 255, 255, 0.1),
+    menu_note: rgba_css(255, 255, 255, 0.6),
+    menu_shadow: rgba_css(0, 0, 0, 0.45),
+});
+
+/// 收纳箱颜色
+pub fn fence_tokens() -> &'static FenceTokens {
+    &FENCE_TOKENS
+}
+
+/// 收纳箱字号 13px（`.fence-window`）
+pub const FENCE_FONT_SIZE: Pixels = px(13.);
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -9,9 +9,11 @@
 //! | [`tray`] | 托盘 | W1（现为空实现） |
 //! | [`auto_sync`] | 自动同步定时器 | W1（现为空实现） |
 //! | [`scheduler`] | 提醒调度与系统通知 | W2（现为空实现） |
+//! | [`fences`] | 桌面收纳箱生命周期：恢复 / 新建 / 显示隐藏 / 重置位置、目录监听、嵌入守护、屏幕组合检测 | W3 |
 
 pub mod auto_sync;
 pub mod autostart;
+pub mod fences;
 pub mod logging;
 pub mod scheduler;
 pub mod single_instance;

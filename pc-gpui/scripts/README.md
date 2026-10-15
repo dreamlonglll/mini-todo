@@ -74,6 +74,7 @@ pc-gpui/scripts/shot.sh --no-build --click 356,576 --sleep 1 --target 新建待�
 | `completed` | 已完成 |
 | `notification` / `notification:<todoId>` | 应用内通知（无 id 时用默认文案；有 id 时用该待办的标题与描述） |
 | `fence:<fenceId>` | 收纳箱窗口 |
+| `fence:new` | 走托盘「新增收纳箱」同一实现新建一个收纳箱（在光标所在显示器右上角找空位，建收纳文件夹）并打开 |
 | `gallery` | 控件样例窗口（`ui/` 里的 Element Plus 风格控件，改控件后对照用） |
 | `toast:<success\|info\|warning\|error>:<文字>` | 在主窗口里弹一条 ElMessage（3s 后消失，截图用 `--wait 1`） |
 | `confirm:<标题>:<内容>` | 在主窗口里弹 ElMessageBox.confirm（`确定` / `取消`） |
@@ -83,3 +84,11 @@ pc-gpui/scripts/shot.sh --no-build --click 356,576 --sleep 1 --target 新建待�
 
 其它 debug 专用环境变量（与旧版相同）：`MINI_TODO_DATA_DIR`（数据目录、日志 `<dir>/logs`；不启用单实例、不刷新开机自启项）、
 `MINI_TODO_FENCES_ROOT`（收纳根目录）、`MINI_TODO_SCREEN_ID_FILE`（文件内容非空时替代屏幕组合 ID）。
+
+GPUI 版新增的 debug 专用环境变量（release 一律忽略）：
+
+| 变量 | 作用 |
+|---|---|
+| `MINI_TODO_DEBUG_DIALOG_PATH` | 非空时设置窗口的导出 / 导入文件对话框不弹出，直接返回该路径（导入导出冒烟测试） |
+| `MINI_TODO_DEBUG_WINDOWS_UI` | `1` 时 Linux 上也显示 Windows 专有的设置项（「固定模式时，嵌入桌面中」），与按 Windows 渲染的参考截图对照 |
+| `MINI_TODO_DEBUG_FENCE_STATE` | `onedrive`：收纳箱窗口打开即显示 OneDrive 提示面板；`drag-hover`：显示外部拖入悬停的虚线框（两者在 Linux 上无法真实触发） |

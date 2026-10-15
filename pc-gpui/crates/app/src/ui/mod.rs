@@ -12,8 +12,19 @@
 //! | [`layers`] | 每个窗口 Root 上的浮层插件（message / message_box 挂在这里，窗口视图不用管） |
 //!
 //! 各窗口需要的其它控件（日期 / 时间 / 颜色选择、下拉、开关、滑块、复选框…）由对应窗口实现者在 `ui/` 下新建文件。
+//!
+//! W3（设置 / 收纳箱）新增：[`ep_switch`]（el-switch）、[`ep_slider`]（el-slider，input / change 两种回调）、
+//! [`ep_radio`]（el-radio-button 组）、[`ep_select`]（el-select，可过滤 / 可清空，虚拟滚动）、
+//! [`ep_color_picker`]（el-color-picker small）、[`ep_dropdown`]（el-dropdown-menu 面板）、[`ep_popper`]（浅色弹层外观与箭头）。
 
 pub mod button;
+pub mod ep_color_picker;
+pub mod ep_dropdown;
+pub mod ep_popper;
+pub mod ep_radio;
+pub mod ep_select;
+pub mod ep_slider;
+pub mod ep_switch;
 pub mod icon;
 pub mod input;
 pub mod layers;

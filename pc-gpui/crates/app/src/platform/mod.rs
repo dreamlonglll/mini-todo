@@ -32,6 +32,8 @@ mod fallback;
 use self::fallback as imp;
 
 pub mod embed;
+pub mod fence_win;
+pub mod file_dialog;
 
 /// 原生窗口句柄（Windows 上是 HWND 的整数值；其它平台不会出现）
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

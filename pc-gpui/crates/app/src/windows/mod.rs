@@ -525,6 +525,8 @@ pub enum DebugOpen {
     Confirm(String, String),
     /// 控件样例窗口（`gallery`）
     Gallery,
+    /// 新建一个收纳箱（`fence:new`，与托盘「新增收纳箱」相同；W3）
+    NewFence,
 }
 
 /// 解析 `main,editor:1:view,editor:new,subtask:3:edit,settings:general,completed,notification:1,fence:1`；
@@ -570,6 +572,7 @@ pub fn parse_debug_open(spec: &str) -> Vec<DebugOpen> {
                     .parse()
                     .ok()
                     .map(|id| DebugOpen::Notification { todo_id: Some(id) }),
+                ["fence", "new"] => Some(DebugOpen::NewFence),
                 ["fence", id] => id.parse().ok().map(DebugOpen::Fence),
                 ["gallery"] => Some(DebugOpen::Gallery),
                 ["toast", kind, text @ ..] if !text.is_empty() => {
@@ -645,6 +648,9 @@ pub fn open_debug(cx: &mut App, items: &[DebugOpen]) {
             DebugOpen::Gallery => {
                 gallery::open(cx);
             }
+            DebugOpen::NewFence => {
+                fence::tray_create_fence(cx);
+            }
             DebugOpen::Toast(kind, text) => {
                 if let Some(main) = WindowManager::main(cx) {
                     crate::ui::message::show_in(main, cx, *kind, text.clone());
@@ -719,6 +725,10 @@ mod tests {
         assert_eq!(
             parse_debug_open("settings:data"),
             vec![DebugOpen::Settings(settings::SettingsTab::Data)]
+        );
+        assert_eq!(
+            parse_debug_open("fence:new,fence:3"),
+            vec![DebugOpen::NewFence, DebugOpen::Fence(3)]
         );
         assert_eq!(
             parse_debug_open(
