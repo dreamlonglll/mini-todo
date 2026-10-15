@@ -17,3 +17,6 @@ pub mod scheduler;
 pub mod single_instance;
 pub mod sync;
 pub mod tray;
+// ---- W2 ----
+/// 系统通知（notify-rust）
+pub mod notify;
