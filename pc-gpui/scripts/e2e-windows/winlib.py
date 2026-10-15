@@ -926,7 +926,7 @@ class Report:
             img = grab()
             img.save(self.out_dir / f"fail-{cid}.png")
             if len(self.snapped) <= self.emit_budget:
-                save_emit(img, self.out_dir, f"fail-{cid}", max_w=960, colors=48)
+                save_emit(img, self.out_dir, f"fail-{cid}", max_w=640, colors=24)
         except Exception as e:  # noqa: BLE001
             print(f"  (失败截图出错: {e})")
 

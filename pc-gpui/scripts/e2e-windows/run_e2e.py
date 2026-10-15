@@ -266,6 +266,19 @@ def setup_env() -> None:
     W.kill_all(C.exe)
     m = W.primary_monitor()
     C.explorer = bool(W.shell_window())
+    # 屏幕上其它程序的窗口（例如 GitHub 托管 runner 的 hosted-compute-agent 终端）会挡住桌面、干扰取色与 Z 序断言：最小化
+    keep = {"Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd", "tray_icon_app"}
+    minimized = []
+    for h in W.top_level_windows():
+        win = Win(h)
+        if not win.visible or win.cls in keep or not win.title or win.flags()["toolWindow"]:
+            continue
+        x0, y0, x1, y1 = win.rect()
+        if x1 - x0 < 50 or y1 - y0 < 50:
+            continue
+        win.show(W.SW_MINIMIZE)
+        minimized.append(W.describe_hwnd(h))
+    print(f"  已最小化其它程序的窗口: {minimized}")
     W.park_cursor()
     W.redraw_desktop()
     time.sleep(2)
@@ -573,6 +586,8 @@ def group_states() -> None:
 # ----------------------------------------------------------------------------- N：应用内通知
 
 def group_notifications() -> None:
+    geo: dict = {}
+
     def n01():
         data = fresh_data("n-data")
         app = App(C.exe, data_dir=data, debug_open="main,notification:1,notification:2,notification:3", tag="N",
@@ -598,9 +613,11 @@ def group_notifications() -> None:
             s = wins[0].scale
             y0, x0, w0, h0 = ys[0]
             print(f"    work={m['work']} clients={[(x, y, w, h) for y, x, w, h in ys]} rects={[n.rect() for n in wins]}")
-            geo = f"work={m['work']} client=({x0},{y0},{w0}×{h0}) rect={wins[0].rect() if len(wins) == 1 else [n.rect() for n in wins]}"
-            c.near(x0 + w0, wr - round(20 * s), 3, f"最下方通知客户区右边缘 = 工作区右 - 20（{geo}）")
-            c.near(y0 + h0, wb - round(20 * s), 3, f"最下方通知客户区下边缘 = 工作区底 - 20（{geo}）")
+            desc = f"work={m['work']} client=({x0},{y0},{w0}×{h0}) rects={[n.rect() for n in wins]}"
+            geo.update(desc=desc, right=x0 + w0, bottom=y0 + h0, wr=wr, wb=wb, s=s)
+            c.near(x0 + w0, wr - round(20 * s), 3, f"最下方通知客户区右边缘 = 工作区右 - 20（{desc}）")
+            # 下边距单独在 N02 精确检查；这里只要求贴着工作区右下角（在工作区内、离底边不超过 30）
+            c.ok(wb - 30 * s <= y0 + h0 <= wb, f"最下方通知贴近工作区底边（下边缘 {y0 + h0}，工作区底 {wb}）")
             c.near(round(w0 / s), 320, 2, "通知逻辑宽")
             c.near(round(h0 / s), 120, 2, "通知逻辑高")
             for i in range(1, len(ys)):
@@ -617,7 +634,20 @@ def group_notifications() -> None:
         finally:
             app.stop()
 
-    C.report.case("N01", "应用内通知：TOOLWINDOW|TOPMOST、主显示器工作区右下、自下而上叠放", n01)
+    def n02():
+        if not geo:
+            raise Skip("N01 没有拿到通知窗口几何")
+        expected = geo["wb"] - round(20 * geo["s"])
+        off = expected - geo["bottom"]
+        if abs(off) > 1:
+            raise AssertionError(
+                f"通知客户区下边缘 {geo['bottom']}，规格为工作区底 - 20 = {expected}（偏差 {off}px；{geo['desc']}）。"
+                "GPUI(gpui-pre-windows 0.3.9) calculate_window_rect 把只在底部的不可见边框高度对半分到上下，"
+                "按逻辑坐标建的窗口客户区整体比请求位置高 height_offset/2（96 DPI 下 4px）")
+        return f"下边距 20px（{geo['desc']}）"
+
+    C.report.case("N01", "应用内通知：TOOLWINDOW|TOPMOST、不抢焦点、右对齐、自下而上叠放（间距 10）", n01)
+    C.report.case("N02", "应用内通知：客户区距工作区底边正好 20px", n02)
 
 
 # ----------------------------------------------------------------------------- I：交互
@@ -936,28 +966,26 @@ def group_webdav() -> None:
 
     def d01():
         stw = need_settings()
-        img = W.grab_client(stw)
-        left = detect_boxes(stw, 300, 240, 520, img=img)
-        right = detect_boxes(stw, 540, 240, 520, img=img)
-        buttons = detect_boxes(stw, 300, 240, 540, border=SETTINGS_BTN_BORDER, tol=6, min_h=30, max_h=50, img=img)
-        print(f"    输入框 x=300: {left}  x=540: {right}  白色按钮 x=300: {buttons}")
         mid = lambda box: (box[0] + box[1]) / 2  # noqa: E731
-        url_y = mid(left[0]) if left else 307
-        user_y = mid(left[1]) if len(left) >= 2 else 375
-        pass_y = mid(right[1]) if len(right) >= 2 else 375
+
+        def fill(x: float, column: float, index: int, fallback_y: float, text: str) -> None:
+            # 每次都重新识别：输入 http:// 地址后表单会多出一行明文提示，下面的控件整体下移
+            boxes = detect_boxes(stw, column, 240, 540)
+            y = mid(boxes[index]) if len(boxes) > index else fallback_y
+            print(f"    输入框 x={column}: {boxes} → 点 ({x}, {y})")
+            W.click(*stw.pt(x, y))
+            W.key_combo("ctrl", "a")
+            W.type_text(text)
+            W.park_cursor()
+            time.sleep(0.5)
+
+        fill(298, 300, 1, 375, DAV_USER)
+        fill(530, 540, 1, 375, DAV_PASS)
+        fill(420, 300, 0, 307, f"http://127.0.0.1:{port}")
+        buttons = detect_boxes(stw, 300, 240, 560, border=SETTINGS_BTN_BORDER, tol=6, min_h=30, max_h=50)
         test_y = mid(buttons[0]) if buttons else 423
+        print(f"    白色按钮 x=300: {buttons} → 测试连接 y={test_y}")
         st["save_y"] = test_y
-        W.click(*stw.pt(420, url_y))
-        W.key_combo("ctrl", "a")
-        W.type_text(f"http://127.0.0.1:{port}")
-        W.click(*stw.pt(298, user_y))
-        W.key_combo("ctrl", "a")
-        W.type_text(DAV_USER)
-        W.click(*stw.pt(530, pass_y))
-        W.key_combo("ctrl", "a")
-        W.type_text(DAV_PASS)
-        W.park_cursor()
-        time.sleep(0.5)
         maybe_emit("D01", shot(stw, "D01-filled"))
         n0 = len(access_log())
         W.click(*stw.pt(300, test_y))       # 测试连接
@@ -1355,7 +1383,7 @@ def main() -> int:
     ap.add_argument("--only", default="")
     ap.add_argument("--allow-real-profile", action="store_true")
     ap.add_argument("--emit-shots", default="")
-    ap.add_argument("--emit-failures", type=int, default=2)
+    ap.add_argument("--emit-failures", type=int, default=1)
     ap.add_argument("--uia-dump", action="store_true")
     args = ap.parse_args()
 
