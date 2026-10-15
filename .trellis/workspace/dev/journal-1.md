@@ -803,3 +803,48 @@ PC 前端（D1 正确性 / 安全 / 同步 UI、D2 性能 / 清理 / 测试）�
 ### Next Steps
 
 - None - task complete
+
+
+## Session 22: 使用 Rust + gpui-pre 重写 PC 端（pc-gpui）并完成 Linux / Windows e2e
+
+**Date**: 2026-10-15
+**Task**: 使用 Rust + gpui-pre 重写 PC 端（pc-gpui）并完成 Linux / Windows e2e
+**Branch**: `claude/determined-mccarthy-6rfxev`
+
+### Summary
+
+新增 pc-gpui（gpui-kit 0.7.3 / gpui-pre 0.3.9）：core 复制旧后端并保留全部测试，app 还原主窗口、编辑、子任务、已完成、通知、设置、桌面收纳箱与 Win32 窗口模式、托盘、单实例、自启、系统通知；视觉回归 48 场景对照旧版；Linux e2e 45/45（Apache+nginx+cloud），Windows e2e（Actions windows-latest）51/51 + release 5/5；e2e 发现的 GPUI 不可见边框偏移、键盘后拖放丢失、收纳箱几何、描述框点击区、行内图片尺寸已修；pc/ 保留待 Windows 实机验收
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `2fed656` | (see git log) |
+| `03d4800` | (see git log) |
+| `68cc14c` | (see git log) |
+| `7bedc5b` | (see git log) |
+| `71a5f29` | (see git log) |
+| `833da43` | (see git log) |
+| `beaf38b` | (see git log) |
+| `faccced` | (see git log) |
+| `a7d48a3` | (see git log) |
+| `b92f457` | (see git log) |
+| `57a0e12` | (see git log) |
+| `facd951` | (see git log) |
+| `9b51a3d` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

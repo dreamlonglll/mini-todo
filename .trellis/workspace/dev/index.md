@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 21
+- **Total Sessions**: 22
 - **Last Active**: 2026-10-15
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~805 | Active |
+| `journal-1.md` | ~850 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 22 | 2026-10-15 | 使用 Rust + gpui-pre 重写 PC 端（pc-gpui）并完成 Linux / Windows e2e | `2fed656`, `03d4800`, `68cc14c`, `7bedc5b`, `71a5f29`, `833da43`, `beaf38b`, `faccced`, `a7d48a3`, `b92f457`, `57a0e12`, `facd951`, `9b51a3d` | `claude/determined-mccarthy-6rfxev` |
 | 21 | 2026-10-15 | 桌面收纳箱（Desktop Fence） | `e1827e5`, `409c5c6`, `845e121`, `8ffca8c` | `main` |
 | 20 | 2026-10-02 | 全面优化：同步链路重写、安全与性能修复、云端校验与 Linux e2e | `c3c2e43`, `0f26d14`, `1b74466`, `5248b8d`, `9582927`, `7d62b5d`, `24a13c0`, `b86191a`, `26c7d5c`, `d757ce1`, `3921c9e`, `060877e`, `f36b762`, `ae0fe2c`, `be13914`, `4b43e03`, `fb4d14a`, `b73b6ea`, `2beb4b6`, `75d6e05`, `3fa6dd6` | `claude/zen-cray-ieqgzr` |
 | 19 | 2026-09-13 | 桌面模式 e2e 验收、改为固定模式嵌入桌面开关并收尾 | `d71a1c4`, `572deec`, `cf0d885`, `1887d6f`, `9927eac`, `1a60d3b` | `feat/desktop-embed-mode` |
