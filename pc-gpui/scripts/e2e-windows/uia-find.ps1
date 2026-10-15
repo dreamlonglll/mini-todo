@@ -31,4 +31,16 @@ while ($sw.Elapsed.TotalSeconds -lt $TimeoutSec) {
     Start-Sleep -Milliseconds 500
 }
 "notfound"
+# 诊断：桌面图标列表里有哪些项
+$names = @()
+foreach ($k in $A::RootElement.FindAll($scope::Children, [System.Windows.Automation.Condition]::TrueCondition)) {
+    if ($k.Current.ClassName -in @('Progman', 'WorkerW')) {
+        $items = $k.FindAll($scope::Descendants, (New-Object System.Windows.Automation.PropertyCondition($A::ControlTypeProperty, [System.Windows.Automation.ControlType]::ListItem)))
+        foreach ($i in $items) { $names += $i.Current.Name }
+        $names += "[$($k.Current.ClassName) 0x$('{0:X}' -f $k.Current.NativeWindowHandle) items=$($items.Count)]"
+    }
+}
+"desktop items: $($names -join ' | ')"
+$hide = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name HideIcons -ErrorAction SilentlyContinue).HideIcons
+"HideIcons=$hide"
 exit 1

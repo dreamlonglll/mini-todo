@@ -1193,10 +1193,12 @@ def group_fences() -> None:
         result = C.out / f"drag-result-{mode}.txt"
         result.unlink(missing_ok=True)
         m = W.primary_monitor()
-        sx, sy = m["work"][0] + 60, m["work"][1] + 300
+        # 放在左上角：拖动路径从主窗口上方经过、不进入主窗口（主窗口居中、顶边约 236）
+        sx, sy = m["work"][0] + 60, m["work"][1] + 40
         drag_proc = subprocess.Popen(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-STA", "-File",
                                       str(HERE / "drag-source.ps1"), "-Path", str(src), "-Mode", mode,
-                                      "-Title", DRAG_TITLE, "-X", str(sx), "-Y", str(sy), "-ResultFile", str(result)],
+                                      "-Title", DRAG_TITLE, "-X", str(sx), "-Y", str(sy), "-W", "220", "-H", "120",
+                                      "-ResultFile", str(result)],
                                      creationflags=W.CREATE_NO_WINDOW)
         dsrc = W.wait_until(lambda: (all_windows_titled(DRAG_TITLE) or [None])[0], 30, "拖放源窗口出现")
         time.sleep(0.8)
@@ -1219,12 +1221,17 @@ def group_fences() -> None:
         return moved, diag
 
     def f04():
+        # 新实例里的第一次外部拖入；不成功时立刻原样再拖一次，区分"拖入整体不可用"与"首次拖入丢失"
         fence = need_fence()
-        moved, diag = drag_file_into(fence, "winforms", "e2e-drop-winforms.txt")
-        shot(fence, "F04-after-drop")
-        if not moved:
-            raise AssertionError(diag)
-        return diag
+        moved, diag = drag_file_into(fence, "winforms", "e2e-drop-1.txt")
+        img = shot(fence, "F04-after-first-drop")
+        if moved:
+            return f"第一次拖入成功：{diag}"
+        maybe_emit("F04", img)
+        moved2, diag2 = drag_file_into(fence, "winforms", "e2e-drop-2.txt")
+        moved3, diag3 = drag_file_into(fence, "winforms", "e2e-drop-3.txt")
+        raise AssertionError(f"新实例里第一次拖入收纳箱没有生效（第二次 {'成功' if moved2 else '也失败'}，第三次 "
+                             f"{'成功' if moved3 else '也失败'}）。第一次：{diag}；第二次：{diag2}；第三次：{diag3}")
 
     def f09():
         fence = need_fence()
@@ -1245,8 +1252,20 @@ def group_fences() -> None:
         (item / "inside.txt").write_text("from the desktop\n", encoding="utf-8")
         W.park_cursor()
         time.sleep(2)
-        out = W.run_ps(f"& '{HERE / 'uia-find.ps1'}' -Name '{name}' -TimeoutSec 15", timeout=90).splitlines()
-        found = next((l for l in reversed(out) if l.count(",") == 3), None)
+        def locate():
+            out = W.run_ps(f"& '{HERE / 'uia-find.ps1'}' -Name '{name}' -TimeoutSec 15", timeout=120).splitlines()
+            print("    UIA: " + " / ".join(out)[:600])
+            return next((l for l in reversed(out) if l.count(",") == 3 and "items" not in l), None), out
+
+        found, out = locate()
+        if not found and any(l.strip() == "HideIcons=1" for l in out):
+            # runner 默认隐藏桌面图标：打开后重启 Explorer（收纳箱会自动重挂，F06 另有断言）
+            subprocess.run(["reg", "add", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
+                            "/v", "HideIcons", "/t", "REG_DWORD", "/d", "0", "/f"], capture_output=True)
+            restart_explorer()
+            W.wait_until(lambda: fence.owner == W.shell_window() != 0, 15, "收纳箱重挂")
+            time.sleep(3)
+            found, out = locate()
         if not found:
             shutil.rmtree(item, ignore_errors=True)
             raise Skip(f"桌面上找不到图标（UIA：{out[-3:]}；桌面 {desk}）")
@@ -1315,8 +1334,8 @@ def group_fences() -> None:
     try:
         C.report.case("F01", "新增收纳箱：窗口嵌入桌面（owner=桌面宿主 / TOOLWINDOW）、收纳文件夹已创建", f01)
         C.report.case("F02", "往收纳文件夹放文件 → 监听刷新出图标", f02)
+        C.report.case("F04", "真实 OLE 拖放（.NET DataObject）：新实例里第一次拖入收纳箱即生效", f04)
         C.report.case("F03", "双击标题改名 → 收纳文件夹同步改名", f03)
-        C.report.case("F04", "真实 OLE 拖放（.NET DataObject / FileDrop）：文件被移进收纳文件夹", f04)
         C.report.case("F08", "从桌面把图标（文件夹）真实拖进收纳箱（资源管理器作拖放源）", f08)
         C.report.case("F09", "真实 OLE 拖放（Shell 文件夹的数据对象，与资源管理器同款）：文件被移进收纳文件夹", f09)
         C.report.case("F07", "收纳箱可见区域与数据库记录的物理像素几何一致", f07)
