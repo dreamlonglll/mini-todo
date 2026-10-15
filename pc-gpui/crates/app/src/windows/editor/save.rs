@@ -175,7 +175,7 @@ impl EditorWindow {
         let state = AppState::global(cx);
         let task = state.update(cx, |state, cx| state.create_todo(request, cx));
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            let created = match task.await {
+            let mut created = match task.await {
                 Ok(todo) => todo,
                 Err(e) => {
                     let _ = this.update_in(cx, |_, window, cx| {
@@ -186,25 +186,29 @@ impl EditorWindow {
                 }
             };
             let mut ok = true;
-            // create_todo 不接受重复字段：再 update 一次
+            // create_todo 不接受重复字段：再 update 一次（成功后以更新结果为准，与旧版 `created = await update_todo` 一致：
+            // 后续子任务落库失败、原地切成编辑态时，`repeat_enabled` 等原值要来自这次更新）
             if form.repeat_enabled {
                 let request = build_update_request(&form, &Originals::default());
                 let id = created.id;
                 let task = cx.update(|_, cx| {
                     AppState::global(cx).update(cx, |state, cx| state.update_todo(id, request, cx))
                 });
-                if let Ok(task) = task
-                    && let Err(e) = task.await
-                {
-                    ok = false;
-                    let _ = this.update_in(cx, |_, window, cx| {
-                        message::error_with(
-                            window,
-                            cx,
-                            "待办已创建，但重复提醒未保存，请点击「保存」重试",
-                            &e,
-                        )
-                    });
+                if let Ok(task) = task {
+                    match task.await {
+                        Ok(updated) => created = updated,
+                        Err(e) => {
+                            ok = false;
+                            let _ = this.update_in(cx, |_, window, cx| {
+                                message::error_with(
+                                    window,
+                                    cx,
+                                    "待办已创建，但重复提醒未保存，请点击「保存」重试",
+                                    &e,
+                                )
+                            });
+                        }
+                    }
                 }
             }
             if ok {

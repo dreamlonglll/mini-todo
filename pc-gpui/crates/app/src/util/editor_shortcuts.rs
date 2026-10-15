@@ -9,15 +9,24 @@
 //! - 有弹出层打开时（下拉、日期 / 时间 / 颜色面板、对话框、确认框、图片预览），Esc 先交给弹出层关闭——
 //!   由窗口自己的动作处理函数判断（[`resolve_editor_shortcut`] 只管按键本身）。
 
-use gpui_kit::{App, KeyBinding, Keystroke, actions};
+use gpui_kit::{App, Global, KeyBinding, Keystroke, actions};
 
 actions!(mini_todo_editor, [EditorClose, EditorSubmit]);
 
 /// 编辑类窗口根元素的 key context
 pub const EDITOR_CONTEXT: &str = "MiniTodoEditor";
 
-/// 注册快捷键（`services::scheduler::start` 之前、开编辑窗口之前调用一次即可；重复调用无害）
+/// 已注册过快捷键的标记（`App::bind_keys` 不去重，每调一次 keymap 就多 3 条）
+struct EditorShortcutsBound;
+
+impl Global for EditorShortcutsBound {}
+
+/// 注册快捷键（开编辑窗口之前调用；只在第一次调用时注册，之后的调用什么都不做）
 pub fn init(cx: &mut App) {
+    if cx.has_global::<EditorShortcutsBound>() {
+        return;
+    }
+    cx.set_global(EditorShortcutsBound);
     cx.bind_keys([
         KeyBinding::new("escape", EditorClose, Some(EDITOR_CONTEXT)),
         KeyBinding::new("secondary-enter", EditorSubmit, Some(EDITOR_CONTEXT)),
