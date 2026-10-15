@@ -115,23 +115,20 @@ pub fn handle_left_click(cx: &mut App) {
     }
 }
 
-/// 收纳箱三个菜单项的转发层。
-///
-/// TODO(merge, W3)：W3 在 `windows/fence.rs` / `services/fences.rs` 里提供 `create_fence(cx)` /
-/// `toggle_fences_visibility(cx)` / `reset_fence_positions(cx)` 后，在这三个函数里接线（只改这里）。
+/// 收纳箱三个菜单项的转发层（实现在 `windows::fence`）
 mod fences {
     use gpui_kit::App;
 
-    pub fn create(_cx: &mut App) {
-        log::warn!("[tray] 新增收纳箱：收纳箱入口尚未接线（W3）");
+    pub fn create(cx: &mut App) {
+        crate::windows::fence::tray_create_fence(cx);
     }
 
-    pub fn toggle_visibility(_cx: &mut App) {
-        log::warn!("[tray] 显示/隐藏所有收纳箱：收纳箱入口尚未接线（W3）");
+    pub fn toggle_visibility(cx: &mut App) {
+        crate::windows::fence::tray_toggle_fences(cx);
     }
 
-    pub fn reset_positions(_cx: &mut App) {
-        log::warn!("[tray] 重置收纳箱位置：收纳箱入口尚未接线（W3）");
+    pub fn reset_positions(cx: &mut App) {
+        crate::windows::fence::tray_reset_fences(cx);
     }
 }
 

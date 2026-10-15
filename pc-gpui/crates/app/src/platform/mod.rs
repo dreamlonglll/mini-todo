@@ -32,6 +32,8 @@ mod fallback;
 use self::fallback as imp;
 
 pub mod embed;
+pub mod fence_win;
+pub mod file_dialog;
 #[cfg(windows)]
 mod subclass;
 

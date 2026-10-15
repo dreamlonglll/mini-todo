@@ -48,6 +48,8 @@ windows = { version = "0.62", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
+    # 收纳箱「自定义颜色」的系统取色对话框 ChooseColorW（W3）
+    "Win32_UI_Controls_Dialogs",
 ] }
 # 托盘（W1）：tray-icon 自带 muda 菜单；只在 Windows 编译（Linux 只用于 CI 与截图）
 tray-icon = { version = "0.21", default-features = false }
