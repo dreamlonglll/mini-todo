@@ -123,10 +123,11 @@ const MIGRATIONS: &[(i32, MigrationFn)] = &[
     (26, migration_v26),
     (27, migration_v27),
     (28, migration_v28),
+    (29, migration_v29),
 ];
 
 /// 最新迁移版本号（启动时可与 [`current_version`] 比较，判断是否有待执行迁移，例如迁移前备份）
-pub const LATEST_VERSION: i32 = 28;
+pub const LATEST_VERSION: i32 = 29;
 
 fn ensure_migrations_table(conn: &Connection) -> Result<()> {
     conn.execute(
@@ -163,6 +164,61 @@ pub(crate) fn run_migrations_to(conn: &Connection, target: i32) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// 迁移 v29：桌面收纳箱（10-15 desktop-fence）。
+///
+/// - `fences`：收纳箱元数据。`x` / `y` / `width` / `height` 是物理像素（虚拟屏幕坐标），
+///   `width` / `height` 为展开态尺寸；`folder_name` 是收纳根目录下的子文件夹名
+/// - `fence_items`：只是排序与原始路径的附加信息，内容以收纳文件夹为准（集成阶段按文件夹对账）
+/// - `fence_layouts`：按屏幕组合分别记忆的位置与尺寸（PRD R5），`screen_config_id` 与 `screen_configs.config_id`
+///   同一格式；`fences.x/y/width/height` 保留为"最近一次用户调整的位置"，当前组合没有记录时回退到它
+///
+/// 三张表都是设备相关数据（路径、屏幕坐标），性质同 `screen_configs`：不进导出 / WebDAV 同步，
+/// **不**接 v28 的 `local_seq` 变更计数触发器与墓碑。
+///
+/// - settings 键 `fence_onedrive_notice_shown`：桌面被 OneDrive 重定向时，首次收纳的一次性提示是否
+///   已显示过。同样是设备本地状态：不在 `SYNCED_SETTING_KEYS`、不在 `AppSettings`，不导出、不同步
+fn migration_v29(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS fences (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            title        TEXT    NOT NULL,
+            folder_name  TEXT    NOT NULL UNIQUE,
+            x            INTEGER NOT NULL,
+            y            INTEGER NOT NULL,
+            width        INTEGER NOT NULL,
+            height       INTEGER NOT NULL,
+            collapsed    INTEGER NOT NULL DEFAULT 0,
+            locked       INTEGER NOT NULL DEFAULT 0,
+            bg_color     TEXT    NOT NULL DEFAULT '#000000',
+            bg_alpha     REAL    NOT NULL DEFAULT 0.45,
+            icon_size    INTEGER NOT NULL DEFAULT 48,
+            sort_order   INTEGER NOT NULL DEFAULT 0,
+            created_at   TEXT    NOT NULL,
+            updated_at   TEXT    NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS fence_items (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            fence_id      INTEGER NOT NULL REFERENCES fences(id) ON DELETE CASCADE,
+            file_name     TEXT    NOT NULL,
+            original_path TEXT,
+            sort_order    INTEGER NOT NULL DEFAULT 0,
+            UNIQUE (fence_id, file_name)
+        );
+        CREATE TABLE IF NOT EXISTS fence_layouts (
+            fence_id         INTEGER NOT NULL REFERENCES fences(id) ON DELETE CASCADE,
+            screen_config_id TEXT    NOT NULL,
+            x                INTEGER NOT NULL,
+            y                INTEGER NOT NULL,
+            width            INTEGER NOT NULL,
+            height           INTEGER NOT NULL,
+            updated_at       TEXT    NOT NULL,
+            PRIMARY KEY (fence_id, screen_config_id)
+        );
+        INSERT OR IGNORE INTO settings (key, value, updated_at)
+            VALUES ('fence_onedrive_notice_shown', 'false', datetime('now', 'localtime'));",
+    )
 }
 
 /// 迁移 v28：同步重构（10-02 全面优化 R1）。
@@ -1009,7 +1065,10 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(title, "老数据", "from v{from}");
-            assert_eq!(notify_at, "2026-05-01 09:30:00", "from v{from}");
+            // 时间规范化是 v28 做的；已经是 v28 的库之后写入的值不会再被改写
+            if from < 28 {
+                assert_eq!(notify_at, "2026-05-01 09:30:00", "from v{from}");
+            }
             let subtasks: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM subtasks WHERE parent_id = 1",
@@ -1053,7 +1112,7 @@ mod tests {
         run_migrations(&conn).expect("全新库迁移失败");
 
         assert_eq!(max_version(&conn), LATEST_VERSION);
-        assert_eq!(LATEST_VERSION, 28);
+        assert_eq!(LATEST_VERSION, 29);
         assert_eq!(
             MIGRATIONS.last().map(|(v, _)| *v),
             Some(LATEST_VERSION),
@@ -1237,5 +1296,139 @@ mod tests {
         // 规范化发生在建触发器之前：local_seq 仍是种子值
         assert_eq!(meta(&conn, "local_seq"), 1);
         assert_eq!(meta(&conn, "synced_seq"), 0);
+    }
+
+    fn insert_fence(conn: &Connection, id: i64, folder: &str) {
+        conn.execute(
+            "INSERT INTO fences (id, title, folder_name, x, y, width, height, created_at, updated_at)
+             VALUES (?1, '收纳箱', ?2, 10, 20, 368, 334, datetime('now', 'localtime'), datetime('now', 'localtime'))",
+            rusqlite::params![id, folder],
+        )
+        .unwrap();
+    }
+
+    /// v29：fences / fence_items / fence_layouts 三张表，列默认值与契约（spec/backend/desktop-fences.md）一致。
+    #[test]
+    fn v29_creates_fence_tables_with_contract_defaults() {
+        let conn = fresh_conn();
+        run_migrations(&conn).expect("迁移失败");
+        assert!(table_exists(&conn, "fences"));
+        assert!(table_exists(&conn, "fence_items"));
+        assert!(table_exists(&conn, "fence_layouts"));
+
+        insert_fence(&conn, 1, "收纳箱");
+        let row: (i64, i64, String, f64, i64, i64) = conn
+            .query_row(
+                "SELECT collapsed, locked, bg_color, bg_alpha, icon_size, sort_order FROM fences WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (0, 0, "#000000".to_string(), 0.45, 48, 0));
+
+        let dup = conn.execute(
+            "INSERT INTO fences (title, folder_name, x, y, width, height, created_at, updated_at)
+             VALUES ('另一个', '收纳箱', 0, 0, 1, 1, '', '')",
+            [],
+        );
+        assert!(dup.is_err(), "folder_name 唯一");
+
+        conn.execute(
+            "INSERT INTO fence_items (fence_id, file_name, original_path) VALUES (1, 'a.lnk', 'C:\\Users\\x\\Desktop\\a.lnk')",
+            [],
+        )
+        .unwrap();
+        let dup_item = conn.execute(
+            "INSERT INTO fence_items (fence_id, file_name) VALUES (1, 'a.lnk')",
+            [],
+        );
+        assert!(dup_item.is_err(), "(fence_id, file_name) 唯一");
+        let orphan = conn.execute(
+            "INSERT INTO fence_items (fence_id, file_name) VALUES (999, 'b.lnk')",
+            [],
+        );
+        assert!(orphan.is_err(), "fence_id 必须指向已有收纳箱");
+
+        let notice: String = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'fence_onedrive_notice_shown'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(notice, "false");
+        assert!(
+            !crate::db::settings_kv::is_synced_setting("fence_onedrive_notice_shown"),
+            "OneDrive 提示标记是设备本地状态，不参与同步"
+        );
+    }
+
+    /// v29：删除收纳箱级联删除它的 fence_items 与 fence_layouts（启动路径 `migrate` 之后外键是开着的）。
+    #[test]
+    fn v29_deleting_a_fence_cascades_to_its_items_and_layouts() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).expect("迁移失败");
+        let fk: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(fk, 1, "迁移完成后外键必须是开着的，级联删除才生效");
+        insert_fence(&conn, 1, "a");
+        insert_fence(&conn, 2, "b");
+        conn.execute_batch(
+            "INSERT INTO fence_items (fence_id, file_name) VALUES (1, 'x.lnk');
+             INSERT INTO fence_items (fence_id, file_name) VALUES (1, 'y.lnk');
+             INSERT INTO fence_items (fence_id, file_name) VALUES (2, 'x.lnk');
+             INSERT INTO fence_layouts (fence_id, screen_config_id, x, y, width, height, updated_at)
+                 VALUES (1, '1_1920x1080@100', 0, 0, 368, 334, '');
+             INSERT INTO fence_layouts (fence_id, screen_config_id, x, y, width, height, updated_at)
+                 VALUES (1, '2_3840x2160@150_2560x1600@125', 0, 0, 552, 504, '');
+             INSERT INTO fence_layouts (fence_id, screen_config_id, x, y, width, height, updated_at)
+                 VALUES (2, '1_1920x1080@100', 10, 10, 368, 334, '');
+             DELETE FROM fences WHERE id = 1;",
+        )
+        .unwrap();
+        let ids = |sql: &str| -> Vec<i64> {
+            conn.prepare(sql)
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_>>()
+                .unwrap()
+        };
+        assert_eq!(ids("SELECT fence_id FROM fence_items"), vec![2]);
+        assert_eq!(ids("SELECT fence_id FROM fence_layouts"), vec![2]);
+        let dup = conn.execute(
+            "INSERT INTO fence_layouts (fence_id, screen_config_id, x, y, width, height, updated_at)
+             VALUES (2, '1_1920x1080@100', 0, 0, 1, 1, '')",
+            [],
+        );
+        assert!(dup.is_err(), "(fence_id, screen_config_id) 唯一");
+    }
+
+    /// v29：收纳箱是设备相关数据，不接同步的变更计数（写它们不能触发"有本地变更"去上传）。
+    #[test]
+    fn v29_fence_writes_do_not_count_as_sync_changes() {
+        let conn = fresh_conn();
+        run_migrations(&conn).expect("迁移失败");
+        let base = meta(&conn, "local_seq");
+
+        insert_fence(&conn, 1, "a");
+        conn.execute(
+            "UPDATE fences SET title = 'b', collapsed = 1 WHERE id = 1",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO fence_items (fence_id, file_name) VALUES (1, 'x.lnk')",
+            [],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM fences WHERE id = 1", []).unwrap();
+
+        assert_eq!(meta(&conn, "local_seq"), base);
+        let tombstones: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tombstones", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(tombstones, 0);
     }
 }

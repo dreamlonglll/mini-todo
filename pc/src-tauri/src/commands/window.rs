@@ -4,6 +4,7 @@ use crate::db::{
     DEFAULT_WINDOW_BG_ALPHA, DEFAULT_WINDOW_BG_COLOR,
 };
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -820,7 +821,12 @@ fn apply_fixed_ex_style(window: &WebviewWindow, fixed: bool) {
     let Some(hwnd) = window_hwnd(window) else {
         return;
     };
+    apply_fixed_ex_style_hwnd(hwnd, fixed);
+}
 
+/// [`apply_fixed_ex_style`] 的 Win32 核心，按句柄作用于任意窗口（收纳箱同样用它去掉任务栏按钮）。
+#[cfg(target_os = "windows")]
+fn apply_fixed_ex_style_hwnd(hwnd: HWND, fixed: bool) {
     unsafe {
         let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
         let new_style = if fixed {
@@ -974,6 +980,21 @@ fn needs_reattach(
     cached_owner == 0 || !owner_alive || shell_now != cached_owner || current_owner != cached_owner
 }
 
+/// `WS_EX_TOOLWINDOW` / `WS_EX_APPWINDOW` 的位值（纯函数要在所有平台上编译、测试，不依赖 windows crate）
+const EX_TOOLWINDOW_BIT: u32 = 0x0000_0080;
+const EX_APPWINDOW_BIT: u32 = 0x0004_0000;
+
+/// 固定 / 嵌入桌面的窗口应当是"工具窗口、无 APPWINDOW"；返回 true 表示样式被抹掉了，需要重申。
+///
+/// 轮询线程据此自愈：前端的 `setResizable` 是异步的窗口插件命令（消息排进事件循环），而模式命令是
+/// 跑在主线程上的同步命令，里面的 `run_on_main_thread` 会**就地**执行。主线程正卡在 WebView2 的
+/// 嵌套消息泵里（启动时同时恢复收纳箱窗口）时，同步命令可能先于排队的 `SetResizable` 执行，随后那次
+/// `apply_diff` 把刚打的 `WS_EX_TOOLWINDOW` 抹掉、再没有人补回来。从轮询线程排队的重申一定排在它之后。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn lacks_tool_window_style(ex_style: u32) -> bool {
+    ex_style & EX_TOOLWINDOW_BIT == 0 || ex_style & EX_APPWINDOW_BIT != 0
+}
+
 #[cfg(target_os = "windows")]
 fn window_class_name(hwnd: HWND) -> String {
     let mut buf = [0u16; 64];
@@ -1020,9 +1041,20 @@ fn desktop_attach(window: &WebviewWindow) {
     let Some(hwnd) = window_hwnd(window) else {
         return;
     };
-    let Some(host) = desktop_host() else {
-        return;
-    };
+    if let Some(host) = desktop_attach_hwnd(hwnd) {
+        DESKTOP_OWNER.store(host, Ordering::SeqCst);
+    }
+}
+
+/// [`desktop_attach`] 的 Win32 核心：按句柄把任意窗口挂到桌面宿主上，不碰任何全局状态。
+/// 返回挂上的宿主句柄；宿主暂不可用（Explorer 未启动）时返回 `None`、什么都不做。
+///
+/// 主窗口与收纳箱共用：调用方各自记录 owner（主窗口写 `DESKTOP_OWNER`，收纳箱写
+/// [`EMBEDDED_WINDOWS`]）。排序约束同 [`desktop_attach`]：必须在主线程队列里、排在会触发
+/// tao `apply_diff` 的调用之后执行。
+#[cfg(target_os = "windows")]
+fn desktop_attach_hwnd(hwnd: HWND) -> Option<isize> {
+    let host = desktop_host()?;
     let host_raw = host.0 as isize;
 
     unsafe {
@@ -1031,7 +1063,7 @@ fn desktop_attach(window: &WebviewWindow) {
             SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, host_raw);
         }
         // 不进任务栏、不参与 Alt+Tab，与固定模式共用同一套样式
-        apply_fixed_ex_style(window, true);
+        apply_fixed_ex_style_hwnd(hwnd, true);
         // owner 刚换过才需要 SWP_FRAMECHANGED 让 shell 重新认识这个窗口；
         // 幂等重申时省掉，避免每次 reassert 都触发一轮 WM_NCCALCSIZE
         let mut flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
@@ -1041,7 +1073,7 @@ fn desktop_attach(window: &WebviewWindow) {
         let _ = SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0, flags);
     }
 
-    DESKTOP_OWNER.store(host_raw, Ordering::SeqCst);
+    Some(host_raw)
 }
 
 /// 把主窗口从桌面上摘下来：清 owner、按当前模式恢复任务栏样式、抬回普通 Z 序。
@@ -1085,21 +1117,45 @@ pub fn tick_desktop_mode(window: &WebviewWindow) {
             return;
         };
         let cached_owner = DESKTOP_OWNER.load(Ordering::SeqCst);
-        let (owner_alive, shell_now, current_owner) = unsafe {
+        let (owner_alive, shell_now, current_owner, ex_style) = unsafe {
             let alive = cached_owner != 0 && IsWindow(HWND(cached_owner as *mut _)).as_bool();
             (
                 alive,
                 GetShellWindow().0 as isize,
                 GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT),
+                GetWindowLongW(hwnd, GWL_EXSTYLE) as u32,
             )
         };
-        if needs_reattach(cached_owner, owner_alive, shell_now, current_owner) {
+        // 样式被晚到的 tao 操作抹掉时同样重挂（见 lacks_tool_window_style）
+        if needs_reattach(cached_owner, owner_alive, shell_now, current_owner)
+            || (shell_now != 0 && lacks_tool_window_style(ex_style))
+        {
             let w = window.clone();
             let _ = window.run_on_main_thread(move || {
                 if is_desktop_mode() {
                     desktop_attach(&w);
                 }
             });
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = window;
+    }
+}
+
+/// 固定模式轮询：任务栏样式被晚到的 tao 操作抹掉时（见 [`lacks_tool_window_style`]）排队重申。
+///
+/// 只在样式确实不对时才排队，正常情况下每个 tick 只多一次 `GetWindowLongW`。
+pub fn tick_fixed_style(window: &WebviewWindow) {
+    #[cfg(target_os = "windows")]
+    {
+        let Some(hwnd) = window_hwnd(window) else {
+            return;
+        };
+        let ex_style = unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32;
+        if is_fixed_mode() && lacks_tool_window_style(ex_style) {
+            reassert_window_mode_state(window);
         }
     }
     #[cfg(not(target_os = "windows"))]
@@ -1139,6 +1195,178 @@ fn reassert_window_mode_state(window: &WebviewWindow) {
     #[cfg(not(target_os = "windows"))]
     {
         let _ = window;
+    }
+}
+
+// ============ 始终嵌入桌面的附属窗口（收纳箱） ============
+//
+// 主窗口的嵌入是三种模式之一，仍由 IS_DESKTOP_MODE / DESKTOP_OWNER 管理；收纳箱窗口只有"始终
+// 嵌入"一种形态（prd R2），按 label 登记在这里：建窗后 `embed_window_in_desktop`，窗口 Destroyed
+// 时 `release_embedded_window`。tao flag（always_on_bottom / minimizable(false) / skip_taskbar）
+// 在建窗时一次给齐，这里只负责 Win32 那一半：owner=Progman + WS_EX_TOOLWINDOW + HWND_BOTTOM。
+
+/// 一个已登记的嵌入窗口
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EmbeddedWindowState {
+    /// 窗口句柄：登记时取一次。轮询线程据此读 owner，不必每个 tick 跨线程向 tao 要句柄
+    hwnd: isize,
+    /// 最近一次挂上的宿主（Progman），0 = 尚未挂上
+    owner: isize,
+}
+
+/// 已登记的嵌入窗口：label → 状态。持锁期间只做只读 Win32 调用，绝不调 `run_on_main_thread`
+static EMBEDDED_WINDOWS: Mutex<BTreeMap<String, EmbeddedWindowState>> = Mutex::new(BTreeMap::new());
+
+fn with_embedded_windows<R>(f: impl FnOnce(&mut BTreeMap<String, EmbeddedWindowState>) -> R) -> R {
+    let mut map = EMBEDDED_WINDOWS.lock().unwrap_or_else(|e| e.into_inner());
+    f(&mut map)
+}
+
+/// 登记一个始终嵌入桌面的窗口并排队挂载（幂等，重复调用只刷新句柄）。
+///
+/// 调用前窗口的 tao flag 必须已经给齐（建窗参数里带 `always_on_bottom(true)` /
+/// `minimizable(false)` / `skip_taskbar(true)`）：挂载排在主线程队列里，之后不应再有
+/// 会触发 `apply_diff` 的 tao 调用；如有（如 `show()` / `hide()`），紧跟着调
+/// [`reassert_embedded_window`]。
+pub fn embed_window_in_desktop(window: &WebviewWindow) {
+    #[cfg(target_os = "windows")]
+    {
+        let Some(hwnd) = window_hwnd(window) else {
+            return;
+        };
+        let label = window.label().to_string();
+        with_embedded_windows(|map| {
+            let entry = map
+                .entry(label)
+                .or_insert(EmbeddedWindowState { hwnd: 0, owner: 0 });
+            entry.hwnd = hwnd.0 as isize;
+        });
+        reassert_embedded_window(window);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = window;
+    }
+}
+
+/// 排队重申嵌入状态（幂等）：tao 的 `show()` / `hide()` 等会经 `apply_diff` 整体重写 ex style、
+/// 抹掉 `WS_EX_TOOLWINDOW`，调用之后紧跟这一步。闭包执行时再查一次登记表：排队期间窗口
+/// 可能已被删除，不能对已释放的窗口做任何事。未登记的窗口是 no-op。
+pub fn reassert_embedded_window(window: &WebviewWindow) {
+    #[cfg(target_os = "windows")]
+    {
+        let w = window.clone();
+        let _ = window.run_on_main_thread(move || attach_embedded_window(&w));
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = window;
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn attach_embedded_window(window: &WebviewWindow) {
+    let label = window.label();
+    let Some(state) = with_embedded_windows(|map| map.get(label).copied()) else {
+        return;
+    };
+    let hwnd = HWND(state.hwnd as *mut _);
+    if !unsafe { IsWindow(hwnd) }.as_bool() {
+        return;
+    }
+    if let Some(host) = desktop_attach_hwnd(hwnd) {
+        with_embedded_windows(|map| {
+            if let Some(entry) = map.get_mut(label) {
+                entry.owner = host;
+            }
+        });
+    }
+}
+
+/// 一次性设置窗口的位置与尺寸（物理像素）。
+///
+/// Windows 上是一次 `SetWindowPos(SWP_NOZORDER | SWP_NOACTIVATE)`：拖左 / 上边缩放时位置与尺寸
+/// 同时变化，分成 tao 的 `set_position` + `set_size` 两步会抖。不改 Z 序、不激活、不经过 tao 的
+/// `apply_diff`（tao 的 `ALWAYS_ON_BOTTOM` 钩子只改 `hwndInsertAfter`，带 `SWP_NOZORDER` 时无效），
+/// 嵌入样式不受影响；最小尺寸仍由 tao 的 `WM_GETMINMAXINFO` 兜底。
+pub fn set_window_bounds_physical(
+    window: &WebviewWindow,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let hwnd = window_hwnd(window).ok_or_else(|| "取不到窗口句柄".to_string())?;
+        unsafe {
+            SetWindowPos(
+                hwnd,
+                HWND(std::ptr::null_mut()),
+                x,
+                y,
+                width as i32,
+                height as i32,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            )
+        }
+        .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        window
+            .set_position(tauri::PhysicalPosition::new(x, y))
+            .and_then(|_| window.set_size(tauri::PhysicalSize::new(width, height)))
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// 窗口销毁时注销（`WindowEvent::Destroyed`）；未登记的 label 是 no-op
+pub fn release_embedded_window(label: &str) {
+    with_embedded_windows(|map| {
+        map.remove(label);
+    });
+}
+
+/// 200ms 轮询：已登记的嵌入窗口里，宿主失效（Explorer 重启 / owner 被清）或工具窗口样式被抹掉的排队重挂。
+///
+/// 每个 tick 只调一次 `GetShellWindow()`，每个窗口三次只读 Win32 调用；判定复用主窗口的
+/// [`needs_reattach`]。先在锁内收集要重挂的 label，释放锁后再 `run_on_main_thread`。
+pub fn tick_embedded_windows(app: &tauri::AppHandle) {
+    #[cfg(target_os = "windows")]
+    {
+        let stale: Vec<String> = with_embedded_windows(|map| {
+            if map.is_empty() {
+                return Vec::new();
+            }
+            let shell_now = unsafe { GetShellWindow() }.0 as isize;
+            map.iter()
+                .filter_map(|(label, state)| {
+                    let hwnd = HWND(state.hwnd as *mut _);
+                    let (alive, owner_alive, current_owner, ex_style) = unsafe {
+                        (
+                            IsWindow(hwnd).as_bool(),
+                            state.owner != 0 && IsWindow(HWND(state.owner as *mut _)).as_bool(),
+                            GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT),
+                            GetWindowLongW(hwnd, GWL_EXSTYLE) as u32,
+                        )
+                    };
+                    let broken = needs_reattach(state.owner, owner_alive, shell_now, current_owner)
+                        || (shell_now != 0 && lacks_tool_window_style(ex_style));
+                    (alive && broken).then(|| label.clone())
+                })
+                .collect()
+        });
+        for label in stale {
+            if let Some(window) = app.get_webview_window(&label) {
+                reassert_embedded_window(&window);
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = app;
     }
 }
 
@@ -1766,17 +1994,24 @@ pub fn list_screen_configs(db: State<Database>) -> Result<Vec<ScreenConfig>, Str
     .map_err(|e| e.to_string())
 }
 
+/// 删除屏幕配置，连同桌面收纳箱在该屏幕组合下的位置记录（`fence_layouts`，PRD R5）
+fn delete_screen_config_rows(conn: &rusqlite::Connection, config_id: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM screen_configs WHERE config_id = ?",
+        [config_id],
+    )?;
+    conn.execute(
+        "DELETE FROM fence_layouts WHERE screen_config_id = ?",
+        [config_id],
+    )?;
+    Ok(())
+}
+
 /// 删除屏幕配置
 #[tauri::command]
 pub fn delete_screen_config(db: State<Database>, config_id: String) -> Result<(), String> {
-    db.with_connection(|conn| {
-        conn.execute(
-            "DELETE FROM screen_configs WHERE config_id = ?",
-            [&config_id],
-        )?;
-        Ok(())
-    })
-    .map_err(|e| e.to_string())
+    db.with_transaction(|tx| delete_screen_config_rows(tx, &config_id))
+        .map_err(|e: rusqlite::Error| e.to_string())
 }
 
 /// 更新屏幕配置的显示名称
@@ -1815,6 +2050,32 @@ pub fn set_show_calendar(db: State<Database>, show: bool) -> Result<(), String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deleting_a_screen_config_also_drops_fence_layouts_of_that_combination() {
+        let db = Database::new_in_memory().unwrap();
+        db.with_connection(|conn| {
+            conn.execute_batch(
+                "INSERT INTO screen_configs (config_id, display_name, window_x, window_y, window_width, window_height, is_fixed, updated_at)
+                     VALUES ('1_1920x1080@100', 'a', 0, 0, 380, 600, 0, ''), ('2_3840x2160@150_2560x1600@125', 'b', 0, 0, 380, 600, 0, '');
+                 INSERT INTO fences (id, title, folder_name, x, y, width, height, created_at, updated_at)
+                     VALUES (1, '收纳箱', '收纳箱', 0, 0, 368, 334, '', '');
+                 INSERT INTO fence_layouts (fence_id, screen_config_id, x, y, width, height, updated_at)
+                     VALUES (1, '1_1920x1080@100', 0, 0, 368, 334, ''), (1, '2_3840x2160@150_2560x1600@125', 9, 9, 552, 504, '');",
+            )?;
+            delete_screen_config_rows(conn, "1_1920x1080@100")?;
+            let configs: i64 =
+                conn.query_row("SELECT COUNT(*) FROM screen_configs", [], |r| r.get(0))?;
+            let layouts: Vec<String> = conn
+                .prepare("SELECT screen_config_id FROM fence_layouts")?
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            assert_eq!(configs, 1);
+            assert_eq!(layouts, vec!["2_3840x2160@150_2560x1600@125".to_string()]);
+            Ok(())
+        })
+        .unwrap();
+    }
 
     const MONITOR: MonitorBounds = MonitorBounds {
         x: 0,
@@ -2197,6 +2458,26 @@ mod tests {
     #[test]
     fn reattaches_when_owner_was_cleared_elsewhere() {
         assert!(needs_reattach(PROGMAN, true, PROGMAN, 0));
+    }
+
+    #[test]
+    fn tool_window_style_is_repaired_only_when_wiped() {
+        assert!(
+            !lacks_tool_window_style(EX_TOOLWINDOW_BIT),
+            "正常：工具窗口"
+        );
+        assert!(
+            !lacks_tool_window_style(EX_TOOLWINDOW_BIT | 0x100),
+            "其它位不影响"
+        );
+        assert!(
+            lacks_tool_window_style(EX_APPWINDOW_BIT),
+            "被 apply_diff 改回 APPWINDOW"
+        );
+        assert!(lacks_tool_window_style(0), "TOOLWINDOW 丢了");
+        assert!(lacks_tool_window_style(
+            EX_TOOLWINDOW_BIT | EX_APPWINDOW_BIT
+        ));
     }
 
     #[test]

@@ -33,7 +33,7 @@
       "dangerousDisableAssetCspModification": ["style-src"],
       "assetProtocol": {
         "enable": true,
-        "scope": ["$LOCALDATA/mini-todo/images/**"]
+        "scope": ["$LOCALDATA/mini-todo/images/**", "$LOCALDATA/mini-todo/fence-icons/**"]
       }
     }
   },

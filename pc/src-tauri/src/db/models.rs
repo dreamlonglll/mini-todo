@@ -316,6 +316,87 @@ pub struct ExportData {
     pub settings: AppSettings,
 }
 
+/// fences 查询列，与 [`fence_from_row`] 的下标一一对应
+pub const FENCE_COLUMNS: &str = "id, title, folder_name, x, y, width, height, collapsed, locked, \
+     bg_color, bg_alpha, icon_size, sort_order, created_at, updated_at";
+
+pub fn fence_from_row(row: &Row) -> rusqlite::Result<Fence> {
+    Ok(Fence {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        folder_name: row.get(2)?,
+        x: row.get(3)?,
+        y: row.get(4)?,
+        width: row.get(5)?,
+        height: row.get(6)?,
+        collapsed: row.get::<_, i32>(7)? != 0,
+        locked: row.get::<_, i32>(8)? != 0,
+        bg_color: row.get(9)?,
+        bg_alpha: row.get(10)?,
+        icon_size: row.get(11)?,
+        sort_order: row.get(12)?,
+        created_at: row.get(13)?,
+        updated_at: row.get(14)?,
+    })
+}
+
+/// 收纳箱背景透明度默认值（与 v29 迁移 `bg_alpha` 列默认值一致；背景色默认 `#000000`、图标大小默认 48）
+pub const DEFAULT_FENCE_BG_ALPHA: f64 = 0.45;
+
+/// 桌面收纳箱（v29 `fences`）。
+///
+/// 设备相关数据，不进 `ExportData` / WebDAV 同步。几何信息是物理像素：`x` / `y` 为虚拟屏幕坐标
+/// （折叠态时即标题栏位置），`width` / `height` 为展开态尺寸，只在用户拖动 / 缩放结束后落库。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Fence {
+    pub id: i64,
+    pub title: String,
+    /// 收纳根目录下的子文件夹名
+    pub folder_name: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub collapsed: bool,
+    /// 锁定（「固定」）：不可移动 / 缩放，仍可拖入、折叠、改名
+    pub locked: bool,
+    pub bg_color: String,
+    pub bg_alpha: f64,
+    /// 图标大小（逻辑像素）
+    pub icon_size: i32,
+    pub sort_order: i32,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// 收纳箱项目的附加信息（v29 `fence_items`）：只有排序与原始路径，内容以收纳文件夹为准。
+///
+/// 每次列举都按收纳文件夹对账（`commands::fence_items::reconcile_rows`）：文件夹有、表里没有 → 补行；
+/// 表里有、文件夹没有 → 删行。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FenceItem {
+    pub id: i64,
+    pub fence_id: i64,
+    /// 收纳文件夹内的实际文件名
+    pub file_name: String,
+    /// 移入前的完整路径；在 Explorer 里直接放进收纳文件夹的为 `None`
+    pub original_path: Option<String>,
+    pub sort_order: i32,
+}
+
+/// `update_fence` 的入参：只更新给出的字段（标题走 `rename_fence`，几何走 `commit_fence_geometry`）
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateFenceRequest {
+    pub collapsed: Option<bool>,
+    pub locked: Option<bool>,
+    pub bg_color: Option<String>,
+    pub bg_alpha: Option<f64>,
+    pub icon_size: Option<i32>,
+}
+
 /// 屏幕配置记录，用于存储不同屏幕组合下的窗口状态
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

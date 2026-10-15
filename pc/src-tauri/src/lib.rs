@@ -12,20 +12,24 @@ use tauri::{Emitter, Manager};
 use tauri_plugin_autostart::ManagerExt;
 
 use commands::{
-    close_all_notification_windows, close_notification_window, create_subtask, create_todo,
-    delete_screen_config, delete_subtask, delete_todo, export_data, export_data_to_file,
-    fetch_holidays, get_auto_hide_enabled, get_change_seq, get_fixed_embed_desktop, get_images_dir,
+    close_all_notification_windows, close_notification_window, commit_fence_geometry, create_fence,
+    create_subtask, create_todo, delete_fence, delete_screen_config, delete_subtask, delete_todo,
+    export_data, export_data_to_file, fence_item_icon, fence_move_in, fence_move_item,
+    fence_open_item, fence_restore_item, fence_reveal_item, fetch_holidays, get_auto_hide_enabled,
+    get_change_seq, get_fence, get_fence_items, get_fixed_embed_desktop, get_images_dir,
     get_notification_type, get_screen_config, get_setting, get_show_calendar, get_subtask,
     get_sync_settings, get_system_fonts, get_text_theme, get_todo, get_todo_font_family,
     get_todo_font_size, get_todos, get_top_on_wake, get_window_background,
     get_window_persist_state, import_data, import_data_from_file, import_subtasks_from_paths,
-    is_desktop_mode, is_fixed_mode, list_screen_configs, reorder_subtasks, reorder_todos,
-    reset_window, save_screen_config, save_settings, save_subtask_image, save_sync_settings,
-    set_auto_hide_cursor_inside, set_auto_hide_enabled, set_fixed_embed_desktop,
-    set_notification_type, set_setting, set_show_calendar, set_text_theme, set_todo_font_family,
-    set_todo_font_size, set_top_on_wake, set_window_background, set_window_desktop_mode,
-    set_window_fixed_mode, sync_auto_start_state, update_screen_config_name, update_subtask,
-    update_todo, webdav_force_pull, webdav_force_push, webdav_sync, webdav_test_connection,
+    is_desktop_mode, is_fixed_mode, list_fences, list_screen_configs, rename_fence,
+    reorder_fence_items, reorder_subtasks, reorder_todos, reset_fence_positions, reset_window,
+    save_screen_config, save_settings, save_subtask_image, save_sync_settings,
+    set_auto_hide_cursor_inside, set_auto_hide_enabled, set_fence_bounds, set_fence_view,
+    set_fixed_embed_desktop, set_notification_type, set_setting, set_show_calendar, set_text_theme,
+    set_todo_font_family, set_todo_font_size, set_top_on_wake, set_window_background,
+    set_window_desktop_mode, set_window_fixed_mode, sync_auto_start_state,
+    toggle_fences_visibility, update_fence, update_screen_config_name, update_subtask, update_todo,
+    webdav_force_pull, webdav_force_push, webdav_sync, webdav_test_connection,
 };
 
 /// 开机自启动时附带的命令行参数（见 autostart 插件初始化）
@@ -47,8 +51,9 @@ fn accept_tray_click(last: &Mutex<Option<Instant>>, now: Instant) -> bool {
     accept
 }
 
+/// DWM 圆角（主窗口与收纳箱窗口共用）
 #[cfg(target_os = "windows")]
-fn setup_window_rounded_corners(window: &tauri::WebviewWindow) {
+pub(crate) fn setup_window_rounded_corners(window: &tauri::WebviewWindow) {
     use raw_window_handle::HasWindowHandle;
     use windows::Win32::Foundation::HWND;
     use windows::Win32::Graphics::Dwm::{
@@ -88,14 +93,22 @@ fn setup_macos_transparent_webview(window: &tauri::WebviewWindow) {
 ///
 /// release 版是 Windows 子系统程序，没有控制台，以前 `eprintln!` 的同步 / 迁移日志全部丢失（C4）。
 /// Windows 上日志目录为 `%LOCALAPPDATA%\com.tauri-app.mini-todo\logs`。
-fn log_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
+/// 开发专用数据隔离（`dev_data_dir`，见 `db::paths::DEV_DATA_DIR_ENV`）时改写到隔离目录的 `logs/`，
+/// 不与正在运行的安装版写同一个日志文件。
+fn log_plugin<R: tauri::Runtime>(
+    dev_data_dir: Option<&std::path::Path>,
+) -> tauri::plugin::TauriPlugin<R> {
     use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
 
+    let file_target = match dev_data_dir {
+        Some(dir) => TargetKind::Folder {
+            path: dir.join("logs"),
+            file_name: None,
+        },
+        None => TargetKind::LogDir { file_name: None },
+    };
     tauri_plugin_log::Builder::new()
-        .targets([
-            Target::new(TargetKind::LogDir { file_name: None }),
-            Target::new(TargetKind::Stdout),
-        ])
+        .targets([Target::new(file_target), Target::new(TargetKind::Stdout)])
         .level(log::LevelFilter::Info)
         .max_file_size(2 * 1024 * 1024)
         .rotation_strategy(RotationStrategy::KeepSome(1))
@@ -148,12 +161,37 @@ fn show_fatal_error(message: &str) {
     eprintln!("{}", message);
 }
 
+/// 开发专用数据隔离时，WebView2 用户数据也放进隔离目录（`<dir>/EBWebView`）。
+///
+/// tauri 在 Windows 上总会给 WebView 指定用户数据目录（`%LOCALAPPDATA%\<identifier>`）。与安装版
+/// 共用时开发版会连进安装版的浏览器进程：localStorage 混用、内存实测被污染，带
+/// `--remote-debugging-port` 等不同启动参数时环境创建还会失败。WebView2 的
+/// `WEBVIEW2_USER_DATA_FOLDER` 环境变量优先于调用方传入的目录，进程启动时（任何 WebView
+/// 创建之前）设好即可；外部已显式设置时尊重外部值。
+fn isolate_webview_user_data(dev_data_dir: &std::path::Path) {
+    const WEBVIEW2_USER_DATA_FOLDER: &str = "WEBVIEW2_USER_DATA_FOLDER";
+    if std::env::var_os(WEBVIEW2_USER_DATA_FOLDER).is_some_and(|v| !v.is_empty()) {
+        return;
+    }
+    // run() 开头、tauri 尚未起任何线程时调用，没有并发读写环境变量的问题
+    std::env::set_var(WEBVIEW2_USER_DATA_FOLDER, dev_data_dir.join("EBWebView"));
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        // 单实例必须第一个注册：重复启动的进程在这里就退出，不会初始化其它插件、打开数据库，
-        // 也不会再起一套提醒调度与同步循环（以前每条提醒弹两次、两个同步互相 412）
-        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+    // 开发专用数据隔离（仅 debug 构建读取 MINI_TODO_DATA_DIR，release 恒为 None），见 db::paths
+    let dev_data_dir = db::paths::dev_data_dir_override();
+    if let Some(dir) = &dev_data_dir {
+        isolate_webview_user_data(dir);
+    }
+
+    let builder = tauri::Builder::default();
+    // 单实例必须第一个注册：重复启动的进程在这里就退出，不会初始化其它插件、打开数据库，
+    // 也不会再起一套提醒调度与同步循环（以前每条提醒弹两次、两个同步互相 412）。
+    // 开发专用数据隔离时不注册：开发版要与正在运行的安装版并存，否则一启动就被单实例插件
+    // 转交给安装版、自己退出
+    let builder = if dev_data_dir.is_none() {
+        builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             // 开机自启动拉起的重复实例不打扰用户
             if argv.iter().any(|arg| arg == AUTOSTART_ARG) {
                 return;
@@ -161,7 +199,13 @@ pub fn run() {
             log::info!("[app] 检测到重复启动，唤起已运行的窗口");
             commands::bring_main_window_to_front(app);
         }))
-        .plugin(log_plugin())
+    } else {
+        builder
+    };
+    let dev_isolated = dev_data_dir.is_some();
+
+    builder
+        .plugin(log_plugin(dev_data_dir.as_deref()))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
@@ -170,13 +214,33 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec![AUTOSTART_ARG]),
         ))
-        .setup(|app| {
+        .setup(move |app| {
+            if dev_isolated {
+                log::warn!(
+                    "[dev] 开发专用数据隔离已启用（{}）：数据目录 {}，未注册单实例插件，不刷新开机自启项",
+                    db::paths::DEV_DATA_DIR_ENV,
+                    db::paths::app_data_dir().display()
+                );
+                // 资源协议的 scope 写死了 $LOCALDATA/mini-todo/{images,fence-icons}，隔离目录里的图片与
+                // 收纳箱图标缓存要单独放行
+                for dir in [
+                    db::paths::images_dir(),
+                    services::fence_fs::icon_cache_dir(),
+                ] {
+                    if let Err(e) = app.asset_protocol_scope().allow_directory(&dir, true) {
+                        log::warn!("[dev] 放行隔离目录 {} 失败: {e}", dir.display());
+                    }
+                }
+            }
+
             // 第一件事：管理数据库状态。setup 跑在主线程，返回前前端的任何 IPC 都处理不了，
             // 所以命令不会在 State<Database> 就位之前被调用
             let database = open_database_or_exit();
             // 轮询线程拿不到 State<Database>，启动时先把 top_on_wake 等灌进运行时缓存
             commands::reload_runtime_prefs(&database);
             app.manage(database);
+            // 收纳根目录的监听句柄：有收纳箱之后才开始监听（fence_items::ensure_fence_watcher）
+            app.manage(commands::FenceWatcherState::default());
 
             if let Some(window) = app.get_webview_window("main") {
                 commands::remember_main_window(&window);
@@ -203,10 +267,11 @@ pub fn run() {
                 MenuItem::with_id(app, "open_settings", "打开设置", true, None::<&str>)?;
             // 自启自愈：is_enabled 只判断注册表键是否存在，不校验路径。便携版目录被移动/
             // 换成安装版后，旧记录仍在但指向失效路径，这里重新 enable 一次刷新为当前 exe。
+            // 开发专用数据隔离时跳过：自启注册表项与安装版共用，刷新会把它改指向开发版 exe
             let auto_start_enabled = {
                 let autolaunch = app.autolaunch();
                 let enabled = autolaunch.is_enabled().unwrap_or(false);
-                if enabled {
+                if enabled && !dev_isolated {
                     if let Err(e) = autolaunch.enable() {
                         log::warn!("Failed to refresh autostart entry: {e}");
                     }
@@ -225,19 +290,42 @@ pub fn run() {
             let separator2 = PredefinedMenuItem::separator(app)?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
 
-            let menu = Menu::with_items(
-                app,
-                &[
-                    &add_todo,
-                    &separator1,
-                    &toggle_fixed,
-                    &reset,
-                    &open_settings,
-                    &auto_start,
-                    &separator2,
-                    &quit,
-                ],
-            )?;
+            // 桌面收纳箱只有 Windows 实现（嵌入桌面依赖 Progman），其它平台不显示这三项
+            #[cfg(target_os = "windows")]
+            let fence_menu_items = (
+                MenuItem::with_id(app, "new_fence", "新增收纳箱", true, None::<&str>)?,
+                MenuItem::with_id(
+                    app,
+                    "toggle_fences",
+                    "显示/隐藏所有收纳箱",
+                    true,
+                    None::<&str>,
+                )?,
+                MenuItem::with_id(app, "reset_fences", "重置收纳箱位置", true, None::<&str>)?,
+                PredefinedMenuItem::separator(app)?,
+            );
+
+            let mut menu_items: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = vec![&add_todo];
+            #[cfg(target_os = "windows")]
+            {
+                let (new_fence, toggle_fences, reset_fences, fence_separator) = &fence_menu_items;
+                menu_items.extend([
+                    fence_separator as &dyn tauri::menu::IsMenuItem<tauri::Wry>,
+                    new_fence,
+                    toggle_fences,
+                    reset_fences,
+                ]);
+            }
+            menu_items.extend([
+                &separator1 as &dyn tauri::menu::IsMenuItem<tauri::Wry>,
+                &toggle_fixed,
+                &reset,
+                &open_settings,
+                &auto_start,
+                &separator2,
+                &quit,
+            ]);
+            let menu = Menu::with_items(app, &menu_items)?;
 
             // 保存托盘菜单项引用，供 set_window_fixed_mode / set_window_desktop_mode 同步勾选状态
             // （嵌入桌面的固定模式对托盘来说同样是"固定模式"）
@@ -245,7 +333,12 @@ pub fn run() {
             // 保存自启菜单项引用，供设置面板切换后同步勾选状态
             commands::set_tray_auto_start_item(auto_start.clone());
 
-            let _tray = TrayIconBuilder::new()
+            let mut tray_builder = TrayIconBuilder::new();
+            if dev_isolated {
+                // 与同时运行的安装版托盘图标区分开
+                tray_builder = tray_builder.tooltip("Mini Todo（开发版）");
+            }
+            let _tray = tray_builder
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
                 .show_menu_on_left_click(false)
@@ -270,6 +363,18 @@ pub fn run() {
                             // 发送事件给前端打开添加待办窗口
                             if let Some(window) = app.get_webview_window("main") {
                                 let _ = window.emit::<()>("tray-add-todo", ());
+                            }
+                        }
+                        "new_fence" => {
+                            // 菜单回调里不能直接建窗（Windows 上会死锁），转到异步运行时
+                            commands::spawn_create_fence(app);
+                        }
+                        "toggle_fences" => {
+                            commands::toggle_all_fences(app);
+                        }
+                        "reset_fences" => {
+                            if let Err(e) = commands::reset_all_fence_positions(app) {
+                                log::warn!("[fence] 重置收纳箱位置失败: {e}");
                             }
                         }
                         "open_settings" => {
@@ -323,11 +428,26 @@ pub fn run() {
             // 启动通知调度器
             NotificationService::start_scheduler(app.handle().clone());
 
-            // 启动窗口模式监听器（固定模式：最小化守护 + 贴边隐藏；桌面模式：宿主存活检测）
+            // 按库恢复桌面收纳箱（异步建窗，不阻塞 setup）
+            #[cfg(target_os = "windows")]
+            commands::restore_fences(app.handle());
+
+            // 启动窗口模式监听器（固定模式：最小化守护 + 贴边隐藏；桌面模式：宿主存活检测；
+            // 收纳箱：始终嵌入桌面，宿主存活检测）
             let handle = app.handle().clone();
             std::thread::spawn(move || {
+                // 收纳箱按屏幕组合记忆位置：约每 2 秒（10 个 tick）检测一次屏幕组合是否变化
+                const FENCE_SCREEN_CHECK_TICKS: u32 = 10;
+                let mut ticks: u32 = 0;
                 loop {
                     std::thread::sleep(std::time::Duration::from_millis(200));
+
+                    // 收纳箱与主窗口的模式互不相关，每个 tick 都查：Explorer 重启后全部重挂
+                    commands::tick_embedded_windows(&handle);
+                    ticks = ticks.wrapping_add(1);
+                    if ticks.is_multiple_of(FENCE_SCREEN_CHECK_TICKS) {
+                        commands::tick_fence_screen_layouts(&handle);
+                    }
 
                     if is_desktop_mode() {
                         // 桌面模式下窗口不可最小化、也不贴边，只需盯着 Explorer 重启后重新挂载
@@ -338,6 +458,9 @@ pub fn run() {
                         if let Some(window) = handle.get_webview_window("main") {
                             // 被最小化就立刻还原：固定模式下没有任务栏入口可以点回来
                             commands::restore_if_minimized(&window);
+
+                            // 任务栏样式被晚到的 tao 操作抹掉时补回来（启动时与收纳箱建窗并发）
+                            commands::tick_fixed_style(&window);
 
                             // 固定模式下贴边自动隐藏/唤起
                             commands::tick_auto_hide(&window);
@@ -416,6 +539,26 @@ pub fn run() {
             // 通知窗口命令
             close_notification_window,
             close_all_notification_windows,
+            // 桌面收纳箱命令
+            list_fences,
+            get_fence,
+            create_fence,
+            rename_fence,
+            update_fence,
+            set_fence_view,
+            set_fence_bounds,
+            commit_fence_geometry,
+            delete_fence,
+            toggle_fences_visibility,
+            reset_fence_positions,
+            get_fence_items,
+            fence_move_in,
+            fence_restore_item,
+            fence_move_item,
+            fence_open_item,
+            fence_reveal_item,
+            fence_item_icon,
+            reorder_fence_items,
             // WebDAV 同步命令
             get_sync_settings,
             save_sync_settings,

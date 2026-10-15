@@ -30,6 +30,12 @@ const routes: RouteRecordRaw[] = [
     path: '/completed',
     name: 'completed',
     component: () => import('@/views/CompletedView.vue')
+  },
+  {
+    // 桌面收纳箱窗口（label fence-{id}，由后端 commands/fence.rs 建窗）
+    path: '/fence',
+    name: 'fence',
+    component: () => import('@/views/FenceView.vue')
   }
 ]
 

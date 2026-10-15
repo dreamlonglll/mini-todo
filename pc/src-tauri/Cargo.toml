@@ -41,9 +41,17 @@ reqwest = { version = "0.12", features = ["json", "blocking"] }
 urlencoding = "2"
 flate2 = "1.1.9"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# 桌面收纳箱（services/fence_fs）：监听收纳目录变化；图标位图编码为 PNG（0.17 与依赖树中已有版本合并）
+notify = "7"
+png = "0.17"
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Dwm", "Win32_Graphics_DirectWrite", "Win32_Security_Cryptography"] }
+# implement / Win32_UI_Shell* / Win32_System_Com / Win32_Graphics_Gdi / Win32_System_Registry / Win32_Storage_FileSystem：
+# 桌面收纳箱的 IFileOperation 移动、IShellItemImageFactory 图标、ShellExecuteExW 启动、资源管理器定位、
+# IShellLinkW::GetPath 判断快捷方式目标是否失效
+windows = { version = "0.58", features = ["implement", "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Dwm", "Win32_Graphics_DirectWrite", "Win32_Graphics_Gdi", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Registry", "Win32_UI_Shell", "Win32_UI_Shell_Common"] }
+# windows 0.58 的 #[implement] 宏展开后引用 ::windows_core（实现 IFileOperationProgressSink 用），版本须与 windows 一致
+windows-core = "0.58"
 raw-window-handle = "0.6"
 
 [dev-dependencies]
