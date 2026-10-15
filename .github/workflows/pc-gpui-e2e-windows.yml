@@ -1,7 +1,8 @@
 name: PC (GPUI) e2e (Windows)
 
-# 在 GitHub 托管的真实 Windows 虚拟机上运行 GPUI 版应用做端到端验证（无 GPU 时 GPUI 走 D3D11 WARP 软件渲染）。
-# 截图、窗口状态、应用日志作为产物上传。
+# 在 GitHub 托管的真实 Windows 虚拟机（有交互桌面；无 GPU 时 GPUI 走 D3D11 WARP 软件渲染）上运行 GPUI 版应用做端到端验证：
+# 真实窗口 + 真实鼠标键盘输入 + Win32 只读断言。用例与本地复现方法见 pc-gpui/scripts/e2e-windows/README.md。
+# 每个用例的 PASS / FAIL 与汇总表打印在日志末尾（也写进 Job Summary）；截图、应用日志作为产物上传。
 on:
   workflow_dispatch:
   push:
@@ -14,11 +15,16 @@ concurrency:
   group: pc-gpui-e2e-windows-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  PYTHONUTF8: '1'
+  PYTHONIOENCODING: utf-8
+  CARGO_TERM_COLOR: never
+
 jobs:
-  smoke:
-    name: Launch + screenshot (debug build)
+  e2e-debug:
+    name: e2e suite (debug build)
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 75
     defaults:
       run:
         working-directory: pc-gpui
@@ -35,39 +41,107 @@ jobs:
         with:
           workspaces: './pc-gpui -> target'
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies
+        run: python -m pip install --disable-pip-version-check -q pillow wsgidav cheroot
+
       - name: Build app and seed tool (debug)
         run: |
           cargo build -p mini-todo --locked
           cargo build -p mini-todo-core --example seed --locked
 
-      - name: Launch app and capture
+      - name: Prepare display (1920x1080, solid desktop color)
+        run: pwsh -NoProfile -File scripts/e2e-windows/set-display.ps1
+
+      - name: Run e2e (debug suite)
+        run: >
+          python -u scripts/e2e-windows/run_e2e.py
+          --exe target/debug/mini-todo.exe
+          --seed target/debug/examples/seed.exe
+          --out "$env:RUNNER_TEMP/e2e-out"
+          --work "$env:RUNNER_TEMP/e2e-work"
+          --suite debug
+          --allow-real-profile
+          --emit-shots W01
+          --uia-dump
+
+      - name: Collect app logs
+        if: always()
         run: |
-          $out = Join-Path $env:RUNNER_TEMP 'e2e-out'
+          $out = Join-Path $env:RUNNER_TEMP 'e2e-out/logs'
           New-Item -ItemType Directory -Force -Path $out | Out-Null
-          $data = Join-Path $env:RUNNER_TEMP 'mt-data'
-          & .\target\debug\examples\seed.exe $data scripts\sample-data.json
-          $env:MINI_TODO_DATA_DIR = $data
-          $env:MINI_TODO_DEBUG_OPEN = 'main'
-          $p = Start-Process -FilePath .\target\debug\mini-todo.exe -PassThru
-          Start-Sleep -Seconds 25
-          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
-          $b = [System.Windows.Forms.SystemInformation]::VirtualScreen
-          $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
-          $g = [System.Drawing.Graphics]::FromImage($bmp)
-          $g.CopyFromScreen($b.Left, $b.Top, 0, 0, $bmp.Size)
-          $bmp.Save((Join-Path $out 'screen-main.png'), [System.Drawing.Imaging.ImageFormat]::Png)
-          "screen: $($b.Width)x$($b.Height)"
-          "process alive: $(-not $p.HasExited)"
-          Get-Process -Id $p.Id -ErrorAction SilentlyContinue | Select-Object Id, MainWindowTitle, MainWindowHandle | Format-List
-          Copy-Item -Recurse -Force (Join-Path $data 'logs') $out -ErrorAction SilentlyContinue
-          Get-ChildItem -Recurse $out | Select-Object FullName, Length | Format-Table -AutoSize
-          Get-Content (Join-Path $out 'logs\mini-todo.log') -ErrorAction SilentlyContinue | Select-Object -Last 80
-          if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
+          Get-ChildItem (Join-Path $env:RUNNER_TEMP 'e2e-work') -Recurse -Filter 'mini-todo*.log' -ErrorAction SilentlyContinue |
+            ForEach-Object { Copy-Item $_.FullName (Join-Path $out ("{0}-{1}" -f $_.Directory.Parent.Name, $_.Name)) }
+          Copy-Item "$env:LOCALAPPDATA/com.tauri-app.mini-todo/logs/*" $out -ErrorAction SilentlyContinue
+          Get-ChildItem (Join-Path $env:RUNNER_TEMP 'e2e-out') | Select-Object Name, Length | Format-Table -AutoSize | Out-String -Width 200
 
       - name: Upload e2e output
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pc-gpui-e2e-windows
+          name: pc-gpui-e2e-windows-debug
+          path: ${{ runner.temp }}/e2e-out
+          if-no-files-found: warn
+
+  release-smoke:
+    name: release build + smoke / single instance
+    runs-on: windows-latest
+    timeout-minutes: 75
+    defaults:
+      run:
+        working-directory: pc-gpui
+        shell: pwsh
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './pc-gpui -> target'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies
+        run: python -m pip install --disable-pip-version-check -q pillow
+
+      # release 构建在 build.rs 里用 Windows SDK 的 fxc.exe 预编译 GPUI 的 HLSL 着色器（debug 构建运行时编译）
+      - name: Build app (release)
+        run: cargo build --release -p mini-todo --locked
+
+      - name: Prepare display (1920x1080, solid desktop color)
+        run: pwsh -NoProfile -File scripts/e2e-windows/set-display.ps1
+
+      - name: Run e2e (release suite)
+        run: >
+          python -u scripts/e2e-windows/run_e2e.py
+          --exe target/release/mini-todo.exe
+          --out "$env:RUNNER_TEMP/e2e-out"
+          --work "$env:RUNNER_TEMP/e2e-work"
+          --suite release
+          --allow-real-profile
+
+      - name: Collect app logs
+        if: always()
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'e2e-out/logs'
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          Copy-Item "$env:LOCALAPPDATA/com.tauri-app.mini-todo/logs/*" $out -ErrorAction SilentlyContinue
+
+      - name: Upload e2e output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pc-gpui-e2e-windows-release
           path: ${{ runner.temp }}/e2e-out
           if-no-files-found: warn
