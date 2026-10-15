@@ -1,0 +1,405 @@
+name: Release
+
+# 发布流水线（写法参考 mini-term 的 release.yml）。推 `v*` tag 触发：
+# - create-release：tag 必须等于 `v<pc-gpui 工作区版本>`（pc-gpui/Cargo.toml 的 [workspace.package] version），
+#   否则直接失败 —— 防止忘改版本号发出 exe 版本与 tag 对不上的包。然后生成 changelog 占位、把 release 建成
+#   **draft**（tag 含 `-` 自动标 pre-release）。各平台只往这个 draft 上传产物，避免并行抢建 release
+#   （softprops/action-gh-release 找不到 draft，会另建一个公开 release，所以上传一律用 gh）
+# - build-windows：pc-gpui release 构建 → NSIS 安装包 `mini-todo_<版本>_x64-setup.exe`
+#   （pc-gpui/scripts/windows-installer.nsi，安装身份沿用旧 Tauri 版，老用户原地升级）+ 便携版
+#   `mini-todo_<版本>_x64-portable.zip`（只有 mini-todo.exe；资源都嵌在 exe 里）
+# - build-cloud：云端 API `minitodo-cloud-<cloud 版本>-linux-<arch>.tar.gz` + `.sha256`（x86_64 / aarch64）
+# - publish：全部构建成功后对 release 的**全部**资产算 SHA256SUMS.txt 上传，再把 draft 转正。匿名请求看不到
+#   draft —— 应用内更新检查（/releases/latest）不会在产物传齐前把用户引到空的 release 页，任一平台构建失败
+#   release 也不会公开；修好后在该次运行上 Re-run failed jobs（publish 随之重跑）
+#   ⚠️ pre-release 不会出现在 /releases/latest，已装正式版的用户不会被提示升级到预发布版
+# - 资产名不带 v 前缀；Windows 包沿用旧 Tauri 版 `mini-todo_<版本>_x64-…` 的形态
+#
+# 手动触发（workflow_dispatch）= 给**已存在**的 release 补建产物：不新建 release、不生成 changelog，
+# 从 inputs.tag 那个 tag 的代码构建 inputs.platforms 选中的平台，`--clobber` 覆盖同名资产，publish 只重算
+# SHA256SUMS.txt，**不碰** draft / prerelease 状态。workflow 文件取自触发时选的分支，代码取自 inputs.tag。
+#
+# 安全口径：顶层只给 contents: read，写 release 的作业各自提权；checkout 一律不把 token 落进 .git/config
+# （构建期几百个依赖的 build.rs 都读得到那个文件），gh 命令只在各自那一步的 env 里拿 token；
+# 所有 action 钉 commit SHA（行尾注释是原 tag，升级时按 tag 重新查 SHA）。
+#
+# 缓存：只读（save-if: false），由 cache-warm.yml 在 main 上预热 —— tag 运行能恢复 main 作用域的缓存，
+# tag 之间互相看不见。⚠️ 两边的 workflow 级 env、装工具链的步骤、shared-key、workspaces、编译命令
+# 必须逐字一致，否则键对不上。
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '已存在的 release tag（如 v3.0.0），产物从该 tag 的代码构建'
+        required: true
+        type: string
+      platforms:
+        description: '要补建的平台，逗号分隔：windows / cloud-x86_64 / cloud-aarch64'
+        required: true
+        default: 'windows'
+        type: string
+
+permissions:
+  contents: read
+
+# 同一个 tag 只跑一份：GitHub 偶尔把同一次 tag push 重复投递成多次运行（v2.4.0 出现过 4 份），
+# 并行往同一个 release 传产物会互相覆盖。后到的排队，跑到时 release 已存在就原样沿用
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  # push 事件是被推的 tag；手动补建是 inputs.tag。各步骤一律用它，不直接碰 github.ref_name ——
+  # 手动触发时那是分支名
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+  # ⚠️ 与 cache-warm.yml 一致（CARGO* 环境变量进 rust-cache 的键）
+  CARGO_TERM_COLOR: always
+
+jobs:
+  create-release:
+    # 手动补建时 release 已经在了，跳过；下游作业的 if 把 skipped 视同成功
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check tag matches pc-gpui version
+        shell: bash
+        run: |
+          VERSION=$(awk -F'"' '/^\[workspace\.package\]/{f=1;next} /^\[/{f=0} f && /^version *=/{print $2; exit}' pc-gpui/Cargo.toml)
+          echo "pc-gpui version: $VERSION, tag: $RELEASE_TAG"
+          if [ -z "$VERSION" ] || [ "v$VERSION" != "$RELEASE_TAG" ]; then
+            echo "::error::tag $RELEASE_TAG 与 pc-gpui/Cargo.toml 的版本 v$VERSION 不一致：先改版本号（并更新 Cargo.lock）再打 tag"
+            exit 1
+          fi
+
+      - name: Generate changelog
+        shell: bash
+        run: |
+          # 基线 = 本 tag 父提交上最近的 v* tag。不能按版本号排序取第二个：预发布转正式时
+          # v3.0.0-pre 排在 v3.0.0 前面，取到的正是当前 tag 自己，changelog 成了空的
+          PREV_TAG=$(git describe --tags --abbrev=0 --match 'v*' "${RELEASE_TAG}^" 2>/dev/null || true)
+          if [ -z "$PREV_TAG" ]; then
+            RANGE="$RELEASE_TAG"
+          else
+            RANGE="${PREV_TAG}..${RELEASE_TAG}"
+          fi
+          echo "changelog range: $RANGE"
+          LOGS=$(git log "$RANGE" --pretty=format:"- %s" --no-merges)
+          {
+            echo "## 更新内容"
+            echo ""
+            echo "$LOGS"
+            echo ""
+          } > "$RUNNER_TEMP/release-notes.md"
+
+      # 在同一次运行上 Re-run all jobs 时 release 已经在了：原样沿用 —— 不重建、不改 draft 状态、
+      # 不覆盖 notes（可能已经手改过）
+      - name: Create draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "::notice::release $RELEASE_TAG 已存在，沿用"
+            exit 0
+          fi
+          flags=(--draft --verify-tag --title "Mini-Todo $RELEASE_TAG"
+                 --notes-file "$RUNNER_TEMP/release-notes.md")
+          case "$RELEASE_TAG" in *-*) flags+=(--prerelease) ;; esac
+          gh release create "$RELEASE_TAG" "${flags[@]}"
+
+  # 算出要构建哪些平台：push 全量；手动补建只留 inputs.platforms 点名的（key 写错直接报错，不静默漏掉）
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      windows: ${{ steps.plan.outputs.windows }}
+      cloud: ${{ steps.plan.outputs.cloud }}
+    steps:
+      - id: plan
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PLATFORMS: ${{ inputs.platforms }}
+        run: |
+          if [ "$EVENT_NAME" = "push" ]; then
+            keys="windows,cloud-x86_64,cloud-aarch64"
+          else
+            keys="$PLATFORMS"
+          fi
+          windows=false
+          cloud=()
+          IFS=',' read -ra items <<< "$keys"
+          for k in "${items[@]}"; do
+            k="${k//[[:space:]]/}"
+            [ -z "$k" ] && continue
+            case "$k" in
+              windows) windows=true ;;
+              cloud-x86_64) cloud+=('{"arch":"x86_64","runner":"ubuntu-24.04"}') ;;
+              cloud-aarch64) cloud+=('{"arch":"aarch64","runner":"ubuntu-24.04-arm"}') ;;
+              *) echo "::error::未知平台 key: $k（可选 windows / cloud-x86_64 / cloud-aarch64）"; exit 1 ;;
+            esac
+          done
+          cloud_json="[$(IFS=,; echo "${cloud[*]}")]"
+          if [ "$windows" = false ] && [ "$cloud_json" = "[]" ]; then
+            echo "::error::platforms 为空，没有要构建的平台"
+            exit 1
+          fi
+          echo "windows=$windows, cloud=$cloud_json"
+          echo "windows=$windows" >> "$GITHUB_OUTPUT"
+          echo "cloud=$cloud_json" >> "$GITHUB_OUTPUT"
+
+  build-windows:
+    name: Windows x64 (pc-gpui)
+    needs: [create-release, plan]
+    # 手动补建时 create-release 是 skipped，默认隐含的 success() 会把本作业一起跳掉；
+    # 显式写状态函数（!cancelled()）才能覆盖那个默认，再自己放行 skipped
+    if: >-
+      !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.windows == 'true' &&
+      (needs.create-release.result == 'success' || needs.create-release.result == 'skipped')
+    runs-on: windows-latest
+    permissions:
+      # 只为最后一步把产物传进 release；token 只在那一步的 env 里出现
+      contents: write
+    steps:
+      # 按 tag 检出而不是触发 sha：手动补建时触发 sha 是分支 HEAD，产物必须出自该版本的代码
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          persist-credentials: false
+
+      # ⚠️ 与 cache-warm.yml 的 gpui-windows 作业一致
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+        with:
+          toolchain: stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: release-gpui
+          save-if: false
+          workspaces: pc-gpui -> target
+
+      # release 构建会在 build.rs 里用 Windows SDK 的 fxc.exe 预编译 GPUI 的 HLSL 着色器（runner 镜像自带）
+      - name: Build
+        working-directory: pc-gpui
+        run: cargo build --release -p mini-todo --locked
+
+      - name: Package portable zip
+        shell: pwsh
+        run: |
+          $version = $env:RELEASE_TAG.TrimStart('v')
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path 'pc-gpui/target/release/mini-todo.exe' `
+            -DestinationPath "dist/mini-todo_${version}_x64-portable.zip" -CompressionLevel Optimal -Force
+          Get-ChildItem dist
+
+      - name: Build NSIS installer
+        shell: pwsh
+        run: |
+          $version = $env:RELEASE_TAG.TrimStart('v')
+          # VIProductVersion 只收纯数字四段：剥掉预发布 / 构建元数据再补第四段
+          $versionNum = ($version -split '[-+]')[0] + '.0'
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $src = (Resolve-Path 'pc-gpui/target/release').Path
+          $ico = (Resolve-Path 'pc-gpui/crates/app/assets/icon.ico').Path
+          $out = Join-Path (Resolve-Path 'dist').Path "mini-todo_${version}_x64-setup.exe"
+          # makensis 定位：三级兜底，每一级之后都重新解析路径（mini-term 踩过：runner 镜像已不再自带 NSIS，
+          # choco 源也会 503；choco 装到的是 C:\ProgramData\chocolatey\bin\makensis.exe）
+          function Resolve-MakeNsis {
+            $cmd = Get-Command makensis -ErrorAction SilentlyContinue
+            if ($cmd) { return $cmd.Source }
+            foreach ($p in @(
+              'C:\Program Files (x86)\NSIS\makensis.exe',
+              'C:\Program Files\NSIS\makensis.exe',
+              'C:\ProgramData\chocolatey\bin\makensis.exe'
+            )) { if (Test-Path $p) { return $p } }
+            return $null
+          }
+          $mk = Resolve-MakeNsis
+          if (-not $mk) {
+            Write-Host '::group::choco install nsis'
+            try { choco install nsis -y --no-progress } catch { Write-Host "choco 失败: $_" }
+            Write-Host '::endgroup::'
+            $mk = Resolve-MakeNsis
+          }
+          if (-not $mk) {
+            # choco 源挂掉时的最后一条路：官方便携包直下（自带 Stubs / Plugins，解压即用）
+            Write-Host '::group::download portable NSIS'
+            $zip = Join-Path $env:RUNNER_TEMP 'nsis.zip'
+            $dir = Join-Path $env:RUNNER_TEMP 'nsis'
+            foreach ($url in @(
+              'https://downloads.sourceforge.net/project/nsis/NSIS%203/3.10/nsis-3.10.zip',
+              'https://cfhcable.dl.sourceforge.net/project/nsis/NSIS%203/3.10/nsis-3.10.zip'
+            )) {
+              try {
+                Invoke-WebRequest -Uri $url -OutFile $zip -MaximumRetryCount 3 -RetryIntervalSec 10
+                Expand-Archive -Path $zip -DestinationPath $dir -Force
+                $mk = (Get-ChildItem $dir -Recurse -Filter makensis.exe | Select-Object -First 1).FullName
+                if ($mk) { break }
+              } catch { Write-Host "$url 取不到: $_" }
+            }
+            Write-Host '::endgroup::'
+          }
+          if (-not $mk) { throw 'makensis 三级兜底全部失败（镜像自带 / choco / 官方便携包）' }
+          Write-Host "makensis: $mk"
+          & $mk /V2 /DVERSION=$version /DVERSION_NUM=$versionNum `
+            /DSOURCE_DIR=$src /DICON_FILE=$ico /DOUT_FILE=$out `
+            pc-gpui/scripts/windows-installer.nsi
+          if ($LASTEXITCODE -ne 0) { throw "makensis 退出码 $LASTEXITCODE" }
+          Get-ChildItem dist
+
+      # 用 gh 直传（找得到 draft），只上传文件、不碰 notes / draft / prerelease；
+      # release 不存在时 gh 直接报错，不会顺手新建一个
+      - name: Upload to release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          shopt -s nullglob
+          files=(dist/mini-todo_*_x64-setup.exe dist/mini-todo_*_x64-portable.zip)
+          if [ "${#files[@]}" -ne 2 ]; then
+            echo "::error::dist/ 下应有安装包与便携 zip 各一个，实际：${files[*]:-<none>}"
+            exit 1
+          fi
+          printf 'upload: %s\n' "${files[@]}"
+          gh release upload "$RELEASE_TAG" "${files[@]}" --clobber
+
+  build-cloud:
+    name: cloud (Linux ${{ matrix.arch }})
+    needs: [create-release, plan]
+    if: >-
+      !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.cloud != '[]' &&
+      (needs.create-release.result == 'success' || needs.create-release.result == 'skipped')
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.cloud) }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          persist-credentials: false
+
+      # ⚠️ 与 cache-warm.yml 的 cloud 作业一致
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+        with:
+          toolchain: stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: release-cloud
+          save-if: false
+          workspaces: cloud -> target
+
+      - name: Build
+        working-directory: cloud
+        run: cargo build --release --locked
+
+      - name: Stage release artifacts
+        shell: bash
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          CLOUD_VERSION="$(awk -F\" '/^version/ {print $2; exit}' cloud/Cargo.toml)"
+          STAGE="minitodo-cloud-${CLOUD_VERSION}-linux-${ARCH}"
+          DIST="$GITHUB_WORKSPACE/dist"
+          OUT="$DIST/$STAGE"
+          mkdir -p "$OUT"
+          cp cloud/target/release/minitodo-cloud "$OUT/"
+          cp cloud/config.example.toml cloud/README.md "$OUT/"
+          cp -r cloud/deploy "$OUT/"
+          rsync -a --exclude '__pycache__' --exclude '*.pyc' cloud/skill/ "$OUT/skill/"
+          cd "$DIST"
+          tar czf "$STAGE.tar.gz" "$STAGE"
+          sha256sum "$STAGE.tar.gz" > "$STAGE.tar.gz.sha256"
+          ls -lah "$STAGE.tar.gz"*
+
+      - name: Upload to release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          # arm64 runner 是合作方镜像，万一没带 gh 就从发行版仓库装
+          if ! command -v gh >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y gh
+          fi
+          shopt -s nullglob
+          files=(dist/minitodo-cloud-*-linux-"$ARCH".tar.gz dist/minitodo-cloud-*-linux-"$ARCH".tar.gz.sha256)
+          if [ "${#files[@]}" -ne 2 ]; then
+            echo "::error::dist/ 下应有 tar.gz 与 .sha256 各一个，实际：${files[*]:-<none>}"
+            exit 1
+          fi
+          printf 'upload: %s\n' "${files[@]}"
+          gh release upload "$RELEASE_TAG" "${files[@]}" --clobber
+
+  # 全部选中的平台都构建成功之后：对 release 的**全部**资产算 SHA256 → SHA256SUMS.txt 覆盖上传；
+  # push 路径再把 draft 转正。手动补建只重算校验和（补传的文件变了，旧的 SUMS 就过期了），
+  # 不改 draft / prerelease —— 已发布的版本不能被改回 draft，还在 draft 的也不由补建来转正。
+  # 校验：下载资产后 `sha256sum -c SHA256SUMS.txt --ignore-missing`
+  publish:
+    needs: [create-release, plan, build-windows, build-cloud]
+    if: >-
+      !cancelled() && needs.plan.result == 'success' &&
+      (needs.create-release.result == 'success' || needs.create-release.result == 'skipped') &&
+      !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') &&
+      (needs.build-windows.result == 'success' || needs.build-cloud.result == 'success')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Generate & upload SHA256SUMS.txt
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          export LC_ALL=C
+          dir="$RUNNER_TEMP/assets"
+          mkdir -p "$dir"
+          gh release download "$RELEASE_TAG" --dir "$dir"
+          # 上一轮的校验和文件不算在内（手动补建时它已经在 release 里了）
+          rm -f "$dir/SHA256SUMS.txt"
+          cd "$dir"
+          shopt -s nullglob
+          files=(*)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::release $RELEASE_TAG 没有任何资产"
+            exit 1
+          fi
+          sha256sum -- "${files[@]}" > "$RUNNER_TEMP/SHA256SUMS.txt"
+          cat "$RUNNER_TEMP/SHA256SUMS.txt"
+          gh release upload "$RELEASE_TAG" "$RUNNER_TEMP/SHA256SUMS.txt" --clobber
+
+      - name: Publish release
+        if: github.event_name == 'push'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          case "$RELEASE_TAG" in
+            *-*) pre=true ;;
+            *) pre=false ;;
+          esac
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease="$pre"

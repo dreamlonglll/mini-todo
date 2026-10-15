@@ -1,0 +1,110 @@
+name: Cache warm
+
+# 在 main 上预热 release.yml 用的 Rust 缓存（写法参考 mini-term 的 cache-warm.yml）。
+#
+# 为什么单独一个 workflow：GitHub Actions 的缓存按 ref 隔离，一次运行只能恢复**本 ref** 与**默认分支（main）**
+# 上建的缓存。release.yml 只在 tag 上跑，缓存若建在各个 refs/tags/vX 上，tag 之间互相看不见、每次发版都冷编
+# （GPUI 的 release 构建 thin LTO + codegen-units = 1，冷编很慢）。现在：
+# - 只有本 workflow 在 main 上**存** release 缓存；release.yml 一律 `save-if: false` 只读
+# - 键由 rust-cache 拼成：prefix-key（默认 v0-rust）+ shared-key + runner OS/arch + 环境哈希（已装工具链的
+#   rustc -vV，加上 CARGO* / CC* / CFLAGS* / CXX* / CMAKE* / RUST* 环境变量）+ 依赖哈希（各 workspace 成员的
+#   Cargo.toml 规整后 + Cargo.lock 里的注册表包）。所以本文件每个作业的 **workflow 级 env、装工具链的步骤、
+#   shared-key、workspaces、编译命令** 都要与 release.yml 对应作业逐字一致：
+#
+#   作业           消费方（release.yml）    shared-key      workspaces
+#   gpui-windows   build-windows            release-gpui    pc-gpui -> target
+#   cloud (×2)     build-cloud              release-cloud   cloud -> target
+#
+#   成员的 version 被规整、Cargo.lock 里的工作区包被剔掉 —— 发版改版本号不会让键变。依赖变了键才变；
+#   tag 先于这里重建跑到时，rust-cache 退回同前缀下最新的一份做部分恢复，大部分依赖照样不用重编。
+#   ⚠️ 只改 pc-gpui/Cargo.toml 的 [profile.*]、或改了编译命令时键**不变**，缓存内容不会自动跟上：
+#   这种时候给两个 workflow 里全部四处 rust-cache 一起加上同一个 prefix-key（如 v1-rust）强制换代
+#
+# 触发：
+# - push 到 main 且进键的文件 / 本文件有变（发版提交改 Cargo.lock 的版本号也会触发：键没变就是精确命中，
+#   各作业只做一次恢复（顺带保活）就结束）
+# - 每周一次：保活（7 天没被访问的缓存会被 GitHub 清掉），兼顺带重建 —— runner 上 stable 工具链一升级，
+#   环境哈希就变，release 会全量不命中直到这里重跑
+# - workflow_dispatch：手动补一次。只在 main 上有意义（别的分支上建的缓存 tag 看不见），所以各作业都限定 main
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'pc-gpui/Cargo.lock'
+      - 'pc-gpui/Cargo.toml'
+      - 'pc-gpui/crates/*/Cargo.toml'
+      - 'cloud/Cargo.lock'
+      - 'cloud/Cargo.toml'
+      - '.github/workflows/cache-warm.yml'
+  schedule:
+    - cron: '23 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cache-warm
+  cancel-in-progress: true
+
+env:
+  # ⚠️ 与 release.yml 一致
+  CARGO_TERM_COLOR: always
+
+jobs:
+  gpui-windows:
+    name: release cache (pc-gpui, Windows)
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+        with:
+          toolchain: stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: release-gpui
+          workspaces: pc-gpui -> target
+
+      - name: Build
+        working-directory: pc-gpui
+        run: cargo build --release -p mini-todo --locked
+
+  cloud:
+    name: release cache (cloud, Linux ${{ matrix.arch }})
+    if: github.ref == 'refs/heads/main'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+        with:
+          toolchain: stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: release-cloud
+          workspaces: cloud -> target
+
+      - name: Build
+        working-directory: cloud
+        run: cargo build --release --locked
