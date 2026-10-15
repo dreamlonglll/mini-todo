@@ -93,6 +93,11 @@ def dump_log_tail(app: App, n: int = 25) -> None:
         print("  | " + l)
 
 
+def all_windows_of_class(cls: str) -> list[Win]:
+    return [Win(h) for h in W.top_level_windows()
+            if W.class_name(h) == cls and W.user32.IsWindowVisible(W.wt.HWND(h))]
+
+
 def all_windows_titled(title: str) -> list[Win]:
     return [Win(h) for h in W.top_level_windows()
             if W.window_text(h) == title and W.user32.IsWindowVisible(W.wt.HWND(h))]
@@ -1243,49 +1248,81 @@ def group_fences() -> None:
         return diag
 
     def f08():
+        """资源管理器作拖放源：打开文件夹窗口，用 UI Automation 找到列表项，真实鼠标拖到收纳箱"""
         fence = need_fence()
-        desk = Path(W.run_ps("[Environment]::GetFolderPath('Desktop')").strip().splitlines()[-1])
-        name = "e2e-desk-folder"
-        item = desk / name
-        shutil.rmtree(item, ignore_errors=True)
-        item.mkdir(parents=True)
-        (item / "inside.txt").write_text("from the desktop\n", encoding="utf-8")
-        W.park_cursor()
-        time.sleep(2)
-        def locate():
-            out = W.run_ps(f"& '{HERE / 'uia-find.ps1'}' -Name '{name}' -TimeoutSec 15", timeout=120).splitlines()
-            print("    UIA: " + " / ".join(out)[:600])
-            return next((l for l in reversed(out) if l.count(",") == 3 and "items" not in l), None), out
-
-        found, out = locate()
-        if not found and any(l.strip() == "HideIcons=1" for l in out):
-            # runner 默认隐藏桌面图标：打开后重启 Explorer（收纳箱会自动重挂，F06 另有断言）
-            subprocess.run(["reg", "add", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
-                            "/v", "HideIcons", "/t", "REG_DWORD", "/d", "0", "/f"], capture_output=True)
-            restart_explorer()
-            W.wait_until(lambda: fence.owner == W.shell_window() != 0, 15, "收纳箱重挂")
-            time.sleep(3)
-            found, out = locate()
-        if not found:
-            shutil.rmtree(item, ignore_errors=True)
-            raise Skip(f"桌面上找不到图标（UIA：{out[-3:]}；桌面 {desk}）")
-        ix, iy, iw, ih = (int(v) for v in found.split(","))
-        fx, fy, fw, fh = fence.client()
-        mark = app.log_size()
-        print(f"    桌面图标 {name} at ({ix},{iy},{iw}×{ih}) → 收纳箱中心 ({fx + fw // 2},{fy + fh // 2})")
-        W.drag(ix + iw // 2, iy + ih // 3, fx + fw // 2, fy + fh // 2, steps=40, hold=0.5, step_delay=0.04, settle=1.0)
-        W.park_cursor()
-        c = Checks()
+        src_dir = C.work / "explorer-src"
+        shutil.rmtree(src_dir, ignore_errors=True)
+        name = "e2e-explorer-folder"
+        (src_dir / name).mkdir(parents=True)
+        (src_dir / name / "inside.txt").write_text("from explorer\n", encoding="utf-8")
+        before = {w.hwnd for w in all_windows_of_class("CabinetWClass")}
+        subprocess.Popen(["explorer.exe", str(src_dir)])
+        ex = W.wait_until(lambda: next((w for w in all_windows_of_class("CabinetWClass") if w.hwnd not in before), None),
+                          30, "资源管理器窗口出现")
         try:
-            W.wait_until(lambda: (folder() / name).is_dir() and not item.exists(), 12, "桌面上的文件夹被移进收纳文件夹")
-            c.ok(True, f"已移入 {folder().name}")
-        except (W.Timeout, AssertionError) as e:
-            logs = [l.split("]", 3)[-1].strip() for l in app.log_since(mark).splitlines()][-6:]
-            c.ok(False, f"{e}；桌面上仍在={item.exists()} 收纳夹={[p.name for p in folder().iterdir()]} 日志={logs}")
-        img = shot(fence, "F08-after-desktop-drop")
-        maybe_emit("F08", img)
-        shutil.rmtree(item, ignore_errors=True)
-        return c.done()
+            m = W.primary_monitor()
+            ex.set_rect(m["work"][0] + 30, m["work"][1] + 30, 760, 480)
+            time.sleep(1.0)
+            ex_x, ex_y, ex_w, _ = ex.client()
+            W.click(ex_x + ex_w // 2, ex_y + 12)      # 点标题栏，把资源管理器带到前台
+            time.sleep(1.5)
+            out = W.run_ps(f"& '{HERE / 'uia-find.ps1'}' -Name '{name}' -Hwnd {ex.hwnd} -TimeoutSec 15",
+                           timeout=120).splitlines()
+            found = next((l for l in reversed(out) if l.count(",") == 3 and "items" not in l), None)
+            print(f"    资源管理器 {ex}，UIA: {' / '.join(out)[:300]}")
+            if not found:
+                raise AssertionError(f"资源管理器窗口里找不到 {name}（UIA：{out[-3:]}）")
+            ix, iy, iw, ih = (int(v) for v in found.split(","))
+            fx, fy, fw, fh = fence.client()
+            mark = app.log_size()
+            W.drag(ix + min(40, iw // 2), iy + ih // 2, fx + fw // 2, fy + fh // 2, steps=40, hold=0.5,
+                   step_delay=0.04, settle=1.0)
+            W.park_cursor()
+            c = Checks()
+            try:
+                W.wait_until(lambda: (folder() / name).is_dir() and not (src_dir / name).exists(), 12,
+                             "资源管理器里的文件夹被移进收纳文件夹")
+                c.ok(True, f"已移入 {folder().name}")
+            except (W.Timeout, AssertionError) as e:
+                logs = [l.split("]", 3)[-1].strip() for l in app.log_since(mark).splitlines()][-6:]
+                c.ok(False, f"{e}；源仍在={(src_dir / name).exists()} 收纳夹={[p.name for p in folder().iterdir()]} 日志={logs}")
+            maybe_emit("F08", shot(fence, "F08-after-explorer-drop"))
+            return c.done()
+        finally:
+            ex.post_close()
+            time.sleep(1)
+
+    def drag_after(action, key: str, label: str) -> str:
+        """先做 action（改名 / 单击标题），紧接着拖入一次；没生效再原样拖一次，区分「只丢第一次」与「一直不行」"""
+        fence = need_fence()
+        action(fence)
+        moved, diag = drag_file_into(fence, "winforms", f"e2e-after-{key}-1.txt")
+        if moved:
+            return f"{label}后第一次拖入成功：{diag}"
+        W.save_emit(shot(fence, f"F-after-{key}"), C.out, f"F-after-{key}")
+        moved2, diag2 = drag_file_into(fence, "winforms", f"e2e-after-{key}-2.txt")
+        raise AssertionError(f"{label}后的第一次外部拖入没有生效（文件没被移入、虚线悬停框残留），紧接着再拖一次"
+                             f"{'成功' if moved2 else '也失败'}。第一次：{diag}；第二次：{diag2}")
+
+    def rename_again(fence: Win) -> None:
+        W.dblclick(*fence.pt(30, 16))
+        time.sleep(0.6)
+        W.type_text("E2E Box 2")
+        W.key_combo("enter")
+        W.park_cursor()
+        W.wait_until(lambda: app.q1("SELECT title FROM fences ORDER BY id LIMIT 1") == "E2E Box 2", 6, "改名落库")
+        time.sleep(1)
+
+    def click_title(fence: Win) -> None:
+        W.click(*fence.pt(120, 16))
+        W.park_cursor()
+        time.sleep(1)
+
+    def f10():
+        return drag_after(rename_again, "rename", "双击标题改名")
+
+    def f11():
+        return drag_after(click_title, "click", "单击标题栏")
 
     def f07():
         fence = need_fence()
@@ -1336,8 +1373,10 @@ def group_fences() -> None:
         C.report.case("F02", "往收纳文件夹放文件 → 监听刷新出图标", f02)
         C.report.case("F04", "真实 OLE 拖放（.NET DataObject）：新实例里第一次拖入收纳箱即生效", f04)
         C.report.case("F03", "双击标题改名 → 收纳文件夹同步改名", f03)
-        C.report.case("F08", "从桌面把图标（文件夹）真实拖进收纳箱（资源管理器作拖放源）", f08)
-        C.report.case("F09", "真实 OLE 拖放（Shell 文件夹的数据对象，与资源管理器同款）：文件被移进收纳文件夹", f09)
+        C.report.case("F10", "双击标题改名之后，紧接着的第一次外部拖入生效", f10)
+        C.report.case("F11", "单击收纳箱标题栏之后，紧接着的第一次外部拖入生效", f11)
+        C.report.case("F09", "真实 OLE 拖放（Shell 文件夹的数据对象）：文件被移进收纳文件夹", f09)
+        C.report.case("F08", "从资源管理器窗口把文件夹真实拖进收纳箱（资源管理器作拖放源）", f08)
         C.report.case("F07", "收纳箱可见区域与数据库记录的物理像素几何一致", f07)
         C.report.case("F05", "收纳箱：Win+D 后仍可见", f05)
         C.report.case("F06", "收纳箱：Explorer 重启后自动重挂", f06)

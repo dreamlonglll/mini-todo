@@ -139,6 +139,8 @@ if IS_WIN:
     _proto(user32.SetProcessDpiAwarenessContext, wt.BOOL, wt.HANDLE)
     _proto(user32.GetKeyboardLayout, wt.HKL, wt.DWORD)
     _proto(user32.SetForegroundWindow, wt.BOOL, wt.HWND)
+    _proto(user32.SetWindowPos, wt.BOOL, wt.HWND, wt.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+           wt.UINT)
     _proto(shell32.Shell_NotifyIconGetRect, ctypes.c_long, ctypes.POINTER(NOTIFYICONIDENTIFIER),
            ctypes.POINTER(wt.RECT))
 
@@ -354,6 +356,10 @@ class Win:
 
     def post_close(self) -> bool:
         return bool(user32.PostMessageW(_h(self.hwnd), WM_CLOSE, 0, 0))
+
+    def set_rect(self, x: int, y: int, w: int, h: int) -> bool:
+        """移动 / 缩放（外框，物理像素；不改 Z 序、不激活）"""
+        return bool(user32.SetWindowPos(_h(self.hwnd), None, x, y, w, h, 0x0004 | 0x0010))
 
     def show(self, cmd: int) -> bool:
         return bool(user32.ShowWindow(_h(self.hwnd), cmd))
