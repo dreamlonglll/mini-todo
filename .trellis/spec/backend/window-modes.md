@@ -8,6 +8,14 @@
 > （`desktop_attach_hwnd` / `apply_fixed_ex_style_hwnd`），供始终嵌入桌面的收纳箱窗口复用（登记、轮询、建窗规则见
 > [desktop-fences.md](./desktop-fences.md)）。主窗口仍走原来的 `desktop_attach` / `desktop_detach` / `IS_DESKTOP_MODE` /
 > `DESKTOP_OWNER` 路径，§3 的状态表不变。同时新增 `lacks_tool_window_style` 自愈（§3 Ordering rule 7、下方 Common Mistakes）。
+>
+> GPUI 版（`pc-gpui/`，任务 `10-15-gpui-rewrite`）：§3 的模式状态表、"嵌入不是第三种模式"、持久化键（`is_fixed` /
+> `fixed_embed_desktop` / `screen_configs`）、Explorer 重启重挂与样式自愈的**语义同样适用**；实现改为
+> `pc-gpui/crates/app/src/services/window_mode.rs` + `platform/embed.rs`（owner = Progman + `WS_EX_TOOLWINDOW` + 去 `WS_MINIMIZEBOX`）+
+> `platform/subclass.rs`（`SetWindowSubclass` 处理 `WM_WINDOWPOSCHANGING` 永远置底，替代 tao `always_on_bottom`），纯逻辑（贴边状态机、
+> `needs_reattach`、`lacks_tool_window_style`）在 `pc-gpui/crates/core/src/window_logic.rs`。GPUI 建窗后不改写 ex style，本文中
+> 为对抗 tao `apply_diff` 的排队重申 / `reassert_window_mode_state` 不再需要；Win32 调用的时机约束改为 GPUI 的"App 借用期间不能同步发消息"
+> （[pc-gpui/gpui-conventions.md §2.2](../pc-gpui/gpui-conventions.md)）。验证用 `pc-gpui/scripts/e2e-windows/`（S 组）。
 
 ---
 

@@ -8,6 +8,13 @@
 
 This directory contains guidelines for frontend development. Fill in each file with your project's specific conventions.
 
+> Scope: the Vue 3 frontend of the Tauri app (`pc/src/`). The GPUI rewrite (`pc-gpui/crates/app`) has no WebView / Vue;
+> its UI conventions live in [`../pc-gpui/`](../pc-gpui/index.md) (`gpui-conventions.md`). Two rules from
+> [State Management](./state-management.md) still hold there semantically: single-flight `fetchTodos` with stale-result
+> drop, and skipping background refreshes while a modal child window is open (`AppState::fetch_todos` /
+> `refresh_if_changed`, `WindowManager::main_has_modal_child`). Pure helpers in `pc/src/utils/*.ts` have 1:1 Rust ports —
+> fix logic bugs in both (mapping in [`../pc-gpui/core-parity.md`](../pc-gpui/core-parity.md) §2.3).
+
 ---
 
 ## Guidelines Index

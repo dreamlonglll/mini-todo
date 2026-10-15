@@ -2,6 +2,10 @@
 
 > Code-specs for `pc/src-tauri/`. Each file is an executable contract: signatures, persisted keys,
 > ordering rules, error matrix, required tests.
+>
+> 同样适用于 GPUI 版的业务核心 `pc-gpui/crates/core`（`mini-todo-core`，由 `pc/src-tauri/src` 复制而来：`db/`、`services/` 原样，
+> `commands/*.rs` 去掉 Tauri 外壳）。窗口 / 平台部分在 `pc-gpui/crates/app`，按 [pc-gpui 规范](../pc-gpui/index.md) 实现同样的语义契约；
+> 文件对应与两边一起改的规则见 [pc-gpui/core-parity.md](../pc-gpui/core-parity.md)。
 
 ---
 
@@ -36,9 +40,16 @@ Before touching sync, import/export, or any write path of `todos` / `subtasks` /
 - [ ] Any new `settings` key / table / record field: walk the "维护检查清单" in `CLAUDE.md`
   (models → data.rs → sync_store → cloud `src/model.rs`)
 
+改 `pc-gpui/crates/core`（或改 `pc/src-tauri` 里 core 也有副本的部分）：
+
+- [ ] 同时遵守 [pc-gpui 规范](../pc-gpui/index.md)：读 [Core Parity](../pc-gpui/core-parity.md)——数据库迁移、settings 键、记录字段、
+      同步 / 合并 / 时间 / 墓碑规则、导出格式**两边一起改**（同号同 SQL），直到 `pc/` 删除；core 保持阻塞函数、不引入 GPUI / Tauri / tokio
+- [ ] 两边 `cargo test` 都绿（`pc/src-tauri` 与 `pc-gpui/`），`db/`、`services/{webdav,secret}.rs`、`services/fence_fs/` 用 `diff` 自查一致
+
 General:
 
 - [ ] Commands doing network / file / bulk SQL work are `async` and run the blocking part in `spawn_blocking`
+  （pc-gpui：core 函数保持阻塞，由 app 用 `db::spawn_db` / `background_executor` 放后台，见 [GPUI Conventions §2.1](../pc-gpui/gpui-conventions.md)）
 - [ ] Use `log::{info,warn,error}!` (persisted by tauri-plugin-log), not `println!`
 - [ ] Any new `screen_configs` column: `SCREEN_CONFIG_COLUMNS` + `screen_config_from_row` + `save_screen_config`
 - [ ] Any new Tauri command: register in `lib.rs` `use commands::{…}` **and** `generate_handler![…]`
@@ -47,6 +58,9 @@ General:
 ## Quality Check
 
 - `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` green (`pc/src-tauri`, and `cloud/` when touched)
+  ——core 有副本的改动另外在 `pc-gpui/` 下跑 `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings`、
+  `cargo test --workspace`（门槛见 [pc-gpui/verification.md](../pc-gpui/verification.md)）
 - Sync changes: run `pc/scripts/e2e-linux/run_e2e.py` S-suites (Apache + nginx) before claiming done
+  （改了 core 的同步再跑 `pc-gpui/scripts/e2e-linux/run_e2e.py` 的 S 组）
 - Window-mode changes: run the e2e harness in [Window Modes §6](./window-modes.md#6-tests-required) before claiming done
 - 收纳箱改动：跑 [Desktop Fences §6](./desktop-fences.md) 的单测与 e2e（含 `npm run test` 的 `utils/fence.test.ts`）

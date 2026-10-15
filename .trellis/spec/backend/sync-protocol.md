@@ -7,6 +7,12 @@
 > Established in task `10-02-full-optimization` (2026-10-02); server behaviour measured against
 > Apache 2.4 mod_dav and nginx 1.24 dav/dav_ext, then verified end-to-end with the real app
 > (`pc/scripts/e2e-linux/`, suites S01–S10 run once per server).
+>
+> 同样适用于 GPUI 版 PC 端的 `pc-gpui/crates/core`：`sync/mod.rs`（= `sync_cmd.rs`，去掉 Tauri 外壳，`webdav_sync` /
+> `webdav_force_pull` / `webdav_force_push` 合并为 `sync::run(db, SyncMode)`，`sync-completed` 事件改为返回 `SyncReport`）、
+> `db/sync_store.rs` / `db/time.rs` / `db/settings_kv.rs` / `services/webdav.rs`（原样复制）。与 `pc/` 并存期间它是第三个实现，
+> 本文每条规则在三处都必须成立（见 [pc-gpui/core-parity.md](../pc-gpui/core-parity.md)）；e2e 另有
+> `pc-gpui/scripts/e2e-linux/` 的 S 组（Apache + nginx）。
 
 ---
 

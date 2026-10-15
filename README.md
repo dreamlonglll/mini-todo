@@ -2,6 +2,10 @@
 
 一款简洁高效的跨平台桌面待办事项管理应用，基于 Tauri 2 + Vue 3 + TypeScript 开发，支持 Windows / macOS。
 
+> **新版预览：GPUI 版（不依赖 WebView2）**。仓库里的 `pc-gpui/` 是用 Rust + [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui) 重写的 Windows 桌面端，
+> 界面、功能与现有版本一致，数据完全互通，不再需要 WebView2 Runtime。目前处于实机验收阶段，获取、构建与切换方式见
+> [GPUI 版（预览）](#gpui-版预览)。
+
 ![列表模式](docs/images/list.png)
 ![四象限模式](docs/images/grid.png)
 ![添加/编辑模式](docs/images/add.png)
@@ -88,6 +92,60 @@ sudo xattr -rd com.apple.quarantine /Applications/Mini\ Todo.app
 执行后重新双击即可正常打开。如果后续升级版本再次出现相同提示，重新执行一次命令即可。
 
 
+## GPUI 版（预览）
+
+`pc-gpui/` 是 Windows 桌面端的 Rust + GPUI 重写版：
+
+- **不依赖 WebView2**：单个 `mini-todo.exe`，界面由 GPUI 直接用 DirectX 11 绘制，不会再遇到 `Could not find the WebView2 Runtime`。
+- **元素、样式、功能与现有版本一致**：列表 / 四象限 / 日历、子任务、提醒与重复提醒、WebDAV 同步、固定模式与嵌入桌面、桌面收纳箱、托盘、开机自启等。
+- **数据完全互通**：与现有版本使用同一个数据目录（`%LOCALAPPDATA%\mini-todo\`）、同一个数据库、同一份 WebDAV 同步数据、同一导出格式，
+  可以随时来回切换，多台设备新旧版本混用、与云端 API 一起同步也没有问题。
+- 目前处于**实机验收**阶段：CI 会在 Windows 虚拟机上跑端到端测试，但固定模式、嵌入桌面、桌面收纳箱、托盘、系统通知等仍需要在真实桌面环境中验收；
+  验收通过后将替换现有版本。
+
+已知差异：
+
+- 描述 / 子任务的 Markdown 编辑由"所见即所得"改为"**源码 + 实时预览**"（放大编辑弹窗仍是源码 / 预览分栏）；渲染效果、图片粘贴 / 拖入上传、
+  链接打开规则不变。
+- 多行中文的换行位置可能与旧版差一个字（逗号、句号等全角标点偶尔会出现在行首）。
+- 暂时只有单个 exe，没有安装包；目前只面向 Windows 10 / 11。
+
+### 下载试用
+
+GitHub Actions 的 [PC (GPUI) CI](https://github.com/dreamlonglll/mini-todo/actions/workflows/pc-gpui-ci.yml) 每次构建都会产出 release 版 exe：
+打开最近一次成功的运行 → 页面底部 **Artifacts** → 下载 `mini-todo-gpui-windows-x64`（zip，内含 `mini-todo.exe`；需要登录 GitHub，
+产物默认保留 90 天）。解压后放到任意目录双击运行即可。
+
+### 自己构建
+
+需要在 **Windows** 上构建：
+
+1. 安装 [Rust](https://rustup.rs/)（最新 stable，默认的 MSVC 工具链）。
+2. 安装 Visual Studio 2022 生成工具，勾选"使用 C++ 的桌面开发"（提供 MSVC 链接器与 **Windows SDK**）。release 构建会用 Windows SDK 里的
+   `fxc.exe` 预编译着色器；找不到时可以用环境变量 `GPUI_FXC_PATH` 指向它（如
+   `C:\Program Files (x86)\Windows Kits\10\bin\<版本>\x64\fxc.exe`）。
+3. 构建：
+
+   ```powershell
+   cd pc-gpui
+   cargo build --release -p mini-todo
+   # 产物：pc-gpui\target\release\mini-todo.exe
+   ```
+
+> 请用 **release** 构建分发或拷到别的电脑。debug 构建（`cargo build` / `cargo run`）的 exe 不内嵌着色器，运行时要按构建机上
+> Rust 依赖缓存（cargo registry）里的绝对路径读取着色器源码现场编译，拷到其它机器上会因为找不到这些文件而无法启动。
+> Linux 只用于 CI 与自动化测试，不能交叉构建出可用的 Windows 版。
+
+### 与现有版本共存 / 切换
+
+- **不要同时运行两个版本**。两版共用同一个单实例标识，会互相识别：一版正在运行时再启动另一版，新启动的那个会直接退出并把已运行的窗口唤到前台。
+  所以切换时先在托盘菜单里"退出"当前版本，再启动另一个版本。
+- 切换不需要导入导出：数据、设置、窗口位置、WebDAV 配置（包括已保存的密码）都会直接沿用。首次切换前建议在设置里"导出数据"留一份备份。
+- 开机自启沿用同一个启动项：开启了开机自启时，最后一次运行的版本会把启动项更新成自己的路径。想让新版开机自启，用新版启动一次即可；
+  切回旧版同理。
+- 两版写入同一个日志文件（`%LOCALAPPDATA%\com.tauri-app.mini-todo\logs\mini-todo.log`），反馈问题时附上即可。
+
+
 ## 开发
 
 ### 环境要求
@@ -95,7 +153,7 @@ sudo xattr -rd com.apple.quarantine /Applications/Mini\ Todo.app
 - Rust 最新 stable
 - Windows 10/11 或 macOS（Linux 可编译运行，用于 CI 与端到端测试）
 
-> PC 端代码位于 `pc/` 子目录，所有开发命令都在 `pc/` 下执行。
+> Tauri 版 PC 端代码位于 `pc/` 子目录，下面的命令都在 `pc/` 下执行；GPUI 版见下文 [GPUI 版（`pc-gpui/`）](#gpui-版pc-gpui)。
 
 ### 安装依赖
 
@@ -129,6 +187,26 @@ cd src-tauri && cargo clippy --all-targets -- -D warnings && cargo test
 
 端到端验证（Linux，真实应用 + WebDAV + 云端 API）见 [`pc/scripts/e2e-linux/README.md`](pc/scripts/e2e-linux/README.md)。
 
+### GPUI 版（`pc-gpui/`）
+
+只需要 Rust stable，所有命令在 `pc-gpui/` 下执行：
+
+```bash
+cd pc-gpui
+cargo run -p mini-todo                                   # debug 运行（只能在本机运行，见上文）
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo build --release -p mini-todo                       # release（仅 Windows，需要 Windows SDK）
+```
+
+- 与已安装的正式版同时调试时，用 `MINI_TODO_DATA_DIR=<临时目录>` 启动 debug 构建（隔离数据、日志，不占用单实例与开机自启项）。
+- Linux 上可以编译运行（需要 `libxkbcommon-dev libwayland-dev libvulkan-dev libfontconfig-dev` 等，完整列表见
+  [`.github/workflows/pc-gpui-ci.yml`](.github/workflows/pc-gpui-ci.yml)），用于截图回归与端到端测试：
+  [`pc-gpui/scripts/README.md`](pc-gpui/scripts/README.md)。
+- 代码结构与约定：[`pc-gpui/crates/app/README.md`](pc-gpui/crates/app/README.md)（界面 / 窗口 / 平台）、
+  [`pc-gpui/crates/core/README.md`](pc-gpui/crates/core/README.md)（业务核心）。
+
 ## 技术栈
 
 | 层级 | 技术选型 | 说明 |
@@ -144,9 +222,19 @@ cd src-tauri && cargo clippy --all-targets -- -D warnings && cargo test
 | 云同步协议 | WebDAV | 兼容坚果云、NextCloud 等 |
 | 云端 API | Rust + Axum | 独立 HTTP 服务，供 AI Skill / cron 读写待办 |
 
+GPUI 版（`pc-gpui/`）：
+
+| 层级 | 技术选型 | 说明 |
+|------|----------|------|
+| UI 框架 | GPUI（gpui-kit 0.7.3：gpui-pre + gpui-component） | Zed 编辑器的 GPU 加速 UI 框架，不依赖 WebView |
+| 界面控件 | 自绘 Element Plus 风格控件 | 外观与现有版本一致 |
+| 业务核心 | Rust（`mini-todo-core`） | 数据库、同步、导入导出、提醒、收纳箱文件层，与现有版本同源 |
+| 农历 | tyme4rs | 与 lunar-javascript 同一作者 |
+
 ## 项目结构
 
-> 项目按平台拆分子目录，`pc/` 为 Windows 桌面端（Tauri），`cloud/` 为云端 HTTP API（Rust + Axum），未来可平行加入 `mobile/`、`web/`。
+> 项目按平台拆分子目录，`pc/` 为 Windows 桌面端（Tauri），`pc-gpui/` 为 Windows 桌面端的 GPUI 重写版（将取代 `pc/`），
+> `cloud/` 为云端 HTTP API（Rust + Axum），未来可平行加入 `mobile/`、`web/`。
 
 ```
 mini-todo/
@@ -168,6 +256,10 @@ mini-todo/
 │   ├── package.json
 │   ├── vite.config.ts
 │   └── tsconfig.json
+├── pc-gpui/                     # PC 端 GPUI 重写版（Rust Cargo workspace）
+│   ├── crates/core/             # 业务核心（数据库 / 同步 / 导入导出 / 提醒 / 收纳箱文件层）
+│   ├── crates/app/              # GPUI 界面、窗口与平台集成（托盘、通知、开机自启……）
+│   └── scripts/                 # 截图回归与端到端测试脚本
 ├── cloud/                       # 云端 HTTP API（Rust + Axum，独立 crate）
 │                                # 通过 WebDAV 与 PC 端共用同一份数据；详见 cloud/README.md
 └── docs/                        # 共享文档
@@ -253,4 +345,6 @@ MIT License
 - [Element Plus](https://element-plus.org/) - Vue 3 组件库
 - [Milkdown](https://milkdown.dev/) - 插件化 Markdown 编辑器
 - [lunar-javascript](https://github.com/6tail/lunar-javascript) - 农历/节气计算
+- [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui) / [gpui-kit](https://github.com/longbridge/gpui-kit)（含 gpui-component） - GPUI 版的 UI 框架与组件
+- [tyme4rs](https://github.com/6tail/tyme4rs) - GPUI 版的农历/节气计算
 - [NateScarlet/holiday-cn](https://github.com/NateScarlet/holiday-cn) - 中国法定节假日数据

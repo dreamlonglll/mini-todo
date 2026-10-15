@@ -7,6 +7,13 @@
 > 建立于任务 `10-15-desktop-fence`（2026-10-15），在 Win11 10.0.26300、双屏混合 DPI（150% + 125%）上 e2e 实测。
 > 主窗口的三种模式（普通 / 固定 / 固定 + 嵌入桌面）见 [window-modes.md](./window-modes.md)，本文件只讲收纳箱。
 > 文件层逐函数说明见任务文档 `10-15-desktop-fence/fence-fs-api.md`（完成后归档到 `.trellis/tasks/archive/2026-10/`）。
+>
+> GPUI 版（`pc-gpui/`）：v29 三张表、文件层（`services/fence_fs/` 原样复制）、对账与 `FenceActivity`、删除保留语义、物理像素几何与
+> 落库时机、屏幕组合布局、debug 隔离变量**全部同样适用**，数据与旧版互通。与窗口无关的部分在 `pc-gpui/crates/core/src/fence/`
+> （`mod.rs` = `fence.rs`，`items.rs` = `fence_items.rs`；`fence-items-changed` 事件改为 `FenceRefresh` 返回值 / 监听回调）；
+> 窗口、嵌入与 200ms 守护在 `pc-gpui/crates/app/src/services/fences.rs` + `windows/fence/` + `platform/embed.rs`。建窗标志按 GPUI 实现
+> （`resizable(false)` / 不可最小化 / `show: false` → 定位 → 嵌入 → `SW_SHOWNOACTIVATE`），`asset` scope 不再适用（GPUI 用 `img(PathBuf)`
+> 直接读图标缓存）。带 `owner_hwnd` 的移动必须在后台线程调用（[pc-gpui/gpui-conventions.md §2.1](../pc-gpui/gpui-conventions.md)）。
 
 ---
 

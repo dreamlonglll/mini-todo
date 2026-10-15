@@ -3,6 +3,11 @@
 > **Purpose**: Before claiming a main-window mode / style / Z-order change — or any desktop-fence
 > window change — "works", run the checks below. Unit tests cannot see Win32 state; the only proof
 > is the live window.
+>
+> GPUI 版（`pc-gpui/`）：「开发版与安装版并存」「输入安全」与下方 Checklist 的断言思路同样适用；但 GPUI 窗口没有 DOM / CDP，
+> 页面内交互只能用真实输入（按布局常量 + 截图识色定位），自动化套件是 `pc-gpui/scripts/e2e-windows/`（CI：
+> `.github/workflows/pc-gpui-e2e-windows.yml`，在一次性 Windows 虚拟机上跑，见其 README 与 `.trellis/spec/pc-gpui/verification.md` §6）。
+> 在自己的机器上跑时同样遵守输入安全规则（用户离开、会话解锁、输入法切英文）。
 
 ---
 
@@ -83,4 +88,5 @@
 - 带隔离变量时开发版的 WebView2 用户数据在 `<data>\EBWebView\EBWebView`，CDP 9222 只看得到开发版页面；`cdp.mjs` 默认目标排除了
   `#/fence`，操作收纳箱页面用 `--target '#/fence?id=N'`。
 
-→ Executable details: `.trellis/spec/backend/window-modes.md` §6, `.trellis/spec/backend/desktop-fences.md` §6, scripts in `pc/scripts/e2e/`.
+→ Executable details: `.trellis/spec/backend/window-modes.md` §6, `.trellis/spec/backend/desktop-fences.md` §6, scripts in `pc/scripts/e2e/`
+（GPUI 版：`pc-gpui/scripts/e2e-windows/`）.

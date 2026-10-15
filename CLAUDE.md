@@ -8,7 +8,13 @@ Mini-Todo 是一款基于 **Tauri 2.x + Vue 3 + TypeScript** 开发的 Windows �
 
 仓库按平台拆子目录，`pc/` 是 Windows 桌面端，`cloud/` 是云端 HTTP API（mini-todo 在远程 VPS 上的复刻，通过同一个 WebDAV 通道与 PC 同步数据，供 AI / Claude Code Skill 通过 REST 读写）。详见 `cloud/README.md`。
 
+`pc-gpui/` 是用 **Rust + GPUI**（`gpui-kit =0.7.3` = gpui-pre 0.3.9 + gpui-component 0.7.3）重写的 PC 端，**不依赖 WebView2**，
+元素 / 样式 / 功能与 `pc/` 一致，目标是取代 `pc/`。`pc/` 暂时保留，待用户在 Windows 上实机验收 GPUI 版后再删除。两套 PC 实现**数据完全兼容**
+（同一数据目录、同一数据库迁移、同一同步文档、同一导出格式、同一 settings 键），关系与双改规则见下文「pc-gpui（GPUI 版 PC 端）」一节。
+
 ## 技术栈
+
+### `pc/`（Tauri 版）
 
 | 层级 | 技术选型 | 说明 |
 |------|----------|------|
@@ -25,9 +31,22 @@ Mini-Todo 是一款基于 **Tauri 2.x + Vue 3 + TypeScript** 开发的 Windows �
 | 前端单测 | vitest | `npm run test`，`src/**/*.test.ts` |
 | 端到端验证 | selenium + tauri-driver | `pc/scripts/e2e-linux/`（Linux 真实应用 + WebDAV + cloud），`pc/scripts/e2e/`（Windows 窗口模式 / 桌面收纳箱） |
 
+### `pc-gpui/`（GPUI 版）
+
+| 层级 | 技术选型 | 说明 |
+|------|----------|------|
+| UI 框架 | gpui-kit `=0.7.3`（gpui-pre 0.3.9 + gpui-base / gpui-component 0.7.3） | Zed 的 GPUI 每周快照，**精确钉版本**；Windows 走 DirectX 11 + DirectComposition（透明窗口），Linux 走 wgpu（Vulkan，CI / Xvfb 用 mesa lavapipe） |
+| 控件 | 自绘 Element Plus 风格控件（`crates/app/src/ui/`） | 外观数值照抄旧版；复杂输入基于 gpui-component（`InputState` 等），主题调成 EP（`#409EFF`） |
+| 图标 | Element Plus Icons SVG | 从 `@element-plus/icons-vue` 抽取，`crates/app/assets/icons/{ep,app}/`，经 `assets.rs` 嵌入 |
+| Markdown | gpui-base `TextView` + 自写块级排版（`markdown` crate） | 编辑为"源码 + 预览"（已知偏差，见下文） |
+| 业务核心 | `mini-todo-core`（`crates/core`） | 由 `pc/src-tauri/src` 复制：rusqlite 0.32 bundled、reqwest 0.12 blocking、windows 0.58；不依赖 GPUI / Tauri / tokio，函数全部阻塞 |
+| 农历 | tyme4rs | lunar-javascript 同一作者的 Rust 库，结果与旧前端逐日比对 |
+| 平台集成 | windows 0.62（与 gpui 同版本）、tray-icon、notify-rust、auto-launch、rfd、embed-resource | 托盘、Toast、开机自启（与旧版同名同键）、带过滤器的文件对话框、exe 图标；单实例与旧版 Tauri 插件同名同格式 |
+| 测试 | cargo test、`scripts/regress.py`（Xvfb 截图对照 + 冒烟）、`scripts/e2e-linux/`、`scripts/e2e-windows/` | 见 `.trellis/spec/pc-gpui/verification.md` |
+
 ## 项目结构
 
-> 项目按平台拆分子目录。`pc/` 为 Windows 桌面端（Tauri），未来可平行加入 `mobile/`、`web/`。
+> 项目按平台拆分子目录。`pc/` 为 Windows 桌面端（Tauri），`pc-gpui/` 为 GPUI 重写版（将取代 `pc/`），未来可平行加入 `mobile/`、`web/`。
 
 ```
 mini-todo/
@@ -114,6 +133,47 @@ mini-todo/
 │   ├── tsconfig.json                       # TypeScript 配置
 │   ├── vitest.config.ts                    # 前端单测配置
 │   └── vite.config.ts                      # Vite 构建配置
+├── pc-gpui/                                # PC 端 GPUI 重写版（Cargo workspace，将取代 pc/；详见各 crate README）
+│   ├── Cargo.toml                          # [workspace] members = crates/core、crates/app；版本 2.5.0；release thin LTO + strip
+│   ├── Cargo.lock                          # 提交；CI 一律 --locked
+│   ├── crates/
+│   │   ├── core/                           # mini-todo-core：业务核心（不依赖 GPUI / Tauri / tokio，全部阻塞函数）
+│   │   │   ├── README.md                   # 公开 API、线程约束、旧命令 → 新函数对照
+│   │   │   ├── src/
+│   │   │   │   ├── db/                     # ← pc/src-tauri/src/db 原样复制（迁移 v1~v29、sync_store、time、settings_kv、paths…）
+│   │   │   │   ├── services/               # ← 原样复制：webdav.rs、secret.rs（DPAPI）、fence_fs/（收纳箱文件层）
+│   │   │   │   ├── todo.rs / data.rs       # ← commands/todo.rs、data.rs（导入导出、AppSettings 读写）
+│   │   │   │   ├── sync/                   # ← commands/sync_cmd.rs：sync::run(db, SyncMode) -> SyncReport（测试在 sync/tests.rs）
+│   │   │   │   ├── settings.rs             # ← settings_cmd.rs + window.rs 的设置 / screen_configs + 屏幕组合 ID
+│   │   │   │   ├── holiday.rs / reminder.rs  # 节假日（blocking）/ 提醒调度纯逻辑与通知窗口槽位、定位
+│   │   │   │   ├── window_logic.rs         # 贴边隐藏状态机、needs_reattach、lacks_tool_window_style 等纯函数
+│   │   │   │   ├── lunar.rs                # 新增：农历（tyme4rs），等价于 pc/src/utils/lunar.ts
+│   │   │   │   └── fence/                  # ← fence.rs / fence_items.rs 中与窗口无关的部分（几何、对账、移入移回）
+│   │   │   ├── examples/seed.rs            # 把导出格式 4.0 的 JSON 导入隔离数据目录（截图 / e2e 用）
+│   │   │   └── tests/fixtures/             # 农历对照数据（gen_lunar.cjs 用 lunar-javascript 生成）
+│   │   └── app/                            # mini-todo：GPUI 界面、窗口、平台集成（lib mini_todo + bin mini-todo）
+│   │       ├── README.md                   # 模块地图、约定、接口表、调试开关（维护者必读）
+│   │       ├── build.rs                    # Windows：嵌 exe 图标（资源 ID 1）+ 版本信息；manifest 由 gpui 嵌，不要重复
+│   │       ├── assets/                     # icon.ico；icons/ep/*.svg（Element Plus）、icons/app/*.svg（自定义）
+│   │       └── src/
+│   │           ├── lib.rs / main.rs        # run()：日志 → 单实例 → 数据库 → Application(QuitMode::Explicit) → 主窗口 → 后台服务
+│   │           ├── theme.rs                # 颜色 / 字体 / 圆角 / 间距 / 阴影 token 的唯一来源（按窗口分节）
+│   │           ├── state.rs                # AppState（Entity + Global）：替代 Pinia store 与跨 WebView 事件
+│   │           ├── db.rs                   # Db 全局（Arc<Database>）、spawn_db（阻塞调用放后台）
+│   │           ├── assets.rs               # EpIcon / AppIcon 嵌入表
+│   │           ├── util/                   # 旧前端 utils 的 1:1 移植（datetime、image_ref、file_link、editor_shortcuts）
+│   │           ├── windows/                # WindowManager（mod.rs，含 DebugOpen）+ main_window/、editor/、subtask、completed、
+│   │           │                           # notification、settings/、fence/、gallery（控件样例，仅调试）
+│   │           ├── ui/                     # Element Plus 风格共享控件（button、input、ep_*、message、message_box、markdown*…）
+│   │           ├── services/               # 托盘、单实例、开机自启、同步编排、自动同步、提醒调度、Toast、窗口模式、收纳箱、版本检查、日志
+│   │           └── platform/               # GPUI 没有的窗口能力：windows.rs（Win32）、fallback.rs（Linux）、embed.rs、subclass.rs…
+│   └── scripts/
+│       ├── README.md                       # regress.py / shot.sh / MINI_TODO_DEBUG_OPEN 说明
+│       ├── regress.py                      # Xvfb 一键回归：场景截图 + 与参考截图并排对照 + 端到端冒烟
+│       ├── shot.sh                         # 单个场景截图 / xdotool 交互
+│       ├── sample-data.json                # 样例数据（导出格式 4.0）
+│       ├── e2e-linux/                      # Linux 端到端（真实应用 + Apache / nginx WebDAV + cloud + Skill）
+│       └── e2e-windows/                    # Windows 端到端（真实窗口 + 真实输入 + Win32 断言；CI pc-gpui-e2e-windows.yml）
 ├── cloud/                                  # 云端 HTTP API（独立 Rust crate）
 │   ├── Cargo.toml                          # axum + tokio + rusqlite + reqwest + ...
 │   ├── config.example.toml                 # 配置示例
@@ -272,8 +332,9 @@ mini-todo/
   - 日志：`%LOCALAPPDATA%\com.tauri-app.mini-todo\logs\mini-todo.log`（tauri-plugin-log，2MB 轮转）
   - 收纳箱文件：`%USERPROFILE%\MiniTodo收纳箱\<收纳箱文件夹>\`（用户可见的真实文件夹，有收纳箱后才创建；不在数据目录里，
     卸载 / 删库都不会丢文件）
-- **迁移版本**：当前 v1~v29，通过 `pc/src-tauri/src/db/migrations.rs` 的迁移表管理；有待执行迁移时先备份，
-  迁移期间关闭外键、提交前 `foreign_key_check`
+  - GPUI 版（`pc-gpui/`）用**完全相同**的数据目录、收纳根目录与日志文件（日志由 app 的 `services::logging` 写，同样 2MB 轮转）
+- **迁移版本**：当前 v1~v29，通过 `pc/src-tauri/src/db/migrations.rs` 的迁移表管理（`pc-gpui/crates/core/src/db/migrations.rs`
+  是逐字相同的副本，两边必须同号同 SQL）；有待执行迁移时先备份，迁移期间关闭外键、提交前 `foreign_key_check`
   - v23：移除所有 AI Agent / 任务调度 / 工作流相关表和字段（详见迁移注释）
   - v24：新增 `webdav_last_modified` settings key
   - v25：新增 `top_on_wake` settings key，贴边唤起时是否临时置顶
@@ -323,6 +384,10 @@ mini-todo/
     记录读写/合并/墓碑：`db/sync_store.rs`（`merge_remote`、`load_todos_with_subtasks`）
   - cloud 写入校验：`cloud/src/model.rs`（新增记录字段必须同步加入允许字段表，否则 AI 写入会被 400）
   - 前端类型：`pc/src/types/todo.ts` → `ExportData`（前端只传递 JSON 字符串，无需严格同步）
+  - GPUI 版对应文件（`pc-gpui/crates/core/src/`，与 `pc/` 并存期间两边一起改）：`db/models.rs`、`db/settings_kv.rs`、`db/sync_store.rs`
+    （原样复制）；`data.rs` → `read_app_settings` / `write_app_settings` / `export_json` / `import_json` / `export_to_file` /
+    `import_from_file`（`EXPORT_VERSION`）；`sync/mod.rs` → `SyncData`、`run_sync_blocking`、`build_sync_doc`、`sync::run`。
+    界面侧没有前端类型，`crates/app` 直接用 core 的 Rust 模型
 
 #### sync-data.json.gz 结构
 
@@ -381,11 +446,20 @@ mini-todo/
    并纳入 `build_sync_doc` 与 cloud 的 `sync/doc.rs`、`sync/merge.rs`
 4. 新增的 **记录字段**：`models.rs`（`#[serde(default)]`）、`sync_store` 的行读写、`export_data_internal` / `import_data_raw`、
    cloud `src/model.rs` 允许字段与类型
-5. 时间字段经 `db::time::normalize_datetime` 规范化；前端经 `utils/datetime.ts`
+5. 时间字段经 `db::time::normalize_datetime` 规范化；前端经 `utils/datetime.ts`（GPUI 版界面经 `crates/app/src/util/datetime.rs`）
 6. 旧版数据导入的兼容性（新字段必须有默认值）
 7. 导出版本号是否需要递增
+8. **GPUI 版 core 同步修改**（直到 `pc/` 删除）：以上 1~7 在 `pc-gpui/crates/core` 里同样做一遍——迁移加到
+   `crates/core/src/db/migrations.rs`（与 `pc/` **同号同 SQL**，`LATEST_VERSION` 相等）；`db/models.rs` / `db/settings_kv.rs` /
+   `db/sync_store.rs` 与 `pc/src-tauri/src/db/` 保持逐字一致；`data.rs` 的 `read_app_settings` / `write_app_settings` /
+   `export_json` / `import_json`；`sync/mod.rs` 的 `build_sync_doc`。需要界面的设置项再改 `crates/app`（`state.rs`、
+   `windows/settings/`）。用 `diff -r pc/src-tauri/src/db pc-gpui/crates/core/src/db` 自查（只应剩 `connection.rs` 的 `test-util` cfg），
+   两边 `cargo test` 都要绿。细则见 `.trellis/spec/pc-gpui/core-parity.md`
 
 ## 核心架构概念
+
+> 本节描述 `pc/`（Tauri 版）的实现；业务流程（调度、同步、对账……）在 `pc-gpui/crates/core` 里逻辑相同，GPUI 版的窗口 / 事件 / 通信
+> 对应关系见下文「pc-gpui（GPUI 版 PC 端）」。
 
 ### 通知调度流程
 
@@ -482,6 +556,77 @@ WebDAV 服务端差异（实测，见 `.trellis/spec/backend/sync-protocol.md`�
 - **FenceView**：桌面收纳箱（每个收纳箱一个窗口，label `fence-{id}`；后端 `commands/fence.rs` 建窗，始终嵌入桌面层，
   不可关闭，删除走 `destroy()`）
 
+## pc-gpui（GPUI 版 PC 端）
+
+`pc-gpui/` 是 `pc/` 的 Rust + GPUI 重写（任务 `10-15-gpui-rewrite`），去掉 WebView2，元素 / 样式 / 功能与旧版一致（上文「核心功能」
+同样适用，已知偏差见下）。维护者入口：
+
+- `pc-gpui/crates/app/README.md`：模块地图、约定、`AppState` / `WindowManager` / `ui::*` / `platform::*` / `services::*` 接口表、调试开关
+- `pc-gpui/crates/core/README.md`：业务 API（逐个对照旧 `#[tauri::command]`）、线程与调用约束、旧事件 → 返回值
+- `pc-gpui/scripts/README.md`：`regress.py` / `shot.sh` / `MINI_TODO_DEBUG_OPEN`；`scripts/e2e-linux/`、`scripts/e2e-windows/` 各有 README
+- `.trellis/spec/pc-gpui/`：GPUI 约定（`gpui-conventions.md`）、与 `pc/` 的双改规则（`core-parity.md`）、验证门槛（`verification.md`）
+
+### 与 `pc/` 的关系
+
+- **数据完全兼容**：同一数据目录 `%LOCALAPPDATA%\mini-todo\`（库 / 图片 / 备份 / 节假日 / 图标缓存）、同一迁移 v1~v29、同一同步文档
+  `sync-data.json.gz`（同一 `webdav_device_id`，切换版本不会被当成新设备）、同一导出格式 4.0、同一 settings 键、同一日志文件与收纳根目录。
+  用户可以在两版之间直接切换，多台设备也可以混用（与 cloud 的协作不变）。
+- **不要同时运行两版**：单实例与旧版 Tauri 插件同名同格式（互斥量 `com.tauri-app.mini-todo-sim`、接收窗口、`WM_COPYDATA`），两版互相识别——
+  后启动的一版把参数转交给已运行的那一版（唤起其主窗口）后退出。
+- 开机自启沿用同一注册表项 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\mini-todo`（`"<exe>" --autostart`）；已开启时每次启动都把路径
+  刷新为当前 exe，因此指向最后启动的那一版。系统通知的 AppUserModelID 沿用 `com.tauri-app.mini-todo`。
+- **双改规则（直到 `pc/` 删除）**：数据库迁移、settings 键、记录字段、同步 / 合并 / 时间 / 墓碑规则、导出格式必须 `pc/src-tauri` 与
+  `pc-gpui/crates/core` 一起改（迁移同号同 SQL，否则混用版本时数据结构分叉或设置被重置）；`db/`、`services/{webdav,secret}.rs`、
+  `services/fence_fs/` 两边保持逐字一致（`diff` 自查）；旧前端 `pc/src/utils/*.ts` 已 1:1 移植到 `crates/app/src/util/` 等处，修逻辑 bug
+  两边一起修。纯界面改动以 pc-gpui 为准。细则 `.trellis/spec/pc-gpui/core-parity.md`。
+- `.trellis/spec/backend/*` 的契约（同步协议、窗口模式语义、收纳箱数据与文件层）对 `pc-gpui/crates/core` 与 app 的对应实现同样适用。
+
+### 架构要点
+
+- `crates/core`（`mini-todo-core`）：`db/`、`services/{webdav,secret,fence_fs}` 原样复制；`commands/*.rs` 去掉 Tauri 外壳成为普通阻塞函数
+  （`todo`、`data`、`sync`、`settings`、`holiday`、`reminder`、`window_logic`、`fence`）；新增 `lunar`（tyme4rs）。不依赖 GPUI / Tauri / tokio，
+  错误仍是面向用户的中文 `String`。
+- `crates/app`（`mini-todo`）：一个进程一个 GPUI `Application`（`QuitMode::Explicit`，托盘常驻），所有窗口共享同一个 `App`：
+
+  | 旧版（Tauri / WebView） | GPUI 版 |
+  |---|---|
+  | Pinia `todoStore` / `appStore` | `state::AppState`（`Entity` + Global），各窗口 `cx.observe`；写操作经 `AppState` 方法在后台执行 |
+  | `invoke` 同步命令 / `spawn_blocking` | `db::spawn_db(cx, \|db\| core::…)` 放后台，`WeakEntity::update` 回前台 |
+  | `sync-completed` | `services::sync::run_sync` → `AppState::apply_sync_report` |
+  | `data-imported` / `app-settings-changed` / `todo-font-changed` | 直接改 `AppState`，所有窗口随之刷新 |
+  | `subtask-memory-ready` / `-init` / `-save` | 子任务窗口直接读写新建待办窗口的 `Entity<DraftSubtasks>`（`subtask::open_draft`） |
+  | `fence-items-changed` | 目录监听回调（`fence-watch` 线程）经 channel 回前台 → 对应收纳箱窗口 |
+  | 托盘事件 | tray-icon 回调 → 前台直接执行动作（`services::tray`） |
+  | 独立 WebView 窗口（label） | GPUI 窗口：`windows::WindowManager` 统一登记 / 模态子窗口 / 遮罩 / owner / 关闭后刷新 / 居中 |
+  | tao 窗口能力 + `commands/window.rs` Win32 | `platform/`（`windows.rs` Win32、`fallback.rs` Linux、`embed.rs` 嵌入桌面、`subclass.rs` 置底与几何锁定） |
+  | Element Plus / Milkdown | `ui/` 下自绘的 EP 风格控件（每种一个实现）、`ui::markdown*` |
+
+- 主窗口刷新与旧版相同：5s `change_seq` 轮询、子窗口关闭、同步完成都走 `AppState::fetch_todos`（单飞 + 过期丢弃），主窗口有模态子窗口时后台刷新跳过。
+- 关键约定（详见 `.trellis/spec/pc-gpui/gpui-conventions.md`）：阻塞调用一律放后台；App 被借用时（事件处理 / `update` / `render`）不能同步调用
+  会给窗口发消息的 Win32（`platform::*(window, cx, …)` 已自动延后）；Windows 上 `start_window_move()` 是空操作，标题栏用
+  `ui::title_bar::drag_region()`；GPUI 没有 z-index（后绘制者在上，弹层只能画在窗口内）；本地图片 `img(PathBuf)`；颜色 / 尺寸 / 字体只从
+  `theme.rs` 取；`gpui-kit` 精确钉 `=0.7.3`，升级按 spec 的步骤逐项核对。
+
+### 已知偏差（相对 `pc/`）
+
+1. **Markdown 编辑**：Milkdown 所见即所得无法在 GPUI 中 1:1 还原，编辑模式改为"Markdown 源码 + 渲染预览"（放大编辑弹窗仍是源码 / 预览分栏）；
+   只读渲染、图片粘贴 / 拖入上传、`minitodo-image://` 引用、链接白名单规则不变。
+2. **中文换行**：GPUI 的换行器不做避头尾，全角标点（`，。、；：！？）`）可能落到行首，多行中文的折行位置与浏览器可能差一个字。
+3. GPUI 没有文字阴影、多色标渐变、位图变换等，个别装饰用近似实现（见 spec `gpui-conventions.md` §2.13）。
+4. **Linux 仅用于 CI、截图回归与 e2e**：没有托盘 / 单实例 / 开机自启 / 嵌入桌面 / 收纳箱真实文件操作，最后一个窗口关闭即退出，设置里的字体下拉为空。
+   Windows 专有能力（嵌入桌面、收纳箱、DPAPI、Toast、托盘、DirectComposition 透明）在 Linux 上只做交叉 clippy，靠 CI 的 Windows e2e 与用户实机验收。
+
+### 构建与运行要点
+
+- Windows release 构建必须在装了 Windows SDK 的 Windows 上做（gpui 的 build.rs 用 `fxc.exe` 预编译 HLSL 着色器，可用 `GPUI_FXC_PATH` 指定）：
+  `cd pc-gpui && cargo build --release -p mini-todo` → `pc-gpui/target/release/mini-todo.exe`（单个 exe，不需要 WebView2 Runtime，暂无安装包）。
+  Linux 无法交叉构建可运行的 Windows 版。
+- debug 构建的 exe 在运行时按**构建机**上 cargo registry 的绝对路径编译着色器，只能在构建它的那台机器上运行。
+- 试用：CI `pc-gpui-ci.yml` 的 Windows job 上传 release 产物 `mini-todo-gpui-windows-x64`（`mini-todo.exe`）。
+- debug 专用环境变量：除下文「开发命令」表中的三个（同名同义）外，GPUI 版另有 `MINI_TODO_DEBUG_OPEN`（启动后打开指定窗口）、
+  `MINI_TODO_DEBUG_LATEST_VERSION`、`MINI_TODO_DEBUG_DIALOG_PATH`、`MINI_TODO_DEBUG_WINDOWS_UI`、`MINI_TODO_DEBUG_FENCE_STATE`，
+  同样只在 debug 构建读取（见 `pc-gpui/crates/app/README.md` §5）。
+
 ## cloud/ 子项目（云端 API）
 
 `cloud/` 是一个独立的 Rust crate（**不在** `pc/` 的 Cargo workspace 里），部署到 VPS 上为
@@ -569,6 +714,23 @@ python3 -m unittest discover -s skill/minitodo -p 'test_*.py'
 
 # 端到端（Linux，真实应用 + 双 WebDAV + cloud + Skill），见 pc/scripts/e2e-linux/README.md
 python3 pc/scripts/e2e-linux/run_e2e.py <app> <cloud> <old-app>
+
+# GPUI 版（在 pc-gpui/ 下），门槛见 .trellis/spec/pc-gpui/verification.md
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked                          # core（迁移来的全部测试 + 农历对照）+ app（util / 纯逻辑）
+cargo test -p mini-todo-core                             # 只测 core（不编译 GPUI）
+# Windows 目标交叉检查（覆盖全部 cfg(windows) 代码；需 rustup target add x86_64-pc-windows-gnu + mingw gcc；只 check 不链接）
+cargo clippy --workspace --all-targets --target x86_64-pc-windows-gnu -- -D warnings
+MINI_TODO_DATA_DIR=/tmp/mt cargo run -p mini-todo        # 隔离数据目录运行 debug 构建
+cargo build --release -p mini-todo                       # 仅 Windows（需 Windows SDK 的 fxc.exe）→ target/release/mini-todo.exe
+scripts/regress.py --ref <参考截图目录> --out /tmp/regress  # Xvfb 视觉回归：场景截图 + 并排对照图（--only 'main-*' 只跑部分）
+scripts/regress.py --smoke --no-build                    # 跨窗口端到端冒烟（按数据库断言）
+scripts/shot.sh --name main-list --window "Mini Todo" /tmp/shots   # 单个场景截图 / xdotool 交互
+
+# GPUI 版端到端（仓库根目录）：Linux 见 pc-gpui/scripts/e2e-linux/README.md；Windows 见 pc-gpui/scripts/e2e-windows/README.md
+python3 pc-gpui/scripts/e2e-linux/run_e2e.py pc-gpui/target/debug/mini-todo cloud/target/debug/minitodo-cloud [用例前缀 ...]
+python pc-gpui/scripts/e2e-windows/run_e2e.py --exe pc-gpui/target/debug/mini-todo.exe --seed pc-gpui/target/debug/examples/seed.exe --out <输出目录>
 ```
 
 debug 专用环境变量（**只在 debug 构建读取，release 一律忽略**；与正在运行的安装版并存做实测时必须带上，详见
@@ -580,13 +742,18 @@ debug 专用环境变量（**只在 debug 构建读取，release 一律忽略**�
 | `MINI_TODO_FENCES_ROOT` | 收纳根目录改为该目录（代替 `%USERPROFILE%\MiniTodo收纳箱`） |
 | `MINI_TODO_SCREEN_ID_FILE` | 文件内容非空时替代屏幕组合 ID，用于模拟显示器组合变化 |
 
+GPUI 版读取同样三个变量（同名同义；没有 WebView2 / asset 协议相关部分），另有 `MINI_TODO_DEBUG_OPEN` 等 GPUI 版专用的 debug 开关，
+见 `pc-gpui/crates/app/README.md` §5 与 `pc-gpui/scripts/README.md`。
+
 CI：`.github/workflows/pc-ci.yml`（Windows fmt/clippy/test、Linux clippy/test、前端 typecheck/lint/test/build）、
-`cloud-ci.yml`（fmt/clippy/test + Skill 单测）。
+`cloud-ci.yml`（fmt/clippy/test + Skill 单测）、`pc-gpui-ci.yml`（GPUI 版：Windows fmt/clippy/test + release 构建并上传
+`mini-todo-gpui-windows-x64` 产物，Linux fmt/clippy/test）、`pc-gpui-e2e-windows.yml`（GPUI 版 Windows e2e：debug 套件 + release 冒烟 / 单实例；
+手动触发，或推送到 `claude/**` 分支且改动 `pc-gpui/**` 时运行）。
 
 ## 注意事项
 
 1. **目标平台**：Windows 10/11；Linux 可编译运行（CI 与 e2e 用），嵌入桌面、桌面收纳箱等 Win32 特性在 Linux 上不可用
-2. **运行环境**：需要 Node.js 和 Rust 开发环境
+2. **运行环境**：需要 Node.js 和 Rust 开发环境（`pc-gpui/` 只需 Rust stable；Windows release 构建另需 Windows SDK）
 3. **图标使用**：仅使用 Element Plus Icons，禁止 emoji
 4. **代码规范**：使用 TypeScript 类型定义，遵循 Vue 3 组合式 API；`<el-*>` 组件按需引入，
    `ElMessage` / `ElMessageBox` 只能从 `src/plugins/element.ts` 导入（eslint 强制）
@@ -598,3 +765,8 @@ CI：`.github/workflows/pc-ci.yml`（Windows fmt/clippy/test、Linux clippy/test
    （scope 只有 `$LOCALDATA/mini-todo/images/**` 与收纳箱图标缓存 `$LOCALDATA/mini-todo/fence-icons/**`，不要放宽）访问，Markdown 里存 `minitodo-image://<name>`（`utils/imageRef.ts`）；
    链接只放行 http(s) / mailto / 本地文件（`utils/fileLink.ts`）；图片文件名经 `is_safe_image_name` 校验
 10. **时间**：见"时间格式约定"，前后端都只用统一的工具函数解析与格式化
+11. **两套 PC 实现并存**：`pc/`（Tauri）与 `pc-gpui/`（GPUI）共用数据，影响数据的改动（迁移 / settings 键 / 字段 / 同步规则 / 导出格式）
+    必须两边一起改，直到 `pc/` 删除（见「pc-gpui」一节与 `.trellis/spec/pc-gpui/core-parity.md`）；不要在同一台机器上同时运行两版
+12. **GPUI 版约定**：改 `pc-gpui/crates/app` 前读 `.trellis/spec/pc-gpui/gpui-conventions.md`（后台执行、App 借用期间不同步调 Win32、
+    拖动窗口、z 序与弹层、`img(PathBuf)`、theme token 唯一来源、`ui/` 控件复用、debug 开关只在 debug 构建生效）；
+    `gpui-kit` 精确钉 `=0.7.3`，不要随手升级；改了界面跑 `scripts/regress.py` 并逐张看对照图
