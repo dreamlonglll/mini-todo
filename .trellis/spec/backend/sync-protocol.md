@@ -51,6 +51,7 @@ pub fn deletion_time(now: &str, record_times: &[&str], tz: Tz) -> String; // == 
 Persisted PC settings keys (device-local, never synced): `webdav_remote_etag`, `webdav_last_modified`
 (recorded only), `webdav_synced_settings_at`, `webdav_last_sync_at`, `webdav_device_id`. Change
 counters live in `sync_meta(local_seq, synced_seq)`, maintained by triggers on `todos` / `subtasks`.
+其他设备本地数据（屏幕配置、桌面收纳箱、`fence_onedrive_notice_shown`）见 §3.6。
 cloud keeps the equivalent in `meta` (`dirty`, `base_etag`, `base_last_modified`, `remote_envelope`).
 
 ### 3. Contracts
@@ -128,6 +129,29 @@ cloud keeps the equivalent in `meta` (`dirty`, `base_etag`, `base_last_modified`
   remote settings (device keys excluded) regardless of `settingsUpdatedAt`. Missing remote → `Err`.
 - `webdav_force_push`: remote := local; writes tombstones for remote-only records (otherwise cloud's
   next push merges them straight back), bumps local versions with the monotonic rule, conditional PUT.
+
+#### 3.6 设备本地数据（不同步）
+
+以下数据只对本机有意义（路径、屏幕坐标、本机提示状态），**不进**同步文档、`ExportData` / `SyncData`、导入导出，cloud 也不知道它们：
+
+| 数据 | 引入 | 说明 |
+|---|---|---|
+| `screen_configs` 表 | 早期 | 按屏幕组合记忆的主窗口位置 / 固定态 |
+| `fences` 表 | v29 | 桌面收纳箱元数据（标题、收纳文件夹名、物理像素几何、折叠 / 锁定 / 外观 / 图标大小） |
+| `fence_items` 表 | v29 | 收纳箱项目的排序与原始路径（内容以本机收纳文件夹为准） |
+| `fence_layouts` 表 | v29 | 收纳箱按屏幕组合记忆的位置 |
+| settings `fence_onedrive_notice_shown` | v29 | 首次收纳时的 OneDrive 一次性提示是否已显示 |
+| settings `webdav_remote_etag` / `webdav_last_modified` / `webdav_synced_settings_at` / `webdav_last_sync_at` / `webdav_device_id` | 多个版本 | 同步自身的本机状态（见 §2），WebDAV 连接配置同样不同步 |
+
+规则：
+
+- 三张收纳箱表**不接** `sync_meta.local_seq` 的变更计数触发器、不写 `tombstones`：写它们不能让同步认为"有本地变更"去上传。
+- 设备本地的 settings 键不进 `AppSettings`、不进 `db::settings_kv::SYNCED_SETTING_KEYS`，`read_app_settings` / `write_app_settings`
+  不读写它们，因此导入备份、`webdav_force_pull` 应用远端设置时也不会覆盖它们。`fence_onedrive_notice_shown` 是对 `CLAUDE.md`
+  「维护检查清单」第 1 条的**有意偏离**（原因见 [desktop-fences.md §3.3](./desktop-fences.md)）。
+- 新增设备本地数据时：在本表登记，并在 `CLAUDE.md`「当前同步覆盖范围」表里标"否"。
+- 测试：`migrations::v29_fence_writes_do_not_count_as_sync_changes`（增删改收纳箱表后 `local_seq` 不变、墓碑数为 0）、
+  `fence_items::onedrive_notice_is_claimed_once_and_stays_device_local`（不在 `SYNCED_SETTING_KEYS`，导出的 `AppSettings` JSON 里没有它）。
 
 ### 4. Validation & Error Matrix
 

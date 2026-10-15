@@ -3,6 +3,11 @@
 > Code-spec for `pc/src-tauri/src/commands/window.rs` + the frontend `appStore` half.
 > Source of truth for how the main window's Win32 style, owner and Z-order are managed.
 > Established in task `09-07-desktop-embed-mode` (2026-09-12/13), e2e-verified on Win11 25H2.
+>
+> 2026-10-15（任务 `10-15-desktop-fence`）：嵌入桌面的 Win32 核心泛化为**按窗口句柄执行**
+> （`desktop_attach_hwnd` / `apply_fixed_ex_style_hwnd`），供始终嵌入桌面的收纳箱窗口复用（登记、轮询、建窗规则见
+> [desktop-fences.md](./desktop-fences.md)）。主窗口仍走原来的 `desktop_attach` / `desktop_detach` / `IS_DESKTOP_MODE` /
+> `DESKTOP_OWNER` 路径，§3 的状态表不变。同时新增 `lacks_tool_window_style` 自愈（§3 Ordering rule 7、下方 Common Mistakes）。
 
 ---
 
@@ -16,6 +21,11 @@
 - Applies whenever code touches `IS_FIXED_MODE` / `IS_DESKTOP_MODE`, `apply_fixed_ex_style`,
   `SetWindowLongPtrW`, `SetWindowPos`, `set_always_on_top/bottom`, `set_minimizable`, or the
   200 ms polling thread in `lib.rs`.
+- 同样适用于主窗口与收纳箱共用的按句柄核心 `desktop_attach_hwnd` / `apply_fixed_ex_style_hwnd`，以及
+  `lacks_tool_window_style` / `tick_fixed_style`。改这几个函数会同时影响主窗口和所有收纳箱窗口，两边都要回归。
+- 200ms 轮询线程现在每个 tick 先跑收纳箱的 `tick_embedded_windows`（与主窗口模式无关，每 10 个 tick 再跑一次
+  `tick_fence_screen_layouts`），再按主窗口模式分支：`is_desktop_mode()` → `tick_desktop_mode`；`is_fixed_mode()` →
+  `restore_if_minimized` → `tick_fixed_style` → `tick_auto_hide`。
 
 ### 2. Signatures
 
@@ -36,11 +46,16 @@ pub fn is_desktop_mode() -> bool;
 // internal seams (cfg(windows) unless noted)
 fn desktop_host() -> Option<HWND>;                       // GetShellWindow(); None only if no shell window
 fn is_desktop_host_class(name: &str) -> bool;            // == "Progman" (pure, tested, all platforms)
-fn desktop_attach(window: &WebviewWindow);               // idempotent: owner=Progman + TOOLWINDOW + HWND_BOTTOM
+fn desktop_attach(window: &WebviewWindow);               // idempotent: owner=Progman + TOOLWINDOW + HWND_BOTTOM（= desktop_attach_hwnd + 写 DESKTOP_OWNER）
+fn desktop_attach_hwnd(hwnd: HWND) -> Option<isize>;     // 按句柄的 Win32 核心，主窗口与收纳箱共用；返回挂上的宿主，Explorer 未运行时 None；不碰任何全局状态
+fn apply_fixed_ex_style(window: &WebviewWindow, fixed: bool);
+fn apply_fixed_ex_style_hwnd(hwnd: HWND, fixed: bool);   // 上一行的按句柄版本：只翻 TOOLWINDOW / APPWINDOW 两位
 fn desktop_detach(window: &WebviewWindow);               // owner=0 + ex style per is_fixed_mode() + HWND_TOP
 fn leave_desktop_mode(window: &WebviewWindow);           // all platforms: atomics + tao + queued detach
 fn needs_reattach(cached_owner: isize, owner_alive: bool, shell_now: isize, current_owner: isize) -> bool; // pure, tested
-pub fn tick_desktop_mode(window: &WebviewWindow);        // called every 200 ms while is_desktop_mode()
+fn lacks_tool_window_style(ex_style: u32) -> bool;       // 纯函数（有单测，全平台编译）：没有 WS_EX_TOOLWINDOW 或带 WS_EX_APPWINDOW
+pub fn tick_desktop_mode(window: &WebviewWindow);        // called every 200 ms while is_desktop_mode(); needs_reattach || (shell_now != 0 && lacks_tool_window_style) → 排队 desktop_attach
+pub fn tick_fixed_style(window: &WebviewWindow);         // 200 ms，is_fixed_mode() 时：样式被抹掉才排队 reassert_window_mode_state
 fn reassert_window_mode_state(window: &WebviewWindow);   // queued on main thread; re-applies style for current mode
 ```
 
@@ -110,12 +125,17 @@ reads `screen_configs.is_fixed` and then `applyFixedMode()` picks the command by
    every `apply_diff`; ex style does not.
 6. The tray "固定模式" `CheckMenuItem` is set explicitly (`sync_tray_fixed_checked`) — true for both
    fixed flavours; never rely on muda's auto-toggle.
+7. **`run_on_main_thread` 在主线程上调用时是就地执行，不是排队**。规则 1 的"排在 tao 操作之后"只有从非主线程排队时才成立：
+   同步命令跑在主线程上，里面的 `run_on_main_thread(...)` 会立刻执行，可能跑到前端更早发出、尚在事件循环里排队的 tao 操作
+   （`setResizable` 等）之前。兜底：200ms 轮询线程在桌面模式（`tick_desktop_mode`）、经典固定模式（`tick_fixed_style`）、
+   收纳箱（`tick_embedded_windows`）三处都读 `GWL_EXSTYLE`，`lacks_tool_window_style` 命中就从轮询线程排队重申——
+   从非主线程排队一定排在已入队的 tao 操作之后。正常情况下每个 tick 只多一次 `GetWindowLongW`。
 
 ### 4. Validation & Error Matrix
 
 | Condition | Behaviour |
 |---|---|
-| `set_window_desktop_mode(enabled=true)` on non-Windows | `Err("桌面模式仅支持 Windows")` |
+| `set_window_desktop_mode(enabled=true)` on non-Windows | 回退为经典固定模式：内部调 `set_window_fixed_mode(…, true)` 并返回其结果（D5：同步来的 `fixed_embed_desktop=true` 不能让固定失败；旧文档写的 `Err("桌面模式仅支持 Windows")` 已不成立） |
 | `set_window_desktop_mode(enabled=false)` on non-Windows | `Ok(())` no-op (frontend `applyNormalMode` calls it unconditionally) |
 | main window not found | `Err("主窗口不存在")` |
 | `GetShellWindow()` returns null (Explorer not running) | `desktop_host()` → `None`, attach skipped with `eprintln!`; `needs_reattach` returns `false` while `shell_now == 0`, tick retries every 200 ms |
@@ -124,6 +144,8 @@ reads `screen_configs.is_fixed` and then `applyFixedMode()` picks the command by
 | preference toggled while not fixed | key written only; takes effect on next `applyFixedMode()` |
 | `set_fixed_embed_desktop` from the settings window | must not call `saveWindowState()` (would persist the settings window's geometry as the main window's) |
 | unknown / missing `fixedEmbedDesktop` in old backups or remote sync blobs | `#[serde(default)]` → false; import never fails |
+| 启动竞态：主窗口固定（经典或嵌入）时 ex style 被晚到的 `apply_diff` 改成 APPWINDOW（owner 仍是 Progman / 0） | 下一个 tick `lacks_tool_window_style` 命中 → 排队重申（嵌入态 `desktop_attach`，经典固定 `reassert_window_mode_state`），约 200ms 内恢复；期间任务栏可能闪一下 |
+| 普通模式下 ex style 是 APPWINDOW | 正常，不检查（`tick_fixed_style` 只在 `is_fixed_mode()` 时调用） |
 
 ### 5. Good/Base/Bad Cases
 
@@ -145,6 +167,8 @@ Unit (`cargo test`, all present):
 - `is_desktop_host_class`: `"Progman"` true; `"WorkerW"`, `""`, `"progman"` false.
 - `needs_reattach`: cached 0 → true; owner dead → true; shell handle changed → true; window's owner
   cleared → true; `shell_now == 0` → false regardless.
+- `tool_window_style_is_repaired_only_when_wiped`：只有 `WS_EX_TOOLWINDOW` 为 false；`TOOLWINDOW | 其它位` 为 false；
+  只有 `WS_EX_APPWINDOW`、`0`、`TOOLWINDOW | APPWINDOW` 都为 true。
 - `migrations::v27_adds_fixed_embed_desktop_key`: key seeded `'false'`; `screen_configs` has no
   `is_desktop` column.
 - `data::import_without_fixed_embed_desktop_defaults_to_false` and
@@ -161,6 +185,7 @@ E2E (manual harness, `pc/scripts/e2e/`, see the README there; run against the de
 | covered by normal windows | WinForms `Form.Show()` over the rect | `WindowFromPoint` hits the form, main still z[1] |
 | Explorer restart | `e2e.ps1 -Step restart-explorer` | `main window alive: True`, `reattached within … True`, then `win-d` again |
 | app restart | `e2e.ps1 -Step kill-app` → start `target\debug\mini-todo.exe` (vite must be running separately) → `wait-window` → `json` | mode + rect restored |
+| 主窗口嵌入 + 多个收纳箱时重启 | 同上（开发版须带 `MINI_TODO_DATA_DIR` 等隔离变量，按 PID 结束） | 最终 `ownerIsProgman=True、toolWindow=True、appWindow=False`；竞态命中时约 200ms 内自愈 |
 | real input | `mouse.ps1 -Action click/drag/wheel` at `clientOrigin + css·dpr` | DOM state via CDP changes; editor window gets foreground on first click |
 
 ### 7. Wrong vs Correct
@@ -205,9 +230,67 @@ case 'fixedEmbedDesktop':
   break
 ```
 
+#### Wrong — 以为同步命令里的 `run_on_main_thread` 一定排在前端的 tao 调用之后，样式只在切换时打一次
+
+```rust
+// set_window_desktop_mode（同步命令，主线程）
+let _ = window.set_minimizable(false);
+let _ = window.set_always_on_bottom(true);
+IS_DESKTOP_MODE.store(true, Ordering::SeqCst);
+reassert_window_mode_state(&window); // 在主线程上 run_on_main_thread 就地执行；前端早先排队的 SetResizable 稍后才执行，抹掉 TOOLWINDOW
+```
+
+#### Correct — 切换路径不变，轮询线程按实际样式自愈
+
+```rust
+// tick_desktop_mode（200ms 轮询线程，非主线程排队 → 一定排在已入队的 tao 操作之后）
+if needs_reattach(cached_owner, owner_alive, shell_now, current_owner)
+    || (shell_now != 0 && lacks_tool_window_style(ex_style))
+{
+    let w = window.clone();
+    let _ = window.run_on_main_thread(move || if is_desktop_mode() { desktop_attach(&w) });
+}
+// tick_fixed_style：if is_fixed_mode() && lacks_tool_window_style(ex_style) { reassert_window_mode_state(window) }
+```
+
+---
+
+## Common Mistakes
+
+### Common Mistake: 以为 `run_on_main_thread` 总是排队执行
+
+**Symptom**：开发版在"主窗口固定 + 嵌入桌面、桌面上有 5 个收纳箱"时重启，主窗口最终 owner=Progman 但 `toolWindow=False /
+appWindow=True`——出现在任务栏、参与 Alt+Tab，之后再没人补回来。逐帧跟踪 ex style：475ms `set_minimizable(false)` →
+482ms `desktop_attach` 打上 TOOLWINDOW → 519ms 前端早先发出的 `setResizable(false)` 才执行，`apply_diff` 把 TOOLWINDOW 抹掉。
+
+**Cause**：前端 `applyFixedMode` 先 `await setResizable(false)`（异步窗口插件命令，只是把 `SetResizable` 排进事件循环），再调同步命令
+`set_window_desktop_mode`。启动时主线程正处在 WebView2 的嵌套消息泵里（同时在创建收纳箱窗口），同步命令先于排队的
+`SetResizable` 被处理；而同步命令里的 `run_on_main_thread` 在主线程上是**就地执行**、不排队，于是"Win32 样式排在 tao 操作之后"
+（Ordering rule 1）的前提不成立。这是上游就有的潜在竞态，启动时并发恢复收纳箱让它稳定复现；经典固定模式同样可能命中。
+
+**Fix**：200ms 轮询线程按**实际**样式自愈（Ordering rule 7）：`tick_desktop_mode` 与新增的 `tick_fixed_style` 发现
+`lacks_tool_window_style` 就从轮询线程排队重申；收纳箱的 `tick_embedded_windows` 用同一判定。修复后同一场景 717ms 时样式恢复。
+
+**Prevention**：任何"只在切换那一刻打一次 Win32 样式"的设计都要配一个按实际状态检查的轮询兜底；不要假设主线程上的
+`run_on_main_thread` 会排在任何东西之后。
+
+> **Warning**：残留约 200ms 的窗口期——竞态命中时主窗口最多带着 `WS_EX_APPWINDOW` 一个 tick，任务栏可能闪一下按钮。
+> 正常情况下（未命中竞态）不会出现。
+
 ---
 
 ## Design Decisions
+
+### Design Decision: 嵌入按窗口句柄泛化，主窗口路径与状态不变
+
+**Context**：桌面收纳箱（多个窗口）需要和"固定 + 嵌入桌面"的主窗口完全相同的 Win32 处理（owner=Progman + TOOLWINDOW +
+`HWND_BOTTOM`、Explorer 重启重挂），但收纳箱只有"始终嵌入"一种形态，没有模式切换。
+
+**Decision**：只把 Win32 核心抽成按句柄、不碰全局状态的 `desktop_attach_hwnd` / `apply_fixed_ex_style_hwnd`，返回挂上的宿主，
+由调用方各自记录 owner：主窗口写 `DESKTOP_OWNER`，收纳箱写 `EMBEDDED_WINDOWS`（label → `{hwnd, owner}`）。主窗口的两个原子量、
+`desktop_attach` / `desktop_detach` / `leave_desktop_mode`、Ordering rules 1–6 与 §3 状态表都不变；Explorer 重启判定共用纯函数
+`needs_reattach`。收纳箱的 tao 标志在建窗时一次给齐，之后只有 `show()` / `hide()` 需要紧跟重挂，见
+[desktop-fences.md §3.1](./desktop-fences.md)。
 
 ### Design Decision: owner=Progman + tao `always_on_bottom`, not `SetParent`
 

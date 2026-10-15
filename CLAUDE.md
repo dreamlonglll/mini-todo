@@ -4,7 +4,7 @@
 
 ## 项目简介
 
-Mini-Todo 是一款基于 **Tauri 2.x + Vue 3 + TypeScript** 开发的 Windows 桌面待办事项管理应用，定位为简洁、聚焦的本地待办工具，支持子任务、四象限、日历、重复提醒、系统通知与 WebDAV 云同步。
+Mini-Todo 是一款基于 **Tauri 2.x + Vue 3 + TypeScript** 开发的 Windows 桌面待办事项管理应用，定位为简洁、聚焦的本地待办工具，支持子任务、四象限、日历、重复提醒、系统通知与 WebDAV 云同步，另有收纳桌面图标的桌面收纳箱。
 
 仓库按平台拆子目录，`pc/` 是 Windows 桌面端，`cloud/` 是云端 HTTP API（mini-todo 在远程 VPS 上的复刻，通过同一个 WebDAV 通道与 PC 同步数据，供 AI / Claude Code Skill 通过 REST 读写）。详见 `cloud/README.md`。
 
@@ -23,7 +23,7 @@ Mini-Todo 是一款基于 **Tauri 2.x + Vue 3 + TypeScript** 开发的 Windows �
 | 异步运行时 | Tokio | Rust 异步任务调度 |
 | WebDAV 客户端 | reqwest | 远端同步（blocking 客户端，只在 `spawn_blocking` 中使用） |
 | 前端单测 | vitest | `npm run test`，`src/**/*.test.ts` |
-| 端到端验证 | selenium + tauri-driver | `pc/scripts/e2e-linux/`（Linux 真实应用 + WebDAV + cloud），`pc/scripts/e2e/`（Windows 窗口模式） |
+| 端到端验证 | selenium + tauri-driver | `pc/scripts/e2e-linux/`（Linux 真实应用 + WebDAV + cloud），`pc/scripts/e2e/`（Windows 窗口模式 / 桌面收纳箱） |
 
 ## 项目结构
 
@@ -38,6 +38,7 @@ mini-todo/
 │   │   ├── assets/                         # 静态资源
 │   │   ├── components/                     # Vue 组件
 │   │   │   ├── CalendarView.vue            # 日历视图（MainView 中 defineAsyncComponent 懒加载）
+│   │   │   ├── FenceItemGrid.vue           # 收纳箱项目网格（图标懒加载、打开、自绘右键菜单、箱内排序、Ctrl+滚轮）
 │   │   │   ├── MarkdownEditor.vue          # 可复用 Milkdown 编辑器（编辑/只读、图片上传、链接白名单）
 │   │   │   ├── QuadrantView.vue            # 四象限视图
 │   │   │   ├── TitleBar.vue                # 标题栏
@@ -51,12 +52,14 @@ mini-todo/
 │   │   │   └── todoStore.ts                # 待办状态（fetchTodos 单飞 + 过期响应丢弃）
 │   │   ├── types/                          # TypeScript 类型定义
 │   │   │   ├── app.ts                      # 应用类型（含 SyncReport / SyncSettings）
+│   │   │   ├── fence.ts                    # 收纳箱类型与前后端共用常量
 │   │   │   └── todo.ts                     # 待办类型
 │   │   ├── utils/                          # 工具函数（*.test.ts 为 vitest 单测）
 │   │   │   ├── datetime.ts                 # 时间解析/格式化，写入统一 YYYY-MM-DD HH:MM:SS
 │   │   │   ├── imageRef.ts                 # Markdown 图片引用 minitodo-image://<name> ⇄ 本机 asset URL
 │   │   │   ├── fileLink.ts                 # 链接点击协议白名单
 │   │   │   ├── editorShortcuts.ts          # 编辑类窗口 Esc / Ctrl+Enter
+│   │   │   ├── fence.ts                    # 收纳箱纯函数（几何落库闸门、缩放矩形、图标档位、提示文案）
 │   │   │   ├── notify.ts                   # notifyError 统一失败提示
 │   │   │   ├── syncReport.ts               # SyncReport 提示文案与刷新判断
 │   │   │   ├── quadrant.ts / color.ts      # 象限与颜色
@@ -65,6 +68,7 @@ mini-todo/
 │   │   ├── views/                          # 页面视图
 │   │   │   ├── CompletedView.vue           # 已完成视图
 │   │   │   ├── EditorView.vue              # 待办编辑主视图
+│   │   │   ├── FenceView.vue               # 桌面收纳箱窗口（独立 WebView，label fence-{id}，路由 #/fence?id=）
 │   │   │   ├── MainView.vue                # 主视图（待办列表）
 │   │   │   ├── SubtaskEditorView.vue       # 子任务编辑视图（独立 WebView）
 │   │   │   ├── NotificationView.vue        # 通知视图
@@ -75,6 +79,8 @@ mini-todo/
 │   │   ├── src/
 │   │   │   ├── commands/                   # Tauri 命令（前后端桥接）
 │   │   │   │   ├── data.rs                 # 数据导入导出、AppSettings 读写（唯一来源）
+│   │   │   │   ├── fence.rs                # 收纳箱元数据 CRUD、窗口生命周期、按屏幕组合记忆位置
+│   │   │   │   ├── fence_items.rs          # 收纳箱内容：对账、移入/移回/跨箱、打开、图标、目录监听
 │   │   │   │   ├── holiday.rs              # 节假日命令
 │   │   │   │   ├── notification_cmd.rs     # 通知命令
 │   │   │   │   ├── settings_cmd.rs         # 设置命令
@@ -83,14 +89,15 @@ mini-todo/
 │   │   │   │   └── window.rs               # 窗口管理命令
 │   │   │   ├── db/                         # 数据库层
 │   │   │   │   ├── connection.rs           # 连接管理、迁移前备份、外键处理
-│   │   │   │   ├── migrations.rs           # 数据库迁移（v1~v28，迁移表驱动）
+│   │   │   │   ├── migrations.rs           # 数据库迁移（v1~v29，迁移表驱动）
 │   │   │   │   ├── models.rs               # 数据模型定义
 │   │   │   │   ├── settings_kv.rs          # settings 读写助手（只在值变化时刷新 updated_at）
 │   │   │   │   ├── sync_store.rs           # 变更计数、墓碑、记录读写与规范化
 │   │   │   │   ├── time.rs                 # 规范时间格式解析/规范化
-│   │   │   │   ├── paths.rs                # 数据 / 图片目录、图片文件名校验
+│   │   │   │   ├── paths.rs                # 数据 / 图片目录、图片文件名校验（debug 构建可用 MINI_TODO_DATA_DIR 隔离）
 │   │   │   │   └── backup.rs               # VACUUM INTO 备份（保留最近 5 份）
 │   │   │   ├── services/                   # 业务服务层
+│   │   │   │   ├── fence_fs/               # 收纳箱文件层（与数据库无关）：命名、IFileOperation 移动、图标提取缓存、notify 监听、打开
 │   │   │   │   ├── notification.rs         # 通知服务（含定时调度、应用内通知窗口定位）
 │   │   │   │   ├── webdav.rs               # WebDAV 客户端（条件 GET/PUT、PROPFIND）
 │   │   │   │   └── secret.rs               # WebDAV 密码保护（Windows DPAPI）
@@ -99,7 +106,7 @@ mini-todo/
 │   │   ├── Cargo.toml                      # Rust 依赖配置
 │   │   └── tauri.conf.json                 # Tauri 配置（含 CSP 与 asset 协议范围）
 │   ├── scripts/
-│   │   ├── e2e/                            # Windows 窗口模式 e2e 工具
+│   │   ├── e2e/                            # Windows 窗口模式 / 收纳箱 e2e 工具（e2e.ps1、fence.ps1、cdp.mjs 等）
 │   │   └── e2e-linux/                      # Linux 端到端验证套件（见其 README）
 │   ├── public/                             # 公共静态资源
 │   ├── index.html                          # Vite 入口 HTML
@@ -215,6 +222,32 @@ mini-todo/
     兜底 tao `apply_diff` 的 ex style 覆写
   - 非 Windows：开关不显示；前端只在 `IS_WINDOWS && fixedEmbedDesktop` 时走桌面模式命令，
     后端 `set_window_desktop_mode(true)` 回退为普通固定模式并返回 Ok（同步来的开关不会让固定失败）
+  - 启动竞态兜底：200ms 轮询线程发现固定 / 嵌入态的 ex style 被晚到的 tao 操作改成 APPWINDOW 时自愈
+    （`lacks_tool_window_style`，`tick_desktop_mode` / `tick_fixed_style`），残留约 200ms 任务栏闪烁
+
+### 桌面收纳箱（仅 Windows）
+- 托盘「新增收纳箱」在光标所在显示器工作区的右上角找空位新建（默认 4 列 × 3 行、标题"收纳箱 / 收纳箱 2…"）。每个收纳箱是一个
+  无边框透明的独立 WebView 窗口（label `fence-{id}`，路由 `#/fence?id={id}` → `FenceView.vue`）
+- **始终嵌入桌面层**：owner=Progman + tao `always_on_bottom` + `WS_EX_TOOLWINDOW`（与主窗口嵌入共用 `desktop_attach_hwnd`），
+  Win+D 后可见、不进任务栏 / Alt+Tab、不盖住应用窗口；tao 标志建窗时一次给齐，`show()` / `hide()` 后必须 `reassert_embedded_window`；
+  `EMBEDDED_WINDOWS` 登记 + 200ms `tick_embedded_windows` 在 Explorer 重启后自动重挂
+- **真收纳**：拖入（`onDragDropEvent`）的文件 / 快捷方式 / 文件夹经 `IFileOperation` 从桌面移到 `%USERPROFILE%\MiniTodo收纳箱\<收纳箱名>\`，
+  重名加 ` (2)` 绝不覆盖，公共桌面项弹 UAC；**文件夹是内容的 source of truth**（`notify` 监听，Explorer 里增删随之刷新），
+  数据库只存元数据与项目的排序 / 原始路径。不允许整体收纳用户桌面 / 公共桌面文件夹本身
+- 双击打开（`ShellExecuteExW`）、自绘右键菜单（打开 / 打开所在位置 / 移回桌面 / 移动到…）、箱内拖动排序、Ctrl+滚轮图标大小、
+  双击标题改名（收纳文件夹同步改名，失败则保留旧文件夹名并提示）、折叠（悬停 / 拖文件经过时临时展开）、
+  「固定」= 锁定位置和大小（仍可拖入、折叠、改名）、每个收纳箱独立的背景色 / 透明度
+- 移动 / 缩放：标题栏超过 3px 才 `startDragging`（不用 `data-tauri-drag-region`），缩放用前端手柄 + `set_fence_bounds`
+  （窗口是 `resizable(false)`）；只有用户拖动 / 缩放结束与托盘重置才 `commit_fence_geometry` 落库，系统挪窗不落库
+- 删除收纳箱：项目全部移回原位置（原目录不存在则回桌面）、空文件夹删除后才删记录并关窗口；有项目移不回去时删除中止、
+  整个收纳箱保留并提示原因
+- 按屏幕组合记忆位置（`fence_layouts`，ID 与 `screen_configs.config_id` / `generateScreenConfigId()` 同格式），约 2 秒检测一次
+  屏幕组合变化；设置里删除屏幕配置时连带删除对应布局
+- 托盘「显示/隐藏所有收纳箱」「重置收纳箱位置」作为兜底入口；首次从 OneDrive 重定向的桌面收纳时提示一次
+- 关键实现：`commands/fence.rs`、`commands/fence_items.rs`、`services/fence_fs/`、`commands/window.rs`（嵌入附属窗口一节）、
+  `views/FenceView.vue`、`components/FenceItemGrid.vue`；契约与易错点见 `.trellis/spec/backend/desktop-fences.md`
+- 已知限制：Win10 / Win11 ≤23H2 上 Win+D 可能盖住收纳箱；每个收纳箱一个 WebView2 渲染进程（开发版每个约 +45~60MB，
+  暂不加 `--process-per-site`）
 
 ## 开发规范
 
@@ -234,9 +267,12 @@ mini-todo/
 ### 数据库设计
 - **数据库类型**：SQLite
 - **存储位置**：`%LOCALAPPDATA%\mini-todo\`（`dirs::data_local_dir()`；Linux 为 `~/.local/share/mini-todo/`）
-  - `data.db`、`images/`（用户图片）、`backups/`（迁移/导入前的 `VACUUM INTO` 快照，保留最近 5 份）、`holidays/`
+  - `data.db`、`images/`（用户图片）、`backups/`（迁移/导入前的 `VACUUM INTO` 快照，保留最近 5 份）、`holidays/`、
+    `fence-icons/`（收纳箱图标 PNG 缓存，启动对账后清理过期项）
   - 日志：`%LOCALAPPDATA%\com.tauri-app.mini-todo\logs\mini-todo.log`（tauri-plugin-log，2MB 轮转）
-- **迁移版本**：当前 v1~v28，通过 `pc/src-tauri/src/db/migrations.rs` 的迁移表管理；有待执行迁移时先备份，
+  - 收纳箱文件：`%USERPROFILE%\MiniTodo收纳箱\<收纳箱文件夹>\`（用户可见的真实文件夹，有收纳箱后才创建；不在数据目录里，
+    卸载 / 删库都不会丢文件）
+- **迁移版本**：当前 v1~v29，通过 `pc/src-tauri/src/db/migrations.rs` 的迁移表管理；有待执行迁移时先备份，
   迁移期间关闭外键、提交前 `foreign_key_check`
   - v23：移除所有 AI Agent / 任务调度 / 工作流相关表和字段（详见迁移注释）
   - v24：新增 `webdav_last_modified` settings key
@@ -245,6 +281,8 @@ mini-todo/
   - v27：新增 `fixed_embed_desktop` settings key，固定模式时是否嵌入桌面（仅 Windows）
   - v28：`sync_meta`（本地变更计数 `local_seq` / `synced_seq`，todos/subtasks 增删改触发器维护）、
     `tombstones` 表、存量时间统一为 `YYYY-MM-DD HH:MM:SS`、新增 `webdav_remote_etag` / `webdav_synced_settings_at`
+  - v29：桌面收纳箱 `fences` / `fence_items` / `fence_layouts` 三张表（后两张 `ON DELETE CASCADE`）与 settings key
+    `fence_onedrive_notice_shown`；均为设备本地数据，不接 `local_seq` 触发器与墓碑、不导出不同步
 
 #### 主要数据表
 
@@ -256,6 +294,9 @@ mini-todo/
 | `screen_configs` | 屏幕配置 |
 | `sync_meta` | 同步计数器（`local_seq` / `synced_seq`），由触发器维护 |
 | `tombstones` | 删除墓碑 `(entity_type, entity_id, deleted_at)`，保留 30 天 |
+| `fences` | 桌面收纳箱元数据（标题、收纳文件夹名、物理像素几何、折叠 / 锁定、外观、图标大小） |
+| `fence_items` | 收纳箱项目的排序与原始路径（内容以收纳文件夹为准，列举时对账） |
+| `fence_layouts` | 收纳箱按屏幕组合记忆的位置 `(fence_id, screen_config_id)` |
 | `migrations` | 迁移版本记录 |
 
 #### 时间格式约定（PC / cloud / 前端一致）
@@ -317,6 +358,8 @@ mini-todo/
 | `settings`（部分） | 是 | `SYNCED_SETTING_KEYS` 的 10 项（含 `is_fixed` / `fixed_embed_desktop`），按 `settingsUpdatedAt` LWW；不含 WebDAV 配置；窗口位置/尺寸只随导出备份 |
 | `images`（文件） | 是 | 先传图片再传 sync-data；一次 PROPFIND 列远端清单；文件名经 `is_safe_image_name` 校验 |
 | `screen_configs` | 否 | 设备特定的屏幕配置 |
+| `fences` / `fence_items` / `fence_layouts` | 否 | 桌面收纳箱：路径与屏幕坐标是设备相关数据，性质同 `screen_configs`；也不进导入导出 |
+| settings `fence_onedrive_notice_shown` | 否 | 设备本地提示标记，有意不进 `AppSettings` / `SYNCED_SETTING_KEYS` |
 | `sync_meta` / `migrations` | 否 | 本机状态 / 结构性表 |
 
 #### 向后兼容
@@ -330,7 +373,9 @@ mini-todo/
 
 当新增数据库迁移时，请检查：
 1. 新增的 **settings 键值** 是否已加入 `AppSettings`（含 `#[serde(default)]`）、`read_app_settings` / `write_app_settings`；
-   需要跨设备同步的再加入 `SYNCED_SETTING_KEYS`（设备相关的不要加）
+   需要跨设备同步的再加入 `SYNCED_SETTING_KEYS`（设备相关的不要加）。
+   例外：纯设备本地的提示 / 状态键（如 v29 的 `fence_onedrive_notice_shown`）有意不进 `AppSettings`，
+   登记在 `.trellis/spec/backend/sync-protocol.md` §3.6
 2. 所有 settings 写入走 `db::settings_kv::set_setting`（禁止 `INSERT OR REPLACE`，否则每次写都会刷新同步版本）
 3. 新增的 **数据表** 是否需要同步：需要则加触发器维护 `local_seq`、在 `sync_store` 中实现读写/合并/墓碑，
    并纳入 `build_sync_doc` 与 cloud 的 `sync/doc.rs`、`sync/merge.rs`
@@ -395,6 +440,17 @@ webdav_force_pull()  让本地等于远端（删除本地独有记录，不写�
 webdav_force_push()  让远端等于本地（为远端独有记录写墓碑后上传）
 ```
 
+### 桌面收纳箱流程
+
+```
+托盘「新增收纳箱」/ create_fence（async：同步命令 / 菜单回调里建窗会死锁）
+  └── create_fence_folder（先建文件夹）→ INSERT fences → save_layout（当前屏幕组合）→ open_fence_window（tao 标志一次给齐）
+       └── embed_window_in_desktop → EMBEDDED_WINDOWS 登记 → 200ms tick_embedded_windows 守护（每 10 tick 检测屏幕组合）
+拖入 → fence_move_in（async，begin_moving 登记 → spawn_blocking）→ IFileOperation → upsert fence_items（搬运 / 记录原始路径）
+目录变化 → notify（300ms 去抖）→ 数据库锁内列举对账 → emit_to("fence-{id}", "fence-items-changed")
+删除 → delete_fence → restore_all → 文件夹已清空才删记录 + destroy 窗口，否则整个收纳箱保留
+```
+
 WebDAV 服务端差异（实测，见 `.trellis/spec/backend/sync-protocol.md`）：Apache mod_dav 的 `If-Unmodified-Since`
 对未改动文件也会 412、写入后 1 秒内 ETag 为弱；nginx/Caddy 忽略 PUT 前置条件、PROPFIND 不返回 getetag、
 `If-Modified-Since` 按整秒比较。所以两端只用 `If-Match` / `If-None-Match`，并且写前总是先 GET 合并。
@@ -405,6 +461,10 @@ WebDAV 服务端差异（实测，见 `.trellis/spec/backend/sync-protocol.md`�
   `async` 并在 `tokio::task::spawn_blocking` 里执行（Tauri 2 的同步命令跑在主线程，会卡住所有窗口）
 - **Tauri emit/listen**：事件驱动通信（实时推送）
   - `tray-toggle-fixed`、`tray-reset-window`、`tray-add-todo`、`tray-open-settings`：托盘菜单事件
+  - 托盘「新增收纳箱」「显示/隐藏所有收纳箱」「重置收纳箱位置」（菜单 id `new_fence` / `toggle_fences` / `reset_fences`，
+    位于「添加待办项」之后，仅 Windows）由后端直接处理，不发前端事件；对应命令 `create_fence` / `toggle_fences_visibility` /
+    `reset_fence_positions` 是同一实现
+  - `fence-items-changed`（payload `FenceEntry[]`）：后端对账后 `emit_to("fence-{id}")`，只发给对应收纳箱窗口
   - `sync-completed`（payload `SyncReport`）：后端同步改动了本地数据后发出（手动 / 自动同步都会），主窗口据此刷新
   - `data-imported`：设置窗口导入数据后通知主窗口重载
   - `app-settings-changed`：设置窗口改动应用设置后通知主窗口按 `key` 重载（含 `fixedEmbedDesktop`）
@@ -419,6 +479,8 @@ WebDAV 服务端差异（实测，见 `.trellis/spec/backend/sync-protocol.md`�
 - **SettingsView**：设置
 - **CompletedView**：已完成列表
 - **NotificationView**：应用内通知弹窗（当通知类型为 "app" 时；按显示器 work area 与缩放换算位置，多条叠放）
+- **FenceView**：桌面收纳箱（每个收纳箱一个窗口，label `fence-{id}`；后端 `commands/fence.rs` 建窗，始终嵌入桌面层，
+  不可关闭，删除走 `destroy()`）
 
 ## cloud/ 子项目（云端 API）
 
@@ -509,12 +571,21 @@ python3 -m unittest discover -s skill/minitodo -p 'test_*.py'
 python3 pc/scripts/e2e-linux/run_e2e.py <app> <cloud> <old-app>
 ```
 
+debug 专用环境变量（**只在 debug 构建读取，release 一律忽略**；与正在运行的安装版并存做实测时必须带上，详见
+`.trellis/spec/backend/desktop-fences.md` §3.6 与 `pc/scripts/e2e/README.md`）：
+
+| 变量 | 作用 |
+|---|---|
+| `MINI_TODO_DATA_DIR` | 数据目录（库 / 图片 / 备份 / 图标缓存）、日志（`<dir>\logs`）、WebView2 用户数据（`<dir>\EBWebView`）都改到该目录；不注册单实例插件、不刷新开机自启注册表项；托盘提示"Mini Todo（开发版）"；asset 协议额外放行隔离目录的 images / fence-icons |
+| `MINI_TODO_FENCES_ROOT` | 收纳根目录改为该目录（代替 `%USERPROFILE%\MiniTodo收纳箱`） |
+| `MINI_TODO_SCREEN_ID_FILE` | 文件内容非空时替代屏幕组合 ID，用于模拟显示器组合变化 |
+
 CI：`.github/workflows/pc-ci.yml`（Windows fmt/clippy/test、Linux clippy/test、前端 typecheck/lint/test/build）、
 `cloud-ci.yml`（fmt/clippy/test + Skill 单测）。
 
 ## 注意事项
 
-1. **目标平台**：Windows 10/11；Linux 可编译运行（CI 与 e2e 用），嵌入桌面等 Win32 特性在 Linux 上不可用
+1. **目标平台**：Windows 10/11；Linux 可编译运行（CI 与 e2e 用），嵌入桌面、桌面收纳箱等 Win32 特性在 Linux 上不可用
 2. **运行环境**：需要 Node.js 和 Rust 开发环境
 3. **图标使用**：仅使用 Element Plus Icons，禁止 emoji
 4. **代码规范**：使用 TypeScript 类型定义，遵循 Vue 3 组合式 API；`<el-*>` 组件按需引入，
@@ -524,6 +595,6 @@ CI：`.github/workflows/pc-ci.yml`（Windows fmt/clippy/test、Linux clippy/test
 7. **日志**：Rust 侧用 `log::info!` / `warn!` / `error!`（落盘到日志文件），不要用 `println!` / `eprintln!`
 8. **设置读写**：一律经 `db::settings_kv`（只在值变化时更新 `updated_at`，否则会干扰设置同步）
 9. **安全边界**：CSP `script-src 'self'`（禁止 `eval` / 内联脚本）；本地图片只经 asset 协议
-   （scope `$LOCALDATA/mini-todo/images/**`）访问，Markdown 里存 `minitodo-image://<name>`（`utils/imageRef.ts`）；
+   （scope 只有 `$LOCALDATA/mini-todo/images/**` 与收纳箱图标缓存 `$LOCALDATA/mini-todo/fence-icons/**`，不要放宽）访问，Markdown 里存 `minitodo-image://<name>`（`utils/imageRef.ts`）；
    链接只放行 http(s) / mailto / 本地文件（`utils/fileLink.ts`）；图片文件名经 `is_safe_image_name` 校验
 10. **时间**：见"时间格式约定"，前后端都只用统一的工具函数解析与格式化
