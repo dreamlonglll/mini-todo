@@ -4169,7 +4169,7 @@ dependencies = [
 
 [[package]]
 name = "mini-todo"
-version = "2.5.0"
+version = "3.0.0-pre"
 dependencies = [
  "async-channel",
  "auto-launch",
@@ -4196,7 +4196,7 @@ dependencies = [
 
 [[package]]
 name = "mini-todo-core"
-version = "2.5.0"
+version = "3.0.0-pre"
 dependencies = [
  "base64",
  "chrono",

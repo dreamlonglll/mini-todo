@@ -3,7 +3,7 @@ members = ["crates/core", "crates/app"]
 resolver = "2"
 
 [workspace.package]
-version = "2.5.0"
+version = "3.0.0-pre"
 edition = "2021"
 
 # 磁盘空间有限（并行的多个 worktree 各有一份 target）：依赖不带调试信息，本地 crate 只保留行号表
