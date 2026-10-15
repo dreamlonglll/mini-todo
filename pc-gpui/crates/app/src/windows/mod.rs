@@ -35,16 +35,14 @@ use std::collections::HashMap;
 use gpui_kit::base::Root;
 use gpui_kit::{
     AnyElement, AnyWindowHandle, App, AppContext as _, BorrowAppContext as _, Bounds, CursorStyle,
-    DisplayId, Entity, Global, InteractiveElement as _, IntoElement, MouseButton,
-    ParentElement as _, Pixels, Render, SharedString, Size, Styled as _, Subscription,
-    TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations,
-    WindowHandle, WindowId, WindowKind as GpuiWindowKind, WindowOptions, div, point, px, size,
-    transparent_black,
+    DisplayId, Entity, Global, InteractiveElement as _, IntoElement, MouseButton, Pixels, Render,
+    SharedString, Size, Styled as _, Subscription, TitlebarOptions, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowHandle, WindowId,
+    WindowKind as GpuiWindowKind, WindowOptions, div, point, px, size, transparent_black,
 };
 
 use crate::platform::{self, Hwnd, MonitorInfo};
-use crate::theme::{self, light};
-use crate::ui::title_bar::WindowTitleBar;
+use crate::theme;
 
 /// 窗口种类
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -460,36 +458,6 @@ pub fn modal_overlay(window: &Window, cx: &App, alpha: f32) -> Option<AnyElement
             })
             .into_any_element()
     })
-}
-
-/// 占位窗口内容（W2 / W3 替换）：标题栏 + 窗口名 + 说明
-pub(crate) fn placeholder(
-    id: &'static str,
-    title: SharedString,
-    note: SharedString,
-) -> impl IntoElement {
-    let palette = light();
-    div()
-        .size_full()
-        .flex()
-        .flex_col()
-        .font(theme::ui_font())
-        .text_size(theme::FONT_SIZE)
-        .line_height(gpui_kit::relative(theme::LINE_HEIGHT))
-        .bg(theme::hex(0xFFFFFF))
-        .text_color(palette.text_primary)
-        .child(WindowTitleBar::new(id, title.clone()))
-        .child(
-            div()
-                .flex_1()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap(px(8.))
-                .child(div().text_size(px(18.)).child(title))
-                .child(div().text_color(palette.text_tertiary).child(note)),
-        )
 }
 
 /// 逻辑尺寸

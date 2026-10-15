@@ -33,6 +33,12 @@ regex = "1"
 auto-launch = "0.5"
 # 版本检查（W1，GitHub latest release）：与 core 相同版本与特性，不多编一份
 reqwest = { version = "0.12", features = ["json", "blocking"] }
+# W2：Markdown 解析（与 gpui-base 同一版本，只在块级排版用；行内交给 gpui-base TextView）
+markdown = "1"
+# W2：系统通知（Windows Toast，AppUserModelID 与 set_app_identity 一致；与旧版 tauri-plugin-notification 底层同一库）
+notify-rust = "4"
+# W2：读图片尺寸（Markdown 图片按原始宽高比缩放）与图片预览旋转；gpui 已启用这些格式，不会多编一份
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 
 [target.'cfg(windows)'.dependencies]
 # 与 gpui-pre-windows 同一版本（0.62），避免再编一份 windows crate

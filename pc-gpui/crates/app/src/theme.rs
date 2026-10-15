@@ -856,3 +856,140 @@ mod tests {
         assert_eq!(todo_font("  ").family, font_family());
     }
 }
+
+// ---- W2：编辑 / 子任务 / 已完成 / 通知窗口与 Markdown（`ui-editor-windows.md`）----
+
+/// W2 窗口与 Markdown 渲染的 token（`0xRRGGBB`，用 [`hex`] 取色；尺寸单位逻辑像素）
+pub mod w2 {
+    use gpui_kit::{Font, FontFallbacks, FontFeatures, FontStyle, FontWeight, Hsla};
+
+    // 编辑类窗口里直接写在 scoped CSS 里的 Tailwind slate / blue / red …
+    /// slate-700：子任务标题、表单字段标签
+    pub const SLATE_700: u32 = 0x334155;
+    /// slate-300：虚线边框、复选框边
+    pub const SLATE_300: u32 = 0xCBD5E1;
+    /// 子任务面板底
+    pub const PANEL_BG: u32 = 0xFAFBFC;
+    /// blue-50：小图标按钮 hover 底
+    pub const BLUE_50: u32 = 0xEFF6FF;
+    /// blue-100 / blue-200：已完成窗口"恢复"按钮底 / hover 底
+    pub const BLUE_100: u32 = 0xDBEAFE;
+    pub const BLUE_200: u32 = 0xBFDBFE;
+    /// blue-300：搜索框聚焦边
+    pub const BLUE_300: u32 = 0x93C5FD;
+    /// red-100 / red-200 / red-600：删除按钮底 / hover 底 / hover 字
+    pub const RED_100: u32 = 0xFEE2E2;
+    pub const RED_200: u32 = 0xFECACA;
+    pub const RED_600: u32 = 0xDC2626;
+    /// indigo-100 / indigo-500：子任务"查看"按钮 hover
+    pub const INDIGO_100: u32 = 0xE0E7FF;
+    pub const INDIGO_500: u32 = 0x6366F1;
+    /// cyan-500：渐变终点（进度条、勾选、通知图标）
+    pub const CYAN_500: u32 = 0x06B6D4;
+    /// sky-50 / sky-100 / sky-700：子任务进度卡片渐变与数字
+    pub const SKY_50: u32 = 0xF0F9FF;
+    pub const SKY_100: u32 = 0xE0F2FE;
+    pub const SKY_700: u32 = 0x0369A1;
+    /// amber-50 / amber-700：暂存子任务提示条
+    pub const AMBER_50: u32 = 0xFFFBEB;
+    pub const AMBER_700: u32 = 0xB45309;
+
+    // ---- Markdown（Milkdown theme-nord + MarkdownEditor.vue scoped 的实际生效值，已按参考截图校准）----
+    /// 正文字色
+    pub const MD_TEXT: u32 = 0x1E293B;
+    /// 列表标记、行内代码字色（nord10）
+    pub const MD_ACCENT: u32 = 0x5E81AC;
+    /// 行内代码底
+    pub const MD_CODE_BG: u32 = 0xF1F5F9;
+    /// 代码块底 / 字
+    pub const MD_PRE_BG: u32 = 0x1E293B;
+    pub const MD_PRE_TEXT: u32 = 0xE2E8F0;
+    /// 引用左线 / 字
+    pub const MD_QUOTE_BORDER: u32 = 0x3B82F6;
+    pub const MD_QUOTE_TEXT: u32 = 0x64748B;
+    /// 表格内线、分隔线
+    pub const MD_RULE: u32 = 0xE2E8F0;
+    /// 表头底；表体奇数列底（gray-50）
+    pub const MD_TH_BG: u32 = 0xF8FAFC;
+    pub const MD_TD_ODD_BG: u32 = 0xF9FAFB;
+    /// 任务项方框边
+    pub const MD_TASK_BORDER: u32 = 0x94A3B8;
+
+    /// 段落 16px / 行高 1.6，上下外边距 0.4em
+    pub const MD_P_SIZE: f32 = 16.;
+    pub const MD_P_LINE: f32 = 25.6;
+    pub const MD_P_MARGIN: f32 = 6.4;
+    /// 标题 (字号, 行高倍数, 上外边距, 下外边距)，h1..h6
+    pub const MD_HEADINGS: [(f32, f32, f32, f32); 6] = [
+        (30., 1.25, 18., 9.),
+        (24., 1.333, 14.4, 7.2),
+        (20., 1.4, 12., 6.),
+        (16., 1.5, 12., 0.),
+        (14., 1.4286, 8., 0.),
+        (14., 1.4286, 8., 0.),
+    ];
+    /// 列表缩进 / 外边距 / 项下边距
+    pub const MD_LIST_INDENT: f32 = 24.;
+    pub const MD_LIST_MARGIN: f32 = 5.6;
+    pub const MD_LI_MARGIN: f32 = 4.;
+    /// 列表标记字号（li 继承编辑器根 14px）
+    pub const MD_MARKER_SIZE: f32 = 14.;
+    /// 引用外边距（0.5em × 14px）
+    pub const MD_QUOTE_MARGIN: f32 = 7.;
+    /// 代码块 14px / 20px，内边距 12 16，圆角 8
+    pub const MD_PRE_SIZE: f32 = 14.;
+    pub const MD_PRE_LINE: f32 = 20.;
+    /// 表格外边距 0.6em（14px）；单元格内边距 12 24；圆角 8
+    pub const MD_TABLE_MARGIN: f32 = 8.4;
+    /// 分隔线外边距 1em（14px）
+    pub const MD_HR_MARGIN: f32 = 14.;
+
+    /// 等宽字体：Windows Consolas（Milkdown 等宽栈在 Windows 上先命中它）；Linux 用 Liberation Mono（截图替身）
+    pub fn mono_font() -> Font {
+        let (family, fallbacks): (&str, Vec<String>) = if cfg!(windows) {
+            (
+                "Consolas",
+                vec!["Courier New".into(), "Microsoft YaHei".into()],
+            )
+        } else {
+            ("Liberation Mono", vec!["Noto Sans CJK SC".into()])
+        };
+        Font {
+            family: family.to_string().into(),
+            features: FontFeatures::default(),
+            fallbacks: Some(FontFallbacks::from_fonts(fallbacks)),
+            weight: FontWeight::NORMAL,
+            style: FontStyle::Normal,
+        }
+    }
+
+    /// 衬线字体（引用块 `ui-serif, Georgia, Cambria, "Times New Roman", serif`；中文在 Windows 上回落宋体）
+    pub fn serif_font() -> Font {
+        let (family, fallbacks): (&str, Vec<String>) = if cfg!(windows) {
+            ("Georgia", vec!["Cambria".into(), "SimSun".into()])
+        } else {
+            ("Liberation Serif", vec!["Noto Serif CJK SC".into()])
+        };
+        Font {
+            family: family.to_string().into(),
+            features: FontFeatures::default(),
+            fallbacks: Some(FontFallbacks::from_fonts(fallbacks)),
+            weight: FontWeight::NORMAL,
+            style: FontStyle::Normal,
+        }
+    }
+
+    /// `color` 以 `alpha` 不透明度叠在白底上的等效不透明色（GPUI 的外阴影会透过半透明背景显示出来，
+    /// CSS 不会；带阴影的浅色块用它代替半透明背景）
+    pub fn tint(color: Hsla, alpha: f32) -> Hsla {
+        let c = color.to_rgb();
+        let mix = |v: f32| v * alpha + (1. - alpha);
+        gpui_kit::Rgba {
+            r: mix(c.r),
+            g: mix(c.g),
+            b: mix(c.b),
+            a: 1.,
+        }
+        .into()
+    }
+}

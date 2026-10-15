@@ -24,3 +24,6 @@ pub mod tray;
 // ---- W1 追加 ----
 pub mod update_check;
 pub mod window_mode;
+// ---- W2 ----
+/// 系统通知（notify-rust）
+pub mod notify;
