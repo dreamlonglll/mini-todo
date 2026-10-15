@@ -19,8 +19,8 @@ if (list) {
   for (const t of pages) console.log(`${t.id}\t${t.title}\t${t.url}`);
   process.exit(0);
 }
-// 主窗口 URL 形如 http://localhost:1420/ 或 http://localhost:1420/#/ ；编辑器为 #/editor?...
-let page = pages.find(t => t.url.includes(targetHint) && (targetHint !== 'localhost:1420/' || !/#\/(editor|settings|completed|subtask-editor|notification)/.test(t.url)));
+// 主窗口 URL 形如 http://localhost:1420/ 或 http://localhost:1420/#/ ；编辑器为 #/editor?...，收纳箱为 #/fence?id=N
+let page = pages.find(t => t.url.includes(targetHint) && (targetHint !== 'localhost:1420/' || !/#\/(editor|settings|completed|subtask-editor|notification|fence)/.test(t.url)));
 if (!page) { console.error('no page target matching', targetHint, '\navailable:', pages.map(p => p.url)); process.exit(2); }
 
 const ws = new WebSocket(page.webSocketDebuggerUrl);
