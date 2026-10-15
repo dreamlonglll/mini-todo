@@ -1,0 +1,73 @@
+name: PC (GPUI) e2e (Windows)
+
+# 在 GitHub 托管的真实 Windows 虚拟机上运行 GPUI 版应用做端到端验证（无 GPU 时 GPUI 走 D3D11 WARP 软件渲染）。
+# 截图、窗口状态、应用日志作为产物上传。
+on:
+  workflow_dispatch:
+  push:
+    branches: ['claude/**']
+    paths:
+      - 'pc-gpui/**'
+      - '.github/workflows/pc-gpui-e2e-windows.yml'
+
+concurrency:
+  group: pc-gpui-e2e-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: Launch + screenshot (debug build)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: pc-gpui
+        shell: pwsh
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './pc-gpui -> target'
+
+      - name: Build app and seed tool (debug)
+        run: |
+          cargo build -p mini-todo --locked
+          cargo build -p mini-todo-core --example seed --locked
+
+      - name: Launch app and capture
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'e2e-out'
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $data = Join-Path $env:RUNNER_TEMP 'mt-data'
+          & .\target\debug\examples\seed.exe $data scripts\sample-data.json
+          $env:MINI_TODO_DATA_DIR = $data
+          $env:MINI_TODO_DEBUG_OPEN = 'main'
+          $p = Start-Process -FilePath .\target\debug\mini-todo.exe -PassThru
+          Start-Sleep -Seconds 25
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          $b = [System.Windows.Forms.SystemInformation]::VirtualScreen
+          $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+          $g = [System.Drawing.Graphics]::FromImage($bmp)
+          $g.CopyFromScreen($b.Left, $b.Top, 0, 0, $bmp.Size)
+          $bmp.Save((Join-Path $out 'screen-main.png'), [System.Drawing.Imaging.ImageFormat]::Png)
+          "screen: $($b.Width)x$($b.Height)"
+          "process alive: $(-not $p.HasExited)"
+          Get-Process -Id $p.Id -ErrorAction SilentlyContinue | Select-Object Id, MainWindowTitle, MainWindowHandle | Format-List
+          Copy-Item -Recurse -Force (Join-Path $data 'logs') $out -ErrorAction SilentlyContinue
+          Get-ChildItem -Recurse $out | Select-Object FullName, Length | Format-Table -AutoSize
+          Get-Content (Join-Path $out 'logs\mini-todo.log') -ErrorAction SilentlyContinue | Select-Object -Last 80
+          if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
+
+      - name: Upload e2e output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pc-gpui-e2e-windows
+          path: ${{ runner.temp }}/e2e-out
+          if-no-files-found: warn
