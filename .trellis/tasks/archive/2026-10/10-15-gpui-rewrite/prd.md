@@ -45,11 +45,28 @@
 
 ## 验收标准
 
-- [ ] `pc-gpui/` 下 `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test` 在 Linux 通过
-- [ ] `cargo check` / `clippy` 对 `x86_64-pc-windows-gnu` 目标通过（覆盖全部 `cfg(windows)` 代码）
-- [ ] core 迁移原有测试（sync_store 合并、迁移、时间、WebDAV 互操作、fence_fs 纯逻辑等）全部通过
-- [ ] 农历 / 节气 / 节日结果与 lunar-javascript 一致（用 Node 生成对照数据做单测）
-- [ ] Xvfb 下运行新应用，各窗口截图与参考截图（Vue 版在浏览器中渲染）逐一对照，布局 / 颜色 / 字号 / 间距一致
-- [ ] Xvfb 下冒烟：新建 / 编辑 / 完成 / 删除待办、子任务、四象限拖拽、日历、设置修改、导入导出、WebDAV 同步（本地 WebDAV 服务）
-- [ ] 新增 CI workflow（Linux build/test/clippy + Windows build/test/clippy）
-- [ ] 更新 CLAUDE.md / README / spec，说明新目录、构建命令、与旧版的关系和已知偏差
+- [x] `pc-gpui/` 下 `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test` 在 Linux 通过（app 148 + core 285）
+- [x] `clippy` 对 `x86_64-pc-windows-gnu` 目标通过（覆盖全部 `cfg(windows)` 代码）
+- [x] core 迁移原有测试全部通过；workspace 特性统一（serde_json/preserve_order）下的不稳定用例已修
+- [x] 农历 / 节气 / 节日结果与 lunar-javascript 一致（2024–2027 逐日对照 1461 天）
+- [x] Xvfb 下各窗口截图与参考截图逐一对照（`scripts/regress.py`，48 个参考场景 + 交互 + 冒烟）
+- [x] 新增 CI workflow（`pc-gpui-ci.yml`：Windows fmt/clippy/test/release 构建并上传产物，Linux clippy/test）
+- [x] 更新 CLAUDE.md / README / spec（新增 `.trellis/spec/pc-gpui/`）
+
+## 用户追加要求：Linux 与 Windows 环境的端到端测试
+
+本容器无 KVM，无法本地起 Windows 虚拟机；Windows 环境改用 GitHub Actions `windows-latest`（真实 Windows 虚拟机，
+交互桌面，D3D11 WARP 软件渲染）。
+
+- [x] Linux e2e（`pc-gpui/scripts/e2e-linux/`）：Xvfb + xdotool 黑盒驱动真实应用，Apache / nginx 两种 WebDAV、cloud、Skill；
+  F 本地 / S 同步 / L 生命周期
+- [x] Windows e2e（`pc-gpui/scripts/e2e-windows/` + `pc-gpui-e2e-windows.yml`）：窗口外观与尺寸、透明、普通 / 经典固定 /
+  嵌入桌面（owner、ex style、Z 序、Win+D、Explorer 重启重挂）、通知叠放、真实鼠标键盘交互、开机自启注册表、托盘、
+  系统通知、DPAPI、WebDAV 同步、收纳箱（真实 OLE 拖放、改名、几何）、单实例、日志位置、release 冒烟
+- e2e 发现并已修复的缺陷：窗口按逻辑坐标偏移（GPUI 不可见边框）、改名后首次拖入丢失（GPUI 输入方式判定）、
+  收纳箱几何外框 / 客户区不一致、空描述框点击区域、行内图片尺寸、子任务窗口长内容不能滚动
+
+## 仍需用户在真实 Windows 桌面确认
+
+多显示器 / 高 DPI 下的屏幕组合 ID 与旧版记录是否一致；Win10 / Win11 ≤23H2 上嵌入桌面对 Win+D 的表现；
+真实 IME 中文输入；Toast 在用户桌面上的显示；与旧版共存时的单实例互认。
