@@ -36,6 +36,8 @@ crates/core/
 │   └── fence/
 │       ├── mod.rs             # ← commands/fence.rs 中与窗口无关的部分
 │       └── items.rs           # ← commands/fence_items.rs 中与窗口无关的部分
+├── examples/
+│   └── seed.rs                # 把导出格式 4.0 的 JSON 导入隔离数据目录（截图 / 冒烟测试用，见 pc-gpui/scripts/README.md）
 └── tests/fixtures/
     ├── gen_lunar.cjs          # 用 lunar-javascript 生成农历对照数据
     └── lunar_fixture.json     # 2024-01-01 ~ 2027-12-31 逐日对照（提交）

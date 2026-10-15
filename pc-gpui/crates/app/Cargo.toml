@@ -1,0 +1,59 @@
+[package]
+name = "mini-todo"
+description = "Mini Todo（GPUI 版 PC 端）：窗口、界面与平台集成"
+version.workspace = true
+# GPUI 与 gpui-component 都是 2024 edition（示例代码、RPIT 捕获规则一致）
+edition = "2024"
+publish = false
+build = "build.rs"
+
+[lib]
+name = "mini_todo"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mini-todo"
+path = "src/main.rs"
+
+[dependencies]
+# gpui-pre / gpui-component 每周快照，API 变化快：必须精确钉版本
+gpui-kit = "=0.7.3"
+raw-window-handle = "0.6"
+mini-todo-core = { path = "../core" }
+log = "0.4"
+async-channel = "2"
+futures = "0.3"
+chrono = "0.4"
+dirs = "5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2"
+regex = "1"
+# 开机自启：与旧版 tauri-plugin-autostart 2.5（底层 auto-launch 0.5）同一库、同名同键
+auto-launch = "0.5"
+
+[target.'cfg(windows)'.dependencies]
+# 与 gpui-pre-windows 同一版本（0.62），避免再编一份 windows crate
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+# 托盘（W1）：tray-icon 自带 muda 菜单；只在 Windows 编译（Linux 只用于 CI 与截图）
+tray-icon = { version = "0.21", default-features = false }
+# 带扩展名过滤器 / 标题的文件对话框（GPUI 自带的没有过滤器）；只在 Windows 编译
+rfd = { version = "0.16", default-features = false }
+
+[build-dependencies]
+embed-resource = "3"
+
+[dev-dependencies]
+mini-todo-core = { path = "../core", features = ["test-util"] }

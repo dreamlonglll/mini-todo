@@ -1,7 +1,20 @@
 [workspace]
-members = ["crates/core"]
+members = ["crates/core", "crates/app"]
 resolver = "2"
 
 [workspace.package]
 version = "2.5.0"
 edition = "2021"
+
+# 磁盘空间有限（并行的多个 worktree 各有一份 target）：依赖不带调试信息，本地 crate 只保留行号表
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
