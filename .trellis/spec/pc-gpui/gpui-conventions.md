@@ -3,8 +3,9 @@
 > app crate 的可执行约定。来源：`pc-gpui/crates/app/README.md` §3「约定」与 §2.1「维护规则」、
 > `.trellis/tasks/archive/2026-10/10-15-gpui-rewrite/research/gpui-api.md` §0「结论速览」，以及实现过程中踩过的坑。
 > 版本：`gpui-kit =0.7.3`（re-export gpui-pre 0.3.9、gpui-pre-platform、gpui-base 0.7.3、gpui-component 0.7.3）。
-> API 以本机 `~/.cargo/registry/src/index.crates.io-*/gpui-pre-0.3.9`、`gpui-pre-windows-0.3.9`、`gpui-component-0.7.3`
-> 等源码为准——gpui-pre 是 Zed 的每周快照，网上的示例、文档常常对不上这个版本。
+> API 以本机 `~/.cargo/registry/src/index.crates.io-*/gpui-pre-0.3.9`、`gpui-pre-windows-0.3.9`、`gpui-pre-macos-0.3.9`、
+> `gpui-pre-apple-0.3.9`、`gpui-component-0.7.3` 等源码为准——gpui-pre 是 Zed 的每周快照，网上的示例、文档常常对不上这个版本。
+> macOS 专属约定见 §2.15（任务 `10-16-macos-package`；mac 平台层没有真机验收，结论来自源码与 CI 的 macOS runner）。
 > 接口清单（`AppState` 方法、`WindowManager`、`ui::*` 控件、`platform::*`、`services::*`）见 app README §4，这里不重复。
 
 ---
@@ -13,7 +14,7 @@
 
 - 任何 `pc-gpui/crates/app/**` 的改动。
 - 尤其：新窗口种类、新控件、动到 `platform/` / `services/window_mode.rs` / `services/fences.rs`、改 `theme.rs`、
-  新 debug 开关、升级 `gpui-kit`。
+  新 debug 开关、升级 `gpui-kit`；任何 `cfg(target_os = "macos")` 代码与 `cfg(not(windows))` 分支（它们在 mac 上会被编译、运行，§2.15）。
 
 ---
 
@@ -47,7 +48,8 @@
 - 读操作（`GetWindowRect`、显示器枚举、光标位置）不发消息，随时可调。
 - 任何**模态**系统调用（同步拖窗循环、同步文件 / 取色对话框）都不能在事件处理里直接调：`platform::file_dialog` / `fence_win::choose_color`
   已放独立线程，`begin_window_drag` 已延后。
-- 窗口代码里**不直接写 Win32**：新能力加在 `platform/`（`windows.rs` 实现 + `fallback.rs` 的 no-op / 近似 + `mod.rs` 跨平台签名）。
+- 窗口代码里**不直接写 Win32 / AppKit**：新能力加在 `platform/`（`windows.rs` 实现 + `macos/` 实现 + `fallback.rs` 的 no-op / 近似 +
+  `mod.rs` 跨平台签名；mac 的分层见 §2.15）。macOS 的 `setFrame:` 等同样会同步触发 GPUI 回调，本节规则对 mac 一样成立。
 - 子类化窗口过程只用 `SetWindowSubclass`（`platform/subclass.rs`），**不要碰 `GWLP_USERDATA`**（GPUI 用它存窗口状态）。
 - GPUI 建窗后**不会**改写 ex style（tao 会），所以旧版为对抗 tao `apply_diff` 写的排队重申不需要；但 GPUI 的缩放热区与
   `WindowControlArea` 命中测试按**建窗时**的 `is_resizable` 计算，没有运行时开关 → 运行时锁定位置 / 尺寸用
@@ -137,7 +139,8 @@
 - 两套调色板：应用自绘部分 `#3B82F6` 系（`light()` / `Palette`），Element Plus 控件 `#409EFF` 系（`ep()`）；以 UI 规格标注为准。
   深色主题只作用于主窗口（`AppState::main_palette()`）。
 - 每个窗口根元素：`.font(theme::ui_font())`、`.text_size(theme::FONT_SIZE)`、`.line_height(relative(theme::LINE_HEIGHT))`。
-  `ui_font()`：Windows `Segoe UI` + `Microsoft YaHei` 回退；Linux `Liberation Sans` + `Noto Sans CJK SC`（与参考截图一致）。
+  `ui_font()`：Windows `Segoe UI` + `Microsoft YaHei` 回退；macOS `.SystemUIFont` + `PingFang SC`（别名只在主字体族上生效，见 §2.15）；
+  Linux `Liberation Sans` + `Noto Sans CJK SC`（与参考截图一致）。
   待办标题等用户字体用 `theme::todo_font(&state.todo_font_family)`。CSS `font-weight: 600` → `theme::WEIGHT_SEMIBOLD`，`500` → Regular。
 - gpui-component 的主题在 `theme::init` 里已调成 Element Plus（primary `#409EFF`、前景 `#606266`、边框 `#DCDFE6`、圆角 6 / 4、
   无焦点外环、字号 14）；不要用 gpui-component 默认外观去"近似"。
@@ -184,20 +187,26 @@
 | `MINI_TODO_DEBUG_OPEN` | 加载完数据后额外打开的窗口（截图 / e2e 用，格式见 `pc-gpui/scripts/README.md`）；这些窗口不走模态关系 |
 | `MINI_TODO_DEBUG_LATEST_VERSION` | 版本检查不联网，直接当作最新版本 |
 | `MINI_TODO_DEBUG_DIALOG_PATH` | 导出 / 导入的文件对话框不弹出，直接返回该路径 |
-| `MINI_TODO_DEBUG_WINDOWS_UI` | `1` 时 Linux 上也显示 Windows 专有的设置项 |
+| `MINI_TODO_DEBUG_WINDOWS_UI` | `1` 时 Linux / macOS 上也显示 Windows 专有的设置项 |
 | `MINI_TODO_DEBUG_FENCE_STATE` | `onedrive` / `drag-hover`：收纳箱直接显示 OneDrive 提示 / 拖入悬停框 |
 
 - 前三个与旧版同名同义（core `db::paths`、`services::fence_fs`、`settings::screen_config_id` 读取）。新增 debug 开关同样只在
   `cfg(debug_assertions)` 下读取，并写进 app README §5 与 `pc-gpui/scripts/README.md`。
-- 开机自启注册表项（`HKCU\…\Run\mini-todo`）与单实例互斥量和旧版 / 安装版共用：隔离运行时绝不刷新 / 切换它们。
+- 开机自启注册表项（`HKCU\…\Run\mini-todo`；mac 为 `~/Library/LaunchAgents/mini-todo.plist`）与单实例互斥量（mac 为
+  `/tmp/com_tauri_app_mini_todo_si.sock`）和旧版 / 安装版共用：隔离运行时绝不刷新 / 切换它们。
 
 ### 2.12 平台差异
 
-- 目标平台 Windows 10/11。Linux 只用于 CI 与截图 / e2e：没有托盘、单实例、开机自启、嵌入桌面、收纳箱真实文件操作；
+- 目标平台 Windows 10/11 与 macOS 11+（预览，§2.15）。Linux 只用于 CI 与截图 / e2e：没有托盘、单实例、开机自启、嵌入桌面、收纳箱真实文件操作；
   `platform/fallback.rs` 为 no-op 或用 GPUI 能力近似（Linux 上无法程序化移动窗口）。
-- `QuitMode::Explicit`：Windows 上关掉所有窗口进程不退出（托盘常驻）；Linux 没有托盘，最后一个窗口关闭时退出。
-- Windows 专有设置项按 `cfg!(windows)` 显示（`MINI_TODO_DEBUG_WINDOWS_UI=1` 可在 Linux 上显示以对照参考截图）。
-- 所有 `cfg(windows)` 代码必须通过 `x86_64-pc-windows-gnu` 交叉 clippy（见 [verification.md](./verification.md) §3）。
+- **`cfg(not(windows))` 不等于 Linux**：mac 上它同样成立。只给 Linux 的行为写 `cfg(target_os = "linux")`（如"最后一个窗口关闭即退出"），
+  Windows + mac 共有的写 `cfg(any(windows, target_os = "macos"))`（托盘、单实例），Linux 的空实现写 `cfg(not(any(windows, target_os = "macos")))`。
+- `QuitMode::Explicit`：Windows 上关掉所有窗口进程不退出（托盘常驻）；macOS 同样不退出（菜单栏图标常驻，Dock / 菜单栏图标再唤起，⌘Q 退出）；
+  Linux 没有托盘，最后一个窗口关闭时退出（`lib.rs` 的 `cfg(target_os = "linux")`）。
+- Windows 专有设置项按 `cfg!(windows)` 显示（`MINI_TODO_DEBUG_WINDOWS_UI=1` 可在 Linux / mac 上显示以对照参考截图）；mac 专有提示按
+  `cfg!(target_os = "macos")`（如设置页"WebDAV 密码以明文保存"）。
+- 所有 `cfg(windows)` 代码必须通过 `x86_64-pc-windows-gnu` 交叉 clippy（见 [verification.md](./verification.md) §3）；mac 代码见
+  [verification.md](./verification.md) §7（`mac-check` 交叉检查 + CI 的 macOS 作业）。
 
 ### 2.13 文本排版与已知视觉偏差
 
@@ -220,6 +229,70 @@
 - `overflow_y_scroll` 的可滚动范围只按**直接子元素**的边界计算（gpui `Div::prepaint`）：滚动容器的直接子元素不要 `size_full`
   （高度被钉成容器高度，孙元素溢出也滚不动），用 `min_h_full`（子任务内容框）。
 
+### 2.15 macOS（AppKit；gpui-pre-macos 0.3.9）
+
+gpui-pre-macos 能建窗（位置 / 显示器 / 置顶层级 / 可缩放都只在建窗时给）、拖动（`start_window_move`）、缩放（`zoom_window`）、激活，
+但**没有**运行时摆窗、改层级、显示 / 隐藏单个窗口、改 style mask；这些在 `platform/macos/ns.rs` 里用 objc2 直接调 NSWindow / NSScreen / NSEvent。
+维护者没有 Mac，下面每条都是"不遵守就出错"且只能靠 CI 的 macOS runner 发现的：
+
+- **AppKit 调用只在主线程**：AppKit 对象都是 `MainThreadOnly`；`ns.rs` 每个函数先 `MainThreadMarker::new()`，不在主线程就返回 `None` / `false`
+  并只警告一次。GPUI 在 mac 上的前台（事件处理、`cx.spawn` 的前台任务）就是主线程，后台线程（`background_executor`、`spawn_db`、
+  `std::thread`）里不要碰 `platform::*`。同理：`UNUserNotificationCenter`（`cx.show_system_notification`）只能在主线程，调度器经通道交给前台
+  （`services/scheduler.rs`）；tray-icon / muda 必须在主线程、run loop 已运行后创建——`services::tray::start` 放在 `Application::run` 的回调里
+  （GPUI 在 `applicationDidFinishLaunching:` 里执行它）。tray-icon 的菜单 / 点击回调也在主线程，但照样只投 channel，不碰 `App`。
+- **`Hwnd` 在 mac 上是 NSWindow 的窗口号（`windowNumber`），不是对象指针**：每次调用都在 `NSApp.windows` 里按窗口号重新找，找不到就当窗口已关、
+  什么都不做。不要保存、解引用 NSWindow / NSView 指针：GPUI 关窗后对象可能已释放，地址还可能被新窗口复用。`platform::hwnd(window)` 只在
+  持有 `&Window` 的那一刻从 `raw_window_handle` 的 `ns_view` 取窗口号。
+- **写操作同样要延后**：`setFrame:` / `setFrameOrigin:` / `orderOut:` / 改 style mask 会同步触发 GPUI 的 `windowDidMove:` / `windowDidResize:`
+  等回调，App 被借用时 GPUI 处理不了——与 Win32 一样遵守 §2.2（`&Window` 版本已自动延后；`Hwnd` 原始调用只在 `cx.spawn` 里、`update` 之外）。
+  菜单动作在活动窗口的 `update` 里派发（窗口正被借用），碰窗口的处理一律 `cx.defer` 到派发之后（`services/mac_menu.rs` 的 `with_active_window`）。
+  读操作（frame、`NSScreen.screens`、`NSEvent.mouseLocation`）与 `ns::prepare_new_window` 不触发回调，随时可调。
+- **坐标**（`platform/mac_geometry.rs` 模块文档）：AppKit 是全局点、主屏左下原点、y 向上；GPUI 的逻辑像素 = 点，但窗口 `bounds()` 与建窗的
+  `window_bounds` 都是**所在显示器本地**的（以该屏左上角为原点）；`cx.displays()` 的 `bounds()` 原点恒为 (0, 0)。因此：
+  - `WindowSpec.bounds` 一律写全局逻辑坐标，由 `windows::open_window` 经 `platform::creation_bounds` 换成显示器本地坐标并补上目标显示器；
+    不要绕过 `open_window` 直接 `cx.open_window`，也不要用 `cx.displays()` 排多屏布局（用 `platform::monitors`）
+  - 本 crate 的"物理像素" = 全局点坐标（左上原点）× **统一系数**（所有屏 `backingScaleFactor` 的最大值）；逻辑 → 物理用
+    `platform::physical_scale(window)`，**不要**用 `window.scale_factor()`（那是窗口所在屏自己的缩放，混合缩放时与统一系数不同）。
+    `MonitorInfo.scale` 在 mac 上恒为统一系数
+  - 屏幕组合 ID 例外：按各屏自己的缩放算（`platform::screen_config_id` → `mac_geometry::screen_config_inputs`），与 2.5.0 一致
+  - 窗口 frame = 客户区（`FullSizeContentView`），没有 Windows 那样的不可见边框；换算逻辑放 `mac_geometry.rs`（全平台编译，Linux 上跑单测）
+- **红绿灯**：所有窗口都带 `TitlebarOptions { appears_transparent: true }`，AppKit 会在左上角画系统的关闭 / 最小化 / 缩放按钮，压在自绘标题栏上。
+  `windows::open_window` 建窗后**立即**（不延后，不触发回调）`Hwnd::prepare_after_open` 隐藏它们，并关掉 NSPanel（`PopUp` / `Floating` 窗口）的
+  `hidesOnDeactivate`、对本该显示的窗口补一次显示。**改 style mask 后 AppKit 可能重建标题栏、红绿灯重新出现，还会换掉第一响应者**（键盘输入
+  不再进 GPUI 视图）：所有改 mask 的代码都走 `ns.rs` 的 `update_style`（改完重新隐藏按钮、把第一响应者还回去），不要直接 `setStyleMask`。
+- **`app_owns_titlebar_drag: true`**（`WindowSpec::options()`，只对 mac 生效）不要去掉：否则 AppKit 从顶部那条标题栏区域拖窗、为区分双击而
+  延迟标题栏上的点击。拖窗走 `start_window_move`（`ui::title_bar::drag_region` 的非 Windows 分支，必须在鼠标按下 / 移动的事件处理里同步调用）。
+- **激活**：点菜单栏图标 / 菜单项、单实例转交、Dock 唤起时本应用多半不在前台，新开或唤起的窗口会落在前台应用的窗口之后——先 `cx.activate(true)`
+  （`tray::activate_app`、`window_mode::bring_main_to_front`、单实例接收端已处理）。`on_reopen` 只在没有可见窗口时回调：移到屏幕边缘（贴边隐藏）
+  的窗口仍算可见，这类状态要在窗口自己的激活回调里处理（主窗口的 `window_mode::on_main_activated`）。
+- **AppKit 会约束窗口位置**：带标题栏样式的窗口顶边不能高过菜单栏，`setFrameOrigin:` 可能没到目标位置。依赖"窗口真的到了那里"的逻辑
+  （贴边隐藏）要读回实际 frame 判断（mac 的 `Hwnd::set_client_position` 已据实返回成败），不要假设摆窗必然成功。
+- **应用菜单与退出**：GPUI 不会自动建主菜单，没有 `set_menus` 就没有 ⌘Q，系统文件面板里的 ⌘C / ⌘V 也不工作（AppKit 靠菜单项的 key equivalent
+  派发）。`services::mac_menu::init` 在 `theme::init` 之后调用一次，**快捷键要先于 `set_menus` 绑定**（菜单项才显示快捷键）；编辑菜单的动作就是
+  gpui-base 输入框的 `input::*`，快捷键沿用输入框自己的绑定，不重复绑定。关窗口不退出（`QuitMode::Explicit`），`on_reopen` 只在没有可见窗口时回调。
+- **激活策略**：GPUI 在 `applicationDidFinishLaunching:` 里按自身状态重设激活策略（默认 Regular），Info.plist 的 `LSUIElement` 会被覆盖；
+  要隐藏 Dock 图标只能用 `cx.set_activation_policy(Accessory)`（或建 `Application` 时 `with_windowing(Headless)`），目前不做。
+- **字体**：GPUI 只在**主字体族**上把 `.SystemUIFont` 换成系统界面字体 `.AppleSystemUIFont`；回退列表原样交给 CoreText，写 `.SystemUIFont`
+  等于没写——回退项要写真实族名 `.AppleSystemUIFont`（`theme::font_family_as_fallback`，`todo_font` 用它）。字体下拉用
+  `cx.text_system().all_font_names()`，去掉 `.` 开头的私有字体。Linux 的替身字体（Liberation / Noto）mac 上没有，新增字体 token 时三个平台都要给值。
+- **文件对话框**用 GPUI 的 `prompt_for_paths` / `prompt_for_new_path`（原生面板、非模态，没有过滤器与标题）。不要在 mac 上用 rfd 的同步接口：
+  它把面板同步派到主队列 `runModal`，对话框期间 GPUI 的前台任务全部停摆。要过滤器时用 rfd 的 async + `set_parent`（sheet）。
+- **系统通知**只在从 `.app` 启动时可用（GPUI 没有 bundle id 时只记一条日志，避免系统 abort），且 bundle 至少要 ad-hoc 签名；拿不到投递结果。
+  e2e / 本地调试要先 `scripts/macos/bundle.sh <二进制> - <目录>` 包成 `.app`。
+- **代码分层**（这样 Linux / Windows 上也能检查大部分 mac 代码）：
+  - objc2 的 AppKit 调用写进**不依赖 GPUI 与本 crate 其它模块**的文件（`platform/macos/ns.rs`；同类的还有 `services/autostart.rs`、
+    `services/single_instance/unix_socket.rs`、`services/tray/mac_icon.rs`），并在 `scripts/mac-check/src/lib.rs` 里加一行 `#[path]` 模块；
+    改 app 的 mac 依赖版本 / 特性时同步改 `scripts/mac-check/Cargo.toml`（逐项一致）
+  - 纯换算 / 纯逻辑写成全平台编译带单测（`mac_geometry.rs`；`mac_menu.rs` 全平台编译、只在 mac 上调用，Linux clippy 能检查它对 GPUI API 的用法），
+    用 `#[cfg_attr(not(target_os = "macos"), allow(dead_code))]` 压住非 mac 的未使用警告
+  - `platform/macos/mod.rs` 等 GPUI 胶水尽量薄——它只有 CI 的 macOS 作业能编译（[verification.md](./verification.md) §7）
+- **测试里的临时目录**：mac 的临时目录 `/var/folders/…` 是 `/private/var/folders/…` 的符号链接，SQLite（库路径）与 FSEvents（`notify`）报告的是
+  解析后的路径。比较路径前两边都 `canonicalize`（`db/backup.rs` 的测试），或只在 mac 上 `canonicalize` 输入（`fence_fs/watch.rs` 的测试：Windows 上
+  `canonicalize` 会变成 `\\?\` 路径，反而对不上）。
+- Windows 专有的 `platform::*` 在 mac 上是 no-op：`set_tool_window`（程序坞 / ⌘Tab 是整个应用的）、`set_owner`（mac 子窗口会跟着父窗口移动，语义不同；
+  模态只靠遮罩与 `forward_activation`）、`set_round_corners`、`set_system_menu`、`embed::*`；`ex_style()` 恒 0（`window_mode` 的 tool window 自愈只在
+  Windows 上做）。
+
 ---
 
 ## 3. `gpui-kit` 精确钉版本与升级
@@ -241,10 +314,18 @@
    `is_hovered`（`ui::external_drop` 依赖它）；透明窗口（DirectComposition）实现；`QuitMode` 默认值；`Root` / `RootPlugin` 接口
    （`UiLayer` 依赖）；`gpui_kit::base::TextView::markdown(..).image_source(..)`；`img(&str)` 的 URI 判定；换行器规则；
    Windows release 构建的 `fxc.exe` 着色器预编译（`gpui-pre-windows/build.rs`）。
-2. 对齐 app 的 `windows` crate 版本与 gpui-pre-windows 一致。
+   macOS（§2.15，gpui-pre-macos / gpui-pre-apple）：gpui-kit 是否仍给 `gpui_platform` 开 `font-kit`（漏开时 mac 上退回 `NoopTextSystem`，
+   界面一个字都不画——mini-term issue #82）与 `runtime_shaders`（关了就要构建期 `xcrun metal`）——用
+   `cargo tree --locked --offline --target aarch64-apple-darwin -e features -i gpui-pre-apple` 核对；窗口 `bounds()` / `window_bounds` 是否仍是
+   显示器本地坐标、`displays()` 原点是否仍恒为 0（`creation_bounds`、`mac_geometry` 依赖它）；`TitlebarOptions` 的 style mask 与红绿灯、
+   NSPanel 的 `hidesOnDeactivate`；`app_owns_titlebar_drag`；`.SystemUIFont` 别名只认主字体族；`show_system_notification` 的 bundle 守卫与线程要求；
+   `did_finish_launching` 是否仍重设激活策略、`on_reopen` 的回调条件；`set_menus` / `MenuItem::os_action`；`setReleasedWhenClosed:NO`。
+2. 对齐 app 的 `windows` crate 版本与 gpui-pre-windows 一致；mac 的 `objc2` / `objc2-foundation` / `objc2-app-kit` 与 gpui-pre-macos 一致
+   （同步改 `scripts/mac-check/Cargo.toml`）。
 3. 若开启 `gpui-kit/test-support`：旧 lock 会出现 `cocoa` / `unicode-properties` 版本冲突，删掉 lock 重新生成（见 gpui-api.md §C1）。
-4. 跑 [verification.md](./verification.md) 的**全部**门槛：Linux fmt / clippy / test、Windows 交叉 clippy、`regress.py` 全部场景
-   （`--before` 指向升级前的输出，逐张对照）与 `--smoke`、Linux e2e、Windows e2e（debug + release 两个 job）。
+4. 跑 [verification.md](./verification.md) 的**全部**门槛：Linux fmt / clippy / test、Windows 交叉 clippy、`mac-check`、`regress.py` 全部场景
+   （`--before` 指向升级前的输出，逐张对照）与 `--smoke`、Linux e2e、Windows e2e（debug + release 两个 job）、macOS e2e（`checks` / `smoke` /
+   `release-smoke`）与 `pc-gpui-ci.yml` 的 macos 作业（universal 构建）。
 5. 更新 `research/gpui-api.md` 的结论（或在本文件记录差异）、app README 的版本号与约定。
 
 ---

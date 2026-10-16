@@ -8,6 +8,8 @@
 > 用例表与本地运行方法见其 README）。CI：`.github/workflows/pc-gpui-e2e-windows.yml`，在一次性的 GitHub 托管 Windows 虚拟机上跑
 > （门槛见 `.trellis/spec/pc-gpui/verification.md` §6）。GPUI 窗口没有 DOM / CDP：按钮位置按布局常量（逻辑像素）点击，会随内容移动的
 > 目标先截图按颜色识别再点。旧 Tauri 版的 CDP / `e2e.ps1` / `fence.ps1` 工具已随旧版删除。
+>
+> macOS：`pc-gpui/scripts/e2e-macos/`（CI `.github/workflows/pc-gpui-e2e-macos.yml`，门槛见 `verification.md` §7），做法见文末「macOS runner」。
 
 ---
 
@@ -19,6 +21,8 @@
 - [ ] 改了收纳箱窗口：`services/fences.rs` 的建窗参数与嵌入守护、`windows/fence/` 的移动 / 缩放 / 折叠 / 外部拖入、`fence_layouts` 的写入时机
 - [ ] 改了会移动用户文件的收纳箱路径（core `services/fence_fs`、`fence::items::{move_in, restore, move_to}`、`fence::delete`）
 - [ ] 改了通知窗口定位、托盘、单实例、开机自启、Toast、DPAPI，或 release profile / `build.rs`
+- [ ] 改了 macOS 的窗口平台层（`platform/macos/`、`mac_geometry.rs`）、建窗 / 红绿灯（`windows/mod.rs`）、应用菜单（`services/mac_menu.rs`）、
+      菜单栏图标 / 单实例 socket / LaunchAgent / 系统通知 / 日志的 mac 分支、`scripts/macos/bundle.sh`
 
 ---
 
@@ -87,5 +91,43 @@
 - GPUI 窗口在左 / 右 / 下有不可见边框（96 DPI 下各 8px）：断言几何时比较**客户区**，不要比较 `GetWindowRect`。
 - 无 GPU 的 CI 虚拟机上 GPUI 走 D3D11 WARP 软件渲染，截图取色依赖桌面是纯色（`set-display.ps1`）。
 
+---
+
+## macOS runner（`pc-gpui/scripts/e2e-macos/`）
+
+维护者没有 Mac，mac 的"live window"只有 GitHub 托管的 macOS runner（`macos-15`，arm64）。做法与 Windows 套件同一思路（真实应用 + 真实输入 +
+只读断言 + 截图 + 读 `data.db`），工具换成 Quartz / Vision / AX（pyobjc）：
+
+- **环境事实**：runner 自动登录图形会话、不休眠、纯黑壁纸；镜像的 TCC 给 `/bin/bash`、`osascript` 与 runner agent（负责进程）预授权了
+  屏幕录制、辅助功能、AppleEvents（System Events / 访达）与 PostEvent，并压掉了 macOS 15+ 的"绕过私有窗口选择器"提醒。GPU 是
+  Apple Paravirtual device（Metal 可用；Intel runner 上 Metal 多重采样会卡死，别在 Intel runner 上跑 GUI e2e）。屏幕默认 **1024×768pt、1x**：
+  比编辑窗口（1080 宽）还窄，AppKit 会把窗口夹到屏幕内——尺寸断言按"期望与屏幕可见区域取小"，开跑前 `set_display.py` 尽力调到 1920×1080。
+  通知中心 UI 被卸载：系统通知横幅与授权弹框测不了。
+- **启动**：先 `scripts/macos/bundle.sh <二进制> - <目录>` 包成 `.app`（没有 bundle id 时系统通知被 GPUI 禁用），再**直接执行**
+  `<app>/Contents/MacOS/mini-todo`——环境变量（`MINI_TODO_DATA_DIR` / `MINI_TODO_DEBUG_OPEN`，只在 debug 构建生效）能传进去，
+  `NSBundle.mainBundle` 仍是这个 `.app`。要测 `open <app>`（Dock / LaunchServices 唤起）先 `lsregister -f` 登记。
+- **窗口**：`CGWindowListCopyWindowInfo` 按 `kCGWindowOwnerPID` 过滤，读 `kCGWindowBounds`（全局点、主屏左上原点，与 CGEvent 坐标同一套）、
+  `kCGWindowNumber`（= NSWindow `windowNumber` = 本应用的 `platform::Hwnd`）、`kCGWindowLayer`（置顶判定）。
+- **截图**：`screencapture -x -o -l <windowNumber>` 截单个窗口（被遮挡也能截）。**没有屏幕录制权限时它照样输出 PNG，只是只有壁纸**
+  （runner-images#8782）：一定要断言"截图确有内容"（不透明像素、颜色数、非主色像素占比），界面上有没有字再用 OCR 断言——mini-term 的 mac 包曾连续
+  6 个版本一个字都不画没人发现（GPUI 漏开 `font-kit`）。
+- **OCR**：Vision `VNRecognizeTextRequest`（accurate、`zh-Hans` + `en-US`），小图先放大；去空白、统一全角标点后子串 / 最长公共子串匹配。
+  数据异步加载，不满足时隔 2 秒重截重试。mac 字体与 Linux 不同，不能拿 `regress.py` 的截图当基线。
+- **菜单**：AX 读应用菜单（`menu bar 1`，`AXMenuBar`）与菜单栏状态项（`AXExtrasMenuBar` 的第一个子元素）。对状态项 `AXPress` 时 AppKit 弹出菜单、
+  弹菜单期间应用不回 AX 请求——超时（-25204）是正常的，读不到菜单再真实右键点它（tray-icon 只在右键按下时弹菜单）；菜单项用 `AXPress`。
+- **键鼠**：`CGEventPost(kCGHIDEventTap)` 等同真实输入，发给光标下 / 前台的应用：**发键盘事件前先切到前台并确认前台进程是被测应用**
+  （AX `AXFocusedApplication`），切不到时退到 `CGEventPostToPid`（直接投给该进程，不会误按到别的程序）并记 BAD。中文用
+  `CGEventKeyboardSetUnicodeString` 直接注入（不经输入法），快捷键用 keycode + `kCGEventFlagMaskCommand`（⌘Enter = 36）。从 runner 的 shell
+  拉起的进程不一定会自己激活：`NSRunningApplication.activateWithOptions` → System Events `set frontmost` → 点窗口顶部空白处，依次尝试。
+- **拖窗口**：左键在标题栏上沿（y + 6pt，按钮之上的留白）按下 → 分步拖动 → 抬起，按 CGWindowList 前后的位置判定；AX 设置窗口位置 / 尺寸
+  （`AXPosition` / `AXSize`）用来判定固定模式下"改尺寸无效"。
+- **断言数据**：debug 套件读 `<MINI_TODO_DATA_DIR>/data.db`；release 套件不隔离，读 `~/Library/Application Support/mini-todo/data.db`、
+  `~/Library/Logs/com.tauri-app.mini-todo/mini-todo.log`、`/tmp/com_tauri_app_mini_todo_si.sock`、`~/Library/LaunchAgents/mini-todo.plist`
+  ——**只在一次性 VM 上跑**（`--allow-real-profile`）。
+- **在自己的 Mac 上跑**（目前没有人这么做，留给有 Mac 的贡献者）：终端要有「屏幕录制」与「辅助功能」权限；smoke 组会接管鼠标键盘；
+  不要加 `--wallpaper`（真的换壁纸）、不要跑 `set_display.py`（改分辨率）、不要跑 release 组（读写真实数据目录、socket 与 LaunchAgent，
+  会和装着的 mini-todo 冲突）；M04 的 AppleScript `quit` 第一次会弹自动化授权。
+- **取回结果**：产物下载不可用时用注解 API，再不行从 job 日志按 PNG 头切分还原截图（`verification.md` §7.3）。
+
 → Executable details: `.trellis/spec/backend/window-modes.md` §6, `.trellis/spec/backend/desktop-fences.md` §6,
-`pc-gpui/scripts/e2e-windows/README.md`.
+`pc-gpui/scripts/e2e-windows/README.md`; macOS: `window-modes.md`「Scenario: macOS」, `pc-gpui/scripts/e2e-macos/README.md`.

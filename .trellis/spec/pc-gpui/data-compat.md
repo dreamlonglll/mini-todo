@@ -20,10 +20,29 @@
 |---|---|---|
 | PC：`pc-gpui/crates/core` | 本地 SQLite、`sync-data.json.gz`、导出文件 | 唯一维护中的 PC 实现 |
 | cloud：`cloud/` | `sync-data.json.gz`（经 WebDAV）、REST 写入 | 独立 crate；合并规则见 `cloud/src/sync/merge.rs`，写入字段契约见 `cloud/src/model.rs` |
-| 已安装的旧版本 PC | 本地 SQLite（同一数据目录）、`sync-data.json.gz` | 其它设备上可能还在跑旧 Tauri 版（≤ 2.5.0）或更早的 3.x；同一台机器上安装包原地升级旧版、共用 `%LOCALAPPDATA%\mini-todo`，用户也可能装回旧版 |
+| 已安装的旧版本 PC | 本地 SQLite（同一数据目录）、`sync-data.json.gz` | 其它设备上可能还在跑旧 Tauri 版（≤ 2.5.0，Windows 与 macOS 都有）或更早的 3.x；同一台机器上 Windows 安装包原地升级旧版、共用 `%LOCALAPPDATA%\mini-todo`，mac 包拖进「应用程序」替换 2.5.0 mac 版、共用 `~/Library/Application Support/mini-todo`（§2.1），用户也可能装回旧版 |
 
 旧 Tauri 版与当前 core 的 `db/`、`services/{webdav,secret,fence_fs}` 同源（core 由它复制而来），所以现有数据完全互通；
 新改动之后旧版本不会跟着变，下表的"后果"列主要就是针对它们。
+
+### 2.1 macOS：与 2.5.0 mac 版共用的身份与数据
+
+3.0.2-pre 起重新提供 mac 包（GPUI 版），与 2.5.0 mac 版（Tauri，`mini-todo_2.5.0_universal.dmg`）是**同一个应用**：
+
+| 项 | 事实 | 后果 / 注意 |
+|---|---|---|
+| 应用身份 | 同一个 bundle id `com.tauri-app.mini-todo`、同名 `mini-todo.app` / 可执行文件 `mini-todo`（`scripts/macos/bundle.sh`） | 拖进「应用程序」直接替换旧版；通知授权与显示设置挂在同一个 bundle id 上（2.5.0 用已弃用的 `NSUserNotificationCenter`，新版用 `UNUserNotificationCenter`，升级后第一次提醒是否还会请求授权未经验证）；LaunchServices 认为是同一个应用 |
+| 数据目录 | 同一个 `~/Library/Application Support/mini-todo/`（core `db/paths.rs` 与 2.5.0 都是 `dirs::data_local_dir()/mini-todo`，`dirs` 5） | 升级即沿用全部数据；首次打开时迁移 v29 / v30（2.5.0 是 v28），v29 / v30 的收纳箱表在 mac 上建了但不用。装回 2.5.0 时它打开 v30 库只记警告、照常运行（规则同 §3 第一行） |
+| 日志 | 同一个 `~/Library/Logs/com.tauri-app.mini-todo/mini-todo.log`（2.5.0 tauri-plugin-log `LogDir`） | 与 Windows / Linux 的 `<data_local_dir>/com.tauri-app.mini-todo/logs/` 口径不同（mac 没有 `logs` 子目录、不在数据目录旁边），`services/logging.rs` 按平台分支；开发隔离时三个平台都是 `<MINI_TODO_DATA_DIR>/logs` |
+| 单实例 | 同一个 Unix socket `/tmp/com_tauri_app_mini_todo_si.sock`、同一消息格式（`<cwd>\0\0<args 以 \0 连接>`） | 新旧两版互相识别，不会同时打开同一个库；只删自己绑定的那个 socket 文件（按文件身份判断），不会误删另一个实例新建的 |
+| 开机自启 | 同一个 LaunchAgent `~/Library/LaunchAgents/mini-todo.plist`（`Label = mini-todo`、`[<可执行文件绝对路径>, --autostart]`） | 旧 plist 在覆盖安装后照样拉起新版（路径不变）；已开启时每次启动刷新路径，从 App Translocation 临时位置运行时不刷新 |
+| WebDAV 密码 | 两版都明文存在 settings（core `services/secret.rs` 非 Windows 分支与 2.5.0 逐字相同） | 互通。以后改成钥匙串时要考虑降级：2.5.0 会把钥匙串标记当成明文密码 |
+| 屏幕组合 ID | 按各屏自己的缩放算 `{n}_{W}x{H}@{scale%}`（W / H = 点尺寸 × 该屏 `backingScaleFactor`），与 2.5.0（tao `availableMonitors()`）一致（`platform/mac_geometry.rs` 的 `screen_config_inputs`） | 2.5.0 记下的 `screen_configs` 记录按 ID 照常匹配 |
+| 主窗口几何（物理像素） | 全局点坐标（主屏左上原点）× **统一系数**（所有屏 `backingScaleFactor` 的最大值）；2.5.0 是"点 × 窗口 / 显示器各自所在屏的缩放" | 所有屏缩放相同（单屏、多块 Retina、多块 1x）时逐像素一致，2.5.0 记下的位置照常恢复；混用缩放（Retina 笔记本 + 1x 外接屏）时口径不同，2.5.0 记下的位置可能恢复到别处或回退为居中。只影响设备本地、不同步的 `screen_configs`，最多丢一次位置；之后两版混用同一台机器时会互相覆盖对方的位置 |
+| 界面状态 | 2.5.0 的"展开全部子任务"存在 WKWebView 的 `localStorage`，GPUI 版存在数据目录的 `ui-state.json` | 不迁移，升级后这个开关回到默认 |
+
+改上表任何一项（尤其 bundle id、`.app` 名、socket 路径与格式、plist 名与参数、日志位置、物理像素口径）都会破坏与 2.5.0 的衔接，
+按"兼容名字不要改"处理（`CLAUDE.md`「兼容旧版沿用的名字」的 macOS 表）。
 
 ---
 

@@ -27,8 +27,9 @@
   - core `fence/**`、`services/fence_fs/**`、`settings::delete_screen_config`、`db/paths.rs` 的隔离变量、`fences` / `fence_items` /
     `fence_layouts` 表
   - app `services/fences.rs`、`windows/fence/**`、`platform/embed.rs`（主窗口也用）、托盘收纳箱菜单项（`services/tray.rs`）
-- 平台：托盘入口与启动恢复（`services::fences::restore_all`）只在 Windows；core 的移动 / 打开 / 定位 / 图标在非 Windows 返回
-  `Err("桌面收纳箱仅支持 Windows")`。Linux 上收纳箱窗口只用于截图 / 冒烟（`MINI_TODO_DEBUG_OPEN=fence:<id>` / `fence:new`）。
+- 平台：托盘入口与启动恢复（`services::fences::restore_all`）只在 Windows（macOS 的菜单栏图标菜单不含收纳箱三项，`tray.rs` 按 `cfg(windows)`
+  加入）；core 的移动 / 打开 / 定位 / 图标在非 Windows 返回 `Err("桌面收纳箱仅支持 Windows")`。Linux 上收纳箱窗口只用于截图 / 冒烟
+  （`MINI_TODO_DEBUG_OPEN=fence:<id>` / `fence:new`）；mac 上没有入口（v29 / v30 的表照样建，不用）。
 
 ### 2. Signatures
 
@@ -511,7 +512,7 @@ release 不编译。Windows e2e 的 P01 在 release 构建上验证忽略 `MINI_
 | 双击目标失效的 `.lnk` | 约 3 秒后 `Err("快捷方式指向的目标不存在，可能已被移动或卸载")` |
 | 打开 / 定位不存在的路径 | `Err("文件不存在")` |
 | 图标提取失败 | `Err`，界面占位图标 |
-| 非 Windows：移动 / 打开 / 定位 / 图标 | `Err("桌面收纳箱仅支持 Windows")`；托盘不存在，`restore_all` 直接返回 |
+| 非 Windows：移动 / 打开 / 定位 / 图标 | `Err("桌面收纳箱仅支持 Windows")`；Linux 没有托盘、macOS 的菜单栏图标菜单没有收纳箱项，`restore_all` 直接返回 |
 | `GetShellWindow()` 为空（Explorer 未运行） | `attach_to_desktop` 返回 false 不挂；守护等 Explorer 回来再挂 |
 | Explorer 重启（新 Progman） | 下一个 tick 内全部重挂，窗口不随旧 owner 销毁 |
 | 收纳箱 ex style 丢了 TOOLWINDOW / 带上 APPWINDOW | 下一个 tick `lacks_tool_window_style` 命中，重挂（GPUI 下是防御） |

@@ -2,8 +2,9 @@
 
 > pc-gpui 的验证入口与"改什么必须跑什么"。命令默认在 `pc-gpui/` 下执行（e2e 另注明）。
 > 工具细节以各自 README 为准：`pc-gpui/scripts/README.md`（`regress.py` / `shot.sh` / `MINI_TODO_DEBUG_OPEN`）、
-> `pc-gpui/scripts/e2e-linux/README.md`、`pc-gpui/scripts/e2e-windows/README.md`。
-> 本机（Claude Code 云端容器）是 Linux：Windows 专有行为只能交叉 clippy + CI 上的 Windows e2e + 用户实机验收。
+> `pc-gpui/scripts/e2e-linux/README.md`、`pc-gpui/scripts/e2e-windows/README.md`、`pc-gpui/scripts/e2e-macos/README.md`。
+> 本机（Claude Code 云端容器）是 Linux：Windows 专有行为只能交叉 clippy + CI 上的 Windows e2e + 用户实机验收；
+> macOS 行为只能 `scripts/mac-check` 交叉检查（只覆盖不依赖 GPUI 的 mac 源文件）+ CI 上的 macOS 作业，维护者没有 Mac，**没有真机验收**（§7）。
 
 ---
 
@@ -16,8 +17,11 @@
 | 可见界面（窗口布局、控件、`theme.rs`、文案、字体） | + §4 `regress.py`：相关场景 `--only`，逐张看 `compare/`；改共享控件 / `theme.rs` 时跑全部场景并看控件样例（`gallery`） |
 | 跨窗口流程（新建 / 编辑 / 子任务 / 设置即时生效 / 导入导出 / 已完成 / 提醒 / 收纳箱新建改名） | + `regress.py --smoke` |
 | core 的同步、导入导出、迁移、提醒调度；单实例、日志 | + §5 Linux e2e（F / S / L 组；同步改动跑 S 组 Apache + nginx），并按 [data-compat.md](./data-compat.md) 确认 cloud 侧也改了 |
-| 版本号、`release.yml` / `cache-warm.yml`、NSIS 安装器 | 见 [release.md](./release.md) |
+| 版本号、`release.yml` / `cache-warm.yml`、NSIS 安装器、`scripts/macos/{bundle.sh,make-dmg.sh}` | 见 [release.md](./release.md)；改 mac 打包脚本另跑 §7.2 的 CI（`pc-gpui-ci.yml` 的 macos 作业或 mac e2e 会调用 `bundle.sh`） |
 | Windows 窗口行为（窗口模式、嵌入桌面、透明、通知窗口定位、收纳箱、托盘、开机自启、单实例、DPAPI、Toast、release 构建） | + §6 Windows e2e（CI 或本机），交付说明里列出需要用户实机验收的项 |
+| 不依赖 GPUI 的 mac 源文件：`platform/macos/ns.rs`、`services/autostart.rs`、`services/single_instance/unix_socket.rs`、`services/tray/mac_icon.rs`（`scripts/mac-check/src/lib.rs` 收录的那些） | + §7.1 `mac-check` 交叉检查（本机就能跑） |
+| `cfg(target_os = "macos")` 代码与 mac 行为：`platform/{macos/,mac_geometry.rs,mod.rs}`、`windows/mod.rs`（建窗 / 红绿灯）、`services/{mac_menu,tray,single_instance,autostart,notify,logging,scheduler,window_mode}` 的 mac 分支、`theme.rs` 的 mac 字体、`lib.rs`、`crates/app/Cargo.toml` 的 mac 依赖 | + §7.1（能覆盖的部分）+ §7.2 推 `claude/**` 分支跑 `pc-gpui-e2e-macos.yml`（mac 代码唯一的编译门），交付说明里写明哪些只在 runner 上验证过 |
+| 共享代码里会影响 mac 的改动（新窗口种类 / `WindowSpec`、新快捷键、托盘菜单、文件对话框、`cfg(not(windows))` 分支、测试里的临时目录路径） | + §7.2：mac 上 `cfg(not(windows))` 落到 mac 而不是 Linux，测试路径有 `/var` → `/private/var` 陷阱（[gpui-conventions.md §2.15](./gpui-conventions.md)） |
 | 升级 `gpui-kit` | 以上全部（[gpui-conventions.md §3](./gpui-conventions.md)） |
 
 ---
@@ -33,8 +37,9 @@ cargo clippy -p mini-todo-core --all-targets -- -D warnings
 cargo test -p mini-todo-core
 ```
 
-- CI（`.github/workflows/pc-gpui-ci.yml`）在 Windows 与 Linux 上都跑 fmt / clippy / test（clippy 与 test 带 `--locked`），Windows job 另做
-  `cargo build --release -p mini-todo --locked` 并上传 `mini-todo.exe`（产物 `mini-todo-gpui-windows-x64`）。
+- CI（`.github/workflows/pc-gpui-ci.yml`，main / PR）在 Windows 与 Linux 上都跑 fmt / clippy / test（clippy 与 test 带 `--locked`），Windows job 另做
+  `cargo build --release -p mini-todo --locked` 并上传 `mini-todo.exe`（产物 `mini-todo-gpui-windows-x64`）；macOS job 跑 clippy / test，
+  再做 universal release 构建 + `bundle.sh`，上传 `mini-todo-gpui-macos-universal`（`ditto` 打的 zip）。fmt 与平台无关，mac 不重复跑。
 - Linux 构建依赖（Ubuntu 24.04）：`libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libvulkan-dev
   libfontconfig-dev libfreetype-dev libssl-dev libzstd-dev libasound2-dev pkg-config clang`（与 CI 相同）。
 - 测试放哪：
@@ -44,6 +49,10 @@ cargo test -p mini-todo-core
     `util/*.rs`）。没有使用 GPUI 的 headless 测试（`gpui-kit/test-support` 会扰动 `Cargo.lock`，见 gpui-api.md §C1）——界面用 §4 验证。
   - app 测试需要内存库时依赖 `mini-todo-core` 的 feature `test-util`（`Database::new_in_memory()`，dev-dependencies 已开）。
   - Windows 专属测试（`fence_fs` 的 shell / sta / 图标、`secret` 的 DPAPI 往返）只在 Windows 上编译运行（CI Windows job 覆盖）。
+  - mac 的纯逻辑尽量写成全平台编译、在 Linux 上就能跑的单测：坐标换算 `platform/mac_geometry.rs`、单实例协议
+    `services/single_instance/unix_socket.rs`（`cfg(any(target_os = "macos", all(test, unix)))`）、应用菜单结构 `services/mac_menu.rs`、
+    菜单栏模板图标（`tray.rs` 的测试）、App Translocation 判定（`autostart.rs`）、字体下拉过滤（`settings/appearance.rs`）。
+    依赖临时目录路径的测试在 mac 上要两边 `canonicalize` 后再比较（`/var` → `/private/var`，[gpui-conventions.md §2.15](./gpui-conventions.md)）。
 - 重新生成农历对照数据（在仓库根目录执行；lunar-javascript 1.7.7 装在临时目录，不要装进仓库）：
   `npm i --prefix /tmp/lunar-js lunar-javascript@1.7.7`，再 `NODE_PATH=/tmp/lunar-js/node_modules node pc-gpui/crates/core/tests/fixtures/gen_lunar.cjs`
   （PowerShell 写法见脚本文件头）。
@@ -136,7 +145,92 @@ cd .. && python3 pc-gpui/scripts/e2e-linux/run_e2e.py pc-gpui/target/debug/mini-
 
 ---
 
-## 7. 交付前需要用户在 Windows 上实机验收的项
+## 7. macOS（`scripts/mac-check/`、`pc-gpui/scripts/e2e-macos/`）
+
+维护者没有 Mac：mac 代码只能"本地交叉检查能覆盖的部分 + 推分支让 CI 的 macOS runner 编译、测试、跑 e2e"，失败日志回灌后再改。
+整个 app 的 mac 目标在 Linux / Windows 上**连 `cargo check` 都过不了**：gpui-pre-apple 的 build.rs 按**宿主机** cfg 生成
+`stitched_shaders.metal`（非 mac 宿主什么也不生成，随后 `include_str!` 失败），bundled SQLite 等构建脚本要 Apple SDK。
+在非 mac 上能做的只有依赖解析（`cargo tree --locked --target aarch64-apple-darwin …`，改 mac 依赖后更新 `Cargo.lock`）和 §7.1。
+
+### 7.1 本地交叉检查：`scripts/mac-check`
+
+```bash
+rustup target add aarch64-apple-darwin           # 一次性
+cargo check  --manifest-path scripts/mac-check/Cargo.toml --target aarch64-apple-darwin
+cargo clippy --manifest-path scripts/mac-check/Cargo.toml --target aarch64-apple-darwin -- -D warnings
+```
+
+- 是什么：不属于 workspace 的小 crate（有自己的 `Cargo.lock`），`src/lib.rs` 用 `#[path]` 把 app 里**不依赖 GPUI** 的 mac 源文件原样编进来，
+  做类型检查 + clippy。Linux 与 Windows 上都能跑，不需要 Apple SDK。
+- 覆盖：`platform/macos/ns.rs`（objc2 调 NSWindow / NSScreen / NSEvent 的全部 AppKit 调用）、`services/autostart.rs`（auto-launch 的 LaunchAgent）、
+  `services/single_instance/unix_socket.rs`、`services/tray/mac_icon.rs`（tray-icon / image）——即对 objc2 / objc2-app-kit / tray-icon / auto-launch
+  的 API 用法。
+- 不覆盖：GPUI 胶水（`platform/macos/mod.rs`、`platform/mod.rs` 与 `windows/mod.rs` 的 mac 分支、`lib.rs` 的 `cfg(target_os = "macos")` 几行、
+  `services/{tray,single_instance,notify,logging,scheduler}.rs` 的 mac `imp` / 函数）；也不链接、不运行、不跑测试。这些只有 §7.2。
+- 已在 §2 里检查的 mac 代码：全平台编译的 `platform/mac_geometry.rs`（Linux 上跑单测）、`services/mac_menu.rs`（Linux clippy 检查它对 GPUI API 的用法）、
+  `unix_socket.rs`（Linux 单测）；`theme.rs` / `settings/appearance.rs` / `settings/data.rs` 用 `cfg!(target_os = "macos")`，两个分支在所有平台都参与编译。
+- 维护：新增不依赖 GPUI 的 mac 源文件就在 `mac-check/src/lib.rs` 加一行 `#[path]` 模块；`mac-check/Cargo.toml` 的依赖版本与特性必须和
+  `crates/app/Cargo.toml` 的 mac 依赖**逐项一致**（版本钉成 `pc-gpui/Cargo.lock` 里的），否则这里能过、app 里不一定能过。
+- 何时必跑：改了上面收录的文件或 mac 依赖。推分支前先跑，省一轮 CI。
+
+### 7.2 CI：`pc-gpui-e2e-macos.yml`（mac 代码唯一的编译门与运行时反馈）
+
+- 触发：`workflow_dispatch`，以及推送到 `claude/**` 分支且改动 `pc-gpui/**` 或本 workflow 时。runner `macos-15`（arm64，Apple Paravirtual GPU /
+  Metal；已登录的图形会话；镜像给 `/bin/bash`、`osascript` 与 runner agent 预授权了屏幕录制、辅助功能、AppleEvents、PostEvent）。
+- 作业：
+  - `checks`：`cargo clippy --workspace --all-targets --locked -- -D warnings` + `cargo test --workspace --locked`（clippy 失败也照跑测试）
+  - `smoke`：debug 构建 + seed → `bundle.sh target/debug/mini-todo -` 包成单架构 `.app`（bundle id 才有效）→ `lsregister` 登记 →
+    `set_display.py` 尝试把显示器调到 1920×1080（失败不致命，runner 默认 1024×768pt、1x）→ `run_e2e.py --suite smoke --strict-traffic-lights`：
+    M01 主窗口（尺寸、截图有内容、OCR 认出待办标题、bundle id、红绿灯已隐藏）、M02 设置、M03 只读详情、M04 AppleScript quit、M05 ⌘Q、
+    M06 App 菜单、M07 菜单栏图标菜单（无收纳箱项）、M08 ⌘W 后 `open <app>` 唤起、M09 FAB 新建待办落库、M10 固定模式拖不动 / 改尺寸无效 / `is_fixed` 落库
+  - `release-smoke`：release 构建 → `.app` → `run_e2e.py --suite release --allow-real-profile`（一次性 VM，不隔离）：P01 真实数据库迁移到
+    `LATEST_VERSION`、日志在 `~/Library/Logs/com.tauri-app.mini-todo/`、单实例 socket；P02 二次启动 5s 内退出码 0 且唤起已运行实例、`--autostart` 静默；
+    P03 LaunchAgent plist（`Label` / `ProgramArguments`）；P04 ⌘Q 退出、socket 被删
+- 用例细节、判定口径（尺寸与屏幕可见区域取小、"截图确有内容"、Vision OCR 模糊匹配、前台确认后才发按键）与本地（Mac 上）运行方法见
+  `pc-gpui/scripts/e2e-macos/README.md`。
+- 另一道门：main / PR 上 `pc-gpui-ci.yml` 的 macos 作业（clippy / test + **universal** release 构建 + `bundle.sh`）。e2e 只构建 host 架构，
+  x86_64 交叉编译、`lipo` 合并与 universal 签名靠它和 `release.yml` 覆盖；**x86_64 切片目前没有在 CI 上运行过**（可以在 arm64 runner 上
+  `arch -x86_64` 走 Rosetta 跑，尚未接入）。
+- 何时必跑：§1 表里的 mac 行。交付前看 Job Summary 的 PASS / FAIL 表，并逐张看截图（尤其 `M01-topleft-x3`：红绿灯是否隐藏、
+  `M01-main`：字体与布局）。mac 字体与 Linux 不同，不能拿 `regress.py` 的 Linux 截图当基线。
+
+### 7.3 取回结果（产物下载不可用时）
+
+```bash
+gh run list --workflow 'PC (GPUI) e2e (macOS)' --limit 3
+gh api repos/<owner>/<repo>/actions/runs/<run_id>/jobs --jq '.jobs[] | {name, id, conclusion}'
+gh api repos/<owner>/<repo>/actions/jobs/<job_id>/logs > job.log         # 整个 job 的原始日志
+grep -E '\[(PASS|FAIL|SKIP)\]|TOTAL:| BAD ' job.log
+gh api repos/<owner>/<repo>/check-runs/<job_id>/annotations --paginate    # 注解：E2E SUMMARY / E2E FAIL <用例> / IMG <名字> <k>/<n>
+```
+
+- 注解 API 能取到时：截图注解按标题 `IMG <名字> <k>/<n>` 排序拼接，base64 解码就是 PNG（`e2e-windows/emit_annotations.py` 文件头）。
+- **注解也取不到时，从 job 日志还原截图**：日志里注解只剩正文——`::notice title=IMG …::<base64>` 记成 `##[notice]<base64>`（warning 同理），标题丢了。
+  每张图的第一个分片都以 PNG 文件头的 base64 `iVBORw0KGgo` 开头，所以：按日志顺序拼接所有正文是纯 base64 的 `##[notice]` / `##[warning]` 行
+  （排除 `E2E SUMMARY` 之类的文字注解），在每个 `iVBORw0KGgo` 处切开，逐段 base64 解码就是一张 PNG。顺序 = `emit/*.png` 按文件名排序，
+  名字对照运行步骤里 `emit <名字>.png: …` 那几行：
+
+  ```python
+  import base64, re, sys
+  log = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+  blob = "".join(re.findall(r"##\[(?:notice|warning)\]([A-Za-z0-9+/=]+)\s*$", log, re.M))
+  for i, part in enumerate(blob.split("iVBORw0KGgo")[1:]):
+      open(f"img-{i:02d}.png", "wb").write(base64.b64decode("iVBORw0KGgo" + part))
+  ```
+
+- 一个 job 最多 50 条注解（失败最多 11 条，截图两个步骤各 15 个分片），放不下的分片在步骤日志里注明"还有 N 个分片没有发出"。
+
+### 7.4 runner 上测不了的（交付说明与发布说明写明"未经真机验收"）
+
+- 系统通知横幅与授权弹框（镜像卸载了通知中心 UI，授权要人点）：只能断言不崩溃、日志有记录；应用内通知窗口能测但目前没有 mac 用例
+- Gatekeeper 首次打开与放行流程、App Translocation；钥匙串弹窗（目前不用钥匙串）
+- Retina（runner 是 1x）、多显示器 / 混合缩放、Spaces / 全屏、真实 GPU 上的阴影 / 圆角 / 透明与深色主题观感
+- 原生 Intel 机型（见 §7.2）；重启 / 重新登录后开机自启是否真的拉起；贴边隐藏（目前没有 mac 用例）
+- 从 2.5.0 mac 版覆盖升级的真实流程（数据目录、LaunchAgent 路径、通知授权沿用）——只能按代码与 2.5.0 实物推断
+
+---
+
+## 8. 交付前需要用户在 Windows 上实机验收的项
 
 Linux 与 CI 虚拟机覆盖不到真实环境的部分，交付说明里逐项列出：
 

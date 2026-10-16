@@ -23,7 +23,7 @@ These guides help you **ask the right questions before coding**.
 |-------|---------|-------------|
 | [Code Reuse Thinking Guide](./code-reuse-thinking-guide.md) | Identify patterns and reduce duplication | When you notice repeated patterns |
 | [Cross-Layer Thinking Guide](./cross-layer-thinking-guide.md) | Think through data flow across layers | Features spanning multiple layers |
-| [Desktop Window E2E Guide](./desktop-window-e2e-guide.md) | Prove a main-window or desktop-fence window change against live Win32 state, safely alongside the installed app | Any change to fixed / embedded mode, fence windows, window styles, owner or Z-order（脚本见 `pc-gpui/scripts/e2e-windows/`） |
+| [Desktop Window E2E Guide](./desktop-window-e2e-guide.md) | Prove a main-window or desktop-fence window change against live Win32 state, safely alongside the installed app; on macOS, against live AppKit state on the CI runner | Any change to fixed / embedded mode, fence windows, window styles, owner or Z-order（脚本见 `pc-gpui/scripts/e2e-windows/`）；any mac window / menu / tray change（`pc-gpui/scripts/e2e-macos/`） |
 
 PC 端（`pc-gpui/`）的 GPUI 约定、数据兼容规则、验证门槛与发布流水线在 [`../pc-gpui/`](../pc-gpui/index.md)（按 spec 层组织，不是 thinking guide）。
 

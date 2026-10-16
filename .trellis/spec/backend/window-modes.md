@@ -3,6 +3,7 @@
 > 主窗口 Win32 样式、owner、Z 序与几何锁定的契约。实现：`pc-gpui/crates/app/src/services/window_mode.rs`（模式切换、200ms 轮询、
 > 贴边隐藏、位置与屏幕配置记忆）+ `platform/embed.rs`（嵌入桌面层，主窗口与收纳箱共用）+ `platform/subclass.rs`（永远置底、
 > 几何锁定）+ `platform/windows.rs`（`Hwnd` 原始调用）；纯逻辑在 `pc-gpui/crates/core/src/window_logic.rs`。
+> macOS（预览，任务 `10-16-macos-package`）走同一套状态机与 200ms 轮询，Win32 部分换成 `platform/macos/`（AppKit），语义差异见「Scenario: macOS」。
 >
 > 历史：建立于任务 `09-07-desktop-embed-mode`（2026-09，旧 Tauri 版，Win11 25H2 实测），`10-15-desktop-fence` 把嵌入核心泛化为
 > 按窗口句柄执行、供收纳箱复用，`10-15-gpui-rewrite` 改为 GPUI 实现。旧 Tauri 版为对抗 tao `WindowFlags::apply_diff` 重写 ex style
@@ -21,7 +22,8 @@
   settings 键 `is_fixed` / `fixed_embed_desktop` / `auto_hide_enabled` / `top_on_wake` 与 `screen_configs.is_fixed`。
 - `platform::embed` 是主窗口与所有收纳箱窗口共用的嵌入核心（收纳箱的登记与守护见 [desktop-fences.md](./desktop-fences.md) §3.1）：
   改它要两边都回归。
-- 只在 Windows 上生效；Linux 上 `platform::embed` / `subclass` 是安全的空实现，"嵌入"偏好按经典固定处理（§4）。
+- 下面 §2 ~ §7 的 Win32 状态只在 Windows 上成立；macOS 的固定模式见「Scenario: macOS」；Linux 上 `platform::embed` / `subclass` 是安全的空实现、
+  没有原生句柄（不跑 200ms 轮询），"嵌入"偏好在 mac / Linux 上都按经典固定处理（§4）。
 
 ### 2. Signatures
 
@@ -214,6 +216,61 @@ hwnd.set_tool_window(tool_window);     // 嵌入 → 经典固定传 true：不�
 /* 恢复嵌入前的 MINIMIZEBOX */
 SetWindowPos(h, HWND_TOP, …);
 ```
+
+---
+
+## Scenario: macOS（预览，未经真机验收）
+
+### 1. Scope
+
+- 2.5.0 mac 版的固定模式是"简化版"（不可缩放、不可拖、被最小化即还原、唤起临时置顶、贴边隐藏降级为按鼠标移入移出），GPUI 版对齐这套语义，
+  并沿用上面的状态机：`TargetMode` / `plan_mode` / `apply_mode` / `plan_tick` / `run_tick` 一行没分叉，差异全在 `platform::*` 的 mac 实现
+  （`platform/macos/mod.rs` → `ns.rs`）。`platform::Hwnd` 在 mac 上是 NSWindow 的窗口号（每次在 `NSApp.windows` 里重新找，见
+  [pc-gpui/gpui-conventions.md §2.15](../pc-gpui/gpui-conventions.md)），所以 `on_main_opened` 拿得到句柄、200ms 轮询照常启动。
+- 改 `platform/macos/`、`window_mode.rs` 里的 `cfg!(windows)` / `cfg(target_os = "macos")`、`ns::set_geometry_locked` / `update_style` 前读本节。
+
+### 2. 各模式在 mac 上的状态
+
+| 模式 | 拖动 / 缩放 | 窗口层级 | 程序坞 / ⌘Tab | 圆角与描边 |
+|---|---|---|---|---|
+| 普通 | 可拖（标题栏 `start_window_move`）、可缩放（style mask 带 `Resizable`） | `NSNormalWindowLevel` | 应用级：Dock 图标照常显示、参与 ⌘Tab | 有（界面自己画） |
+| 经典固定 | `Op::LockGeometry(true)` → `setMovable:NO` + 去掉 `Resizable`（锁定前是否可缩放按窗口号记住，解锁时恢复）；标题栏不渲染拖动区 | 平时 `NSNormalWindowLevel`；托盘唤起临时 `NSFloatingWindowLevel` 600ms，贴边唤起且开了"唤起时置顶"时保持浮动层级 | **不变**：`Op::ToolWindow` 是 no-op（mac 没有逐窗口的"不进任务栏 / Alt+Tab"，程序坞与 ⌘Tab 是整个应用的激活策略） | 无（`is_classic_fixed()`，与 Windows 相同） |
+| 固定 + 嵌入桌面 | **不存在**：`TargetMode::for_state` 只在 Windows 上选 `Desktop`；设置项「固定模式时，嵌入桌面中」不显示；同步来的 `fixed_embed_desktop = true` 只让固定走经典固定；`platform::embed::*` 是空实现 | — | — | — |
+
+- 改 style mask（`Resizable` / `Miniaturizable`）一律走 `ns.rs` 的 `update_style`：AppKit 可能重建标题栏（红绿灯重新出现）并换掉第一响应者
+  （键盘输入不再进 GPUI 视图），`update_style` 改完会重新隐藏红绿灯、把第一响应者还回去。
+- `setMovable:NO` 只拦用户拖动，程序摆窗（`setFrame:` / `setFrameOrigin:`，贴边隐藏、重置位置、屏幕配置恢复）不受影响。
+
+### 3. 200ms 轮询在 mac 上做什么
+
+| 项 | mac 行为 |
+|---|---|
+| 嵌入重挂 | 不会发生（`mode.desktop` 恒 false） |
+| 经典固定被最小化（⌘M、应用菜单「最小化」） | 下一个 tick `isMiniaturized` → `deminiaturize:` 还原（红绿灯已隐藏，⌘M 是唯一入口） |
+| tool window 样式自愈 | 不做（`cfg!(windows) && lacks_tool_window_style(..)`，mac 的 `ex_style()` 恒 0，否则每个 tick 都会误判） |
+| 贴边隐藏 | 照常：`cursor_position_physical()` = `NSEvent.mouseLocation`（全局光标），显示器来自 `NSScreen.screens`；比 2.5.0 的"前端上报 mouseenter / mouseleave"准确。隐藏 / 唤起靠 `Hwnd::set_client_position`（`setFrameOrigin:`）。**AppKit 会把带标题栏样式的窗口约束在屏幕内（顶边不能高过菜单栏）**：mac 的 `set_client_position` 摆完读回实际位置，差超过 1 个统一系数单位就返回 false，`run_tick` 据此把贴边状态回滚成显示态——有菜单栏的屏幕上往顶边藏不进去 |
+
+- **贴边隐藏中被激活**：GPUI 只在"没有可见窗口"时回调 Dock 唤起（`on_reopen`），藏在屏幕边缘的窗口仍算可见。所以主窗口的激活回调里
+  `cx.defer(window_mode::on_main_activated)`：mac 上若处于经典固定 + 贴边隐藏，就按托盘唤起处理（`bring_main_to_front`：拉回锚点、临时置顶）；
+  Windows 上是空操作（经典固定没有任务栏 / Alt+Tab 入口）。点 Dock 图标、⌘Tab 切回来都走这条路。
+
+### 4. 唤起与重置
+
+- `bring_main_to_front`（菜单栏图标左键、单实例转交、Dock / 访达再次打开经 `mac_menu::on_reopen`、贴边隐藏中被激活经 `on_main_activated`、
+  应用菜单「设置…」）开头先 `cx.activate(true)` 把应用切到前台，之后与 Windows 相同：贴边隐藏开着时给宽限并拉回 → 还原 →
+  临时置顶 600ms → 激活（`makeKeyAndOrderFront:`）。
+- 托盘「重置位置」：mac 能程序化摆窗（Linux 不能），与 Windows 相同——放回主显示器左上区域、尺寸复位，固定中则退回普通模式，然后保存。
+- 启动恢复：与 Windows 相同，按当前屏幕组合的 `screen_configs.is_fixed` 进入经典固定；几何的物理像素口径见
+  [pc-gpui/data-compat.md §2.1](../pc-gpui/data-compat.md)。
+
+### 5. Tests
+
+- 单测：`target_mode_follows_embed_preference_only_on_windows`（已有）；坐标换算 `platform/mac_geometry.rs`（Linux 上跑）。
+- e2e：`pc-gpui/scripts/e2e-macos/` 的 M10（普通模式拖标题栏能移动 → 菜单栏图标「固定模式」→ `settings.is_fixed = 'true'`、拖不动、
+  AX 改尺寸无效 → 取消后又能拖、`'false'`），CI `pc-gpui-e2e-macos.yml`。
+- **没有覆盖**（待补用例 / 待真机反馈）：贴边隐藏与唤起置顶在 mac 上的实际效果（左 / 右 / 下边能否藏进去、往顶边藏被挡回时的回滚、
+  贴边隐藏中经 Dock / ⌘Tab 激活后拉回）；被 ⌘M 最小化后的还原；固定模式在 Spaces / 全屏 / 调度中心下的表现（没有设置 `collectionBehavior`）；
+  多显示器 / 混合缩放下的贴边判定。
 
 ---
 
