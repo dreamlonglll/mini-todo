@@ -22,7 +22,9 @@
   collectionBehavior 整体替换为 `CanJoinAllSpaces | Stationary | IgnoresCycle | FullScreenNone`、`canHide = NO`、`excludedFromWindowsMenu = YES`、
   `animationBehavior = None`（`hidesOnDeactivate = NO` 已由 `prepare_new_window` 设好）→ 摆到库里的几何 → 不处于"全部隐藏"时
   `orderFrontRegardless`。收纳箱窗口绝不调用 `set_topmost` / `ns::set_floating` / `setFloatingPanel:`（会改层级）。
-  改名开始时先 `window.activate_window()`（非激活面板单击不会成为 key）。Windows / Linux 保持 `Normal`。
+  改名开始时先 `cx.activate(true)` 再 `window.activate_window()`（150 / 500 / 1000ms 复查、1.2 秒宽限期，见实现记录）。Windows / Linux 保持 `Normal`。
+  （实现记录 2026-10-16：CI 证明改名时应用总会被激活，只调 `activate_window()` 时激活后 AppKit 可能把 key 还给主窗口；改名是唯一激活应用的操作。
+  MF08 首两轮失败的直接原因是测试用 HID 逐字注入 Unicode 进不了 GPUI 输入框，改用粘贴 + 回车后通过。）
 - Consequences：点收纳箱不激活应用；NSPanel 不计入 `hasVisibleWindows`（Apple 文档），现有 `on_reopen` 不改。**退路**：若 CI 证明非激活面板
   收不到键盘（改名用例失败）或 Dock 唤起失效，改用 `Normal` + 自己注册 `kAEReopenApplication` Apple Event handler（mac-desktop-window.md §5.3）。
   中文输入法在非激活 key 面板里是否正常未验证（runner 测不了），写进已知限制。
@@ -98,11 +100,11 @@
 
 ## Acceptance Criteria
 
-- [ ] `pc-gpui-e2e-macos.yml` 的 `checks`（clippy / test，含新 mac 单测）、`smoke`（含新收纳箱用例）、`release-smoke` 全绿
-- [ ] 本机：`cargo fmt --check`、`cargo clippy --workspace --all-targets --locked -D warnings`、`cargo test --workspace --locked`、
+- [x] `pc-gpui-e2e-macos.yml` 的 `checks`（clippy / test，含新 mac 单测）、`smoke`（含新收纳箱用例）、`release-smoke` 全绿（run 38917861897，a9c9298）
+- [x] 本机：`cargo fmt --check`、`cargo clippy --workspace --all-targets --locked -D warnings`、`cargo test --workspace --locked`、
       Windows 交叉 clippy、mac-check 交叉 clippy 全绿
-- [ ] `pc-gpui-e2e-windows.yml` 照常通过（Windows 零回归）
-- [ ] 规范 / CLAUDE.md / README / crate README / scripts README / 开发文档同步；新的发布说明草稿（不改已发布的 `v3.0.2-pre.md`）
+- [x] `pc-gpui-e2e-windows.yml` 照常通过（Windows 零回归；run 38917861719）
+- [x] 规范 / CLAUDE.md / README / crate README / scripts README / 开发文档同步；新的发布说明草稿 `v3.0.3-pre.md`（未改版本号）
 
 ## Definition of Done
 
