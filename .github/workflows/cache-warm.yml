@@ -22,7 +22,8 @@ name: Cache warm
 #   成员的 version 被规整、Cargo.lock 里的工作区包被剔掉 —— 发版改版本号不会让键变。依赖变了键才变；
 #   tag 先于这里重建跑到时，rust-cache 退回同前缀下最新的一份做部分恢复，大部分依赖照样不用重编。
 #   ⚠️ 只改 pc-gpui/Cargo.toml 的 [profile.*]、或改了编译命令时键**不变**，缓存内容不会自动跟上：
-#   这种时候给两个 workflow 里全部四处 rust-cache 一起加上同一个 prefix-key（如 v1-rust）强制换代
+#   这种时候给两个 workflow 里全部六处 rust-cache（各三处：gpui Windows、gpui macOS、cloud）一起加上同一个 prefix-key
+#   （如 v1-rust）强制换代
 #
 # 触发：
 # - push 到 main 且进键的文件 / 本文件有变（发版提交改 Cargo.lock 的版本号也会触发：键没变就是精确命中，

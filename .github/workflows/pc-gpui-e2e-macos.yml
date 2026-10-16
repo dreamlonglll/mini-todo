@@ -128,7 +128,7 @@ jobs:
           sqlite3 "$HOME/Library/Application Support/com.apple.TCC/TCC.db" \
             "select service, client, auth_value from access" || true
 
-      # --strict-traffic-lights：红绿灯没隐藏时 M01 判失败（第二轮起应已隐藏；主会话看结果决定是否保留）
+      # --strict-traffic-lights：红绿灯没隐藏时 M01 判失败（open_window 建窗后隐藏红绿灯，见 platform/macos）
       - name: Run e2e (smoke)
         run: >
           python3 -u scripts/e2e-macos/run_e2e.py

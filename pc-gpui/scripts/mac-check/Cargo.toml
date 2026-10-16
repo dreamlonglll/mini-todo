@@ -1,7 +1,7 @@
 # mac 专属代码的本地交叉检查（不是 pc-gpui workspace 的成员）。
 #
-# GPUI 的 mac 平台层（gpui-pre-apple 的 build.rs 按宿主机 cfg 生成着色器源码）与 bundled sqlite / mac-notification-sys 的
-# C / ObjC 编译都离不开 macOS 宿主与 SDK，所以 Linux / Windows 上无法 `cargo check --target aarch64-apple-darwin` 整个 app。
+# GPUI 的 mac 平台层（gpui-pre-apple 的 build.rs 按宿主机 cfg 生成着色器源码）与 bundled sqlite 等 C 依赖的编译
+# 都离不开 macOS 宿主与 SDK，所以 Linux / Windows 上无法 `cargo check --target aarch64-apple-darwin` 整个 app。
 # 但不依赖 GPUI 的 mac 代码（objc2 调 NSWindow / NSScreen、tray-icon、auto-launch、Unix socket 单实例……）是纯 Rust，
 # 这里用 `#[path]` 把这些源文件原样编进来做类型检查：
 #

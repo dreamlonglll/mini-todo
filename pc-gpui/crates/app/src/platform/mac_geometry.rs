@@ -343,6 +343,61 @@ mod tests {
     }
 
     #[test]
+    fn retina_screen_left_of_a_1x_primary() {
+        // 主屏 1x（1920×1080 点）；Retina 外接屏（1440×900 点）放在主屏左侧、顶边对齐：AppKit x = −1440、y = 1080 − 900 = 180。
+        // 统一系数取自非主屏的 2.0，主屏上的"物理"尺寸因此也 ×2
+        let primary = CocoaScreen {
+            display_id: 3,
+            frame: rect(0., 0., 1920., 1080.),
+            visible: rect(0., 0., 1920., 1055.),
+            scale: 1.,
+        };
+        let left = CocoaScreen {
+            display_id: 4,
+            frame: rect(-1440., 180., 1440., 900.),
+            visible: rect(-1440., 180., 1440., 900.),
+            scale: 2.,
+        };
+        let layout = ScreenLayout::new(vec![primary, left]);
+        assert_eq!(layout.unit(), 2.);
+        let monitors = layout.monitors();
+        assert_eq!(monitors[0].rect, PhysRect::new(0, 0, 3840, 2160));
+        assert!(monitors[0].primary);
+        assert_eq!(monitors[1].rect, PhysRect::new(-2880, 0, 2880, 1800));
+        // 左侧屏上的窗口：负 x 往返不丢精度，中心只落在左侧屏上
+        let on_left = rect(-1000., 300., 380., 600.);
+        let physical = layout.to_physical(on_left);
+        assert_eq!(physical, PhysRect::new(-2000, 360, 760, 1200));
+        assert_eq!(layout.to_cocoa(physical), on_left);
+        let center = (
+            physical.x + physical.width / 2,
+            physical.y + physical.height / 2,
+        );
+        let hit: Vec<_> = monitors
+            .iter()
+            .filter(|m| m.rect.contains(center.0, center.1))
+            .map(|m| m.display_id)
+            .collect();
+        assert_eq!(hit, vec![DisplayId::new(4)]);
+        // 光标在左侧屏左上角
+        assert_eq!(layout.point_to_physical(-1440., 1080.), (-2880, 0));
+        // 建窗：减去左侧屏的全局原点 (−1440, 0) 点
+        let bounds = Bounds::new(point(px(-1000.), px(180.)), size(px(380.), px(600.)));
+        assert_eq!(
+            display_local_bounds(&monitors, bounds, None),
+            (
+                Bounds::new(point(px(440.), px(180.)), size(px(380.), px(600.))),
+                Some(DisplayId::new(4))
+            )
+        );
+        // 屏幕组合 ID 按各屏自己的缩放、像素数大的在前
+        assert_eq!(
+            mini_todo_core::settings::screen_config_id_of(&layout.screen_config_inputs()),
+            "2_2880x1800@200_1920x1080@100"
+        );
+    }
+
+    #[test]
     fn empty_layout_is_harmless() {
         let layout = ScreenLayout::new(Vec::new());
         assert_eq!(layout.unit(), 1.);
