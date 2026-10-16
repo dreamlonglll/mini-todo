@@ -1,14 +1,19 @@
-//! 路径解析与判定：收纳根目录、图标缓存目录、用户桌面 / 公共桌面、OneDrive 重定向。
+//! 路径解析与判定：收纳根目录、图标缓存目录、用户桌面 / 公共桌面、OneDrive 重定向（macOS 的 iCloud 判定见 `mac.rs`）。
 
 use std::path::{Path, PathBuf};
 
-/// 收纳根目录在用户目录下的名字：`%USERPROFILE%\MiniTodo收纳箱\`
+/// 收纳根目录在用户目录下的名字：`%USERPROFILE%\MiniTodo收纳箱\`（macOS：`~/MiniTodo收纳箱/`）
 pub const FENCE_ROOT_DIR_NAME: &str = "MiniTodo收纳箱";
 
 /// 开发专用：覆盖收纳根目录的环境变量（仅 debug 构建生效，见 [`fence_root_override`]）
 // release 构建不读它（fence_root_override 的 release 分支恒为 None）
 #[cfg_attr(not(debug_assertions), allow(dead_code))]
 pub const FENCES_ROOT_ENV: &str = "MINI_TODO_FENCES_ROOT";
+
+/// 开发专用：覆盖"用户桌面"的环境变量（仅 debug 构建生效，见 [`desktop_dir_override`]）
+// release 构建不读它（desktop_dir_override 的 release 分支恒为 None）
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
+pub const DESKTOP_DIR_ENV: &str = "MINI_TODO_DESKTOP_DIR";
 
 /// 图标缓存目录名（位于应用数据目录下）
 const ICON_CACHE_DIR_NAME: &str = "fence-icons";
@@ -28,6 +33,22 @@ fn fence_root_override() -> Option<PathBuf> {
     }
 }
 
+/// 开发专用覆盖：debug 构建下读取 `MINI_TODO_DESKTOP_DIR`，代替 [`user_desktop_dir`] 的真实桌面
+/// （移回的兜底目标、"不能收纳桌面本身"的保护、OneDrive / iCloud 提示的"来自桌面"判断）。
+/// e2e 用它把"移回桌面"落在临时目录：macOS 上碰真实 `~/Desktop` 可能弹隐私授权框，runner 上没人点会一直阻塞。
+///
+/// **release 构建完全忽略该变量**（同 [`fence_root_override`]）
+fn desktop_dir_override() -> Option<PathBuf> {
+    #[cfg(debug_assertions)]
+    {
+        root_override_from(std::env::var_os(DESKTOP_DIR_ENV))
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        None
+    }
+}
+
 /// 环境变量值 → 覆盖目录：未设置或空白时不覆盖
 #[cfg_attr(not(debug_assertions), allow(dead_code))]
 fn root_override_from(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
@@ -40,7 +61,7 @@ fn root_override_from(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
 
 /// 收纳根目录的路径（不创建）。
 ///
-/// 默认 `%USERPROFILE%\MiniTodo收纳箱`；debug 构建设置了 `MINI_TODO_FENCES_ROOT` 时用该目录。
+/// 默认 `%USERPROFILE%\MiniTodo收纳箱`（macOS：`~/MiniTodo收纳箱`）；debug 构建设置了 `MINI_TODO_FENCES_ROOT` 时用该目录。
 pub fn fence_root_path() -> Result<PathBuf, String> {
     if let Some(dir) = fence_root_override() {
         return Ok(dir);
@@ -50,11 +71,16 @@ pub fn fence_root_path() -> Result<PathBuf, String> {
         .ok_or_else(|| "无法确定用户目录，不能创建收纳文件夹".to_string())
 }
 
-/// 收纳根目录（不存在则创建）
+/// 收纳根目录（不存在则创建）。
+///
+/// macOS 上返回解析过符号链接的路径：访达拖放、FSEvents 给的都是解析后的路径（`/var/folders` → `/private/var/folders`），
+/// "已在该收纳箱中""来自别的收纳箱"等判断按路径前缀比较，两边要是同一种写法
 pub fn fence_root_dir() -> Result<PathBuf, String> {
     let root = fence_root_path()?;
     std::fs::create_dir_all(&root)
         .map_err(|e| format!("创建收纳根目录失败（{}）: {}", root.display(), e))?;
+    #[cfg(target_os = "macos")]
+    let root = root.canonicalize().unwrap_or(root);
     Ok(root)
 }
 
@@ -65,8 +91,16 @@ pub fn icon_cache_dir() -> PathBuf {
     crate::db::paths::app_data_dir().join(ICON_CACHE_DIR_NAME)
 }
 
-/// 用户桌面（`dirs::desktop_dir()`，底层是 `SHGetKnownFolderPath(FOLDERID_Desktop)`，已处理 OneDrive / 组策略重定向）
+/// 用户桌面（`dirs::desktop_dir()`：Windows 底层是 `SHGetKnownFolderPath(FOLDERID_Desktop)`，已处理 OneDrive / 组策略重定向；
+/// macOS 是 `~/Desktop`）。debug 构建设置了 `MINI_TODO_DESKTOP_DIR` 时用该目录（见 [`desktop_dir_override`]）
 pub fn user_desktop_dir() -> Option<PathBuf> {
+    if let Some(dir) = desktop_dir_override() {
+        // macOS：覆盖目录常在 /var/folders（/private/var 的符号链接），访达拖放给的是解析后的路径。
+        // 只规范化覆盖目录：真实的 ~/Desktop 受隐私保护，不去碰它
+        #[cfg(target_os = "macos")]
+        let dir = dir.canonicalize().unwrap_or(dir);
+        return Some(dir);
+    }
     dirs::desktop_dir()
 }
 
@@ -178,10 +212,18 @@ mod tests {
         }
     }
 
+    #[test]
+    fn default_desktop_is_the_system_desktop() {
+        if std::env::var_os(DESKTOP_DIR_ENV).is_none() {
+            assert_eq!(user_desktop_dir(), dirs::desktop_dir());
+        }
+    }
+
     #[cfg(not(debug_assertions))]
     #[test]
     fn release_build_ignores_override() {
         assert_eq!(fence_root_override(), None);
+        assert_eq!(desktop_dir_override(), None);
     }
 
     #[test]

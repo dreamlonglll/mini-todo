@@ -62,8 +62,9 @@ pub(crate) fn existing_names_lower(dir: &Path) -> HashSet<String> {
         .unwrap_or_default()
 }
 
-/// 是否带 Windows 隐藏 / 系统属性（列举用：这类文件永不显示，"显示隐藏的图标"也不显示）。
-/// 其他平台没有这两个属性，恒为 `false`——以 `.` 开头的项目照常列出，标记为自动隐藏（[`FenceEntry::auto_hidden`]）
+/// 是否带隐藏 / 系统属性（列举用：这类文件永不显示，"显示隐藏的图标"也不显示）：
+/// Windows 看 `FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM`；macOS 看 `UF_HIDDEN`（`chflags hidden`，访达不显示）。
+/// 其他平台没有这类属性，恒为 `false`。以 `.` 开头的项目不看这里，照常列出、标记为自动隐藏（[`FenceEntry::auto_hidden`]）
 pub(crate) fn has_hidden_or_system_attribute(meta: &fs::Metadata) -> bool {
     #[cfg(windows)]
     {
@@ -72,21 +73,27 @@ pub(crate) fn has_hidden_or_system_attribute(meta: &fs::Metadata) -> bool {
         const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
         meta.file_attributes() & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM) != 0
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        super::mac::has_hidden_flag(meta)
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = meta;
         false
     }
 }
 
-/// 是否是隐藏或系统文件（移入校验用：Windows 看文件属性；其他平台看是否以 `.` 开头）
+/// 是否是隐藏或系统文件（移入校验用，这类文件不收纳，避免"移走后哪里都看不到"）：
+/// Windows 看文件属性、macOS 看 `UF_HIDDEN`（两者的点文件都照常移入，移入后按名字自动隐藏）；
+/// 其他平台看是否以 `.` 开头
 pub(crate) fn is_hidden_or_system(meta: &fs::Metadata, file_name: &str) -> bool {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     {
         let _ = file_name;
         has_hidden_or_system_attribute(meta)
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = meta;
         is_auto_hidden_name(file_name)
@@ -109,6 +116,8 @@ fn modified_ms(meta: &fs::Metadata) -> Option<i64> {
 
 /// 常见 IO 错误的中文说明
 pub(crate) fn describe_io_error(err: &std::io::Error) -> String {
+    // Win32 错误码（在其他平台上同样的数字是别的 errno，例如 macOS 的 32 = EPIPE）
+    #[cfg(windows)]
     match err.raw_os_error() {
         // ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION
         Some(32) | Some(33) => return "正被其他程序占用".to_string(),
@@ -118,8 +127,12 @@ pub(crate) fn describe_io_error(err: &std::io::Error) -> String {
     }
     match err.kind() {
         ErrorKind::NotFound => "不存在".to_string(),
-        ErrorKind::PermissionDenied => "没有权限（可能正被其他程序占用）".to_string(),
+        ErrorKind::PermissionDenied if cfg!(windows) => {
+            "没有权限（可能正被其他程序占用）".to_string()
+        }
+        ErrorKind::PermissionDenied => "没有权限".to_string(),
         ErrorKind::AlreadyExists => "已存在同名项".to_string(),
+        ErrorKind::DirectoryNotEmpty => "文件夹不为空".to_string(),
         _ => err.to_string(),
     }
 }
@@ -320,7 +333,7 @@ pub(crate) fn remove_folder_if_empty_at(root: &Path, folder_name: &str) -> Resul
     Ok(true)
 }
 
-/// 删除收纳文件夹，但只在它已经清空时删除（只剩 `desktop.ini` / `Thumbs.db` 也算空，会一并删掉）。
+/// 删除收纳文件夹，但只在它已经清空时删除（只剩 `desktop.ini` / `Thumbs.db` / `.DS_Store` 等系统元数据文件也算空，会一并删掉）。
 ///
 /// 返回 `Ok(true)` 表示已删除或本来就不存在；`Ok(false)` 表示里面还有文件，文件夹保留。
 /// 绝不递归删除用户文件。
@@ -367,7 +380,8 @@ pub(crate) fn list_items_at(root: &Path, folder_name: &str) -> Result<Vec<FenceE
     Ok(items)
 }
 
-/// 列举收纳文件夹内容（按文件名不区分大小写排序；跳过 `desktop.ini`、`Thumbs.db` 与带 Windows 隐藏 / 系统属性的文件）。
+/// 列举收纳文件夹内容（按文件名不区分大小写排序；跳过 `desktop.ini`、`Thumbs.db`、`.DS_Store` 等系统元数据文件，
+/// 与带隐藏 / 系统属性的文件：Windows 的隐藏 / 系统属性、macOS 的 `UF_HIDDEN`）。
 /// 以 `.` 开头的项目照常列出、`auto_hidden = true`；`hidden`（用户隐藏）由对账从数据库带出，这里一律 `false`。
 /// 文件夹不存在返回 `Err`。
 pub fn list_fence_items(folder_name: &str) -> Result<Vec<FenceEntry>, String> {
@@ -436,8 +450,46 @@ pub(crate) mod test_support {
     }
 }
 
+/// macOS 测试辅助：文件标志（`chflags`）
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) mod mac_test_support {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Path;
+
+    fn chflags(path: &Path, flags: u32) {
+        let c = CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: 有效的 NUL 结尾路径
+        let rc = unsafe { libc::chflags(c.as_ptr(), flags) };
+        assert_eq!(
+            rc,
+            0,
+            "chflags {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        );
+    }
+
+    /// `chflags hidden`
+    pub fn set_hidden_flag(path: &Path) {
+        chflags(path, libc::UF_HIDDEN);
+    }
+
+    /// `chflags uchg`（访达「已锁定」）
+    pub fn lock(path: &Path) {
+        chflags(path, libc::UF_IMMUTABLE);
+    }
+
+    /// 清除全部用户标志（解锁，测试结束前调用，否则临时目录删不掉）
+    pub fn clear_flags(path: &Path) {
+        chflags(path, 0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "macos")]
+    use super::mac_test_support;
     use super::test_support::{touch, TempDir};
     use super::*;
 
@@ -526,8 +578,18 @@ mod tests {
         fs::remove_file(root.join(&name).join("keep.txt")).unwrap();
         touch(&root.join(&name).join("desktop.ini"));
         touch(&root.join(&name).join("Thumbs.db"));
+        // 访达写的元数据同样不算内容（访达打开过收纳文件夹后必有 .DS_Store）
+        touch(&root.join(&name).join(".DS_Store"));
+        touch(&root.join(&name).join(".localized"));
+        #[cfg(not(windows))] // Windows 文件名不能含控制字符
+        touch(&root.join(&name).join("Icon\r"));
         assert!(remove_folder_if_empty_at(root, &name).unwrap());
         assert!(!root.join(&name).exists());
+
+        // 只有元数据文件名的文件夹不算元数据
+        let name = create_folder_at(root, "箱3", &[]).unwrap();
+        fs::create_dir(root.join(&name).join(".DS_Store")).unwrap();
+        assert!(!remove_folder_if_empty_at(root, &name).unwrap());
 
         // 子文件夹也算内容
         let name = create_folder_at(root, "箱2", &[]).unwrap();
@@ -547,6 +609,10 @@ mod tests {
         touch(&dir.join("官网.url"));
         touch(&dir.join("b.txt"));
         touch(&dir.join("desktop.ini"));
+        touch(&dir.join(".DS_Store"));
+        touch(&dir.join(".localized"));
+        #[cfg(not(windows))] // Windows 文件名不能含控制字符
+        touch(&dir.join("Icon\r"));
         fs::create_dir(dir.join("文件夹.lnk")).unwrap();
         // 以 . 开头的项目（没有隐藏属性）所有平台都列出，标记为自动隐藏
         touch(&dir.join(".gitkeep"));
@@ -561,6 +627,12 @@ mod tests {
                 .status()
                 .unwrap();
             assert!(status.success());
+        }
+        #[cfg(target_os = "macos")]
+        {
+            // 带 UF_HIDDEN（chflags hidden）的文件永不列出，同 Windows 的隐藏属性
+            touch(&dir.join("hidden.txt"));
+            mac_test_support::set_hidden_flag(&dir.join("hidden.txt"));
         }
 
         let items = list_items_at(root, &name).unwrap();

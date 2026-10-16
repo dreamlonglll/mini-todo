@@ -4202,12 +4202,17 @@ name = "mini-todo-core"
 version = "3.0.2-pre"
 dependencies = [
  "base64",
+ "block2 0.6.2",
  "chrono",
  "dirs 5.0.1",
  "encoding_rs",
  "flate2",
+ "libc",
  "log",
  "notify 7.0.0",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
  "png 0.17.16",
  "reqwest",
  "rusqlite",

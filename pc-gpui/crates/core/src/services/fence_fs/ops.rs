@@ -2,10 +2,15 @@
 //!
 //! 分两层：
 //! * **规划**（全平台、可单测）：校验源路径、选目标目录、预先算好不冲突的目标文件名
-//! * **执行**（仅 Windows）：在新开的 STA 线程里用一个 `IFileOperation` 批量 `MoveItem`，
-//!   Shell 会发变更通知让桌面立即刷新，权限不足时弹系统"需要管理员权限"对话框（UAC）
+//!   （macOS 上不列举收纳根目录以外的目标目录，见 [`Reserved`]）
+//! * **执行**：
+//!   - Windows：在新开的 STA 线程里用一个 `IFileOperation` 批量 `MoveItem`，
+//!     Shell 会发变更通知让桌面立即刷新，权限不足时弹系统"需要管理员权限"对话框（UAC）
+//!   - macOS：在调用线程（后台线程）上逐项 `renamex_np(RENAME_EXCL)`，目标已存在就换下一个后缀名重试，
+//!     跨卷交给 `NSFileManager`（`mac.rs`）；没有提权对话框，也就没有"用户取消"
+//!   - 其他平台：不支持
 //!
-//! 执行完后按每项的 `PostMoveItem` 回调与文件系统实际状态归类为 移动成功 / 用户取消 / 失败 / 跳过。
+//! 执行完后按每项的执行反馈（Windows 是 `PostMoveItem` 回调）与文件系统实际状态归类为 移动成功 / 用户取消 / 失败 / 跳过。
 
 use super::folder::{
     describe_io_error, ensure_folder_at, entry_exists, existing_names_lower, folder_path_at,
@@ -90,7 +95,7 @@ pub struct RestoreAllResult {
 pub(crate) struct MoveJob {
     pub source: PathBuf,
     pub dest_dir: PathBuf,
-    /// 规划阶段已去重的目标文件名；执行时仍带 `FOF_RENAMEONCOLLISION` 兜底，绝不覆盖
+    /// 规划阶段已去重的目标文件名；执行时仍有兜底（Windows `FOF_RENAMEONCOLLISION`、macOS `RENAME_EXCL` 撞名顺延），绝不覆盖
     pub dest_name: String,
 }
 
@@ -103,9 +108,10 @@ impl MoveJob {
 /// 执行层对单个任务的原始反馈
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct MoveOutcome {
-    /// `PostMoveItem` 回调里的 HRESULT；没收到回调为 `None`
+    /// Windows：`PostMoveItem` 回调里的 HRESULT，没收到回调为 `None`。
+    /// macOS：成功为 `Some(0)`，失败为 `Some(-errno)`（小负数，不会与取消码相撞）
     pub hr: Option<i32>,
-    /// 回调里 `psiNewlyCreated` 的文件系统路径
+    /// 移动后的实际路径（Windows：回调里 `psiNewlyCreated` 的文件系统路径；macOS：撞名顺延后的最终路径）
     pub new_path: Option<PathBuf>,
     /// 失败说明（入队失败，或 `hr` 失败码的中文描述）
     pub error: Option<String>,
@@ -219,23 +225,65 @@ pub(crate) enum Plan {
 }
 
 /// 同一批任务的目标名字分配器：按目标目录缓存已有项的名字（小写），
-/// 并记录本批已经"预订"的名字，避免两项算出同一个名字；比较一律不区分大小写
-#[derive(Default)]
-pub(crate) struct Reserved(HashMap<String, HashSet<String>>);
+/// 并记录本批已经"预订"的名字，避免两项算出同一个名字；比较一律不区分大小写。
+///
+/// **macOS 只列举收纳根目录内的目标目录**：列举桌面 / 文稿 / 下载等受隐私保护的目录（读取已有内容）会弹
+/// 「想访问桌面文件夹中的文件」授权框（ad-hoc 签名每次升级都会再弹；拒绝后读不到），而在里面新建项目不需要授权。
+/// 这些目录只按本批已预订的名字去重，与磁盘上已有项的重名交给执行层的 `renamex_np(RENAME_EXCL)` 撞名顺延，同样绝不覆盖
+pub(crate) struct Reserved {
+    root: PathBuf,
+    /// 是否也列举收纳根目录以外的目标目录（macOS 为 false）
+    list_outside_root: bool,
+    taken: HashMap<String, HashSet<String>>,
+}
 
 impl Reserved {
-    /// 在 `dir` 下为 `name` 选一个磁盘上和本批都不冲突的名字，并预订它
+    /// 按当前平台的列举规则（macOS 不列举收纳根目录以外的目录）
+    pub(crate) fn new(root: &Path) -> Self {
+        Self::with_policy(root, !cfg!(target_os = "macos"))
+    }
+
+    pub(crate) fn with_policy(root: &Path, list_outside_root: bool) -> Self {
+        Reserved {
+            root: root.to_path_buf(),
+            list_outside_root,
+            taken: HashMap::new(),
+        }
+    }
+
+    /// 在 `dir` 下为 `name` 选一个磁盘上（可列举时）和本批都不冲突的名字，并预订它
     fn pick(&mut self, dir: &Path, name: &str, is_dir: bool) -> String {
+        let listable = self.list_outside_root || path_starts_with_ci(dir, &self.root);
         let taken = self
-            .0
+            .taken
             .entry(dir.to_string_lossy().to_lowercase())
-            .or_insert_with(|| existing_names_lower(dir));
+            .or_insert_with(|| {
+                if listable {
+                    existing_names_lower(dir)
+                } else {
+                    HashSet::new()
+                }
+            });
         let chosen = unique_file_name(name, is_dir, |candidate| {
             taken.contains(&candidate.to_lowercase())
         });
         taken.insert(chosen.to_lowercase());
         chosen
     }
+}
+
+/// 源路径读不到时的原因。macOS 上隐私权限被拒（`EPERM`）与只在 iCloud 里的旧式占位文件给出可操作的提示
+fn describe_access_error(source: &Path, fence_dir: &Path, err: &std::io::Error) -> String {
+    #[cfg(target_os = "macos")]
+    match err.raw_os_error() {
+        Some(errno @ libc::EPERM) => return super::mac::describe_errno(source, fence_dir, errno),
+        Some(errno @ libc::ENOENT) if super::mac::has_legacy_icloud_stub(source) => {
+            return super::mac::describe_errno(source, fence_dir, errno)
+        }
+        _ => {}
+    }
+    let _ = (source, fence_dir);
+    format!("无法访问: {}", describe_io_error(err))
 }
 
 /// 移入规划：逐个校验源路径，生成移动到 `fence_dir` 的任务。
@@ -248,7 +296,7 @@ pub(crate) fn plan_move_in(
     protected: &[PathBuf],
     fence_dir: &Path,
 ) -> Vec<Plan> {
-    let mut reserved = Reserved::default();
+    let mut reserved = Reserved::new(root);
     let mut seen: HashSet<String> = HashSet::new();
     sources
         .iter()
@@ -275,7 +323,7 @@ pub(crate) fn plan_move_in(
             };
             let meta = match fs::symlink_metadata(source) {
                 Ok(meta) => meta,
-                Err(e) => return fail(format!("无法访问: {}", describe_io_error(&e))),
+                Err(e) => return fail(describe_access_error(source, fence_dir, &e)),
             };
             if !seen.insert(source.to_string_lossy().to_lowercase()) {
                 return skip("重复的项目");
@@ -350,10 +398,10 @@ pub(crate) fn plan_restore(
     }
 }
 
-/// 执行器：真实环境下是 [`execute`]（IFileOperation）；测试里可换成 `std::fs` 实现
+/// 执行器：真实环境下是 [`execute`]（Windows IFileOperation / macOS renamex_np）；测试里可换成 `std::fs` 实现
 pub(crate) type Executor<'a> = &'a dyn Fn(&[MoveJob]) -> Result<BatchOutcome, String>;
 
-/// 执行一批移动任务（Windows：新开 STA 线程 + IFileOperation）
+/// 执行一批移动任务（Windows：新开 STA 线程 + IFileOperation；macOS：本线程逐项 renamex_np）
 fn execute(jobs: &[MoveJob], owner_hwnd: Option<isize>) -> Result<BatchOutcome, String> {
     if jobs.is_empty() {
         return Ok(BatchOutcome::default());
@@ -365,10 +413,52 @@ fn execute(jobs: &[MoveJob], owner_hwnd: Option<isize>) -> Result<BatchOutcome, 
             Ok(super::shell::perform_moves(&jobs, owner_hwnd))
         })
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        // macOS 没有提权 / "文件正在使用"对话框，用不到父窗口
+        let _ = owner_hwnd;
+        Ok(execute_mac(jobs))
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = owner_hwnd;
         Err(super::UNSUPPORTED.to_string())
+    }
+}
+
+/// macOS 执行层：在调用线程（后台线程）上逐项移动，绝不覆盖（`mac::move_item`）。
+/// 期间允许本线程下载"只在云端"的 iCloud 文件（先下载完再改名，不会留下坏文件）
+#[cfg(target_os = "macos")]
+fn execute_mac(jobs: &[MoveJob]) -> BatchOutcome {
+    let policy = super::mac::allow_materialize_on_this_thread();
+    let items = jobs.iter().map(execute_mac_job).collect();
+    super::mac::restore_materialize_policy(policy);
+    BatchOutcome {
+        items,
+        aborted: false,
+        perform_error: None,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn execute_mac_job(job: &MoveJob) -> MoveOutcome {
+    let is_dir = fs::symlink_metadata(&job.source)
+        .map(|meta| path_is_dir(&job.source, &meta))
+        .unwrap_or(false);
+    // 目标已存在时按收纳的去重规则顺延：`a.txt` → `a (2).txt`，包 `X.app` → `X (2).app`
+    let next_name = |n: u32| super::naming::suffixed_file_name(&job.dest_name, n, is_dir);
+    let result = super::mac::move_item(&job.source, &job.dest_dir, &job.dest_name, &next_name);
+    match result.final_path {
+        Some(path) => MoveOutcome {
+            hr: Some(0),
+            new_path: Some(path),
+            error: result.message,
+        },
+        None => MoveOutcome {
+            hr: Some(-result.errno.unwrap_or(1).max(1)),
+            new_path: None,
+            error: Some(result.message.unwrap_or_else(|| "移动失败".to_string())),
+        },
     }
 }
 
@@ -423,10 +513,10 @@ pub(crate) fn move_into_at(
 /// * 返回与 `sources` 一一对应、顺序相同的结果；`Moved` 项的 `source` 存为 `original_path`，
 ///   `file_name` 存为 `fence_items.file_name`
 /// * 重名自动加 ` (2)` 后缀；`desktop.ini`、隐藏 / 系统文件、已在该收纳箱中的项返回 `Skipped`
-/// * 公共桌面上的项会弹系统"需要管理员权限"对话框 / UAC，用户取消返回 `Cancelled`
-/// * `owner_hwnd`：系统对话框的父窗口（收纳箱窗口的 HWND），`None` 则无父窗口
+/// * 公共桌面上的项会弹系统"需要管理员权限"对话框 / UAC，用户取消返回 `Cancelled`（Windows）
+/// * `owner_hwnd`：系统对话框的父窗口（收纳箱窗口的 HWND；macOS 上不用），`None` 则无父窗口
 /// * 收纳文件夹不存在时自动重建
-/// * `Err` 只表示整次调用无法进行（文件夹名非法、根目录不可用、非 Windows）
+/// * `Err` 只表示整次调用无法进行（文件夹名非法、根目录不可用、既不是 Windows 也不是 macOS）
 pub fn move_into_fence<P: AsRef<Path>>(
     sources: &[P],
     folder_name: &str,
@@ -484,7 +574,7 @@ pub(crate) fn restore_item_at(
         original.as_deref(),
         desktop,
         root,
-        &mut Reserved::default(),
+        &mut Reserved::new(root),
     );
     let mut results = run_plans(vec![Plan::Job(job)], exec)?;
     Ok(results.remove(0))
@@ -532,7 +622,7 @@ pub(crate) fn move_between_at(
     };
     let to_dir = ensure_folder_at(root, to_folder)?;
     let job = MoveJob {
-        dest_name: Reserved::default().pick(&to_dir, file_name, path_is_dir(&path, &meta)),
+        dest_name: Reserved::new(root).pick(&to_dir, file_name, path_is_dir(&path, &meta)),
         source: path,
         dest_dir: to_dir,
     };
@@ -578,7 +668,7 @@ pub(crate) fn restore_all_at(
         .iter()
         .map(|(name, path)| (name.to_lowercase(), PathBuf::from(path)))
         .collect();
-    let mut reserved = Reserved::default();
+    let mut reserved = Reserved::new(root);
     let mut plans = Vec::new();
     let read =
         fs::read_dir(&dir).map_err(|e| format!("读取收纳文件夹失败: {}", describe_io_error(&e)))?;
@@ -635,8 +725,9 @@ pub(crate) fn restore_all_at(
 ///
 /// * `originals`：`file_name → original_path`（来自 `fence_items`；没有原始路径的项不用放进来，
 ///   会回用户桌面）。按文件名不区分大小写匹配
-/// * 文件夹里的所有项都会处理（包括隐藏文件，`desktop.ini` / `Thumbs.db` 除外），规则同 [`restore_item`]
-/// * 所有项在同一个 `IFileOperation` 里执行，公共桌面项的管理员权限对话框可"对所有项执行此操作"
+/// * 文件夹里的所有项都会处理（包括隐藏文件，`desktop.ini` / `Thumbs.db` / `.DS_Store` 等系统元数据文件除外），规则同 [`restore_item`]
+/// * Windows：所有项在同一个 `IFileOperation` 里执行，公共桌面项的管理员权限对话框可"对所有项执行此操作"；
+///   macOS：逐项移动
 /// * 有项目没移走（取消 / 失败）时保留文件夹，`remaining` 列出剩余文件名
 pub fn restore_all(
     folder_name: &str,
@@ -977,7 +1068,8 @@ mod tests {
         touch(&fence.join("x.txt"));
         touch(&desktop.join("Chrome.lnk"));
 
-        let mut reserved = Reserved::default();
+        // 按"所有目标目录都列举"的规则（Windows / Linux）；macOS 的规则见下一个测试
+        let mut reserved = Reserved::with_policy(&root, true);
         // 原目录存在，原名可用 → 恢复原名
         let j = plan_restore(
             &fence.join("Chrome (2).lnk"),
@@ -1024,6 +1116,53 @@ mod tests {
         );
         assert_eq!(j.dest_dir, desktop);
         assert_eq!(j.dest_name, "x.txt");
+    }
+
+    #[test]
+    fn protected_targets_outside_the_root_are_not_listed() {
+        // macOS 规则：不列举收纳根目录以外的目标目录（列举桌面会弹隐私授权框），只按本批预订的名字去重；
+        // 与磁盘上已有项的重名交给执行层撞名顺延
+        let tmp = TempDir::new("plan-unlisted");
+        let root = tmp.path().join("root");
+        let fence = root.join("箱");
+        let desktop = tmp.path().join("desktop");
+        touch(&fence.join("a.txt"));
+        touch(&fence.join("b.txt"));
+        touch(&desktop.join("a.txt"));
+        touch(&desktop.join("b.txt"));
+
+        let mut reserved = Reserved::with_policy(&root, false);
+        let j = plan_restore(
+            &fence.join("a.txt"),
+            false,
+            None,
+            &desktop,
+            &root,
+            &mut reserved,
+        );
+        assert_eq!(j.dest_dir, desktop);
+        assert_eq!(j.dest_name, "a.txt", "桌面没有被列举");
+        // 同一批里的同名项仍按预订去重
+        let j = plan_restore(
+            &fence.join("a.txt"),
+            false,
+            None,
+            &desktop,
+            &root,
+            &mut reserved,
+        );
+        assert_eq!(j.dest_name, "a (2).txt");
+        // 收纳根目录内的目标照常列举
+        assert_eq!(reserved.pick(&fence, "b.txt", false), "b (2).txt");
+
+        // 所有平台的默认规则：只有 macOS 不列举
+        let mut reserved = Reserved::new(&root);
+        let expected = if cfg!(target_os = "macos") {
+            "b.txt"
+        } else {
+            "b (2).txt"
+        };
+        assert_eq!(reserved.pick(&desktop, "b.txt", false), expected);
     }
 
     #[test]
@@ -1278,6 +1417,254 @@ mod tests {
             assert_eq!(r.items.len(), 2);
             assert!(desktop.join("doc.txt").is_file());
             assert!(desktop.join("doc (2).txt").is_file());
+        }
+    }
+
+    /// 真实执行 macOS 的 renamex_np 移动（只在临时目录里；不碰 ~/Desktop 等受隐私保护的目录）
+    #[cfg(target_os = "macos")]
+    mod real_moves_mac {
+        use super::super::super::folder::mac_test_support::{clear_flags, lock, set_hidden_flag};
+        use super::super::super::mac;
+        use super::*;
+
+        fn exec(jobs: &[MoveJob]) -> Result<BatchOutcome, String> {
+            execute(jobs, None)
+        }
+
+        #[test]
+        fn move_in_restore_and_cross_fence_round_trip() {
+            let tmp = TempDir::new("real-mac");
+            let root = tmp.path().join("root");
+            let desktop = tmp.path().join("desktop");
+            let elsewhere = tmp.path().join("elsewhere");
+            fs::create_dir_all(&desktop).unwrap();
+            fs::create_dir_all(&elsewhere).unwrap();
+            fs::create_dir_all(root.join("箱A")).unwrap();
+            touch(&desktop.join("App.lnk"));
+            touch(&elsewhere.join("App.lnk"));
+            touch(&desktop.join("doc.txt"));
+            touch(&desktop.join("文件夹").join("sub").join("f.txt"));
+            touch(
+                &desktop
+                    .join("Safari.app")
+                    .join("Contents")
+                    .join("Info.plist"),
+            );
+            touch(
+                &root
+                    .join("箱A")
+                    .join("Safari.app")
+                    .join("Contents")
+                    .join("Info.plist"),
+            );
+            touch(&desktop.join("desktop.ini"));
+            touch(&desktop.join(".DS_Store"));
+            touch(&desktop.join(".env"));
+            touch(&desktop.join("hidden.txt"));
+            set_hidden_flag(&desktop.join("hidden.txt"));
+
+            // 移入：重名自动加后缀（包按文件处理），结果顺序与输入一致；点文件照常移入，UF_HIDDEN 的不收纳
+            let sources = vec![
+                desktop.join("App.lnk"),
+                elsewhere.join("App.lnk"),
+                desktop.join("文件夹"),
+                desktop.join("Safari.app"),
+                desktop.join(".env"),
+                desktop.join("hidden.txt"),
+                desktop.join("desktop.ini"),
+                desktop.join(".DS_Store"),
+                desktop.join("missing.lnk"),
+            ];
+            let results = move_into_at(&root, &[], &sources, "箱A", &exec).unwrap();
+            let statuses: Vec<ItemOpStatus> = results.iter().map(|r| r.status).collect();
+            assert_eq!(
+                statuses,
+                vec![
+                    ItemOpStatus::Moved,
+                    ItemOpStatus::Moved,
+                    ItemOpStatus::Moved,
+                    ItemOpStatus::Moved,
+                    ItemOpStatus::Moved,
+                    ItemOpStatus::Skipped,
+                    ItemOpStatus::Skipped,
+                    ItemOpStatus::Skipped,
+                    ItemOpStatus::Failed
+                ],
+                "{results:#?}"
+            );
+            assert_eq!(results[0].file_name.as_deref(), Some("App.lnk"));
+            assert_eq!(results[1].file_name.as_deref(), Some("App (2).lnk"));
+            assert_eq!(results[2].file_name.as_deref(), Some("文件夹"));
+            assert_eq!(results[3].file_name.as_deref(), Some("Safari (2).app"));
+            assert_eq!(results[4].file_name.as_deref(), Some(".env"));
+            assert_eq!(PathBuf::from(&results[1].source), elsewhere.join("App.lnk"));
+            assert!(!desktop.join("App.lnk").exists());
+            assert!(root.join("箱A").join("App (2).lnk").is_file());
+            assert!(root
+                .join("箱A")
+                .join("文件夹")
+                .join("sub")
+                .join("f.txt")
+                .is_file());
+            assert!(root
+                .join("箱A")
+                .join("Safari (2).app")
+                .join("Contents")
+                .join("Info.plist")
+                .is_file());
+            assert!(desktop.join("hidden.txt").is_file());
+            assert!(desktop.join("desktop.ini").is_file());
+            assert!(desktop.join(".DS_Store").is_file());
+
+            // 移回：原目录存在 → 回原目录并恢复原名
+            let original = elsewhere.join("App.lnk").to_string_lossy().into_owned();
+            let r = restore_item_at(
+                &root,
+                &desktop,
+                "箱A",
+                "App (2).lnk",
+                Some(&original),
+                &exec,
+            )
+            .unwrap();
+            assert_eq!(r.status, ItemOpStatus::Moved, "{r:#?}");
+            assert_eq!(
+                PathBuf::from(r.dest_path.unwrap()),
+                elsewhere.join("App.lnk")
+            );
+
+            // 移回：桌面上已有同名（桌面不列举，靠 RENAME_EXCL 撞名顺延）→ 不覆盖，加后缀
+            fs::write(desktop.join("App.lnk"), b"desktop-copy").unwrap();
+            let r = restore_item_at(&root, &desktop, "箱A", "App.lnk", None, &exec).unwrap();
+            assert_eq!(r.status, ItemOpStatus::Moved, "{r:#?}");
+            assert_eq!(r.file_name.as_deref(), Some("App (2).lnk"));
+            assert_eq!(fs::read(desktop.join("App.lnk")).unwrap(), b"desktop-copy");
+
+            // 包移回桌面：桌面已有同名包（原来那个已经移走，这里放一个新的）→ `Safari (2).app`
+            touch(&desktop.join("Safari.app").join("mine"));
+            let original = desktop.join("Safari.app").to_string_lossy().into_owned();
+            let r = restore_item_at(
+                &root,
+                &desktop,
+                "箱A",
+                "Safari (2).app",
+                Some(&original),
+                &exec,
+            )
+            .unwrap();
+            assert_eq!(r.status, ItemOpStatus::Moved, "{r:#?}");
+            assert_eq!(r.file_name.as_deref(), Some("Safari (2).app"));
+            assert!(desktop.join("Safari.app").join("mine").is_file());
+
+            // 跨箱移动：重名加后缀
+            let results =
+                move_into_at(&root, &[], &[desktop.join("doc.txt")], "箱A", &exec).unwrap();
+            assert_eq!(results[0].status, ItemOpStatus::Moved);
+            touch(&root.join("箱B").join("doc.txt"));
+            let r = move_between_at(&root, "箱A", "doc.txt", "箱B", &exec).unwrap();
+            assert_eq!(r.status, ItemOpStatus::Moved, "{r:#?}");
+            assert_eq!(r.file_name.as_deref(), Some("doc (2).txt"));
+            assert!(root.join("箱B").join("doc (2).txt").is_file());
+
+            // 批量还原：文件夹清空后删除（访达写的 .DS_Store / Icon\r 不算剩余、不移回桌面）
+            let mut originals = HashMap::new();
+            originals.insert(
+                "文件夹".to_string(),
+                desktop.join("文件夹").to_string_lossy().into_owned(),
+            );
+            touch(&root.join("箱A").join(".DS_Store"));
+            touch(&root.join("箱A").join("Icon\r"));
+            let r = restore_all_at(&root, &desktop, "箱A", &originals, &exec).unwrap();
+            assert!(r.folder_removed, "{r:#?}");
+            assert!(r.remaining.is_empty());
+            // 剩下的：文件夹、Safari.app（原名在箱里）、.env
+            assert_eq!(r.items.len(), 3, "{r:#?}");
+            assert!(
+                r.items.iter().all(|i| i.status == ItemOpStatus::Moved),
+                "{r:#?}"
+            );
+            assert!(desktop.join("文件夹").join("sub").join("f.txt").is_file());
+            assert!(desktop.join(".env").is_file());
+            assert_eq!(fs::read(desktop.join(".DS_Store")).unwrap(), b"x");
+            assert!(!desktop.join(".DS_Store (2)").exists());
+            assert!(!root.join("箱A").exists());
+
+            let r = restore_all_at(&root, &desktop, "箱B", &HashMap::new(), &exec).unwrap();
+            assert!(r.folder_removed, "{r:#?}");
+            assert_eq!(r.items.len(), 2);
+            assert!(desktop.join("doc.txt").is_file());
+            assert!(desktop.join("doc (2).txt").is_file());
+        }
+
+        #[test]
+        fn rename_excl_never_overwrites_and_tries_the_next_name() {
+            let tmp = TempDir::new("excl-mac");
+            let src_dir = tmp.path().join("src");
+            let dest = tmp.path().join("dest");
+            touch(&src_dir.join("a.txt"));
+            fs::create_dir_all(&dest).unwrap();
+            fs::write(dest.join("a.txt"), b"keep-1").unwrap();
+            fs::write(dest.join("a (2).txt"), b"keep-2").unwrap();
+            let next = |n: u32| format!("a ({n}).txt");
+            let r = mac::move_item(&src_dir.join("a.txt"), &dest, "a.txt", &next);
+            assert_eq!(r.final_path, Some(dest.join("a (3).txt")), "{r:?}");
+            assert_eq!(fs::read(dest.join("a.txt")).unwrap(), b"keep-1");
+            assert_eq!(fs::read(dest.join("a (2).txt")).unwrap(), b"keep-2");
+            assert!(!src_dir.join("a.txt").exists());
+
+            // 只差大小写：不区分大小写的卷（APFS 默认）上同样算重名，不覆盖
+            let case_insensitive = dest.join("A.TXT").exists();
+            touch(&src_dir.join("A.TXT"));
+            let r = mac::move_item(&src_dir.join("A.TXT"), &dest, "A.TXT", &|n| {
+                format!("A ({n}).TXT")
+            });
+            let moved_to = r.final_path.expect("应移动成功");
+            if case_insensitive {
+                assert_ne!(moved_to, dest.join("A.TXT"));
+            }
+            assert_eq!(fs::read(dest.join("a.txt")).unwrap(), b"keep-1");
+
+            // 名字用完：失败，源保留
+            touch(&src_dir.join("b.txt"));
+            touch(&dest.join("b.txt"));
+            let r = mac::move_item(&src_dir.join("b.txt"), &dest, "b.txt", &|_| "b.txt".into());
+            assert_eq!(r.final_path, None);
+            assert_eq!(r.errno, Some(libc::EEXIST));
+            assert!(src_dir.join("b.txt").is_file());
+
+            // 源不存在
+            let r = mac::move_item(&src_dir.join("nope"), &dest, "nope", &next);
+            assert_eq!(r.errno, Some(libc::ENOENT));
+            assert_eq!(r.message.as_deref(), Some("文件不存在"));
+        }
+
+        #[test]
+        fn locked_items_fail_with_a_clear_reason_and_stay_put() {
+            let tmp = TempDir::new("locked-mac");
+            let root = tmp.path().join("root");
+            let desktop = tmp.path().join("desktop");
+            let item = desktop.join("locked.txt");
+            touch(&item);
+            lock(&item);
+            let results =
+                move_into_at(&root, &[], std::slice::from_ref(&item), "箱", &exec).unwrap();
+            clear_flags(&item);
+            assert_eq!(results[0].status, ItemOpStatus::Failed, "{results:#?}");
+            let error = results[0].error.as_deref().unwrap_or_default();
+            assert!(error.contains("锁定"), "{error}");
+            assert!(item.is_file());
+        }
+
+        #[test]
+        fn icloud_placeholders_are_recognized() {
+            let tmp = TempDir::new("icloud-mac");
+            touch(&tmp.path().join(".报告.pages.icloud"));
+            assert!(mac::has_legacy_icloud_stub(&tmp.path().join("报告.pages")));
+            assert!(!mac::has_legacy_icloud_stub(&tmp.path().join("别的.pages")));
+            // 临时目录不在 iCloud 里
+            touch(&tmp.path().join("local.txt"));
+            assert!(!mac::is_ubiquitous_item(&tmp.path().join("local.txt")));
+            assert!(!mac::is_ubiquitous_item(&tmp.path().join("missing.txt")));
         }
     }
 }

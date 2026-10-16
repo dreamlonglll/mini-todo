@@ -25,7 +25,7 @@ crates/core/
 │   │   ├── mod.rs
 │   │   ├── webdav.rs          # ← 原样复制
 │   │   ├── secret.rs          # ← 原样复制（Windows DPAPI）
-│   │   └── fence_fs/          # ← 原样复制（ops.rs 中 1 个测试的路径字面量改为按平台拼接）
+│   │   └── fence_fs/          # ← 原样复制（ops.rs 中 1 个测试的路径字面量改为按平台拼接）；mac.rs 为 macOS 后端（GPUI 版新增）
 │   ├── todo.rs                # ← commands/todo.rs
 │   ├── data.rs                # ← commands/data.rs
 │   ├── sync/mod.rs            # ← commands/sync_cmd.rs（测试拆到 sync/tests.rs）
@@ -61,6 +61,8 @@ NODE_PATH=/tmp/lunar-js/node_modules node pc-gpui/crates/core/tests/fixtures/gen
 PowerShell 写法见 `tests/fixtures/gen_lunar.cjs` 文件头。
 
 Windows 专属测试（`fence_fs` 的 shell / sta / 真实图标提取 / Windows 监听、`secret` 的 DPAPI 往返）只在 Windows 上编译运行；
+macOS 专属测试（`fence_fs` 的真实 `renamex_np` 移动往返 / 撞名顺延 / 已锁定 / `UF_HIDDEN` 列举 / 真实图标提取 / iCloud 占位判定）
+只在 macOS 上编译运行（CI `pc-gpui-e2e-macos.yml` 的 `checks` 作业）；
 `fence_fs::location` 有 1 个测试只在 `--release` 下编译（与旧版相同）。
 
 其它 crate 的测试要用内存库时打开 feature：`mini-todo-core = { path = "...", features = ["test-util"] }`，
@@ -290,10 +292,10 @@ app 层负责（`crates/app/src/services/fences.rs`、`windows/fence/`；行号�
 | `FenceRefresh { fence_id, items }` | 对账后的完整列表（含隐藏项，app 按 `Fence.show_hidden` 过滤显示），交给对应窗口 | `fence-items-changed` |
 | `get_items(db, id) -> R<Vec<FenceEntry>>` | 按文件夹对账后返回；不存在或删除中报错 | `get_fence_items` |
 | `reconcile(db, id) -> R<Option<Vec<FenceEntry>>>` / `refresh(db, id) -> Option<FenceRefresh>` | 对账（数据库锁内列举文件夹；删除中返回 `None`） | `reconcile_fence` / `reconcile_and_notify` |
-| `move_in(db, id, &[String], owner_hwnd) -> R<(FenceMoveInResult { results, onedrive_notice }, Vec<FenceRefresh>)>` | 拖入（文件 / 快捷方式 / 文件夹）；跨箱来源搬运原始路径并返回来源箱刷新；`onedrive_notice` 只会为 true 一次。**后台线程** | `fence_move_in` |
+| `move_in(db, id, &[String], owner_hwnd) -> R<(FenceMoveInResult { results, onedrive_notice }, Vec<FenceRefresh>)>` | 拖入（文件 / 快捷方式 / 文件夹）；跨箱来源搬运原始路径并返回来源箱刷新；`onedrive_notice`（云同步提示：Windows 是从被 OneDrive 重定向的桌面移入，macOS 是移动前由 iCloud / File Provider 管理的项目）只会为 true 一次。**后台线程** | `fence_move_in` |
 | `restore(db, id, file_name, owner_hwnd) -> R<ItemOpResult>` | 移回原目录（不存在则桌面），重名改名。**后台线程** | `fence_restore_item` |
 | `move_to(db, id, file_name, target_id, owner_hwnd) -> R<(ItemOpResult, Option<FenceRefresh>)>` | 跨箱移动（搬运原始路径、不搬运隐藏标记），返回目标箱刷新。**后台线程** | `fence_move_item` |
-| `open(db, id, file_name) -> R<()>` / `reveal(db, id, file_name) -> R<()>` | `ShellExecuteExW` / 资源管理器定位（非 Windows 报"仅支持 Windows"） | `fence_open_item` / `fence_reveal_item` |
+| `open(db, id, file_name) -> R<()>` / `reveal(db, id, file_name) -> R<()>` | Windows：`ShellExecuteExW` / 资源管理器定位；macOS：`NSWorkspace` 打开 / 在访达中显示（其他平台报"仅支持 Windows 与 macOS"） | `fence_open_item` / `fence_reveal_item` |
 | `icon(db, id, file_name, size_px) -> R<PathBuf>` | 图标 PNG 缓存路径（档位向上取整，`fence-icons/`），GPUI 用 `img(path)` | `fence_item_icon` |
 | `reorder(db, id, &[String]) -> R<()>` | 箱内排序（完整顺序，含隐藏项） | `reorder_fence_items` |
 | `set_hidden(db, id, file_name, hidden) -> R<FenceRefresh>` | 右键「隐藏」/「取消隐藏」（v30）：数据库锁内先对账再写 `fence_items.hidden`（文件名不区分大小写），返回最新完整列表；不改文件属性；删除中 / 不存在 / 找不到该项报错 | （GPUI 版新增） |
@@ -307,7 +309,7 @@ app 层负责（`crates/app/src/services/fences.rs`、`windows/fence/`；行号�
 |---|---|
 | `services::webdav` | `WebDavClient`（blocking；条件 GET/PUT、PROPFIND、MKCOL）——同步引擎内部使用 |
 | `services::secret` | `protect` / `reveal` / `is_protected`（Windows DPAPI，`dpapi:<base64>`；其它平台明文） |
-| `services::fence_fs` | 收纳箱文件层：`fence_root_dir`、`icon_cache_dir`、`user_desktop_dir`、`create_fence_folder`、`ensure_fence_folder`、`rename_fence_folder`、`remove_fence_folder_if_empty`、`fence_folder_path`、`list_fence_items`（点文件照常列出、`auto_hidden`；带 Windows 隐藏 / 系统属性的跳过）、`is_auto_hidden_name`、`list_fence_folders`、`move_into_fence`、`restore_item`、`move_between_fences`、`restore_all`、`launch_item`、`reveal_in_explorer`、`icon_png`、`prune_icon_cache`、`watch_fence_root`、`FenceWatcher`、`FenceChange` 等（debug 下 `MINI_TODO_FENCES_ROOT` 覆盖收纳根目录） |
+| `services::fence_fs` | 收纳箱文件层：`fence_root_dir`、`icon_cache_dir`、`user_desktop_dir`、`create_fence_folder`、`ensure_fence_folder`、`rename_fence_folder`、`remove_fence_folder_if_empty`、`fence_folder_path`、`list_fence_items`（点文件照常列出、`auto_hidden`；带隐藏 / 系统属性（Windows 属性、macOS `UF_HIDDEN`）的与 `desktop.ini` / `.DS_Store` 等系统元数据文件跳过）、`is_auto_hidden_name`、`list_fence_folders`、`move_into_fence`、`restore_item`、`move_between_fences`、`restore_all`、`launch_item`、`reveal_in_explorer`、`icon_png`、`prune_icon_cache`、`watch_fence_root`、`FenceWatcher`、`FenceChange`、`is_ubiquitous_item`（macOS iCloud 判定）等。移动 / 打开 / 定位 / 图标：Windows 走 Shell（`shell.rs` / `sta.rs`），macOS 走 `mac.rs`（`renamex_np(RENAME_EXCL)` 撞名顺延 + 跨卷 `NSFileManager`、`NSWorkspace`；规划时不列举收纳根目录以外的目标目录，避免隐私授权框），其他平台报错。debug 下 `MINI_TODO_FENCES_ROOT` 覆盖收纳根目录、`MINI_TODO_DESKTOP_DIR` 覆盖用户桌面 |
 
 ## 不在 core 的旧命令
 

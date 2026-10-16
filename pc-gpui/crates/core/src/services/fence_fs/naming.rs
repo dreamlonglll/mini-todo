@@ -24,8 +24,57 @@ const RESERVED_NAMES: &[&str] = &[
     "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", "LPT¹", "LPT²", "LPT³",
 ];
 
-/// Shell 自动生成的元数据文件：不收纳、不显示、删除收纳箱时不算"剩余文件"
-const SHELL_METADATA_FILES: &[&str] = &["desktop.ini", "thumbs.db"];
+/// 系统自动生成的元数据文件（小写）：不收纳、不显示、删除收纳箱时不算"剩余文件"（文件夹只剩它们时连同它们一起删掉）。
+///
+/// * Windows 资源管理器：`desktop.ini`、`Thumbs.db`
+/// * macOS 访达：`.DS_Store`（打开过的文件夹都会写）、`Icon\r`（文件夹自定义图标，名字末尾是回车）、
+///   `.localized`（文件夹名本地化标记）
+///
+/// 所有平台共用同一张表：Mac 拷来的 U 盘 / 网络共享上 Windows 也常见 `.DS_Store`，在 macOS 上也会遇到 `desktop.ini`
+const SHELL_METADATA_FILES: &[&str] = &[
+    "desktop.ini",
+    "thumbs.db",
+    ".ds_store",
+    "icon\r",
+    ".localized",
+];
+
+/// macOS 的"包"（bundle）扩展名（小写）：这类**文件夹**在访达里显示、打开、移动都像一个文件（`Safari.app`）。
+/// 去重加后缀时按文件处理，后缀插在扩展名前（`Safari (2).app`），否则 `Safari.app (2)` 在访达里不再是应用。
+///
+/// 所有平台都按这张表处理（纯函数，不看平台）：Windows 上这类文件夹几乎只来自 Mac（U 盘 / 网络共享），
+/// 保持扩展名在最后对 Mac 才有意义，对 Windows 无影响；同时移回时恢复原名的判断（[`restore_file_name`]）在各平台一致
+const PACKAGE_EXTENSIONS: &[&str] = &[
+    "app",
+    "appex",
+    "band",
+    "bundle",
+    "component",
+    "docset",
+    "fcpbundle",
+    "framework",
+    "imovielibrary",
+    "kext",
+    "key",
+    "logicx",
+    "mdimporter",
+    "mpkg",
+    "numbers",
+    "pages",
+    "photoslibrary",
+    "pkg",
+    "playground",
+    "plugin",
+    "prefpane",
+    "qlgenerator",
+    "rtfd",
+    "saver",
+    "scptd",
+    "wdgt",
+    "xcodeproj",
+    "xcworkspace",
+    "xpc",
+];
 
 fn is_illegal_char(c: char) -> bool {
     c.is_control() || ILLEGAL_CHARS.contains(&c)
@@ -122,18 +171,32 @@ pub fn dedupe_name(base: &str, is_taken: impl Fn(&str) -> bool) -> String {
         .expect("u32 范围内总能找到未占用的名字")
 }
 
-/// 把文件名拆成（主干, 扩展名含点）。文件夹不拆；以点开头且没有第二个点的名字（`.env`）视为无扩展名。
-pub fn split_extension(name: &str, is_dir: bool) -> (&str, &str) {
-    if is_dir {
-        return (name, "");
+/// 名字是否带 macOS 包扩展名（`Safari.app`、`报告.rtfd`；不区分大小写），见 [`PACKAGE_EXTENSIONS`]
+pub fn is_package_name(name: &str) -> bool {
+    match split_file_extension(name) {
+        (_, "") => false,
+        (_, ext) => PACKAGE_EXTENSIONS.contains(&ext[1..].to_lowercase().as_str()),
     }
+}
+
+/// 按文件规则拆：最后一个 `.` 之后是扩展名；以点开头且没有第二个点的名字（`.env`）、以点结尾的名字视为无扩展名
+fn split_file_extension(name: &str) -> (&str, &str) {
     match name.rfind('.') {
         Some(idx) if idx > 0 && idx + 1 < name.len() => (&name[..idx], &name[idx..]),
         _ => (name, ""),
     }
 }
 
-/// 带序号后缀的文件名：`a.lnk` + 2 → `a (2).lnk`；文件夹 `docs` + 2 → `docs (2)`
+/// 把文件名拆成（主干, 扩展名含点）。文件夹不拆（macOS 的包除外，见 [`is_package_name`]）；
+/// 以点开头且没有第二个点的名字（`.env`）视为无扩展名。
+pub fn split_extension(name: &str, is_dir: bool) -> (&str, &str) {
+    if is_dir && !is_package_name(name) {
+        return (name, "");
+    }
+    split_file_extension(name)
+}
+
+/// 带序号后缀的文件名：`a.lnk` + 2 → `a (2).lnk`；文件夹 `docs` + 2 → `docs (2)`；包 `Safari.app` + 2 → `Safari (2).app`
 pub fn suffixed_file_name(name: &str, n: u32, is_dir: bool) -> String {
     let (stem, ext) = split_extension(name, is_dir);
     format!("{stem} ({n}){ext}")
@@ -151,9 +214,16 @@ pub fn unique_file_name(name: &str, is_dir: bool, is_taken: impl Fn(&str) -> boo
         .expect("u32 范围内总能找到未占用的名字")
 }
 
-/// `current` 是否是 `original` 加序号后缀后的名字（如 `Chrome (2).lnk` 之于 `Chrome.lnk`）
+/// `current` 是否是 `original` 加序号后缀后的名字（如 `Chrome (2).lnk` 之于 `Chrome.lnk`）。
+/// 包文件夹两种写法都认：`Safari (2).app`（现在的写法）与 `Safari.app (2)`（以前的版本把包当普通文件夹）
 fn is_suffixed_variant(current: &str, original: &str, is_dir: bool) -> bool {
     let (stem, ext) = split_extension(original, is_dir);
+    suffixed_with(current, stem, ext)
+        || (is_dir && !ext.is_empty() && suffixed_with(current, original, ""))
+}
+
+/// `current` 是否形如 `{stem} (N){ext}`（N ≥ 2，不区分大小写）
+fn suffixed_with(current: &str, stem: &str, ext: &str) -> bool {
     let current_l = current.to_lowercase();
     let prefix = format!("{} (", stem.to_lowercase());
     let suffix = format!("){}", ext.to_lowercase());
@@ -212,7 +282,7 @@ pub fn display_name(file_name: &str, is_dir: bool) -> String {
     }
 }
 
-/// 是否是 Shell 元数据文件（`desktop.ini` / `Thumbs.db`）
+/// 是否是系统元数据文件（`desktop.ini` / `Thumbs.db` / `.DS_Store` / `Icon\r` / `.localized`，见 [`SHELL_METADATA_FILES`]）
 pub fn is_shell_metadata_file(file_name: &str) -> bool {
     let lower = file_name.to_lowercase();
     SHELL_METADATA_FILES.contains(&lower.as_str())
@@ -454,6 +524,68 @@ mod tests {
         assert!(is_shell_metadata_file("Desktop.INI"));
         assert!(is_shell_metadata_file("Thumbs.db"));
         assert!(!is_shell_metadata_file("desktop.ini.bak"));
+        // macOS 访达的元数据（所有平台一样）
+        assert!(is_shell_metadata_file(".DS_Store"));
+        assert!(is_shell_metadata_file(".ds_store"));
+        assert!(is_shell_metadata_file("Icon\r"));
+        assert!(is_shell_metadata_file(".localized"));
+        assert!(!is_shell_metadata_file("Icon"));
+        assert!(!is_shell_metadata_file("Icon\r.png"));
+        assert!(!is_shell_metadata_file(".DS_Store (2)"));
+        assert!(!is_shell_metadata_file("DS_Store"));
+    }
+
+    #[test]
+    fn package_folders_keep_their_extension_last() {
+        for package in [
+            "Safari.app",
+            "工具.APP",
+            "x.bundle",
+            "报告.rtfd",
+            "a.b.framework",
+            "Proj.xcodeproj",
+        ] {
+            assert!(is_package_name(package), "{package:?}");
+        }
+        for plain in [
+            "docs",
+            "v1.2",
+            ".app",
+            "app",
+            "x.app.bak",
+            "x.",
+            "Safari.App (2)",
+        ] {
+            assert!(!is_package_name(plain), "{plain:?}");
+        }
+        // 包文件夹按文件拆扩展名：后缀插在扩展名前
+        assert_eq!(split_extension("Safari.app", true), ("Safari", ".app"));
+        assert_eq!(suffixed_file_name("Safari.app", 2, true), "Safari (2).app");
+        assert_eq!(
+            suffixed_file_name("a.b.framework", 3, true),
+            "a.b (3).framework"
+        );
+        let taken = taken_set(&["safari.app", "Safari (2).app"]);
+        assert_eq!(
+            unique_file_name("Safari.app", true, |c| taken.contains(&c.to_lowercase())),
+            "Safari (3).app"
+        );
+        // 普通文件夹不变
+        assert_eq!(suffixed_file_name("v1.2", 2, true), "v1.2 (2)");
+        assert_eq!(suffixed_file_name("docs", 2, true), "docs (2)");
+        // 移回时恢复原名：新写法与以前的写法都认
+        assert_eq!(
+            restore_file_name("Safari (2).app", Some("Safari.app"), true),
+            "Safari.app"
+        );
+        assert_eq!(
+            restore_file_name("Safari.app (2)", Some("Safari.app"), true),
+            "Safari.app"
+        );
+        assert_eq!(
+            restore_file_name("我的浏览器.app", Some("Safari.app"), true),
+            "我的浏览器.app"
+        );
     }
 
     #[test]

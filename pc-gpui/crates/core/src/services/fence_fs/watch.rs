@@ -1,4 +1,4 @@
-//! 监听收纳根目录（`notify`，Windows 上是 ReadDirectoryChangesW），去抖后回调受影响的收纳文件夹名。
+//! 监听收纳根目录（`notify`：Windows 上是 ReadDirectoryChangesW，macOS 上是 FSEvents），去抖后回调受影响的收纳文件夹名。
 
 use super::location::{fence_root_dir, normalize_for_compare};
 use super::naming::is_valid_folder_name;
@@ -131,6 +131,10 @@ pub(crate) fn watch_root_at(
     debounce: Duration,
     on_change: impl Fn(FenceChange) + Send + 'static,
 ) -> Result<FenceWatcher, String> {
+    // macOS：FSEvents 报告的是解析过符号链接的路径（例如 /var/folders → /private/var/folders），按未解析的根目录
+    // 算不出收纳文件夹名，先规范化。Windows 上不能规范化：会变成 `\\?\` 路径，与 notify 报告的路径对不上
+    #[cfg(target_os = "macos")]
+    let root = root.canonicalize().unwrap_or(root);
     let (tx, rx) = mpsc::channel::<notify::Result<Event>>();
     let mut watcher =
         notify::recommended_watcher(tx).map_err(|e| format!("创建目录监听失败: {}", e))?;
@@ -209,16 +213,16 @@ mod tests {
         let root = tmp.path().join("root");
         std::fs::create_dir_all(root.join("甲")).unwrap();
         std::fs::create_dir_all(root.join("乙")).unwrap();
-        // macOS 的临时目录 /var/folders 是 /private/var/folders 的符号链接，FSEvents 报告的是解析后的路径，
-        // 用未解析的 root 匹配不上（收纳箱只在 Windows 上用，生产代码不处理）。Windows 上不能规范化：
-        // 会变成 `\\?\` 路径，与 notify 报告的路径对不上
-        #[cfg(target_os = "macos")]
-        let root = root.canonicalize().unwrap();
         let (tx, rx) = mpsc::channel::<FenceChange>();
         let watcher = watch_root_at(root.clone(), Duration::from_millis(150), move |change| {
             let _ = tx.send(change);
         })
         .unwrap();
+        // macOS 的临时目录 /var/folders 是 /private/var/folders 的符号链接：watch_root_at 自己规范化根目录
+        // （FSEvents 报告解析后的路径），下面照样用未解析的路径写文件，验证的就是这一点
+        #[cfg(target_os = "macos")]
+        assert_eq!(watcher.root(), root.canonicalize().unwrap().as_path());
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(watcher.root(), root.as_path());
 
         // 同一时间段内的多次变化合并成一次回调
