@@ -9,7 +9,7 @@
 //! | `completed.rs` | 已完成 |
 //! | `notification.rs` | 应用内通知（透明、置顶、不抢焦点） |
 //! | `settings/` | 设置（常规 / 外观 / 数据与同步 / 屏幕配置 / 关于） |
-//! | `fence/` | 桌面收纳箱（透明、嵌入桌面；Windows） |
+//! | `fence/` | 桌面收纳箱（透明；Windows 嵌入桌面层，macOS 是桌面图标层之上的不激活应用的面板） |
 //! | `gallery.rs` | 控件样例（仅调试） |
 //!
 //! ## 模态子窗口（旧版 `isModalOpen` 语义）

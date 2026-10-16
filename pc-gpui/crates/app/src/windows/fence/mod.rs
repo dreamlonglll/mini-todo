@@ -6,13 +6,16 @@
 //! | 文件 | 内容 |
 //! |---|---|
 //! | `mod.rs` | 视图状态、标题栏（超过 3px 才拖动、双击改名、折叠 / 固定 / 更多）、折叠与临时展开状态机、几何落库、缩放手柄、外部拖入 |
-//! | `panels.rs` | 外观 / 删除确认 / OneDrive 提示面板，「更多」下拉菜单 |
-//! | `grid.rs` | 项目网格：图标懒加载、选中 / 打开、自绘右键菜单（含「隐藏」/「取消隐藏」「移动到…」）、隐藏项过滤与半透明、箱内拖动排序、Ctrl+滚轮调图标大小 |
+//! | `panels.rs` | 外观 / 删除确认 / 云同步提示面板（Windows OneDrive、macOS iCloud），「更多」下拉菜单 |
+//! | `grid.rs` | 项目网格：图标懒加载、选中 / 打开、自绘右键菜单（含「隐藏」/「取消隐藏」「移动到…」）、隐藏项过滤与半透明、箱内拖动排序、Ctrl+滚轮（macOS 另认 ⌘+滚轮）调图标大小 |
 //! | `logic.rs` | 纯函数（标题规范化、拖动阈值、几何闸门、缩放矩形、图标档位、隐藏项过滤与排序合并、结果提示文案） |
 //!
 //! 几何一律物理像素的**客户区**（= 可见区域，与旧版 Tauri 无边框窗口的外框相同；GPUI 窗口另有不可见边框）：
 //! `mini_todo_core::fence::fence_view` + `platform::set_client_rect_physical` 摆窗，`platform::client_rect_physical` 读几何。
 //! 只有用户拖动 / 缩放结束才落库（`commit_geometry`），折叠 / 展开、启动夹回、系统挪窗都不落库。
+//!
+//! macOS：窗口是不激活应用的面板（`services::fences` 模块文档），单击不一定会让它成为 key 窗口（没有真机验证）——鼠标操作
+//! 不受影响，只有改名要键盘，所以 [`FenceWindow::start_rename`] 先 `activate_window()`（面板成为 key、应用仍不激活）。
 
 mod grid;
 pub mod logic;
@@ -67,6 +70,7 @@ pub(crate) enum Panel {
     None,
     Appearance,
     Delete,
+    /// 桌面云同步的一次性提示（Windows：OneDrive 重定向的桌面；macOS：iCloud「桌面与文稿」）
     OneDrive,
 }
 
@@ -74,11 +78,12 @@ pub(crate) enum Panel {
 #[derive(Debug, Clone, Copy)]
 struct ResizeSession {
     dir: ResizeDir,
-    /// 按下时的光标（Windows：屏幕物理像素；其它平台：窗口逻辑坐标）
+    /// 按下时的光标（Windows / macOS：屏幕物理像素；Linux：窗口逻辑坐标）
     start_cursor: (f64, f64),
     /// 按下时的窗口客户区（物理像素）
     start: PxRect,
-    dpr: f64,
+    /// 逻辑 → 物理像素的系数（`platform::physical_scale`：macOS 是统一系数，不是窗口所在屏的缩放）
+    scale: f64,
 }
 
 /// 缩放手柄的拖动标记
@@ -233,7 +238,7 @@ impl FenceWindow {
     }
 
     /// debug 构建：`MINI_TODO_DEBUG_FENCE_STATE=onedrive|drag-hover` 直接呈现 Linux 上触发不了的状态
-    /// （OneDrive 提示要 Windows 的 OneDrive 桌面；外部拖入悬停要真实的 XDND 拖放源），截图对照用
+    /// （云同步提示要 OneDrive 重定向的桌面 / iCloud「桌面与文稿」；外部拖入悬停要真实的 XDND 拖放源），截图对照用
     #[cfg(debug_assertions)]
     fn apply_debug_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match std::env::var("MINI_TODO_DEBUG_FENCE_STATE").as_deref() {
@@ -671,6 +676,11 @@ impl FenceWindow {
             return;
         };
         let title = fence.title.clone();
+        // macOS：不激活应用的面板单击不一定成为 key 窗口，那样键盘输入进不来：先让它成为 key（makeKeyAndOrderFront:，
+        // GPUI 延后执行；应用仍不激活）。失去 key 时（点到别的应用）照常经 observe_window_activation 提交改名
+        if cfg!(target_os = "macos") {
+            window.activate_window();
+        }
         self.editing_title = true;
         self.press_point = None;
         self.title_input.update(cx, |s, cx| {
@@ -724,7 +734,7 @@ impl FenceWindow {
     // 缩放（窗口内 8 个手柄）
     // ------------------------------------------------------------------
 
-    /// 当前光标：Windows 用屏幕物理坐标（拖左 / 上边时窗口在动，窗口坐标不可靠）；其它平台用窗口坐标
+    /// 当前光标：Windows / macOS 用屏幕物理坐标（拖左 / 上边时窗口在动，窗口坐标不可靠）；Linux 取不到，用窗口坐标
     fn cursor_for_resize(&self, position: Point<Pixels>, window: &Window) -> (f64, f64) {
         match platform::cursor_position_physical() {
             Some((x, y)) => (f64::from(x), f64::from(y)),
@@ -756,7 +766,7 @@ impl FenceWindow {
             dir,
             start_cursor: self.cursor_for_resize(event.position, window),
             start: runtime::to_px(start),
-            dpr: f64::from(window.scale_factor()),
+            scale: platform::physical_scale(window),
         });
         cx.stop_propagation();
     }
@@ -772,11 +782,11 @@ impl FenceWindow {
         };
         let (cx_now, cy_now) = self.cursor_for_resize(position, window);
         let physical = platform::cursor_position_physical().is_some();
-        // 非 Windows 的窗口坐标是逻辑像素，乘缩放换成物理像素
-        let scale = if physical { 1. } else { session.dpr };
-        let dx = (cx_now - session.start_cursor.0) * scale;
-        let dy = (cy_now - session.start_cursor.1) * scale;
-        let min = logic::js_round(core_fence::MIN_WIDTH_DIP * session.dpr) as f64;
+        // Linux 的窗口坐标是逻辑像素，乘缩放换成物理像素
+        let factor = if physical { 1. } else { session.scale };
+        let dx = (cx_now - session.start_cursor.0) * factor;
+        let dy = (cy_now - session.start_cursor.1) * factor;
+        let min = logic::js_round(core_fence::MIN_WIDTH_DIP * session.scale) as f64;
         let rect = logic::resize_rect(session.start, session.dir, dx, dy, min, min);
         self.resize_pending = Some(rect);
         if !self.resize_frame_scheduled {
@@ -791,8 +801,8 @@ impl FenceWindow {
 
     fn flush_resize(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(rect) = self.resize_pending.take() {
-            let dpr = self.resizing.map(|s| s.dpr).unwrap_or(1.);
-            runtime::apply_window_rect(window, cx, rect, dpr);
+            let scale = self.resizing.map(|s| s.scale).unwrap_or(1.);
+            runtime::apply_window_rect(window, cx, rect, scale);
         }
     }
 
@@ -917,7 +927,7 @@ impl FenceWindow {
     }
 
     /// 旧 `moveIn`：后台移入（带 owner HWND，系统对话框以本窗口为父）→ 汇总提示（5 秒；没开「显示隐藏的图标」时
-    /// 说明以 . 开头的项目已自动隐藏）→ OneDrive 一次性提示 → 刷新
+    /// 说明以 . 开头的项目已自动隐藏）→ 云同步（OneDrive / iCloud）一次性提示 → 刷新
     fn move_in(&mut self, paths: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
         if paths.is_empty() {
             return;
@@ -1281,7 +1291,7 @@ impl Render for FenceWindow {
 // 入口（托盘 / 启动钩子 / 调试）
 // ----------------------------------------------------------------------
 
-/// 启动时恢复全部收纳箱窗口（`run()` 里调用；仅 Windows）
+/// 启动时恢复全部收纳箱窗口（`run()` 里调用；Windows 与 macOS）
 pub fn restore_all(cx: &mut App) {
     runtime::restore_all(cx);
 }

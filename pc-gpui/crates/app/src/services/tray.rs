@@ -1,8 +1,9 @@
 //! 系统托盘 / 菜单栏图标（Windows 与 macOS：`tray-icon` + 其自带的 muda 菜单；旧版 `lib.rs` L256-426）。
 //!
 //! 菜单（旧版顺序与文案）：添加待办项、分隔、新增收纳箱、显示/隐藏所有收纳箱、重置收纳箱位置、分隔、
-//! 固定模式（勾选）、重置位置、打开设置、开机自启动（勾选）、分隔、退出。收纳箱三项（连同其后的分隔）只在 Windows 上有
-//! （旧版 mac 托盘同样没有）。左键单击 300ms 去抖后唤起主窗口；右键弹菜单；开发隔离时 tooltip 为 `Mini Todo（开发版）`。
+//! 固定模式（勾选）、重置位置、打开设置、开机自启动（勾选）、分隔、退出。收纳箱三项（连同其后的分隔）Windows 与 macOS 都有
+//! （2.5.0 的 mac 托盘没有收纳箱；3.0 起 mac 也有桌面收纳箱）。左键单击 300ms 去抖后唤起主窗口；右键弹菜单；开发隔离时 tooltip
+//! 为 `Mini Todo（开发版）`。
 //! 图标：Windows 取 exe 资源 ID 1；macOS 用单色模板图标（`tray/mac_icon.rs`，随菜单栏深浅色自动着色）。
 //!
 //! 托盘 / 菜单事件在窗口过程（Windows）/ AppKit 事件（macOS，主线程）里触发：回调里**不碰** GPUI `App`，只把事件投进
@@ -208,33 +209,27 @@ mod imp {
                 None,
             )),
             Box::new(PredefinedMenuItem::separator()),
+            // 收纳箱三项：Windows 与 macOS（菜单栏图标）都有（这个模块只在这两个平台编译）
+            Box::new(MenuItem::with_id(
+                menu_id::NEW_FENCE,
+                "新增收纳箱",
+                true,
+                None,
+            )),
+            Box::new(MenuItem::with_id(
+                menu_id::TOGGLE_FENCES,
+                "显示/隐藏所有收纳箱",
+                true,
+                None,
+            )),
+            Box::new(MenuItem::with_id(
+                menu_id::RESET_FENCES,
+                "重置收纳箱位置",
+                true,
+                None,
+            )),
+            Box::new(PredefinedMenuItem::separator()),
         ];
-        // 收纳箱三项只在 Windows 上有（桌面收纳箱是 Windows 专有功能；旧版 mac 托盘同样没有）
-        #[cfg(windows)]
-        {
-            let fence_items: [Box<dyn IsMenuItem>; 4] = [
-                Box::new(MenuItem::with_id(
-                    menu_id::NEW_FENCE,
-                    "新增收纳箱",
-                    true,
-                    None,
-                )),
-                Box::new(MenuItem::with_id(
-                    menu_id::TOGGLE_FENCES,
-                    "显示/隐藏所有收纳箱",
-                    true,
-                    None,
-                )),
-                Box::new(MenuItem::with_id(
-                    menu_id::RESET_FENCES,
-                    "重置收纳箱位置",
-                    true,
-                    None,
-                )),
-                Box::new(PredefinedMenuItem::separator()),
-            ];
-            items.extend(fence_items);
-        }
         let rest: [Box<dyn IsMenuItem>; 6] = [
             Box::new(fixed.clone()),
             Box::new(MenuItem::with_id(menu_id::RESET, "重置位置", true, None)),

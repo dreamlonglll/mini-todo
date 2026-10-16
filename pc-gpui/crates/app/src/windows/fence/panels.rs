@@ -1,4 +1,4 @@
-//! 收纳箱的面板（外观 / 删除确认 / OneDrive 提示，§3.7–§3.9）与标题栏「更多」下拉菜单（§3.4.4）。
+//! 收纳箱的面板（外观 / 删除确认 / 云同步提示（Windows OneDrive、macOS iCloud），§3.7–§3.9）与标题栏「更多」下拉菜单（§3.4.4）。
 
 use gpui_kit::{
     AnyElement, AppContext as _, Context, InteractiveElement as _, IntoElement, ParentElement as _,
@@ -26,6 +26,22 @@ fn show_hidden_label(show_hidden: bool) -> &'static str {
         "不显示隐藏的图标"
     } else {
         "显示隐藏的图标"
+    }
+}
+
+/// 云同步提示面板的标题与说明：Windows 是 OneDrive 重定向的桌面（旧版文案）；macOS 是 iCloud「桌面与文稿」——
+/// 移出 iCloud 管理的桌面就是从 iCloud 云盘删除，其它设备上也会少掉
+fn cloud_notice_text() -> (&'static str, &'static str) {
+    if cfg!(target_os = "macos") {
+        (
+            "桌面由 iCloud 同步",
+            "收进收纳箱的项目会从桌面移走，也会从 iCloud 云盘中移除（你其他设备的桌面上也会少掉这些项目）。 项目仍保存在收纳文件夹里，移回桌面即可恢复。",
+        )
+    } else {
+        (
+            "桌面由 OneDrive 同步",
+            "收进收纳箱的项目会从桌面移走，移出桌面会同步到你的其他设备（它们的桌面上也会少掉这些图标）。 项目仍保存在收纳文件夹里，移回桌面即可恢复。",
+        )
     }
 }
 
@@ -324,45 +340,46 @@ impl FenceWindow {
                     )
                     .into_any_element()
             }
-            Panel::OneDrive => div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .gap(px(10.))
-                .child(
-                    div()
-                        .flex_1()
-                        .child(
-                            div()
-                                .mb(px(6.))
-                                .flex()
-                                .items_center()
-                                .gap(px(6.))
-                                .font_weight(theme::WEIGHT_SEMIBOLD)
-                                .child(icon(EpIcon::InfoFilled, 16., t.text))
-                                .child("桌面由 OneDrive 同步"),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(12.))
-                                .text_color(t.panel_label)
-                                .child(
-                                    "收进收纳箱的项目会从桌面移走，移出桌面会同步到你的其他设备（它们的桌面上也会少掉这些图标）。 项目仍保存在收纳文件夹里，移回桌面即可恢复。",
-                                ),
+            Panel::OneDrive => {
+                let (notice_title, notice_body) = cloud_notice_text();
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .gap(px(10.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(
+                                div()
+                                    .mb(px(6.))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .font_weight(theme::WEIGHT_SEMIBOLD)
+                                    .child(icon(EpIcon::InfoFilled, 16., t.text))
+                                    .child(notice_title),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(t.panel_label)
+                                    .child(notice_body),
+                            ),
+                    )
+                    .child(
+                        div().flex().justify_end().child(
+                            EpButton::new("onedrive-ok")
+                                .small()
+                                .primary()
+                                .label("知道了")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.set_panel(Panel::None, window, cx)
+                                })),
                         ),
-                )
-                .child(
-                    div().flex().justify_end().child(
-                        EpButton::new("onedrive-ok")
-                            .small()
-                            .primary()
-                            .label("知道了")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.set_panel(Panel::None, window, cx)
-                            })),
-                    ),
-                )
-                .into_any_element(),
+                    )
+                    .into_any_element()
+            }
         };
         Some(
             div()
@@ -628,6 +645,20 @@ mod tests {
             title_menu_width(&["重命名", "外观", show_hidden_label(true), "删除收纳箱"]),
             165.
         );
+    }
+
+    #[test]
+    fn cloud_notice_names_the_platform_service() {
+        let (title, body) = cloud_notice_text();
+        if cfg!(target_os = "macos") {
+            assert_eq!(title, "桌面由 iCloud 同步");
+            assert!(body.contains("iCloud"));
+        } else {
+            // Windows 沿用旧版文案（Linux 截图对照同一份）
+            assert_eq!(title, "桌面由 OneDrive 同步");
+            assert!(body.starts_with("收进收纳箱的项目会从桌面移走，移出桌面会同步到你的其他设备"));
+        }
+        assert!(body.ends_with("项目仍保存在收纳文件夹里，移回桌面即可恢复。"));
     }
 
     #[test]

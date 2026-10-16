@@ -19,6 +19,8 @@
 # - CFBundleShortVersionString / CFBundleVersion 按 Apple 规定只能是数字和点：取版本号 `-` / `+` 之前的部分（3.0.1-pre → 3.0.1），
 #   口径与 Windows 安装器的 VIProductVersion 相同；完整版本号由应用内关于页显示
 # - 版本号只从 pc-gpui/Cargo.toml 的 [workspace.package] version 读（唯一来源）
+# - 隐私用途说明 NS{Desktop,Documents,Downloads}FolderUsageDescription：桌面收纳箱把桌面上的项目移进收纳箱 / 移回原位置时，
+#   万一触发「文件与文件夹」授权框，框里显示的中文说明（正常路径不列举这些受保护目录，不会弹框）。不是身份键，改了不影响升级
 #
 # 签名：没有 Apple 开发者账号，最后一步 `codesign --force --sign -` 整包 ad-hoc 签名（封 Info.plist / Resources，
 # 并重签 lipo 合并后的每个切片）。签完不要再改 bundle 里的任何文件。不开 hardened runtime、不打时间戳（只有公证才需要）。
@@ -121,6 +123,12 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <string>public.app-category.productivity</string>
   <key>NSHighResolutionCapable</key>
   <true/>
+  <key>NSDesktopFolderUsageDescription</key>
+  <string>mini-todo 需要访问桌面文件夹，才能把桌面上的项目收进收纳箱或移回桌面。</string>
+  <key>NSDocumentsFolderUsageDescription</key>
+  <string>mini-todo 需要访问“文稿”文件夹，才能把收纳箱里的项目移回它原来所在的位置。</string>
+  <key>NSDownloadsFolderUsageDescription</key>
+  <string>mini-todo 需要访问“下载”文件夹，才能把收纳箱里的项目移回它原来所在的位置。</string>
 </dict>
 </plist>
 PLIST

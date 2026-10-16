@@ -318,4 +318,14 @@ pub mod raw {
     pub fn prepare_after_open(h: Hwnd) {
         ns::prepare_new_window(h.0);
     }
+
+    /// 收纳箱：桌面图标层之上一层 + 所有空间 / 不受调度中心与 ⌘H 影响（不显示；幂等）
+    pub fn make_desktop_layer(h: Hwnd) -> bool {
+        ns::make_desktop_layer(h.0)
+    }
+
+    /// 窗口实际的层级与行为（日志用）
+    pub fn describe_layer(h: Hwnd) -> Option<String> {
+        ns::describe_window(h.0)
+    }
 }

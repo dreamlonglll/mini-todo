@@ -1,6 +1,6 @@
 //! 项目网格（旧 `FenceItemGrid.vue`，规格 §4）：图标懒加载（同时最多 3 个请求、可见区上下外扩 64px、同一
 //! `路径|修改时间|档位` 只请求一次）、单选与双击打开、自绘深色右键菜单（主页 / 「移动到…」页）、箱内拖动排序、
-//! Ctrl+滚轮调图标大小（40ms 节流、400ms 防抖落库）。
+//! Ctrl+滚轮调图标大小（40ms 节流、400ms 防抖落库；macOS 另认 ⌘+滚轮：⌃+滚轮在开了「辅助功能 → 缩放」时被系统拿去放大屏幕）。
 //!
 //! 隐藏项（用户右键「隐藏」+ 以 `.` 开头的自动隐藏）：`items` 是全部项目，网格只排 [`FenceWindow::display_items`]——
 //! 没开「显示隐藏的图标」时去掉隐藏项，开了时隐藏项半透明显示；拖动排序只排显示项，松手后把隐藏项按原位置并回完整顺序。
@@ -33,6 +33,20 @@ use crate::ui::message;
 
 /// 右键菜单里点文件「取消隐藏」禁用时的说明
 const AUTO_HIDDEN_NOTE: &str = "以 . 开头的项目自动隐藏";
+
+/// 右键菜单「在文件管理器里定位」一项的文案：macOS 惯用「在访达中显示」，Windows 沿用旧版「打开所在位置」
+fn reveal_label() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "在访达中显示"
+    } else {
+        "打开所在位置"
+    }
+}
+
+/// 滚轮调图标大小的修饰键：Ctrl；macOS 另认 ⌘（⌃+滚轮常被「辅助功能 → 缩放」占用）
+fn is_zoom_modifier(modifiers: &gpui_kit::Modifiers) -> bool {
+    modifiers.control || (cfg!(target_os = "macos") && modifiers.platform)
+}
 
 /// 图标状态
 #[derive(Debug, Clone, PartialEq)]
@@ -464,8 +478,9 @@ impl FenceWindow {
         let task = spawn_db(cx, move |db| items::reveal(db, id, &entry.file_name));
         cx.spawn_in(window, async move |_, cx| {
             if let Err(e) = task.await {
-                let _ =
-                    cx.update(|window, cx| message::error_with(window, cx, "打开所在位置失败", &e));
+                let _ = cx.update(|window, cx| {
+                    message::error_with(window, cx, &format!("{}失败", reveal_label()), &e)
+                });
             }
         })
         .detach();
@@ -648,7 +663,7 @@ impl FenceWindow {
     }
 
     // ------------------------------------------------------------------
-    // Ctrl+滚轮
+    // Ctrl+滚轮（macOS 另认 ⌘+滚轮）
     // ------------------------------------------------------------------
 
     fn on_grid_wheel(
@@ -657,7 +672,7 @@ impl FenceWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !event.modifiers.control {
+        if !is_zoom_modifier(&event.modifiers) {
             // 普通滚动照常滚动，并关闭右键菜单
             self.close_item_menu(window, cx);
             cx.notify();
@@ -956,7 +971,7 @@ impl FenceWindow {
                             this.reveal_item(reveal_entry.clone(), window, cx)
                         }))
                         .child(icon(EpIcon::FolderOpened, 12., t.menu_text))
-                        .child("打开所在位置")
+                        .child(reveal_label())
                         .into_any_element(),
                     hide_row.into_any_element(),
                     row("menu-restore".into())
@@ -1061,5 +1076,35 @@ impl FenceWindow {
             .with_priority(3)
             .into_any_element(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn icon_zoom_accepts_ctrl_everywhere_and_cmd_on_mac() {
+        let ctrl = gpui_kit::Modifiers {
+            control: true,
+            ..Default::default()
+        };
+        let cmd = gpui_kit::Modifiers {
+            platform: true,
+            ..Default::default()
+        };
+        assert!(is_zoom_modifier(&ctrl));
+        assert_eq!(is_zoom_modifier(&cmd), cfg!(target_os = "macos"));
+        assert!(!is_zoom_modifier(&gpui_kit::Modifiers::default()));
+    }
+
+    #[test]
+    fn reveal_label_follows_the_platform() {
+        let expected = if cfg!(target_os = "macos") {
+            "在访达中显示"
+        } else {
+            "打开所在位置"
+        };
+        assert_eq!(reveal_label(), expected);
     }
 }

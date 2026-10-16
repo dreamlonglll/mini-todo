@@ -7,7 +7,7 @@
 //! |---|---|---|
 //! | Mini Todo（系统显示为 bundle 名） | 关于 Mini Todo（设置的「关于」页）、设置…、服务、隐藏 Mini Todo、隐藏其他、全部显示、退出 Mini Todo | ⌘, / ⌘H / ⌥⌘H / ⌘Q |
 //! | 编辑 | 撤销、重做、剪切、拷贝、粘贴、全选 | 输入框自己的绑定（gpui-base `input::*`，⌘Z / ⇧⌘Z / ⌘X / ⌘C / ⌘V / ⌘A） |
-//! | 窗口 | 最小化、关闭窗口 | ⌘M / ⌘W |
+//! | 窗口 | 最小化、关闭窗口（收纳箱是活动窗口时两者都不做） | ⌘M / ⌘W |
 //!
 //! - 编辑菜单的动作就是 gpui-component 输入框（gpui-base）的 `input::{Undo, Redo, Cut, Copy, Paste, SelectAll}`：焦点在输入框
 //!   里时可用，否则 GPUI 自动置灰；快捷键沿用输入框在 macOS 上的绑定（context `Input`），这里不重复绑定。
@@ -53,7 +53,7 @@ pub fn init(cx: &mut App) {
         log::info!("[app] 菜单退出");
         cx.quit();
     });
-    cx.on_action(|_: &Minimize, cx| with_active_window(cx, |window, _| window.minimize_window()));
+    cx.on_action(|_: &Minimize, cx| with_active_window(cx, minimize_window));
     cx.on_action(|_: &CloseWindow, cx| with_active_window(cx, close_window));
     cx.bind_keys([
         KeyBinding::new("cmd-,", OpenSettings, None),
@@ -122,7 +122,20 @@ fn with_active_window(cx: &mut App, f: impl FnOnce(&mut Window, &mut App) + 'sta
     });
 }
 
-/// ⌘W：与点系统关闭按钮一样（主窗口先按关闭请求保存几何）；收纳箱不能关（Windows 专有，macOS 上不会出现）
+/// 收纳箱窗口（桌面层的面板；改名时会成为 key / 活动窗口）
+fn is_fence(window: &Window, cx: &App) -> bool {
+    WindowManager::kind_of(cx, window.window_handle().window_id())
+        == Some(crate::windows::WindowKind::Fence)
+}
+
+/// ⌘M：收纳箱不能最小化（建窗时就没有可最小化样式，`miniaturize:` 不看样式，这里拦住）
+fn minimize_window(window: &mut Window, cx: &mut App) {
+    if !is_fence(window, cx) {
+        window.minimize_window();
+    }
+}
+
+/// ⌘W：与点系统关闭按钮一样（主窗口先按关闭请求保存几何）；收纳箱不能关（删除收纳箱才关窗）
 fn close_window(window: &mut Window, cx: &mut App) {
     let id = window.window_handle().window_id();
     match WindowManager::kind_of(cx, id) {

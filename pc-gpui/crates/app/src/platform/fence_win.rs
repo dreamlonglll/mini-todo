@@ -2,7 +2,8 @@
 //!
 //! - [`choose_color`]：收纳箱外观面板的「自定义颜色」。旧版是 WebView2 里的 `<input type="color">`，在 Windows 上弹出
 //!   系统 `ChooseColor` 通用对话框；这里直接调用 `ChooseColorW`（父窗口为收纳箱窗口），在独立线程里运行，不阻塞
-//!   GPUI 主线程的消息循环。其它平台没有系统取色对话框，返回 `None`（只记日志）。
+//!   GPUI 主线程的消息循环。macOS 用系统取色面板 `NSColorPanel`（非模态、只能在主线程碰）：前台任务里显示它，之后每 150ms
+//!   读一次颜色，面板关掉时返回最后的颜色（没改过视为取消）。Linux 没有系统取色对话框，返回 `None`（只记日志）。
 
 use gpui_kit::{App, Task};
 
@@ -86,7 +87,52 @@ mod imp {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+mod imp {
+    use std::time::Duration;
+
+    use gpui_kit::{App, Task};
+
+    use super::super::macos::ns;
+    use super::Hwnd;
+
+    /// 读取面板颜色的间隔
+    const POLL: Duration = Duration::from_millis(150);
+
+    /// NSColorPanel 是共享的非模态面板，没有"确定 / 取消"：显示后轮询，用户关掉面板时返回最后的颜色；
+    /// 颜色没变（或读不出 RGB）视为取消。面板没有父窗口（`owner` 用不到）。
+    ///
+    /// 全程在 GPUI 前台任务里（macOS 上就是主线程，AppKit 要求）；显示面板会让当前 key 窗口失去 key、同步触发 GPUI 回调，
+    /// 所以放进任务里执行，不在调用方的事件处理（App 被借用）里直接做
+    pub fn choose_color(
+        cx: &mut App,
+        _owner: Option<Hwnd>,
+        initial: (u8, u8, u8),
+    ) -> Task<Option<(u8, u8, u8)>> {
+        cx.spawn(async move |cx| {
+            if !ns::show_color_panel(initial) {
+                log::warn!("[fence] 无法打开系统取色面板");
+                return None;
+            }
+            let mut last = None;
+            loop {
+                cx.background_executor().timer(POLL).await;
+                let Some(state) = ns::color_panel_state() else {
+                    break;
+                };
+                if state.color.is_some() {
+                    last = state.color;
+                }
+                if !state.visible {
+                    break;
+                }
+            }
+            last.filter(|color| *color != initial)
+        })
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 mod imp {
     use gpui_kit::{App, Task};
 
@@ -97,7 +143,7 @@ mod imp {
         _owner: Option<Hwnd>,
         _initial: (u8, u8, u8),
     ) -> Task<Option<(u8, u8, u8)>> {
-        log::info!("[fence] 系统取色对话框仅在 Windows 上可用");
+        log::info!("[fence] 系统取色对话框仅在 Windows 与 macOS 上可用");
         Task::ready(None)
     }
 }

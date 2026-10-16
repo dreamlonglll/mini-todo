@@ -82,7 +82,7 @@ pub fn run() {
 
         windows::main_window::open(cx);
 
-        // 后台服务：托盘（Windows / macOS）、自动同步定时器、提醒调度、恢复收纳箱窗口（Windows）
+        // 后台服务：托盘（Windows / macOS）、自动同步定时器、提醒调度、恢复收纳箱窗口（Windows / macOS）
         services::tray::start(cx);
         services::auto_sync::start(cx);
         services::scheduler::start(cx);

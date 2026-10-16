@@ -11,6 +11,8 @@
 //!   指针；找不到就当窗口已经不在，什么都不做。
 //! - `setFrame:` / `orderOut:` / 改 style mask 会**同步**触发 GPUI 的窗口回调（`windowDidMove:` / `windowDidResize:` …），
 //!   只能在 App 未被借用时调用（见 `platform` 模块文档）；读操作与 [`prepare_new_window`] 不触发回调，随时可调。
+//! - 收纳箱专用：桌面层（[`make_desktop_layer`]，层级用 CoreGraphics 的 `CGWindowLevelForKey` 运行时查询）与「自定义颜色」的
+//!   系统取色面板（[`show_color_panel`] / [`color_panel_state`]，共享的 NSColorPanel，不按窗口号）。
 
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -20,10 +22,22 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
 use objc2_app_kit::{
-    NSApplication, NSEvent, NSFloatingWindowLevel, NSNormalWindowLevel, NSScreen, NSView, NSWindow,
-    NSWindowButton, NSWindowStyleMask,
+    NSApplication, NSColor, NSColorPanel, NSColorSpace, NSColorSpaceModel, NSEvent,
+    NSFloatingWindowLevel, NSNormalWindowLevel, NSPanel, NSScreen, NSView, NSWindow,
+    NSWindowAnimationBehavior, NSWindowButton, NSWindowCollectionBehavior, NSWindowLevel,
+    NSWindowStyleMask,
 };
 use objc2_foundation::{NSNumber, NSPoint, NSRect, NSSize, ns_string};
+
+// CoreGraphics（AppKit 本来就链接它）：objc2-app-kit 只导出 NSNormalWindowLevel 以上的层级常量，没有桌面层，
+// 按 Apple 的建议用运行时查询的 `CGWindowLevelForKey`（不为一个函数多引入 objc2-core-graphics）
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGWindowLevelForKey(key: i32) -> i32;
+}
+
+/// `kCGDesktopIconWindowLevelKey`（`CGWindowLevel.h` 的 `CGWindowLevelKey` 枚举值）
+const DESKTOP_ICON_WINDOW_LEVEL_KEY: i32 = 18;
 
 /// AppKit 全局点坐标矩形（左下原点，y 向上）
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
@@ -177,6 +191,62 @@ pub fn set_floating(number: isize, floating: bool) -> bool {
     with_window(number, |window| window.setLevel(level)).is_some()
 }
 
+/// 收纳箱的窗口层级：Finder 画桌面图标的那一层之上一层（= -2147483602）。在桌面图标之上、所有普通窗口（0）之下；
+/// 正好等于桌面图标层时与 Finder 的图标窗口前后顺序不定，点击偶尔被它截走，所以 +1
+pub fn desktop_layer_level() -> NSWindowLevel {
+    // SAFETY: 纯查询，参数是头文件里的枚举值
+    let icon_level = unsafe { CGWindowLevelForKey(DESKTOP_ICON_WINDOW_LEVEL_KEY) };
+    icon_level as NSWindowLevel + 1
+}
+
+/// 收纳箱：把窗口放到桌面层（[`desktop_layer_level`]）并设好"像桌面一样"的行为，不显示、不改 key 窗口。
+/// 幂等，建窗后（窗口仍隐藏时）调用一次、每次重新显示前再调用一次。
+///
+/// - collectionBehavior **整体替换**（GPUI 的 `PopUp` 建窗时设的是 `CanJoinAllSpaces | FullScreenAuxiliary`）：
+///   所有桌面空间都显示（`CanJoinAllSpaces`）、调度中心 / 显示桌面时不动也不隐藏（`Stationary`；非 Normal 层级的窗口默认
+///   `Transient`，会在调度中心里被藏起来）、不参与 ⌘\` 循环（`IgnoresCycle`）、自己不进全屏也不进别的应用的全屏空间
+///   （`FullScreenNone`）；
+/// - `canHide = NO`：⌘H（`[NSApp hide:]`）与别的应用的「隐藏其他」都不隐藏它；
+/// - `hidesOnDeactivate = NO`（NSPanel 默认 YES）、不进「窗口」菜单、去掉显示 / 隐藏的系统动画。
+///
+/// 收纳箱窗口之后绝不能再调 [`set_floating`]（会把层级改回 0 / 3）
+pub fn make_desktop_layer(number: isize) -> bool {
+    with_window(number, |window| {
+        window.setLevel(desktop_layer_level());
+        window.setCollectionBehavior(
+            NSWindowCollectionBehavior::CanJoinAllSpaces
+                | NSWindowCollectionBehavior::Stationary
+                | NSWindowCollectionBehavior::IgnoresCycle
+                | NSWindowCollectionBehavior::FullScreenNone,
+        );
+        window.setCanHide(false);
+        window.setHidesOnDeactivate(false);
+        window.setExcludedFromWindowsMenu(true);
+        window.setAnimationBehavior(NSWindowAnimationBehavior::None);
+    })
+    .is_some()
+}
+
+/// 窗口实际生效的层级与行为（写进日志供 e2e 核对：CGWindowList 只给得出层级，collectionBehavior / canHide 读不到）
+pub fn describe_window(number: isize) -> Option<String> {
+    with_window(number, |window| {
+        format!(
+            "level={} behavior={:#x} canHide={} excludedFromWindowsMenu={} hidesOnDeactivate={} \
+             nonactivating={} panel={} visible={}",
+            window.level(),
+            window.collectionBehavior().0,
+            window.canHide(),
+            window.isExcludedFromWindowsMenu(),
+            window.hidesOnDeactivate(),
+            window
+                .styleMask()
+                .contains(NSWindowStyleMask::NonactivatingPanel),
+            window.downcast_ref::<NSPanel>().is_some(),
+            window.isVisible(),
+        )
+    })
+}
+
 /// 显示（`orderFrontRegardless`：应用不在前台时也显示到同层最前，不改 key / main 窗口）
 pub fn order_front(number: isize) -> bool {
     with_window(number, |window| window.orderFrontRegardless()).is_some()
@@ -321,4 +391,70 @@ pub fn set_geometry_locked(number: isize, locked: bool) -> bool {
         }
     })
     .is_some()
+}
+
+// ----------------------------------------------------------------------
+// 收纳箱「自定义颜色」：系统取色面板（共享的 NSColorPanel）
+// ----------------------------------------------------------------------
+
+/// 显示系统取色面板，初始色 `initial`（sRGB 0~255）、不显示透明度。
+///
+/// NSPanel 默认在应用失活时自动隐藏（`hidesOnDeactivate`），用户点一下桌面面板就消失、会被轮询当成"关掉了"：关掉这个行为。
+/// 本应用多半不在前台（收纳箱是不激活应用的面板），先把应用切到前台再 `makeKeyAndOrderFront:`。
+/// 会让当前 key 窗口失去 key（触发 GPUI 回调），只在 App 未被借用时调用
+pub fn show_color_panel(initial: (u8, u8, u8)) -> bool {
+    let Some(mtm) = main_thread() else {
+        return false;
+    };
+    let panel = NSColorPanel::sharedColorPanel(mtm);
+    panel.setShowsAlpha(false);
+    panel.setHidesOnDeactivate(false);
+    let channel = |v: u8| f64::from(v) / 255.0;
+    let color = NSColor::colorWithSRGBRed_green_blue_alpha(
+        channel(initial.0),
+        channel(initial.1),
+        channel(initial.2),
+        1.0,
+    );
+    panel.setColor(&color);
+    activate_app();
+    panel.makeKeyAndOrderFront(None);
+    true
+}
+
+/// 取色面板的现状
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ColorPanelState {
+    /// 还显示着（用户关掉面板后为 false）
+    pub visible: bool,
+    /// 当前颜色（sRGB 0~255）；换不成 RGB 时 `None`
+    pub color: Option<(u8, u8, u8)>,
+}
+
+/// 取色面板的现状；面板从未建过时 `None`
+pub fn color_panel_state() -> Option<ColorPanelState> {
+    let mtm = main_thread()?;
+    if !NSColorPanel::sharedColorPanelExists(mtm) {
+        return None;
+    }
+    let panel = NSColorPanel::sharedColorPanel(mtm);
+    Some(ColorPanelState {
+        visible: panel.isVisible(),
+        color: srgb8(&panel.color()),
+    })
+}
+
+/// 换成 sRGB 的 0~255 分量。对非 RGB 模型的颜色（图案色、灰度…）读 `redComponent` 会抛 ObjC 异常（穿过 Rust 帧直接
+/// abort），所以先换色彩空间（换不了返回 nil）、再确认是 RGB 模型
+fn srgb8(color: &NSColor) -> Option<(u8, u8, u8)> {
+    let srgb = color.colorUsingColorSpace(&NSColorSpace::sRGBColorSpace())?;
+    if srgb.colorSpace().colorSpaceModel() != NSColorSpaceModel::RGB {
+        return None;
+    }
+    let to8 = |v: f64| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    Some((
+        to8(srgb.redComponent()),
+        to8(srgb.greenComponent()),
+        to8(srgb.blueComponent()),
+    ))
 }
