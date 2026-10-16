@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 25
+- **Total Sessions**: 26
 - **Last Active**: 2026-10-16
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~956 | Active |
+| `journal-1.md` | ~996 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 26 | 2026-10-16 | macOS 桌面收纳箱（预览）与 v3.0.3-pre 版本号 | `654f298`, `e1c3a4b`, `ddde4b4`, `ee45a1e`, `d64c005`, `0a58393`, `a9c9298`, `c06ec66` | `claude/serene-sagan-uuuz7r` |
 | 25 | 2026-10-16 | 收纳箱隐藏图标 | `451e4f3`, `96faf31`, `92d77f0` | `main` |
 | 24 | 2026-10-16 | 去掉 DWM 透出的系统标题栏按钮（收纳箱 / 主窗口右上角小 ×） | `44c41fe`, `fbaa33c` | `main` |
 | 23 | 2026-10-16 | GPUI 版合入、删除 Tauri 版并发布 v3.0.0-pre | `0422e7a`, `b0f26d6`, `ee8f287`, `8117b1f`, `5e09540` | `main` |
