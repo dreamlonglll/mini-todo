@@ -1,1 +1,7 @@
-{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python3 .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/spec/pc-gpui/gpui-conventions.md", "reason": "检查 app 代码是否遵守 GPUI 约定（App 借用、后台执行、theme token）"}
+{"file": ".trellis/spec/pc-gpui/verification.md", "reason": "门槛：fmt / clippy / test / Windows 交叉 clippy；mac 只能靠 CI"}
+{"file": ".trellis/spec/pc-gpui/release.md", "reason": "release.yml / cache-warm.yml 键一致性与资产命名"}
+{"file": ".trellis/spec/pc-gpui/data-compat.md", "reason": "沿用旧版名字与兼容"}
+{"file": ".trellis/spec/backend/window-modes.md", "reason": "固定模式契约（Windows 零回归）"}
+{"file": ".trellis/tasks/10-16-macos-package/research/legacy-mac-behavior.md", "reason": "mac 身份与名字表核对"}
+{"file": ".trellis/tasks/10-16-macos-package/research/gpui-macos-platform.md", "reason": "mac 实现路径核对"}
