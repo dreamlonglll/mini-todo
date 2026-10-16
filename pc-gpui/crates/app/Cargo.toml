@@ -57,10 +57,12 @@ windows = { version = "0.62", features = [
     # 收纳箱「自定义颜色」的系统取色对话框 ChooseColorW
     "Win32_UI_Controls_Dialogs",
 ] }
-# 托盘：tray-icon 自带 muda 菜单；只在 Windows 编译（Linux 只用于 CI 与截图）
-tray-icon = { version = "0.21", default-features = false }
 # 带扩展名过滤器 / 标题的文件对话框（GPUI 自带的没有过滤器）；只在 Windows 编译
 rfd = { version = "0.16", default-features = false }
+
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+# 托盘 / 菜单栏图标：tray-icon 自带 muda 菜单；Windows 与 macOS 编译（Linux 只用于 CI 与截图）
+tray-icon = { version = "0.21", default-features = false }
 
 [build-dependencies]
 embed-resource = "3"
