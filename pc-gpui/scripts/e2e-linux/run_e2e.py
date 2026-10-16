@@ -1133,8 +1133,8 @@ V28_TRIGGERS = [f"trg_{t}_{e}_local_seq" for t in ("todos", "subtasks") for e in
 
 
 def make_legacy_db(s: Session) -> None:
-    """造一个 v27 结构的旧库：先让 core 建出最新库（v29），再按 v28 / v29 迁移的内容逆向剥掉
-    （触发器、sync_meta、tombstones、三张收纳箱表、两次迁移新增的 settings 键与迁移记录），
+    """造一个 v27 结构的旧库：先让 core 建出最新库（v30），再按 v28 / v29 / v30 迁移的内容逆向剥掉
+    （触发器、sync_meta、tombstones、三张收纳箱表（含 v30 的两列）、两次迁移新增的 settings 键与迁移记录），
     最后按旧版写法插入 `T` 分隔 / 无秒 / 小数秒 / 仅日期 的存量时间。
     v1~v27 的表结构就是 core 迁移表里的同一份 SQL，与旧版 Tauri 应用建出来的库一致。"""
     seed(SEED_BIN, s, {"version": "4.0", "exportedAt": fmt(now_local()), "todos": [],
@@ -1179,7 +1179,7 @@ def suite_lifecycle() -> None:
             check(backups, f"no pre-migration backup in {s.data_dir / 'backups'}")
             check(any("v27" in b.name for b in backups), f"backup name lacks the old version: {backups}")
             vers = {r["version"] for r in s.query("SELECT version FROM migrations")}
-            check({28, 29} <= vers, f"migrations {sorted(vers)}")
+            check({28, 29, 30} <= vers, f"migrations {sorted(vers)}")
             r = s.one("SELECT * FROM todos WHERE id=1")
             check((r["notify_at"], r["start_time"], r["end_time"]) ==
                   ("2030-01-02 03:04:00", "2030-01-01 00:00:00", "2030-01-05 23:59:00"), f"times {r}")
@@ -1191,13 +1191,13 @@ def suite_lifecycle() -> None:
             check(s.query("SELECT name FROM sqlite_master WHERE name='fences'"), "v29 tables missing")
             check(s.setting("fence_onedrive_notice_shown") == "false", "v29 settings key missing")
             text = s.log_text()
-            check("数据库将从 v27 升级到 v29" in text, f"migration backup not logged: {text[-400:]!r}")
+            check("数据库将从 v27 升级到 v30" in text, f"migration backup not logged: {text[-400:]!r}")
             ui.wait_main_shows(app, "Legacy one", 10)
             ui.wait_main_shows(app, "Legacy two", 4)
             app.wait_text(app.main_win(), "1/1", 8, region=ui.list_region(app.main_win()), fuzzy=0.9)
             app.shot("L01-upgraded-main", app.main_win())
-            return f"backup {backups[0].name}; v27 -> v29; times normalized; data intact"
-        res.run("L01 legacy v27 database: auto backup + v28/v29 migrations + data intact + shown", l01, on_fail)
+            return f"backup {backups[0].name}; v27 -> v30; times normalized; data intact"
+        res.run("L01 legacy v27 database: auto backup + v28~v30 migrations + data intact + shown", l01, on_fail)
 
         def l02():
             nonlocal app
@@ -1228,13 +1228,13 @@ def suite_lifecycle() -> None:
         def l03():
             nonlocal app
             shutdown(app)
-            s.execute("INSERT INTO migrations (version) VALUES (30)")
+            s.execute("INSERT INTO migrations (version) VALUES (31)")
             mark = LogMark(s)
             app = launch(s)
-            mark.wait(r"比本程序支持的 v29 新", 10)
+            mark.wait(r"比本程序支持的 v30 新", 10)
             ui.wait_main_shows(app, "Legacy one", 10)
             return "newer schema version: warning logged, app runs"
-        res.run("L03 database from a newer version (v30): warns and keeps working", l03, on_fail)
+        res.run("L03 database from a newer version (v31): warns and keeps working", l03, on_fail)
     finally:
         shutdown(app)
 
