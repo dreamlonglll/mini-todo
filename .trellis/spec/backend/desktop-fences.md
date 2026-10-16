@@ -239,7 +239,8 @@ core 与 app 必须成对的常量：`logic::ICON_BUCKETS` ↔ `fence_fs::ICON_S
 | 改标题（改名后） | `window.set_window_title` |
 | 显示 / 隐藏全部 | `Hwnd::show` / `hide`（`ShowWindow`，不改 ex style）；显示后再 `attach_to_desktop` + `set_always_on_bottom`（幂等）。macOS：显示前再 `make_desktop_layer`（幂等）→ `orderFrontRegardless`，隐藏 `orderOut:` |
 | 改 resizable / minimizable / 加 `WS_EX_NOACTIVATE` / `WS_EX_LAYERED` / 加回 `WS_SYSMENU` | **禁止** |
-| macOS：`set_topmost` / `ns::set_floating` / `setFloatingPanel:` / `bring_to_front` / `cx.activate(true)` | **禁止**（前三个会把层级改回 0 / 3；后两个激活应用） |
+| macOS：`set_topmost` / `ns::set_floating` / `setFloatingPanel:` | **禁止**（会把层级改回 0 / 3） |
+| macOS：激活应用（`cx.activate(true)` / `bring_to_front`） | 只有双击标题改名时 `cx.activate(true)` + `window.activate_window()`（mac 场景 §M1「改名」）；单击、拖动、缩放、外部拖入、打开项目等其他操作**禁止**激活应用 |
 
 **锁定（「固定」）完全由界面控制**：锁定时不发起拖动、不显示缩放手柄；仍可拖入、折叠、改名、打开项目。Win32 样式不随锁定变化。
 
@@ -280,7 +281,8 @@ core 与 app 必须成对的常量：`logic::ICON_BUCKETS` ↔ `fence_fs::ICON_S
 - 缩放比例按**目标位置**所在显示器取（`title_scale`），不取窗口当前所在显示器：混合 DPI 下重置位置 / 启动夹回时两者不同。
 
 **必须可激活**（Windows）：不加 `WS_EX_NOACTIVATE`。否则双击打开的程序可能拿不到前台；未激活的收纳箱上第一次点击即生效。
-macOS 相反：收纳箱是**不激活应用**的面板（点它菜单栏不切换），鼠标事件不要求 key 窗口，只有改名要先 `activate_window()`（mac 场景 §M1）。
+macOS 相反：收纳箱是**不激活应用**的面板（点它菜单栏不切换），鼠标事件不要求 key 窗口；只有改名要键盘，改名开始时先激活应用
+（`cx.activate(true)`）再 `activate_window()`（mac 场景 §M1）。
 
 **外部拖入**：用 `ui::external_drop::ExternalDrop`（`DropScope::Window`），**不用** GPUI 的 `.on_drop::<ExternalPaths>()`：
 gpui-pre 0.3.9 的文件拖放不改输入模态，`on_drop` 要求 `is_hovered`，窗口最后一次输入是键盘时（改名回车后）松手会被丢掉（e2e F10，
@@ -810,8 +812,8 @@ NSPanel + `NSWindowStyleMaskNonactivatingPanel`），再改成桌面层。Window
 **规则**：
 
 - GPUI 建窗后不再改 level / collectionBehavior（gpui-pre-macos 只在 `MacWindow::open` 里设）；本 crate 里会改层级的只有 `ns::set_floating`
-  （`set_topmost` / `Hwnd::set_topmost`），**收纳箱窗口绝不能调**；也不调 `setFloatingPanel:`（会改层级）、`bring_to_front` / `cx.activate(true)`
-  （激活应用，失去不激活的意义）。
+  （`set_topmost` / `Hwnd::set_topmost`），**收纳箱窗口绝不能调**；也不调 `setFloatingPanel:`（会改层级）。激活应用（`cx.activate(true)`）
+  只在改名时做（见下文「改名」）；单击、拖动、缩放、外部拖入、打开项目都不激活应用，`bring_to_front` 不对收纳箱用。
 - 摆窗：`apply_window_rect` → `platform::set_client_rect_physical` → `setFrame:display:`（延后执行）；frame = 客户区，物理像素 = 全局点 × 统一系数。
   缩放手柄的光标取 `cursor_position_physical()`（`NSEvent.mouseLocation` × 统一系数），最小尺寸与逻辑 → 物理换算用 `platform::physical_scale(window)`，
   **不用** `window.scale_factor()`（窗口所在屏自己的缩放，混合缩放时不同）；`check_screen_layout` 找不到显示器时的兜底系数同理。
@@ -820,11 +822,19 @@ NSPanel + `NSWindowStyleMaskNonactivatingPanel`），再改成桌面层。Window
   每 ~2 秒的屏幕组合检测。
 - 拖动：标题栏超过 3px 后 `begin_window_drag` = `start_window_move`（`performWindowDragWithEvent:` + 当前的 mouse-dragged 事件），落库照常走
   `GeometryCommitGate`（e2e MF09）。
-- 改名：非激活面板单击不一定成为 key 窗口，键盘进不来，`start_rename` 先 `window.activate_window()`（`makeKeyAndOrderFront:`，GPUI 延后执行；
-  应用仍不激活）；用户点到别的应用时面板失去 key，经 `observe_window_activation` 照常提交改名（e2e MF08：访达在前台时双击标题、键入、回车）。
-  **MF08 在 runner 上没通过**（2026-10-16 首轮）：双击后经系统输入流（`CGEventPost(kCGHIDEventTap)`）键入的标题没有进到面板、没落库，而
-  `CGEventPostToPid` 直接投给进程可以改名——即"非激活面板收不到真实键盘"在 runner 上成立，真机上是否一样未知。若确认是真实问题，按 PRD D1
-  的退路改用 `Normal` + 自己的 reopen Apple Event handler（见下文 Dock 唤起），或在改名时临时激活应用。**中文输入法在非激活 key 面板里是否正常未验证**。
+- 改名（`windows/fence/mod.rs` 的 `start_rename` → `begin_mac_rename_focus`）：非激活面板单击不一定成为 key 窗口，键盘进不来，所以改名是收纳箱
+  **唯一激活应用**的操作：先 `cx.activate(true)` 再 `window.activate_window()`（`makeKeyAndOrderFront:`，GPUI 延后执行）。激活应用时 AppKit
+  会把 key 还给上次的 key 窗口（主窗口），面板随即失去 key、改名被当成"点到别处"提交了原标题（2026-10-16 CI 日志）。所以：
+  - 开始后 150 / 500 / 1000ms 复查（`MAC_RENAME_KEY_CHECKS`），面板不是 key 就重新激活应用并让它成为 key（焦点放回输入框，不重新全选）
+  - 开始后 1.2 秒内（`MAC_RENAME_GRACE`）的失去 key 与输入框 Blur 不当作提交
+  - 宽限期结束后再查一次（`MAC_RENAME_FINAL_CHECK_MS` = 1250ms）：面板仍不是 key（宽限期内失去 key、没能拿回来）就提交——之后不会再有
+    失去 key 的通知，不提交就会卡在改名状态
+  - 宽限期过后用户点到别的应用 / 桌面时面板失去 key，经 `observe_window_activation` 照常提交；回车提交、Esc 取消同其他平台
+  - 过程写进日志（`[fence] 改名…`：GPUI 的窗口激活态、应用是否在前台、AppKit 的 key 窗口号），CI 失败时据此定位
+
+  代价：改名期间菜单栏切到 mini-todo（主窗口可能一起到前面）；单击、拖动、缩放、外部拖入、双击打开项目仍不激活应用。e2e MF08：访达在前台时
+  双击标题 → 系统输入流输入（逐字注入进不去就 pbcopy + ⌘A + ⌘V）→ 回车 → 落库，runner 上用粘贴 + 回车验证（runner 上 `CGEventKeyboardSetUnicodeString` 逐字注入的
+  按键本来就进不了 GPUI 输入框，普通窗口的 M09 也一样，不是面板的问题）。**中文输入法在改名输入框里是否正常未验证**。
 - ⌘M / ⌘W（`services/mac_menu.rs`）：活动窗口是收纳箱时两者都不做（`is_fence`；`miniaturize:` 不看 style mask，必须显式拦）。
 - Dock 唤起：只有收纳箱可见时 `on_reopen` 照常回调（NSPanel 不算可见窗口，e2e MF07）。**退路**（若某个 macOS 版本上失效）：改用 `Normal` +
   自己注册 `kAEReopenApplication` Apple Event handler（调研 `mac-desktop-window.md` §5.3 有草图），其余设置不变。
@@ -938,7 +948,7 @@ NSPanel + `NSWindowStyleMaskNonactivatingPanel`），再改成桌面层。Window
 - **e2e**（`pc-gpui/scripts/e2e-macos/run_e2e.py` 的 MF 组，smoke 作业，debug `.app`，全部在临时目录）：MF01 新建（层级 = 桌面图标层 + 1、排在所有
   layer ≥ 0 的窗口之后、368×336pt 右上角、库与文件夹、日志自报 `0x251` / `canHide=false` / 非激活面板）、MF02 目录监听、MF03 真实拖入
   （`drag_source.py` 拖放源）与撞名不覆盖、MF04 移回原目录 / 桌面、MF05 删除收纳箱全部移回且 `.DS_Store` 不搬到桌面、MF06 ⌘H 与别的应用隐藏都不藏
-  收纳箱 + 点收纳箱不激活应用、MF07 有收纳箱时 Dock 唤起主窗口、MF08 键盘改名、MF09 拖标题栏落库、MF10 菜单栏图标三项与重启恢复；M07 断言菜单栏图标
+  收纳箱 + 点收纳箱不激活应用、MF07 有收纳箱时 Dock 唤起主窗口、MF08 双击标题改名（激活应用，系统输入流粘贴 + 回车）、MF09 拖标题栏落库、MF10 菜单栏图标三项与重启恢复；M07 断言菜单栏图标
   菜单**有**收纳箱三项。窗口枚举不带 `kCGWindowListExcludeDesktopElements`（详见 `pc-gpui/scripts/e2e-macos/README.md`）。
 - **runner 测不了**（写进交付说明）：Spaces / 台前调度 / 调度中心 /「显示桌面」/「点按墙纸显示桌面」、Retina / 多显示器 / 混合缩放、中文输入法、
   真实 `~/Desktop` 的 TCC 流程、iCloud「桌面与文稿」、跨卷移动、打开 / 在访达中显示（会拉起别的应用）、Finder 重启后的层级、光标形状。
@@ -1016,7 +1026,8 @@ Electron `type: 'desktop'` 那样放到 `kCGDesktopWindowLevel - 1`（收不到�
 **Decision**：GPUI `PopUp` + `CGWindowLevelForKey(kCGDesktopIconWindowLevelKey) + 1` + `CanJoinAllSpaces | Stationary | IgnoresCycle |
 FullScreenNone` + `canHide = NO`（Plash 的可交互模式、Hammerspoon "能可靠收点击的最低层级"同一层）。不激活应用：点收纳箱不切换菜单栏、
 不把隐藏中的应用（连同主窗口）取消隐藏、不计入 Dock 唤起的 `hasVisibleWindows`；`PopUp` 有 `ActiveAlways` 跟踪区，应用不在前台时悬停折叠 /
-展开照常。代价：改名要先 `activate_window()`，且 runner 上经系统输入流的键盘仍没进到面板（MF08 首轮失败，§M1）；中文输入法未验证。`Floating` 点击仍激活应用且没有跟踪区；普通 NSWindow 计入
+展开照常。代价：改名要键盘，改名开始时必须先激活应用（`cx.activate(true)`）再 `activate_window()`，并在宽限期内把 key 从主窗口拿回来
+（§M1「改名」），改名期间菜单栏切到 mini-todo；改名时的中文输入法未验证。`Floating` 点击仍激活应用且没有跟踪区；普通 NSWindow 计入
 `hasVisibleWindows`（退路：普通窗口 + 自己的 reopen Apple Event handler）。
 
 ### Design Decision: macOS 移动用 `renamex_np(RENAME_EXCL)`，不用 NSFileManager / `rename(2)` 打头
@@ -1046,10 +1057,10 @@ Windows 的 `FOF_RENAMEONCOLLISION`）；只有跨卷 / 卷不支持时交给 NS
   （3.0.0 等，没有 v30 迁移）时隐藏不生效（全部显示，点文件在 Windows 上也会显示）。以 `.` 开头的项目固定自动隐藏，没有开关。
 - Explorer 重启后某个收纳箱的 Z 序可能落在隐身的 Shell CoreWindow 之上（仍在所有普通应用窗口之下），不影响可见行为（旧版实测）。
 - GPUI 窗口外沿那圈不可见边框（96 DPI 下左 / 右 / 下各 8px）仍会接住鼠标（`HTBORDER`），见 gpui-conventions §2.2。
-- **macOS（预览，未经真机验收）**：只在 runner 上验证过（单屏 1x、一个桌面空间、临时目录）；其中键盘改名（MF08）在 runner 上没通过（§M1「改名」）。没验证过 Spaces / 台前调度 / 调度中心 /
-  「显示桌面」/「点按墙纸显示桌面」下的表现、Retina 与多显示器、非激活面板里的中文输入法、真实 `~/Desktop` 的隐私授权流程（含 ad-hoc 签名
+- **macOS（预览，未经真机验收）**：只在 runner 上验证过（单屏 1x、一个桌面空间、临时目录；改名用粘贴 + 回车验证）。没验证过 Spaces / 台前调度 / 调度中心 /
+  「显示桌面」/「点按墙纸显示桌面」下的表现、Retina 与多显示器、改名时的中文输入法、真实 `~/Desktop` 的隐私授权流程（含 ad-hoc 签名
   升级后重新授权）、iCloud「桌面与文稿」、跨卷移动、Finder 重启后的层级、打开 / 在访达中显示；访达拖入时光标带"+"（GPUI 回报 Copy）但实际是移动；
-  取色面板会激活应用。混合缩放下统一系数随显示器组合变化时"最近一次位置"可能按新系数解释
+  改名与取色面板会激活应用（菜单栏切到 mini-todo）。混合缩放下统一系数随显示器组合变化时"最近一次位置"可能按新系数解释
   （与主窗口同性质，见 CLAUDE.md 已知限制）。
 - **装回旧版本**（Windows 与 macOS 都是）：3.0.2-pre 及更早的 mac 版不恢复收纳箱（`restore_all` 在 mac 上直接返回）、菜单栏图标没有入口，
   2.5.0 mac 版完全不认这些表——收纳箱不显示，但文件都还在 `~/MiniTodo收纳箱/<名称>/` 里，可在访达里找回；再装回新版本后照常恢复。

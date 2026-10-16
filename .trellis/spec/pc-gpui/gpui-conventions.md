@@ -298,8 +298,10 @@ gpui-pre-macos 能建窗（位置 / 显示器 / 置顶层级 / 可缩放都只�
 - **收纳箱窗口（桌面层的不激活面板）**：mac 上收纳箱建成 `WindowKind::PopUp`（NSPanel + `NonactivatingPanel`，只能建窗时给）、`show: false`，
   建窗后在 `cx.spawn` 里 `Hwnd::make_desktop_layer`（层级 `CGWindowLevelForKey(kCGDesktopIconWindowLevelKey) + 1`、collectionBehavior
   **整体替换**成 `CanJoinAllSpaces | Stationary | IgnoresCycle | FullScreenNone`、`canHide = NO` 等）再 `orderFrontRegardless`。GPUI 建窗后不再改层级，
-  本 crate 里会改的只有 `ns::set_floating`（`set_topmost`）——**收纳箱窗口绝不能调它**，也不调 `setFloatingPanel:` / `bring_to_front` /
-  `cx.activate(true)`。非激活面板单击不一定成为 key 窗口：要键盘（改名）时先 `window.activate_window()`。菜单动作（⌘M / ⌘W）对收纳箱跳过。
+  本 crate 里会改的只有 `ns::set_floating`（`set_topmost`）——**收纳箱窗口绝不能调它**，也不调 `setFloatingPanel:` / `bring_to_front`。
+  单击、拖动、拖入、打开项目都不激活应用；非激活面板单击不一定成为 key 窗口，所以只有要键盘的改名激活应用：先 `cx.activate(true)` 再
+  `window.activate_window()`，并在宽限期内复查、把 key 从主窗口拿回来（激活应用时 AppKit 会把 key 还给上次的 key 窗口；宽限期内的失去 key /
+  输入框 Blur 不当作提交，宽限期结束仍不是 key 才提交，`windows/fence/mod.rs` 的 `begin_mac_rename_focus`）。菜单动作（⌘M / ⌘W）对收纳箱跳过。
   契约见 [backend/desktop-fences.md](../backend/desktop-fences.md)「场景：macOS 上的收纳箱」。
 - **系统取色面板**（`fence_win::choose_color` 的 mac 实现，`ns::show_color_panel` / `color_panel_state`）：`NSColorPanel` 是 `MainThreadOnly` 的共享
   非模态面板，只能在前台任务里碰；要 `setHidesOnDeactivate(false)`（NSPanel 默认失活就藏，会被轮询误判成"关掉了"）；读分量前先

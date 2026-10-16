@@ -198,8 +198,10 @@ mini-todo/
   `setFrame:` 摆到库里的几何 → `Hwnd::make_desktop_layer`（`ns.rs`：层级 `CGWindowLevelForKey(kCGDesktopIconWindowLevelKey) + 1`，
   collectionBehavior 整体换成 `CanJoinAllSpaces | Stationary | IgnoresCycle | FullScreenNone` = `0x251`、`canHide = NO`、
   不进「窗口」菜单、无显示动画）→ `orderFrontRegardless`；日志自报实际属性（`[fence] 收纳箱窗口 #… 已放到桌面层：level=… behavior=0x…`，
-  e2e 据此核对）。点它不激活应用、⌘H / 别的应用「隐藏其他」不隐藏它、不计入 Dock 唤起的"有可见窗口"；⌘M / ⌘W 对它无效；
-  收纳箱窗口**绝不调** `set_topmost`（会把层级改回 0 / 3）；改名开始时先 `window.activate_window()`（面板单击不一定成为 key 窗口）。
+  e2e 据此核对）。单击、拖动、拖入、打开项目都不激活应用；⌘H / 别的应用「隐藏其他」不隐藏它、不计入 Dock 唤起的"有可见窗口"；⌘M / ⌘W 对它无效；
+  收纳箱窗口**绝不调** `set_topmost`（会把层级改回 0 / 3）。双击标题改名是唯一激活应用的操作（面板单击不一定成为 key 窗口）：先 `cx.activate(true)`
+  再 `window.activate_window()`，150 / 500 / 1000ms 复查、不是 key 就重新拿回，开始后 1.2 秒内的失去 key / 输入框失焦不当作提交，宽限期结束时
+  仍不是 key 才提交；改名期间菜单栏切到 mini-todo（`windows/fence/mod.rs` 的 `begin_mac_rename_focus`）。
   没有 Explorer 那样的重挂守护（层级是全局排序，未在真机验证 Finder 重启后的表现）
 - **真收纳**：外部拖入（`ui::external_drop`）的文件 / 快捷方式 / 文件夹从桌面移到收纳根目录下的 `<收纳箱名>` 文件夹（Windows
   `%USERPROFILE%\MiniTodo收纳箱\`、macOS `~/MiniTodo收纳箱/`），重名加 ` (2)` 绝不覆盖（包 `X.app` → `X (2).app`）；
@@ -578,10 +580,10 @@ WebDAV 服务端差异（实测，见 `.trellis/spec/backend/sync-protocol.md`�
    - 只有 ad-hoc 签名、不公证：首次打开要放行（`xattr -cr` 或「隐私与安全性 → 仍要打开」），每次升级都要重新放行
    - 系统通知拿不到投递结果（授权被拒也视为已投递），`cargo run` 的裸二进制收不到通知；runner 上测不了通知横幅与授权
    - 主窗口没有嵌入桌面，固定模式没有"不进 Dock / ⌘Tab"；固定模式在 Spaces / 全屏下的行为（`collectionBehavior`）没有处理
-   - 收纳箱（3.0.2-pre 之后新增）只在 runner 上跑过 e2e（MF 组：桌面层层级、监听、真实拖入、移回、删除、⌘H、Dock 唤起、键盘改名、拖动落库、菜单栏三项、
-     重启恢复），全部在临时目录里、没碰过真实 `~/Desktop`。**键盘改名（MF08）在 runner 上没通过**（2026-10-16 首轮：系统输入流的按键没有路由到
-     不激活应用的面板，直接投给进程的 `CGEventPostToPid` 可以），真机上双击标题后能否键入未知。没验证过：真实桌面的隐私授权（TCC）流程、iCloud「桌面与文稿」、跨卷移动、
-     Spaces / 台前调度 / 调度中心 /「显示桌面」/「点按墙纸显示桌面」下的表现、Retina / 多显示器、非激活面板里的中文输入法（改名）、
+   - 收纳箱（3.0.2-pre 之后新增）只在 runner 上跑过 e2e（MF 组：桌面层层级、监听、真实拖入、移回、删除、⌘H、Dock 唤起、改名、拖动落库、菜单栏三项、
+     重启恢复），全部在临时目录里、没碰过真实 `~/Desktop`。改名（MF08）在 runner 上用粘贴 + 回车验证（系统输入流的 ⌘V / 回车；runner 上逐字注入的
+     Unicode 按键本来就进不了 GPUI 输入框，普通窗口也一样）。没验证过：真实桌面的隐私授权（TCC）流程、iCloud「桌面与文稿」、跨卷移动、
+     Spaces / 台前调度 / 调度中心 /「显示桌面」/「点按墙纸显示桌面」下的表现、Retina / 多显示器、收纳箱改名时的中文输入法、
      打开 / 在访达中显示（e2e 不测，会拉起别的应用）
    - 收纳箱的小偏差：访达拖入时光标带绿色"+"（GPUI 对外部拖入一律回报"拷贝"），实际执行的是移动；「自定义颜色」的取色面板会把应用切到前台
    - 混合缩放（Retina 笔记本 + 1x 外接屏）时主窗口位置的物理像素口径与 2.5.0 不同，2.5.0 记下的位置可能恢复不到（设备本地数据，只丢一次）

@@ -19,7 +19,8 @@
 //! **会激活应用**（菜单栏切到 mini-todo，主窗口可能一起到前面）再让面板成为 key。应用被激活时 AppKit 会把 key 还给上次的
 //! key 窗口（主窗口），面板随即失去 key——CI 的 MF08 里键盘输入因此进了主窗口、改名被当成"点到别处"提交了原标题。所以
 //! 改名开始后的宽限期（`MAC_RENAME_GRACE`）内失去 key 不提交，而是重新让面板成为 key，并在几个时间点复查
-//! （`MAC_RENAME_KEY_CHECKS`），过程写进日志（`[fence] 改名…`）；宽限期过后失去 key（点到别的应用 / 桌面）照常提交。
+//! （`MAC_RENAME_KEY_CHECKS`），过程写进日志（`[fence] 改名…`）；宽限期过后失去 key（点到别的应用 / 桌面）照常提交，
+//! 宽限期结束时面板仍不是 key（没能拿回来）也提交（`MAC_RENAME_FINAL_CHECK_MS`），不会卡在改名状态。
 //! 没有真机验证（中文输入法、台前调度下的表现未知）。
 
 mod grid;
@@ -64,6 +65,9 @@ pub fn fence_key(fence_id: i64) -> String {
 const MAC_RENAME_GRACE: Duration = Duration::from_millis(1200);
 /// macOS 改名：开始后这几个时间点（毫秒，升序，都在宽限期内）复查面板是否是 key，不是就重新让它成为 key
 const MAC_RENAME_KEY_CHECKS: [u64; 3] = [150, 500, 1000];
+/// macOS 改名：宽限期结束后的最后一次复查（毫秒）。这时面板还不是 key（宽限期内失去 key、没能拿回来），之后不会再有
+/// 失去 key 的通知来提交改名——按"点到别处"提交，不让收纳箱卡在改名状态
+const MAC_RENAME_FINAL_CHECK_MS: u64 = MAC_RENAME_GRACE.as_millis() as u64 + 50;
 
 /// macOS 改名的焦点诊断（日志用）：GPUI 看到的窗口激活态 + AppKit 的应用前台 / key 窗口
 fn focus_report(window: &Window) -> String {
@@ -748,7 +752,8 @@ impl FenceWindow {
 
     /// macOS：让键盘进得了改名输入框（见模块文档）。先把应用切到前台（`cx.activate(true)`），再让面板成为 key
     /// （`activate_window()` = `makeKeyAndOrderFront:`，GPUI 延后到 App 借用之外执行），然后在 [`MAC_RENAME_KEY_CHECKS`]
-    /// 的时间点复查：面板不是 key 就重新来一次。宽限期内的失去 key 由 `observe_window_activation` 处理
+    /// 的时间点复查：面板不是 key 就重新来一次。宽限期内的失去 key 由 `observe_window_activation` 处理；
+    /// 宽限期结束后（[`MAC_RENAME_FINAL_CHECK_MS`]）面板仍不是 key 就提交改名（同失去 key）
     fn begin_mac_rename_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let started = Instant::now();
         self.rename_started_at = Some(started);
@@ -761,7 +766,11 @@ impl FenceWindow {
         window.activate_window();
         cx.spawn_in(window, async move |this, cx| {
             let mut waited = 0;
-            for at in MAC_RENAME_KEY_CHECKS {
+            let checks = MAC_RENAME_KEY_CHECKS
+                .into_iter()
+                .map(|at| (at, false))
+                .chain([(MAC_RENAME_FINAL_CHECK_MS, true)]);
+            for (at, last) in checks {
                 cx.background_executor()
                     .timer(Duration::from_millis(at.saturating_sub(waited)))
                     .await;
@@ -776,6 +785,17 @@ impl FenceWindow {
                             this.fence_id,
                             focus_report(window)
                         );
+                    } else if last {
+                        // 宽限期已过、面板仍不是 key：之后不会再有失去 key 的通知，按点到别处提交
+                        log::info!(
+                            "[fence] 改名 {at}ms：收纳箱 #{} 宽限期结束时面板仍不是 key，提交改名（{}）",
+                            this.fence_id,
+                            focus_report(window)
+                        );
+                        this.finish_rename(true, window, cx);
+                        this.close_item_menu(window, cx);
+                        this.close_title_menu(window, cx);
+                        return false;
                     } else {
                         this.reassert_rename_key(
                             &format!("改名 {at}ms 时面板不是 key"),

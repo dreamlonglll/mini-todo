@@ -193,7 +193,7 @@ editor::open(cx, Some(parent), None, EditorMode::Edit);
 | `completed::open(cx, parent)` | 已完成 | 460×550 |
 | `settings::open(cx, parent, SettingsTab::{General, Appearance, Data, Screen, About})` | 设置 | 680×560，不可缩放；`SettingsTab::label()` = 菜单文案 |
 | `notification::open(cx, NotificationContent { todo_id, title, description }) -> Option<AnyWindowHandle>`、`notification::close_all(cx)` | 应用内通知 | 320×120，透明、`WindowKind::PopUp`（置顶、不进任务栏）、不抢焦点；core 槽位与叠放算法，关窗归还槽位 |
-| `fence::open(cx, fence_id)`、`fence::restore_all(cx)`、`fence::tray_create_fence / tray_toggle_fences / tray_reset_fences(cx)`、`fence::fence_key(id)` | 收纳箱 | 透明、不可缩放、不可最小化、建窗不显示（定位后再显示）；macOS 上 `kind = PopUp`（不激活应用的 NSPanel）；登记 key `fence-{id}`；实现在 `services::fences` |
+| `fence::open(cx, fence_id)`、`fence::restore_all(cx)`、`fence::tray_create_fence / tray_toggle_fences / tray_reset_fences(cx)`、`fence::fence_key(id)` | 收纳箱 | 透明、不可缩放、不可最小化、建窗不显示（定位后再显示）；macOS 上 `kind = PopUp`（不激活应用的 NSPanel；只有双击标题改名时先 `cx.activate(true)` 再 `activate_window()`，宽限期内把 key 从主窗口拿回来，见 `windows/fence/mod.rs` 模块文档）；登记 key `fence-{id}`；实现在 `services::fences` |
 | `gallery::open(cx)` | 控件样例 | 仅调试 |
 
 `WindowManager`（Global）：
@@ -282,7 +282,7 @@ editor::open(cx, Some(parent), None, EditorMode::Edit);
 - macOS 的 GPUI 胶水（`platform/macos/mod.rs`、`lib.rs` 里 `cfg(target_os = "macos")` 的几行）只有 CI 的 macOS 作业能编译；
   `platform/macos/ns.rs` 可在 Linux 上用 `scripts/mac-check` 交叉检查，`mac_geometry.rs` / `services/mac_menu.rs` 全平台编译。
   真机行为（红绿灯是否全部隐藏、Retina / 多屏摆窗、固定模式、通知面板在应用失活时是否显示、收纳箱桌面层在 Spaces / 台前调度 / 显示桌面下的表现、
-  非激活面板里的中文输入法）只能靠 CI 截图与用户反馈。
+  收纳箱改名时的中文输入法）只能靠 CI 截图与用户反馈。
 - debug 构建的 Windows exe 在运行时从构建机 cargo registry 编译着色器，只能在构建它的机器上运行；release 必须在装了
   Windows SDK（`fxc.exe`）的 Windows 上构建。
 - Xvfb 下透明窗口的透明像素截图为黑色（无合成器）；GPUI 在光标离开窗口后不清除悬停（回归脚本会把光标停在空白处）。

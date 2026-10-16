@@ -53,7 +53,7 @@ macOS 的收纳箱是桌面图标层之上一层、不激活应用的面板（GP
 | MF05 删除收纳箱 | 预置 `k1.txt`（原始路径）、`k2.txt`（无）与 `.DS_Store`；「更多」→「删除收纳箱」→「删除」（OCR 找按钮，找不到依次试布局常量）→ 窗口关闭、`fences` 清空、`k1` 回 `-src`、`k2` 回 `-desktop`、收纳文件夹删掉、`.DS_Store` 没被搬到桌面 | 确认面板的项目数（应为 2） |
 | MF06 ⌘H | 前台时 ⌘H → 主窗口不在屏幕上、收纳箱仍在；Finder 在前台时点收纳箱 → 前台不是本应用、主窗口仍隐藏（不激活应用的面板）；`NSRunningApplication.unhide()` → 主窗口回来；`hide()`（别的应用发起的隐藏）→ 收纳箱仍在 | `isHidden`、前台应用 |
 | MF07 Dock 唤起 | 有收纳箱时 ⌘W → 主窗口关闭、收纳箱仍在；`open <app>` → 主窗口重新出现、没有另起进程、收纳箱没多出来 | |
-| MF08 改名 | Finder 在前台时双击收纳箱标题 → `CGEventPost(HID)` 键入「E2E 收纳」→ 回车 → `fences.title` / `folder_name` 改名、收纳文件夹改名、层级不变；失败时再用 `CGEventPostToPid` 试一次，说明是"按键没路由到面板"还是"面板没进入改名"（不改变失败结论） | 双击 / 改名后的前台应用、`kCGWindowName`、OCR |
+| MF08 改名 | Finder 在前台时双击收纳箱标题（改名会激活应用、面板成为 key）→ 同 M09：`CGEventKeyboardSetUnicodeString` 逐字输入「E2E 收纳」，OCR 认不出时退到 `pbcopy` + ⌘A ⌘V（HID）→ 回车（HID）→ `fences.title` / `folder_name` 改名、收纳文件夹改名、层级不变；PASS 详情写明用了哪种输入方式。失败时再用 `CGEventPostToPid` 试一次，说明是"按键没路由到面板"还是"面板没进入改名"（不改变失败结论） | 双击 / 改名后的前台应用（预期是本应用）、`kCGWindowName`、OCR |
 | MF09 拖动 | 标题栏 (120, 16) 按下拖 (-160, +90) → 窗口位移约等于拖动距离（±30pt）、层级不变；`fences.x/y` 变了且 = 窗口位置 × 统一系数，当前组合的 `fence_layouts` 同时更新 | `fence_layouts` |
 | MF10 菜单栏图标三项 | 预置左上角的收纳箱按库里的位置打开；「新增收纳箱」→ 第二个「收纳箱 2」在右上角、桌面层、自报属性正确；「显示/隐藏所有收纳箱」→ 都不在屏幕上，再点 → 都回来且仍在桌面层；「重置收纳箱位置」→ 右上角并排（间距 16pt）并落库；「退出」后不带 `MINI_TODO_DEBUG_OPEN` 重启 → 两个收纳箱在原位恢复、自报属性正确 | |
 
@@ -89,7 +89,9 @@ macOS 的收纳箱是桌面图标层之上一层、不激活应用的面板（GP
   否则最长公共子串 ≥ 60%。数据是异步加载的，不满足时每 2 秒重截重试。
 - **键盘**：先 `bring_to_front`（`NSRunningApplication.activateWithOptions` → System Events `set frontmost` → 点窗口顶部空白处），
   确认前台进程（AX 系统级 `AXFocusedApplication`）是本应用后经 `CGEventPost(kCGHIDEventTap)` 发——与真实按键同一路径；
-  切不到前台时退到 `CGEventPostToPid` 并记 BAD。GPUI 按键码换算快捷键、按事件自带的字符 `insertText`，所以 Unicode 输入能打中文。
+  切不到前台时退到 `CGEventPostToPid` 并记 BAD。**文字输入用粘贴**：runner 上经 HID 发的 `CGEventKeyboardSetUnicodeString` 逐字注入
+  （虚拟键码 0，`maclib.type_text`）进不了 GPUI 的文字输入框（M09 普通窗口、MF08 收纳箱都一样；同样的事件 `CGEventPostToPid` 能进），
+  所以逐字输入后 OCR 认不出就退到 `pbcopy` + ⌘A ⌘V（HID）。`CGEventPostToPid` 只作诊断：它绕过前台应用 / key 窗口的路由。
 - **菜单栏图标**：AX `AXExtrasMenuBar` 的第一个子元素。先 `AXPress`（NSStatusItem 设了 menu，AppKit 弹出它；弹菜单期间应用不回 AX
   请求，所以超时 1.5s、返回 -25204 是正常的），读不到菜单再真实右键点它（tray-icon 的视图只在右键按下时弹菜单）；菜单项用 `AXPress`。
 - **拖窗口**：`CGEvent` 左键在标题栏上沿（y+6pt，按钮之上的留白，属于拖动区）按下 → 分步拖动 → 抬起，按 CGWindowList 前后的位置判断。

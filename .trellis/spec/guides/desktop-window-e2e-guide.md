@@ -120,9 +120,14 @@
 - **菜单**：AX 读应用菜单（`menu bar 1`，`AXMenuBar`）与菜单栏状态项（`AXExtrasMenuBar` 的第一个子元素）。对状态项 `AXPress` 时 AppKit 弹出菜单、
   弹菜单期间应用不回 AX 请求——超时（-25204）是正常的，读不到菜单再真实右键点它（tray-icon 只在右键按下时弹菜单）；菜单项用 `AXPress`。
 - **键鼠**：`CGEventPost(kCGHIDEventTap)` 等同真实输入，发给光标下 / 前台的应用：**发键盘事件前先切到前台并确认前台进程是被测应用**
-  （AX `AXFocusedApplication`），切不到时退到 `CGEventPostToPid`（直接投给该进程，不会误按到别的程序）并记 BAD。中文用
-  `CGEventKeyboardSetUnicodeString` 直接注入（不经输入法），快捷键用 keycode + `kCGEventFlagMaskCommand`（⌘Enter = 36）。从 runner 的 shell
-  拉起的进程不一定会自己激活：`NSRunningApplication.activateWithOptions` → System Events `set frontmost` → 点窗口顶部空白处，依次尝试。
+  （AX `AXFocusedApplication`），切不到时退到 `CGEventPostToPid`（直接投给该进程，不会误按到别的程序）并记 BAD。快捷键用 keycode +
+  `kCGEventFlagMaskCommand`（⌘Enter = 36）。从 runner 的 shell 拉起的进程不一定会自己激活：`NSRunningApplication.activateWithOptions` →
+  System Events `set frontmost` → 点窗口顶部空白处，依次尝试。
+- **文字输入用粘贴**：runner 上经 HID 事件流（`CGEventPost(kCGHIDEventTap)`）发的 `CGEventKeyboardSetUnicodeString` 逐字注入（虚拟键码 0，
+  `maclib.type_text`）**进不了 GPUI 的文字输入框**——普通窗口（M09 新建待办）与收纳箱（MF08 改名）都一样，窗口明明是 key、应用在前台；
+  同样的事件用 `CGEventPostToPid` 直接投给进程却能进。所以文字一律 `pbcopy` + ⌘A + ⌘V（键盘事件仍走 HID），逐字注入只作首选尝试
+  （OCR 认不出就改粘贴）；`CGEventPostToPid` 只用来诊断（它绕过前台应用 / key 窗口的路由，证明不了真实键盘到得了窗口）。不要把
+  "逐字注入没进去"当成应用的焦点问题去改应用（MF08 就这样误判过一轮）。
 - **拖窗口**：左键在标题栏上沿（y + 6pt，按钮之上的留白）按下 → 分步拖动 → 抬起，按 CGWindowList 前后的位置判定；AX 设置窗口位置 / 尺寸
   （`AXPosition` / `AXSize`）用来判定固定模式下"改尺寸无效"。
 - **断言数据**：debug 套件读 `<MINI_TODO_DATA_DIR>/data.db`；release 套件不隔离，读 `~/Library/Application Support/mini-todo/data.db`、
@@ -143,8 +148,9 @@
   - **主窗口挡着收纳箱**：主窗口（layer 0）盖住的地方点不到收纳箱、也拖不进；1024×768 的 runner 上居中的主窗口常与右上角的收纳箱重叠，
     交互前先把主窗口拖开（`clear_main_off`）。
   - **非激活**：先 `activate_other("Finder")` 再点收纳箱，断言 `frontmost_pid()` 仍是 Finder；别的应用发起的隐藏用
-    `NSRunningApplication.hide()` 模拟。键盘改名同样在访达在前台时做（面板成为 key、应用不激活），失败时再用 `CGEventPostToPid` 区分原因
-    （2026-10-16 首轮：HID 事件流的按键没进不激活面板、`CGEventPostToPid` 能改名——MF08 失败，见 desktop-fences.md §M1）。
+    `NSRunningApplication.hide()` 模拟。改名（MF08）同样从访达在前台时开始，但改名会**有意激活应用**（预期前台变成 mini-todo，面板成为 key）；
+    输入按上面的"文字输入用粘贴"（⌘A + ⌘V，回车也走 HID），失败时再用 `CGEventPostToPid` 区分"按键没路由到面板"与"面板没进入改名"
+    （见 desktop-fences.md §M1「改名」）。
   - **预置数据**：需要已有收纳箱 / 项目的用例启动前直接写库 + 建文件夹（`seed_fence`），不依赖拖入。
   - **隐私授权框**：runner 有图形会话、没人点，授权框会让后台移动线程**永久阻塞**；所有来源 / 移回目标都在 `--work` 下的临时目录。
   - 测不了：Spaces（runner 只有一个桌面空间）、台前调度、调度中心 /「显示桌面」、中文输入法候选窗、Retina / 多屏、真实 `~/Desktop` 的 TCC 流程。

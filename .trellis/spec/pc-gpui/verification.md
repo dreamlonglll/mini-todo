@@ -192,7 +192,7 @@ cargo clippy --manifest-path scripts/mac-check/Cargo.toml --target aarch64-apple
     收纳箱 MF01~MF10（全部在临时目录：`MINI_TODO_FENCES_ROOT` + `MINI_TODO_DESKTOP_DIR`，绝不碰真实桌面）：MF01 新建（层级 = 桌面图标层 + 1、在所有
     普通窗口之后、位置与尺寸、库与文件夹、日志自报 collectionBehavior `0x251` / `canHide=false` / 非激活面板）、MF02 目录监听、MF03 `drag_source.py`
     真实拖入与撞名不覆盖、MF04 移回、MF05 删除收纳箱（全部移回、`.DS_Store` 不搬到桌面）、MF06 ⌘H 与别的应用隐藏都不藏收纳箱、点收纳箱不激活应用、
-    MF07 有收纳箱时 Dock 唤起主窗口、MF08 键盘改名、MF09 拖标题栏落库、MF10 菜单栏图标三项与重启恢复
+    MF07 有收纳箱时 Dock 唤起主窗口、MF08 双击标题改名（激活应用，系统输入流粘贴 + 回车）、MF09 拖标题栏落库、MF10 菜单栏图标三项与重启恢复
   - `release-smoke`：release 构建 → `.app` → `run_e2e.py --suite release --allow-real-profile`（一次性 VM，不隔离）：P01 真实数据库迁移到
     `LATEST_VERSION`、日志在 `~/Library/Logs/com.tauri-app.mini-todo/`、单实例 socket；P02 二次启动 5s 内退出码 0 且唤起已运行实例、`--autostart` 静默；
     P03 LaunchAgent plist（`Label` / `ProgramArguments`）；P04 ⌘Q 退出、socket 被删
@@ -236,7 +236,7 @@ gh api repos/<owner>/<repo>/check-runs/<job_id>/annotations --paginate    # 注�
 - Gatekeeper 首次打开与放行流程、App Translocation；钥匙串弹窗（目前不用钥匙串）
 - Retina（runner 是 1x）、多显示器 / 混合缩放、Spaces / 全屏、真实 GPU 上的阴影 / 圆角 / 透明与深色主题观感
 - 收纳箱：Spaces / 台前调度 / 调度中心 /「显示桌面」/「点按墙纸显示桌面」下的表现（runner 只有一个桌面空间，collectionBehavior 只能由应用日志自报）、
-  非激活面板里的中文输入法、真实 `~/Desktop` / `~/Documents` / `~/Downloads` 的「文件与文件夹」授权流程（授权框没人点会永久阻塞，e2e 一律用临时目录）
+  收纳箱改名时的中文输入法、真实 `~/Desktop` / `~/Documents` / `~/Downloads` 的「文件与文件夹」授权流程（授权框没人点会永久阻塞，e2e 一律用临时目录）
   与 ad-hoc 签名升级后的重新授权、iCloud「桌面与文稿」（提示与 dataless 文件下载）、跨卷移动、打开 / 在访达中显示（会拉起别的应用）、Finder 重启后的层级
 - 原生 Intel 机型（见 §7.2）；重启 / 重新登录后开机自启是否真的拉起；贴边隐藏（目前没有 mac 用例）
 - 从 2.5.0 mac 版覆盖升级的真实流程（数据目录、LaunchAgent 路径、通知授权沿用）——只能按代码与 2.5.0 实物推断

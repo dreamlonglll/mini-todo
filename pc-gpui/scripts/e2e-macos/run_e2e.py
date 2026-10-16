@@ -36,7 +36,7 @@
 | MF05 | 「更多」→「删除收纳箱」→「删除」→ 全部移回、`.DS_Store` 不挡删除、文件夹与记录删掉、窗口关闭 |
 | MF06 | ⌘H / `NSRunningApplication.hide()` 后收纳箱仍在；应用隐藏中点收纳箱：前台不变、不取消隐藏 |
 | MF07 | 有收纳箱可见时 ⌘W 关主窗口 → `open <app>` → 主窗口回来 |
-| MF08 | Finder 在前台时双击收纳箱标题 → 系统输入流键入新标题 → 回车 → 标题与收纳文件夹改名 |
+| MF08 | Finder 在前台时双击收纳箱标题（改名会激活应用）→ 系统输入流输入新标题（逐字输入不行就 pbcopy + ⌘A + ⌘V）→ 回车 → 标题与收纳文件夹改名 |
 | MF09 | 拖标题栏 → 收纳箱移动 → fences 与 fence_layouts 落库 |
 | MF10 | 菜单栏图标「新增收纳箱」/「显示/隐藏所有收纳箱」×2 /「重置收纳箱位置」；「退出」后不带 DEBUG_OPEN 重启 → 原位恢复 |
 | P01 | release：窗口有内容、真实数据库迁移到 LATEST_VERSION、日志在 ~/Library/Logs、单实例 socket |
@@ -1837,7 +1837,10 @@ def mf07() -> str:
 
 
 def mf08() -> str:
-    """应用不在前台时双击收纳箱标题改名：键盘（系统输入流）要进得了不激活应用的面板（PRD D1）→ 标题与收纳文件夹改名"""
+    """应用不在前台时双击收纳箱标题改名 → 键盘（系统输入流）进得了收纳箱面板 → 标题与收纳文件夹改名。
+    改名开始时应用会被激活（`start_rename`，菜单栏切到 mini-todo），面板成为 key。输入同 M09：先逐字输入
+    （CGEventKeyboardSetUnicodeString，runner 上进不了 GPUI 输入框——普通窗口也一样），OCR 认不出就 pbcopy + ⌘A + ⌘V；
+    回车同样走系统输入流（HID），证明系统键盘事件到得了面板"""
     M.dump_windows("用例开始前")
     env = fence_start("MF08")
     app = env.app
@@ -1849,16 +1852,28 @@ def mf08() -> str:
         time.sleep(2)
         fence = clear_main_off(app, fence)
         fp = M.activate_other("Finder")
-        print(f"    改名前前台：{M.describe_pid(fp)}（改名在本应用不在前台时进行）")
+        print(f"    改名前前台：{M.describe_pid(fp)}（改名从本应用不在前台时开始）")
         M.double_click(*at(refresh_fence(app, fence), FENCE_TITLE_TEXT))
         time.sleep(0.8)
-        print(f"    双击标题后前台：{M.describe_pid(M.frontmost_pid())}")
+        print(f"    双击标题后前台（只打印；改名会激活应用，预期是 mini-todo）：{M.describe_pid(M.frontmost_pid())}")
         fence = refresh_fence(app, fence)
         shoot(fence, "MF08-editing")
         M.type_text(FENCE_RENAMED)
         time.sleep(0.5)
         img_typed, _, lines = fence_ocr(refresh_fence(app, fence), "MF08-typed")
-        print(f"    输入后收纳箱 OCR：{[l.text for l in lines[:8]]}")
+        typed, how = M.fuzzy_find(FENCE_RENAMED, lines)
+        print(f"    逐字输入后收纳箱 OCR：{how}；{[l.text for l in lines[:8]]}")
+        method = "CGEventKeyboardSetUnicodeString"
+        if not typed:
+            print("    逐字输入没认出来，改用剪贴板：⌘A → ⌘V（系统输入流）")
+            M.set_clipboard(FENCE_RENAMED)
+            M.post_key_hid(M.KEY_A, M.cmd_flag())
+            M.post_key_hid(M.KEY_V, M.cmd_flag())
+            time.sleep(0.8)
+            img_typed, _, lines = fence_ocr(refresh_fence(app, fence), "MF08-pasted")
+            pasted, how = M.fuzzy_find(FENCE_RENAMED, lines)
+            print(f"    粘贴后收纳箱 OCR（只打印，以落库为准）：{pasted}，{how}；{[l.text for l in lines[:8]]}")
+            method = "pbcopy + ⌘A + ⌘V"
         M.post_key_hid(M.KEY_RETURN)
         renamed = False
         try:
@@ -1867,7 +1882,7 @@ def mf08() -> str:
         except M.Timeout:
             pass
         fp_after = M.frontmost_pid()
-        print(f"    改名后前台（只打印；不激活应用时应仍是 Finder）：{M.describe_pid(fp_after)}")
+        print(f"    改名后前台（只打印；改名时应用被激活，预期是 mini-todo）：{M.describe_pid(fp_after)}")
         if not renamed:
             rows = fence_rows(app)
             M.save_emit(M.flatten(img_typed, (0x1F, 0x6F, 0x8B)), C.out, "MF08-typed", max_w=300, colors=12)
@@ -1879,12 +1894,13 @@ def mf08() -> str:
             M.post_key_to_pid(app.pid, M.KEY_RETURN, 0)
             try:
                 M.wait_until(lambda: [r for r in fence_rows(app) if r[1] == FENCE_RENAMED], 6, "PostToPid 改名")
-                diag = "直接投递给进程（CGEventPostToPid）可以改名：系统输入流的按键没路由到不激活应用的面板"
+                diag = "直接投递给进程（CGEventPostToPid）可以改名：系统输入流的按键（粘贴 / 回车）没路由到收纳箱面板"
             except M.Timeout:
                 diag = "直接投递给进程（CGEventPostToPid）也改不了：面板没进入改名 / 没成为 key"
-            ck.ok(False, f"键盘（系统输入流）输入的新标题进了收纳箱面板并落库：fences {rows}；前台 {M.describe_pid(fp_after)}；{diag}")
+            ck.ok(False, f"系统输入流（{method} + 回车）输入的新标题进了收纳箱面板并落库：fences {rows}；"
+                         f"前台 {M.describe_pid(fp_after)}；{diag}")
             return ck.done()
-        ck.ok(True, f"双击标题 → 键入「{FENCE_RENAMED}」→ 回车 → fences.title 落库")
+        ck.ok(True, f"双击标题 → {method} 输入「{FENCE_RENAMED}」→ 回车（系统输入流）→ fences.title 落库")
         rows = fence_rows(app)
         new_folder = env.root / FENCE_RENAMED
         ck.ok(rows and rows[0][2] == FENCE_RENAMED, f"folder_name 跟着改名（{rows}）")
@@ -1898,7 +1914,7 @@ def mf08() -> str:
                                             refresh_fn=refresh_fence)
         print(f"    OCR 认出新标题（只打印）：{found}，{how}")
         check_no_panic(ck, app)
-        return ck.done(f"{FENCE_RENAMED}；前台 {M.describe_pid(fp_after)}")
+        return ck.done(f"{FENCE_RENAMED}；输入方式 {method}；前台 {M.describe_pid(fp_after)}")
     finally:
         fence_case_end(env, app)
 
@@ -2098,7 +2114,7 @@ SMOKE = [
     ("MF05", "删除收纳箱：全部移回、.DS_Store 不挡删除、文件夹与记录删掉、窗口关闭", mf05, 240),
     ("MF06", "⌘H / 隐藏后收纳箱仍在；隐藏中点收纳箱不激活应用", mf06, 240),
     ("MF07", "有收纳箱可见时 ⌘W 关主窗口、open 唤起主窗口", mf07, 180),
-    ("MF08", "应用不在前台时双击标题改名（键盘进不激活应用的面板）", mf08, 240),
+    ("MF08", "应用不在前台时双击标题改名（激活应用、系统输入流粘贴 + 回车）", mf08, 240),
     ("MF09", "拖标题栏移动收纳箱、几何落库（fences + fence_layouts）", mf09, 180),
     ("MF10", "菜单栏图标：新增 / 显示隐藏 / 重置收纳箱位置；退出后重启恢复", mf10, 300),
 ]
