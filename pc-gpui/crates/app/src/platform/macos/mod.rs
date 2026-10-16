@@ -279,7 +279,10 @@ pub mod raw {
         ns::set_frame(h.0, ns_rect(layout.to_cocoa(target)))
     }
 
-    /// 只挪左上角（按窗口当前的点高度换算 AppKit 的左下角原点）
+    /// 只挪左上角（按窗口当前的点高度换算 AppKit 的左下角原点）。
+    ///
+    /// 返回窗口是否真的到了目标位置：AppKit 会把带标题栏样式的窗口约束在屏幕内（顶边不能高过菜单栏），贴边隐藏往屏幕
+    /// 上方藏时可能被挡回来；返回 false 时 `window_mode` 的贴边状态机会回滚成显示态
     pub fn set_client_position(h: Hwnd, x: i32, y: i32) -> bool {
         let layout = layout();
         let Some(frame) = ns::window_frame(h.0) else {
@@ -290,7 +293,14 @@ pub mod raw {
             return true;
         }
         let (ox, oy) = layout.cocoa_origin_for(x, y, frame.height);
-        ns::set_origin(h.0, ox, oy)
+        if !ns::set_origin(h.0, ox, oy) {
+            return false;
+        }
+        // AppKit 会把原点对齐到所在屏的像素：统一系数大于该屏缩放时差 1 个"物理像素"以内都算到位
+        let tolerance = layout.unit().ceil() as i32;
+        ns::window_frame(h.0)
+            .map(|f| layout.to_physical(cocoa(f)))
+            .is_some_and(|r| (r.x - x).abs() <= tolerance && (r.y - y).abs() <= tolerance)
     }
 
     /// `setMovable:NO` + 去掉可缩放（解锁时恢复）

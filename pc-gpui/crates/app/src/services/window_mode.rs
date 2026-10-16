@@ -15,6 +15,8 @@
 //! macOS 走同一套状态机与 200ms 轮询（`platform::Hwnd` 是 NSWindow 窗口号）：几何锁定 = `setMovable:NO` + 去掉可缩放，
 //! 置顶 = `NSFloatingWindowLevel`，`ToolWindow` 是 no-op（程序坞 / ⌘Tab 是整个应用的），没有嵌入桌面；被最小化即还原、
 //! 托盘唤起临时置顶、贴边隐藏照常（`NSEvent.mouseLocation` 给全局光标，比 2.5.0 只按鼠标移入移出更准）。
+//! 贴边隐藏中被 Dock / ⌘Tab 激活时按托盘唤起拉回（[`on_main_activated`]）；往屏幕上方藏时 AppKit 可能把窗口挡在菜单栏下，
+//! 平台层据实返回失败、状态机回滚成显示态（有菜单栏的屏幕上窗口本来就贴不到顶边）。
 //!
 //! **线程 / 借用约束**：所有 Win32 写操作都在 `cx.spawn` 的 async 块里、`cx.update` 闭包之外执行
 //! （`platform::Hwnd` 原始调用会同步给 GPUI 窗口过程发消息，App 被借用时 GPUI 处理不了）。
@@ -563,6 +565,22 @@ pub fn bring_main_to_front(cx: &mut App) {
         }
     })
     .detach();
+}
+
+/// 主窗口被激活时调用。macOS：贴边隐藏中的主窗口被点 Dock 图标 / ⌘Tab 切回来激活时按托盘唤起处理（拉回锚点、临时置顶）——
+/// GPUI 只在没有可见窗口时才回调 Dock 唤起（`mac_menu::on_reopen`），藏在屏幕边缘的窗口仍算可见，不处理的话窗口
+/// 成了 key 窗口却停在屏幕外。Windows 的经典固定没有任务栏 / Alt+Tab 入口，什么都不做
+pub fn on_main_activated(cx: &mut App) {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    let hidden = cx
+        .try_global::<WindowMode>()
+        .is_some_and(|m| m.classic_fixed && m.auto_hide.hidden);
+    if hidden {
+        log::info!("[window] 贴边隐藏中的主窗口被激活，拉回");
+        bring_main_to_front(cx);
+    }
 }
 
 /// 托盘「重置位置」（旧 `reset_window_impl` + 前端 `tray-reset-window`）：清贴边状态、撤置顶、

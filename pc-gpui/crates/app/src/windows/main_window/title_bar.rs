@@ -107,11 +107,13 @@ impl MainWindow {
         let version_color = palette.text_tertiary;
         let version_hover = palette.text_secondary;
 
+        // 标题栏左区放不下时（macOS 的系统字体比 Segoe UI 宽）先收缩版本号：容器可以缩到 0，版本文字按剩余宽度截断加省略号，
+        // 更新红点不截。放得下时排版与以前一样（截断只在文字超出时才发生）
         let version = div()
             .id("version-tag")
             .occlude()
             .flex()
-            .flex_none()
+            .min_w_0()
             .items_center()
             .ml(px(4.))
             // align-items: baseline 的近似：11px 版本号的基线对齐 16px 标题的首行基线
@@ -125,7 +127,12 @@ impl MainWindow {
                     .hover(move |s| s.text_color(version_hover))
                     .on_click(cx.listener(|this, _, window, cx| this.confirm_update(window, cx)))
             })
-            .child(format!("v{APP_VERSION}"))
+            .child(
+                div()
+                    .min_w_0()
+                    .text_ellipsis()
+                    .child(format!("v{APP_VERSION}")),
+            )
             .when(has_update, |this| this.child(update_dot()));
 
         div()
@@ -142,8 +149,10 @@ impl MainWindow {
                     .items_start()
                     .min_w_0()
                     .child(
+                        // 旧版 CSS 标题不换行：任何平台都不收缩、不折行（收缩的是后面的版本号）
                         div()
-                            .min_w_0()
+                            .flex_none()
+                            .whitespace_nowrap()
                             .text_size(px(16.))
                             .line_height(relative_line(16.))
                             .font_weight(theme::WEIGHT_SEMIBOLD)

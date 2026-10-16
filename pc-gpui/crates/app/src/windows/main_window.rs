@@ -216,6 +216,8 @@ impl MainWindow {
                     if !window.is_window_active() {
                         return;
                     }
+                    // macOS：贴边隐藏中被 Dock / ⌘Tab 激活时拉回（Windows 上是空操作）
+                    cx.defer(window_mode::on_main_activated);
                     this.calendar.refresh_today(cx);
                     if !WindowManager::forward_activation(window, cx) {
                         AppState::global(cx).update(cx, |state, cx| state.reload_todos(cx));
