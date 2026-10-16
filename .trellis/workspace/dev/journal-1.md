@@ -919,3 +919,38 @@ PC 前端（D1 正确性 / 安全 / 同步 UI、D2 性能 / 清理 / 测试）�
 ### Next Steps
 
 - None - task complete
+
+
+## Session 25: 收纳箱隐藏图标
+
+**Date**: 2026-10-16
+**Task**: 收纳箱隐藏图标
+**Branch**: `main`
+
+### Summary
+
+收纳箱支持隐藏图标：以 . 开头的文件自动隐藏（固定开启），项目右键「隐藏」/「取消隐藏」（fence_items.hidden），每个收纳箱可切换并记住「显示隐藏的图标」（fences.show_hidden，迁移 v30），隐藏项半透明显示；拖动排序时隐藏项保持原位置（merge_sorted），拖入点文件时提示，全部隐藏时空状态显示数量。隐藏只是本应用标记，不改文件属性；带 Windows 隐藏属性的文件维持永不显示。regress.py 与 Linux e2e 适配，规范补充排序合并与菜单加项导致回归坐标错位的经验。本机 fmt/clippy/test 全绿；截图回归、Linux/Windows e2e 与非 Windows 编译待 CI 与人工验收。另提交并推送了 macOS 安装包任务文档，交云端处理。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `451e4f3` | (see git log) |
+| `96faf31` | (see git log) |
+| `92d77f0` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
