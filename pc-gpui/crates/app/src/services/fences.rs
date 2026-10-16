@@ -1,5 +1,5 @@
-//! 桌面收纳箱生命周期：建窗与嵌入桌面、启动恢复、托盘三个入口（新增 / 显示隐藏 / 重置位置）、
-//! 目录监听 → 前台刷新、200ms 嵌入守护（Explorer 重启后重挂）、约 2 秒一次的屏幕组合检测。
+//! 桌面收纳箱生命周期：建窗与嵌入桌面（Windows）/ 桌面层（macOS）、启动恢复、托盘 / 菜单栏图标三个入口（新增 / 显示隐藏 /
+//! 重置位置）、目录监听 → 前台刷新、200ms 嵌入守护（Windows：Explorer 重启后重挂）、约 2 秒一次的屏幕组合检测。
 //!
 //! 契约：`.trellis/spec/backend/desktop-fences.md` §3.1（建窗参数、可做的窗口操作、几何落库）、§3.4（文件层与线程）、
 //! §3.5（屏幕组合布局）；对应旧 Tauri 版（已删除，见 git 历史）`commands/fence.rs` 的 `open_fence_window` / `restore_fences` /
@@ -15,6 +15,13 @@
 //! - 显示 / 隐藏用 `ShowWindow`，不改 ex style（GPUI 不会像 tao 那样重写样式），之后照样重挂一次（幂等）。
 //! - 所有会给窗口同步发消息的 Win32 调用都在 `cx.spawn` 的 async 块里、`update` 闭包之外执行。
 //! - 目录监听回调在 `fence-watch` 线程，经 channel 回前台交给对应收纳箱窗口。
+//!
+//! macOS（`.trellis/tasks/10-16-macos-fences/prd.md` D1）：没有 Progman 可挂，收纳箱建成 GPUI `PopUp`（不激活应用的 NSPanel：
+//! 点它不切换菜单栏、⌘H 隐藏中的应用不会被取消隐藏、不计入 Dock 唤起的"有可见窗口"），同样 `show: false` 先藏着建好 →
+//! 摆到库里的几何 → [`Hwnd::make_desktop_layer`]（桌面图标层之上一层、所有空间、`Stationary`、`canHide = NO`）→
+//! `orderFrontRegardless` 显示；摆窗走 `setFrame:`（`platform::set_client_rect_physical`），显示 / 隐藏走 `orderFrontRegardless` /
+//! `orderOut:`。AppKit 调用同样只在 App 未被借用时执行。收纳箱窗口绝不调 `set_topmost`（会把层级改回 0 / 3）。
+//! Linux 只用于截图 / 冒烟：没有原生句柄，`apply_window_rect` 只改尺寸，启动时不恢复。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -39,8 +46,8 @@ const SCREEN_CHECK_TICKS: u32 = 10;
 struct FenceWindowRecord {
     handle: AnyWindowHandle,
     view: WeakEntity<FenceWindow>,
-    /// 只在 Windows 上用到（嵌入守护 / 显示隐藏）
-    #[cfg_attr(not(windows), allow(dead_code))]
+    /// Windows：嵌入守护 / 显示隐藏；macOS：显示隐藏（Linux 没有原生句柄）
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
     hwnd: Option<Hwnd>,
 }
 
@@ -107,15 +114,15 @@ pub fn to_phys(r: PxRect) -> PhysRect {
     PhysRect::new(r.x, r.y, r.width, r.height)
 }
 
-/// 把收纳箱窗口的客户区（= 可见区域）摆到 `rect`（物理像素）。Windows：换算成外框一次 `SetWindowPos`（延后执行）；
-/// 其它平台 GPUI 不能移动窗口，只改尺寸（截图 / 冒烟测试用）
+/// 把收纳箱窗口的客户区（= 可见区域）摆到 `rect`（物理像素）。Windows：换算成外框一次 `SetWindowPos`；macOS：`setFrame:`
+/// （都延后执行，`scale` 用不到）；Linux GPUI 不能移动窗口，只按 `scale` 改尺寸（截图 / 冒烟测试用）
 pub fn apply_window_rect(window: &mut gpui_kit::Window, cx: &App, rect: PxRect, scale: f64) {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     {
         let _ = scale;
         platform::set_client_rect_physical(window, cx, to_phys(rect));
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = cx;
         let s = if scale > 0. { scale } else { 1. } as f32;
@@ -155,8 +162,13 @@ pub fn open_fence_window(
     spec.resizable = false;
     spec.minimizable = false;
     spec.focus = false;
-    // Windows：先藏着建好，按物理像素定位、嵌入桌面层之后再显示（不闪任务栏）
-    spec.show = !cfg!(windows);
+    // macOS：不激活应用的面板（NSPanel + NonactivatingPanel），建窗后由 embed_after_open 改成桌面层；Windows / Linux 普通窗口
+    if cfg!(target_os = "macos") {
+        spec.kind = gpui_kit::WindowKind::PopUp;
+    }
+    // Windows：先藏着建好，按物理像素定位、嵌入桌面层之后再显示（不闪任务栏）；macOS 同理：改好层级再显示，
+    // 不在 PopUp 默认的 101 层（所有窗口之上）闪一下
+    spec.show = !cfg!(any(windows, target_os = "macos"));
     // 折叠态窗口只有标题栏高：最小尺寸取 160×32，展开态的最小高度由界面逻辑保证
     spec.min_size = Some(gpui_kit::size(
         gpui_kit::px(fence::MIN_WIDTH_DIP as f32),
@@ -207,7 +219,7 @@ pub fn open_fence_window(
     Some(handle)
 }
 
-/// Windows：建窗后（App 未借用时）按物理像素定位客户区、改样式、嵌入桌面层、显示
+/// 建窗后（App 未借用时）按物理像素定位客户区，Windows 改样式、嵌入桌面层，macOS 改成桌面层，然后显示（"全部隐藏"中不显示）
 fn embed_after_open(cx: &mut App, hwnd: Option<Hwnd>, rect: PxRect) {
     #[cfg(windows)]
     {
@@ -232,7 +244,30 @@ fn embed_after_open(cx: &mut App, hwnd: Option<Hwnd>, rect: PxRect) {
         })
         .detach();
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        let Some(h) = hwnd else {
+            log::error!("[fence] 取不到收纳箱的原生窗口，窗口不会显示");
+            return;
+        };
+        let hidden = is_hidden(cx);
+        cx.spawn(async move |_| {
+            // setFrame: 会同步触发 GPUI 的移动回调：这里在 async 块里、update 之外。open_window 已校正过时什么都不做
+            h.set_client_rect(to_phys(rect));
+            // 先改层级再显示：建窗时 PopUp 在 101 层（所有窗口之上）
+            if !h.make_desktop_layer() {
+                log::warn!("[fence] 设置桌面层失败（窗口 #{}）", h.0);
+            }
+            if !hidden {
+                h.show();
+            }
+            if let Some(state) = h.describe_layer() {
+                log::info!("[fence] 收纳箱窗口 #{} 已放到桌面层：{state}", h.0);
+            }
+        })
+        .detach();
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = (cx, hwnd, rect);
     }
@@ -268,7 +303,8 @@ pub fn deliver_refresh(cx: &mut App, refresh: FenceRefresh) {
     }
 }
 
-/// 200ms 守护：Explorer 重启后重挂 owner / 样式被改掉时自愈（仅 Windows）；每 ~2 秒检测屏幕组合变化
+/// 200ms 守护：Explorer 重启后重挂 owner / 样式被改掉时自愈（仅 Windows。macOS 的层级是全局排序、GPUI 建窗后不再改层级，
+/// Finder 重启后桌面图标窗口仍在原层级，所以不重挂——未在真机验证）；每 ~2 秒检测屏幕组合变化（三个平台都做）
 fn ensure_guard(cx: &mut App) {
     if runtime(cx).guard_started {
         return;
@@ -334,7 +370,8 @@ fn check_screen_layout(cx: &mut App) {
         let info = cx
             .update_window(handle, |_, window, _| {
                 let rect = platform::client_rect_physical(window).map(to_px);
-                let scale = f64::from(window.scale_factor());
+                // 只在找不到所在显示器时用到；macOS 是统一系数（MonitorInfo.scale 的口径），不是窗口所在屏的缩放
+                let scale = platform::physical_scale(window);
                 (rect, scale)
             })
             .ok();
@@ -379,10 +416,10 @@ fn apply_targets(cx: &mut App, targets: Vec<(Fence, PxRect)>, areas: &[MonitorAr
     }
 }
 
-/// 显示 / 隐藏全部收纳箱窗口
+/// 显示 / 隐藏全部收纳箱窗口（Windows `ShowWindow`，macOS `orderFrontRegardless` / `orderOut:`；Linux 只记状态）
 fn set_all_visible(cx: &mut App, visible: bool) {
     runtime(cx).hidden = !visible;
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     {
         let hwnds: Vec<Hwnd> = runtime(cx)
             .windows
@@ -392,10 +429,16 @@ fn set_all_visible(cx: &mut App, visible: bool) {
         cx.spawn(async move |_| {
             for h in hwnds {
                 if visible {
+                    // macOS：显示前再确认一次桌面层（幂等），免得在别的层级闪一下
+                    #[cfg(target_os = "macos")]
+                    h.make_desktop_layer();
                     h.show();
                     // ShowWindow 不改 ex style，重挂一次也无害（幂等）
-                    platform::embed::attach_to_desktop(h);
-                    platform::embed::set_always_on_bottom(h, true);
+                    #[cfg(windows)]
+                    {
+                        platform::embed::attach_to_desktop(h);
+                        platform::embed::set_always_on_bottom(h, true);
+                    }
                 } else {
                     h.hide();
                 }
@@ -405,10 +448,10 @@ fn set_all_visible(cx: &mut App, visible: bool) {
     }
 }
 
-/// 启动时恢复全部收纳箱窗口（旧 `restore_fences`，仅 Windows）：`prepare_restore` → 逐个建窗（夹回可见区域，
-/// 不落库）→ 有收纳箱则开始监听 → 启动对账 + 20 秒后清理图标缓存
+/// 启动时恢复全部收纳箱窗口（旧 `restore_fences`；Windows 与 macOS，Linux 只用于截图 / 冒烟、不恢复）：`prepare_restore` →
+/// 逐个建窗（夹回可见区域，不落库）→ 有收纳箱则开始监听 → 启动对账 + 20 秒后清理图标缓存
 pub fn restore_all(cx: &mut App) {
-    if !cfg!(windows) {
+    if !cfg!(any(windows, target_os = "macos")) {
         return;
     }
     let screen_id = platform::screen_config_id(cx);

@@ -15,7 +15,7 @@
 |-------|-------------|--------|
 | [Window Modes](./window-modes.md) | 主窗口普通 / 经典固定 / 固定 + 嵌入桌面：模式状态表、`services::window_mode` 的切换与 200ms 轮询、`platform::embed` / `subclass`、持久化键、Explorer 重启自愈、e2e；macOS 的固定模式（`setMovable:NO` + 去掉可缩放、唤起临时置顶、最小化即还原、全局光标贴边隐藏，没有嵌入桌面） | Active |
 | [Sync Protocol](./sync-protocol.md) | PC ↔ WebDAV ↔ cloud: document shape, time format, monotonic `updated_at`, record LWW + tombstones, settings LWW, WebDAV precondition rules measured on Apache / nginx | Active |
-| [Desktop Fences](./desktop-fences.md) | 桌面收纳箱：始终嵌入桌面层的窗口（建窗参数、嵌入守护、移动 / 缩放 / 几何落库）、core `fence` / `fence::items` 接口与 `FenceRefresh`、v29 三张表与 v30 隐藏图标两列（点开头自动隐藏、右键隐藏、显示隐藏的图标）、文件层（文件夹为 source of truth、对账、`FenceActivity`、删除保留语义）、按屏幕组合记忆位置、debug 专用环境变量 | Active |
+| [Desktop Fences](./desktop-fences.md) | 桌面收纳箱：始终在桌面层的窗口（建窗参数、Windows 嵌入守护 / macOS 不激活面板与桌面图标层、移动 / 缩放 / 几何落库）、core `fence` / `fence::items` 接口与 `FenceRefresh`、v29 三张表与 v30 隐藏图标两列（点开头自动隐藏、右键隐藏、显示隐藏的图标）、文件层（文件夹为 source of truth、对账、`FenceActivity`、删除保留语义；macOS `renamex_np(RENAME_EXCL)` 与隐私授权 TCC）、按屏幕组合记忆位置、debug 专用环境变量 | Active |
 
 ---
 
@@ -26,11 +26,13 @@
 
 - [ ] Read [Window Modes](./window-modes.md) — especially §3 "Ordering rules" and "Wrong vs Correct"; mac 改动另读「Scenario: macOS」
 
-改桌面收纳箱（core `fence/`、`services/fence_fs/`；app `services/fences.rs`、`windows/fence/`、`platform/embed.rs`；`fences` /
-`fence_items` / `fence_layouts` 表）之前：
+改桌面收纳箱（core `fence/`、`services/fence_fs/`（含 macOS 的 `mac.rs`）；app `services/fences.rs`、`windows/fence/`、`platform/embed.rs`、
+`platform/macos/ns.rs` 的桌面层 / 取色面板；`fences` / `fence_items` / `fence_layouts` 表）之前：
 
 - [ ] 读 [Desktop Fences](./desktop-fences.md) —— 尤其 §3.1（建窗参数与可做的窗口操作）、§3.4（对账、upsert、登记与锁顺序、删除保留）、§7
-- [ ] 会移动用户文件的改动：只在隔离环境（`MINI_TODO_DATA_DIR` + `MINI_TODO_FENCES_ROOT`）和 `__fence_e2e_` 测试文件上验证
+- [ ] 会移动用户文件的改动：只在隔离环境（`MINI_TODO_DATA_DIR` + `MINI_TODO_FENCES_ROOT`，mac 另加 `MINI_TODO_DESKTOP_DIR`）和 `__fence_e2e_` 测试文件上验证；
+      mac 上绝不碰真实 `~/Desktop` / `~/Documents` / `~/Downloads`（隐私授权框没人点会一直阻塞）
+- [ ] mac 的移动绝不用 `std::fs::rename`（会覆盖），规划时不列举收纳根目录以外的目标目录（desktop-fences.md「场景：macOS 上的收纳箱」）
 
 Before touching sync, import/export, or any write path of `todos` / `subtasks` / `settings`
 (core functions or cloud REST handlers):
@@ -58,4 +60,5 @@ General:
 - Sync changes: run `pc-gpui/scripts/e2e-linux/run_e2e.py` S-suites (Apache + nginx) before claiming done
 - Window-mode changes: run the e2e in [Window Modes §6](./window-modes.md#6-tests-required) before claiming done;
   touching the mac side also needs `pc-gpui-e2e-macos.yml` (M10) — see [pc-gpui/verification.md §7](../pc-gpui/verification.md)
-- 收纳箱改动：跑 [Desktop Fences §6](./desktop-fences.md) 的单测与 Windows e2e（F 组）
+- 收纳箱改动：跑 [Desktop Fences §6](./desktop-fences.md) 的单测与 Windows e2e（F 组）；碰到共享代码或 mac 分支再推分支跑 `pc-gpui-e2e-macos.yml`
+  （`checks` 的 mac 单测 + `smoke` 的 MF 组，desktop-fences.md §M5）

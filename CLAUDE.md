@@ -5,7 +5,7 @@
 ## 项目简介
 
 Mini-Todo 是一款 Windows / macOS 桌面待办事项管理应用，定位为简洁、聚焦的本地待办工具，支持子任务、四象限、日历、重复提醒、系统通知与
-WebDAV 云同步，另有收纳桌面图标的桌面收纳箱（仅 Windows）。**macOS 版是预览版**：只在 GitHub 的 macOS runner 上自动化验证过，
+WebDAV 云同步，另有收纳桌面图标的桌面收纳箱（Windows；macOS 预览）。**macOS 版是预览版**：只在 GitHub 的 macOS runner 上自动化验证过，
 未经真机验收（维护者没有 Mac），差异与限制见「macOS（预览）」与「已知偏差与限制」。
 
 PC 端是 `pc-gpui/`：用 **Rust + GPUI**（`gpui-kit =0.7.3` = gpui-pre 0.3.9 + gpui-component 0.7.3）实现，**不依赖 WebView2**；Windows 上是单个
@@ -26,9 +26,9 @@ git 历史取（删除前的最后一个提交是 `749405a`，例如 `git show 7
 | 控件 | 自绘 Element Plus 风格控件（`crates/app/src/ui/`） | 外观数值照抄 UI 规格；复杂输入基于 gpui-component（`InputState` 等），主题调成 EP（`#409EFF`） |
 | 图标 | Element Plus Icons SVG | 从 `@element-plus/icons-vue` 抽取，`crates/app/assets/icons/{ep,app}/`，经 `assets.rs` 嵌入 |
 | Markdown | gpui-base `TextView` + 自写块级排版（`markdown` crate，GFM：表格 / 任务清单 / 删除线 / 自动链接） | 编辑为"源码 + 预览"（已知偏差，见下文） |
-| 业务核心 | `mini-todo-core`（`crates/core`） | rusqlite 0.32 bundled（SQLite）、reqwest 0.12 blocking（WebDAV / 节假日）、windows 0.58；不依赖 GPUI / Tauri / tokio，函数全部阻塞 |
+| 业务核心 | `mini-todo-core`（`crates/core`） | rusqlite 0.32 bundled（SQLite）、reqwest 0.12 blocking（WebDAV / 节假日）、windows 0.58；macOS 收纳箱文件层用 libc / objc2 / objc2-foundation / objc2-app-kit（与 app 同版本）；不依赖 GPUI / Tauri / tokio，函数全部阻塞 |
 | 农历 | tyme4rs | lunar-javascript 同一作者的 Rust 库，结果与旧前端逐日比对（`tests/fixtures/lunar_fixture.json`） |
-| 平台集成 | windows 0.62（与 gpui 同版本）、tray-icon、notify-rust、auto-launch、rfd、embed-resource；macOS：objc2 0.6 / objc2-app-kit 0.3（与 gpui-pre-macos 同版本） | 托盘 / 菜单栏图标、Toast、开机自启、带过滤器的文件对话框（rfd 仅 Windows）、exe 图标与版本信息；macOS 的 NSWindow / NSScreen 调用、系统通知走 GPUI `show_system_notification`（notify-rust 不在 mac 上编译） |
+| 平台集成 | windows 0.62（与 gpui 同版本）、tray-icon、notify-rust、auto-launch、rfd、embed-resource；macOS：objc2 0.6 / objc2-app-kit 0.3（与 gpui-pre-macos 同版本） | 托盘 / 菜单栏图标、Toast、开机自启、带过滤器的文件对话框（rfd 仅 Windows）、exe 图标与版本信息；macOS 的 NSWindow / NSScreen 调用（含收纳箱桌面层、取色面板 `NSColorPanel`）、系统通知走 GPUI `show_system_notification`（notify-rust 不在 mac 上编译） |
 | 安装包 | NSIS（`pc-gpui/scripts/windows-installer.nsi`）+ 便携 zip；macOS universal dmg（`pc-gpui/scripts/macos/`） | 由 `release.yml` 构建：Windows x64 + macOS universal（整包 ad-hoc 签名，不公证） |
 | 测试 | cargo test、`scripts/regress.py`（Xvfb 截图对照 + 冒烟）、`scripts/e2e-linux/`、`scripts/e2e-windows/`、`scripts/e2e-macos/`、`scripts/mac-check/`（mac 专属代码的本地交叉检查） | 见 `.trellis/spec/pc-gpui/verification.md` |
 
@@ -42,7 +42,7 @@ mini-todo/
 │   └── 开发文档/                            # 开发相关文档
 ├── pc-gpui/                                # PC 端（Cargo workspace；详见各 crate README）
 │   ├── Cargo.toml                          # [workspace] members = crates/core、crates/app；[workspace.package] version 是
-│   │                                       # 版本号唯一来源（当前 3.0.2-pre）；release thin LTO + strip
+│   │                                       # 版本号唯一来源（当前 3.0.3-pre）；release thin LTO + strip
 │   ├── Cargo.lock                          # 提交；CI 一律 --locked
 │   ├── crates/
 │   │   ├── core/                           # mini-todo-core：业务核心（不依赖 GPUI / Tauri / tokio，全部阻塞函数）
@@ -50,7 +50,8 @@ mini-todo/
 │   │   │   ├── src/
 │   │   │   │   ├── db/                     # 连接 / 迁移前备份（connection、backup）、迁移 v1~v30（migrations）、模型（models）、
 │   │   │   │   │                           # settings 读写助手（settings_kv）、变更计数 / 墓碑 / 合并（sync_store）、时间（time）、路径（paths）
-│   │   │   │   ├── services/               # webdav.rs（条件 GET/PUT、PROPFIND）、secret.rs（DPAPI）、fence_fs/（收纳箱文件层）
+│   │   │   │   ├── services/               # webdav.rs（条件 GET/PUT、PROPFIND）、secret.rs（DPAPI）、fence_fs/（收纳箱文件层；
+│   │   │   │   │                           # Windows 走 shell.rs / sta.rs，macOS 走 mac.rs）
 │   │   │   │   ├── todo.rs / data.rs       # 待办 / 子任务 CRUD、图片保存；导入导出、AppSettings 读写（唯一来源）
 │   │   │   │   ├── sync/                   # sync::run(db, SyncMode) -> SyncReport（测试在 sync/tests.rs）
 │   │   │   │   ├── settings.rs             # 单项设置、运行时偏好、屏幕组合 ID、screen_configs
@@ -77,7 +78,7 @@ mini-todo/
 │   │           ├── ui/                     # Element Plus 风格共享控件（button、input、ep_*、message、message_box、markdown*…）
 │   │           ├── services/               # 托盘 / 菜单栏图标、单实例、开机自启、同步编排、自动同步、提醒调度、系统通知、窗口模式、收纳箱、
 │   │           │                           # 版本检查、日志；mac_menu.rs（macOS 应用菜单与 Dock 唤起）
-│   │           └── platform/               # GPUI 没有的窗口能力：windows.rs（Win32）、macos/（mod.rs GPUI 胶水 + ns.rs AppKit 原始调用）、
+│   │           └── platform/               # GPUI 没有的窗口能力：windows.rs（Win32）、macos/（mod.rs GPUI 胶水 + ns.rs AppKit 原始调用，含收纳箱桌面层）、
 │   │                                       # mac_geometry.rs（mac 坐标换算，全平台编译带单测）、fallback.rs（Linux）、embed.rs、subclass.rs…
 │   └── scripts/
 │       ├── README.md                       # regress.py / shot.sh / MINI_TODO_DEBUG_OPEN 说明，文末「macOS：打包、e2e 与交叉检查」
@@ -86,7 +87,7 @@ mini-todo/
 │       ├── sample-data.json                # 样例数据（导出格式 4.0）
 │       ├── windows-installer.nsi           # NSIS 安装器（安装身份沿用旧 Tauri 版，见 .trellis/spec/pc-gpui/release.md）
 │       ├── macos/                          # bundle.sh（组装 mini-todo.app + 整包 ad-hoc 签名）、make-dmg.sh（拖放安装 dmg）、gen-tray-icon.py
-│       ├── mac-check/                      # 不属于 workspace 的小 crate：把不依赖 GPUI 的 mac 源文件 #[path] 进来，在 Linux / Windows 上
+│       ├── mac-check/                      # 不属于 workspace 的小 crate：把不依赖 GPUI 的 mac 源文件（含 core 的 fence_fs/mac.rs）#[path] 进来，在 Linux / Windows 上
 │       │                                   # --target aarch64-apple-darwin 做类型检查
 │       ├── e2e-linux/                      # Linux 端到端（真实应用 + Apache / nginx WebDAV + cloud + Skill）
 │       ├── e2e-windows/                    # Windows 端到端（真实窗口 + 真实输入 + Win32 断言；CI pc-gpui-e2e-windows.yml）
@@ -187,51 +188,75 @@ mini-todo/
 - **多屏幕位置记忆**：按屏幕组合（`screen_configs`）记住主窗口位置、尺寸与是否固定；托盘「重置位置」把主窗口放回主显示器左上区域。
   macOS 的物理像素口径见 `platform/mac_geometry.rs`（全局点坐标 × 所有屏的最大缩放；屏幕组合 ID 按各屏自身缩放，与 2.5.0 一致）
 
-### 桌面收纳箱（仅 Windows）
-- 托盘「新增收纳箱」在光标所在显示器工作区的右上角找空位新建（默认 4 列 × 3 行、标题"收纳箱 / 收纳箱 2…"）。每个收纳箱是一个
+### 桌面收纳箱（Windows；macOS 预览）
+- 托盘 / 菜单栏图标「新增收纳箱」在光标所在显示器工作区的右上角找空位新建（默认 4 列 × 3 行、标题"收纳箱 / 收纳箱 2…"）。每个收纳箱是一个
   无系统标题栏的透明 GPUI 窗口（`WindowKind::Fence`，登记 key `fence-{id}`，`crates/app/src/windows/fence/`）
-- **始终嵌入桌面层**：与主窗口嵌入共用 `platform::embed`（owner=Progman + 永远置底 + `WS_EX_TOOLWINDOW` + 无 `WS_MINIMIZEBOX`），
-  Win+D 后可见、不进任务栏 / Alt+Tab、不盖住应用窗口；建窗参数一次给齐（`resizable: false`、`minimizable: false`、Windows 上先隐藏建好、
+- **Windows：始终嵌入桌面层**：与主窗口嵌入共用 `platform::embed`（owner=Progman + 永远置底 + `WS_EX_TOOLWINDOW` + 无 `WS_MINIMIZEBOX`），
+  Win+D 后可见、不进任务栏 / Alt+Tab、不盖住应用窗口；建窗参数一次给齐（`resizable: false`、`minimizable: false`、先隐藏建好、
   定位并嵌入后再显示）；200ms 守护在 Explorer 重启后自动重挂（`services/fences.rs`）
-- **真收纳**：外部拖入（`ui::external_drop`）的文件 / 快捷方式 / 文件夹经 `IFileOperation` 从桌面移到 `%USERPROFILE%\MiniTodo收纳箱\<收纳箱名>\`，
-  重名加 ` (2)` 绝不覆盖，公共桌面项弹 UAC；**文件夹是内容的 source of truth**（`notify` 监听，Explorer 里增删随之刷新），
-  数据库只存元数据与项目的排序 / 原始路径 / 隐藏标记。不允许整体收纳用户桌面 / 公共桌面文件夹本身
-- 双击打开（`ShellExecuteExW`）、自绘右键菜单（打开 / 打开所在位置 / 隐藏或取消隐藏 / 移回桌面 / 移动到…）、箱内拖动排序、Ctrl+滚轮图标大小、
+- **macOS：桌面图标层之上的不激活面板**（不走 `platform::embed`）：建成 GPUI `WindowKind::PopUp`（NSPanel + `NonactivatingPanel`），先隐藏建好 →
+  `setFrame:` 摆到库里的几何 → `Hwnd::make_desktop_layer`（`ns.rs`：层级 `CGWindowLevelForKey(kCGDesktopIconWindowLevelKey) + 1`，
+  collectionBehavior 整体换成 `CanJoinAllSpaces | Stationary | IgnoresCycle | FullScreenNone` = `0x251`、`canHide = NO`、
+  不进「窗口」菜单、无显示动画）→ `orderFrontRegardless`；日志自报实际属性（`[fence] 收纳箱窗口 #… 已放到桌面层：level=… behavior=0x…`，
+  e2e 据此核对）。单击、拖动、拖入、打开项目都不激活应用；⌘H / 别的应用「隐藏其他」不隐藏它、不计入 Dock 唤起的"有可见窗口"；⌘M / ⌘W 对它无效；
+  收纳箱窗口**绝不调** `set_topmost`（会把层级改回 0 / 3）。双击标题改名是唯一激活应用的操作（面板单击不一定成为 key 窗口）：先 `cx.activate(true)`
+  再 `window.activate_window()`，150 / 500 / 1000ms 复查、不是 key 就重新拿回，开始后 1.2 秒内的失去 key / 输入框失焦不当作提交，宽限期结束时
+  仍不是 key 才提交；改名期间菜单栏切到 mini-todo（`windows/fence/mod.rs` 的 `begin_mac_rename_focus`）。
+  没有 Explorer 那样的重挂守护（层级是全局排序，未在真机验证 Finder 重启后的表现）
+- **真收纳**：外部拖入（`ui::external_drop`）的文件 / 快捷方式 / 文件夹从桌面移到收纳根目录下的 `<收纳箱名>` 文件夹（Windows
+  `%USERPROFILE%\MiniTodo收纳箱\`、macOS `~/MiniTodo收纳箱/`），重名加 ` (2)` 绝不覆盖（包 `X.app` → `X (2).app`）；
+  Windows 经 `IFileOperation`（公共桌面项弹 UAC），macOS 逐项 `renamex_np(RENAME_EXCL)`（内核原子判重，撞名换下一个后缀名重试；跨卷才交给
+  `NSFileManager`，同样不覆盖；**不用** `std::fs::rename`，它会静默覆盖）。**文件夹是内容的 source of truth**（`notify` 监听，
+  资源管理器 / 访达里增删随之刷新），数据库只存元数据与项目的排序 / 原始路径 / 隐藏标记。不允许整体收纳用户桌面 / 公共桌面文件夹本身
+- 双击打开（Windows `ShellExecuteExW`；macOS `NSWorkspace`，先拦下失效的替身 / 符号链接）、自绘右键菜单（打开 / 打开所在位置（macOS「在访达中显示」）/
+  隐藏或取消隐藏 / 移回桌面 / 移动到…）、箱内拖动排序、Ctrl+滚轮图标大小（macOS 另认 ⌘+滚轮）、
   双击标题改名（收纳文件夹同步改名，失败则保留旧文件夹名并提示）、折叠（悬停 / 拖文件经过时临时展开）、
-  「固定」= 锁定位置和大小（仍可拖入、折叠、改名）、每个收纳箱独立的背景色 / 透明度
+  「固定」= 锁定位置和大小（仍可拖入、折叠、改名）、每个收纳箱独立的背景色 / 透明度（「自定义颜色」：Windows `ChooseColorW`，macOS 系统取色面板
+  `NSColorPanel`，非模态、每 150ms 读一次，面板关掉时生效，打开时会把应用切到前台）
 - **隐藏图标**（v30，只影响收纳箱的显示，不改文件属性、不移动文件）：以 `.` 开头的项目自动隐藏（固定开启，不能单独取消隐藏；
   拖入时提示一次）；右键「隐藏」/「取消隐藏」写 `fence_items.hidden`（`fence::items::set_hidden`）；「更多」→「显示隐藏的图标」
   （每个收纳箱独立，`fences.show_hidden`）打开时隐藏项半透明显示，关闭时不显示，全部隐藏时空状态显示"N 个项目已隐藏"。
-  对账保留隐藏标记（含只改大小写的重命名），跨箱移动不携带；带 Windows 隐藏 / 系统属性的文件维持原样永不显示；删除收纳箱时隐藏项一并移回
+  对账保留隐藏标记（含只改大小写的重命名），跨箱移动不携带；带 Windows 隐藏 / 系统属性（macOS `UF_HIDDEN`，即 `chflags hidden`）的文件
+  维持原样永不显示、不收纳；删除收纳箱时隐藏项一并移回
+- **系统元数据文件**（所有平台）：`desktop.ini`、`Thumbs.db`、`.DS_Store`、`Icon\r`、`.localized` 不显示、不收纳、删除收纳箱时不算剩余
+  （文件夹只剩它们时连同它们一起删掉）
 - 移动 / 缩放：标题栏移动超过 3px 才 `platform::begin_window_drag`（标题栏不用 `drag_region()`，否则双击改名收不到），缩放用窗口内 8 个手柄 +
-  按客户区 `SetWindowPos`；只有用户拖动 / 缩放结束与托盘重置才 `fence::commit_geometry` / `reset_positions` 落库，系统挪窗不落库。几何一律是客户区的物理像素
+  按客户区摆窗（Windows `SetWindowPos`、macOS `setFrame:`）；只有用户拖动 / 缩放结束与托盘重置才 `fence::commit_geometry` / `reset_positions` 落库，
+  系统挪窗不落库。几何一律是客户区的物理像素（macOS 是全局点 × 统一系数，见「多屏幕位置记忆」）
 - 删除收纳箱：项目全部移回原位置（原目录不存在则回桌面）、空文件夹删除后才删记录并关窗口；有项目移不回去时删除中止、
   整个收纳箱保留并提示原因
 - 按屏幕组合记忆位置（`fence_layouts`，ID 与 `screen_configs.config_id` 同格式，都由 core `settings::screen_config_id` 计算），约 2 秒检测一次
   屏幕组合变化；设置里删除屏幕配置时连带删除对应布局
-- 托盘「显示/隐藏所有收纳箱」「重置收纳箱位置」作为兜底入口；首次从 OneDrive 重定向的桌面收纳时提示一次
-- 关键实现：core `fence/`、`services/fence_fs/`；app `services/fences.rs`、`windows/fence/`、`platform/embed.rs`；
-  契约与易错点见 `.trellis/spec/backend/desktop-fences.md`
-- 已知限制：Win10 / Win11 ≤23H2 上 Win+D 可能盖住收纳箱
+- 托盘 / 菜单栏图标「显示/隐藏所有收纳箱」「重置收纳箱位置」作为兜底入口；首次收纳"由云同步管理的桌面项目"时提示一次（Windows：桌面被 OneDrive
+  重定向；macOS：项目移动前由 iCloud 云盘管理（`NSURLIsUbiquitousItemKey`），移出就会从 iCloud 删除；两者共用 `fence_onedrive_notice_shown`）
+- macOS 文件层的隐私权限（TCC）：拖放即授权被拖的项目、在桌面里新建项目不需要同意，但**列举** `~/Desktop` / `~/Documents` / `~/Downloads`
+  会弹「文件与文件夹」授权框（ad-hoc 签名每次升级都会再弹），所以 mac 上规划移动时不列举收纳根目录以外的目标目录，撞名交给 `RENAME_EXCL`。
+  授权框会阻塞调用线程（移动本来就在后台线程）；`bundle.sh` 的 Info.plist 带 `NSDesktopFolderUsageDescription` 等用途说明（不是身份键）
+- 关键实现：core `fence/`、`services/fence_fs/`（macOS 后端 `mac.rs`）；app `services/fences.rs`、`windows/fence/`、`platform/embed.rs`（Windows）、
+  `platform/macos/ns.rs`（`make_desktop_layer`、取色面板）；契约与易错点见 `.trellis/spec/backend/desktop-fences.md`
+- 已知限制：Win10 / Win11 ≤23H2 上 Win+D 可能盖住收纳箱；macOS 版未经真机验收（见「已知偏差与限制」6）
 
 ### 系统功能
 - 托盘（Windows）/ 菜单栏图标（macOS，单色模板图标 `assets/tray-template.png`，随菜单栏深浅色着色）：左键单击唤起主窗口（300ms 去抖）；
-  右键菜单：添加待办项、新增收纳箱、显示/隐藏所有收纳箱、重置收纳箱位置（这三项仅 Windows）、固定模式（勾选）、重置位置、打开设置、
+  右键菜单：添加待办项、新增收纳箱、显示/隐藏所有收纳箱、重置收纳箱位置、固定模式（勾选）、重置位置、打开设置、
   开机自启动（勾选）、退出
 - 单实例：再次启动时把参数转交给已运行的实例并唤起其主窗口（开机自启拉起的不唤起）；Windows 命名互斥量 + `WM_COPYDATA`，macOS Unix socket
 - 开机自启（Windows 注册表 Run 项 / macOS LaunchAgent）、版本更新检查（GitHub `releases/latest`，标题栏版本号旁红点；不会提示预发布版）
 - 运行日志落盘（2MB 轮转，保留 1 份旧日志）
 
 ### macOS（预览）
-- 能力对齐 2.5.0 mac 版（再加上 3.0 的全部界面与功能），没有收纳箱、嵌入桌面；**未经真机验收**，只靠 CI 的 macOS runner 自动化验证
-  （`pc-gpui-e2e-macos.yml`）与用户反馈
+- 能力对齐 2.5.0 mac 版（再加上 3.0 的全部界面与功能），另有桌面收纳箱（2.5.0 没有，见「桌面收纳箱」）；主窗口没有嵌入桌面；**未经真机验收**，
+  只靠 CI 的 macOS runner 自动化验证（`pc-gpui-e2e-macos.yml`）与用户反馈
 - 身份与 2.5.0 mac 版相同（bundle id、`.app` 名、数据目录、日志、单实例 socket、LaunchAgent，见「兼容旧版沿用的名字」）；
-  Dock 图标照常显示（不设 `LSUIElement`，GPUI 启动时会把激活策略重设为 Regular，要隐藏只能用 `set_activation_policy`）
+  Dock 图标照常显示（不设 `LSUIElement`，GPUI 启动时会把激活策略重设为 Regular，要隐藏只能用 `set_activation_policy`）；
+  Info.plist 另带 `NS{Desktop,Documents,Downloads}FolderUsageDescription`（收纳箱万一触发「文件与文件夹」授权框时的中文说明，不是身份键）
 - 窗口：所有窗口仍是自绘标题栏，系统红绿灯建窗后隐藏（`Hwnd::prepare_after_open`，改 style mask 后再隐藏一次），
-  `WindowSpec` 设 `app_owns_titlebar_drag`；运行时摆窗 / 显示隐藏 / 置顶 / 几何锁定在 `platform/macos/ns.rs`（objc2 调 NSWindow / NSScreen）
+  `WindowSpec` 设 `app_owns_titlebar_drag`；运行时摆窗 / 显示隐藏 / 置顶 / 几何锁定 / 收纳箱桌面层 / 取色面板在 `platform/macos/ns.rs`
+  （objc2 调 NSWindow / NSScreen / NSColorPanel）
 - 应用菜单（`services/mac_menu.rs`，GPUI 不会自动建）：Mini Todo（关于 / 设置… ⌘, / 服务 / 隐藏 ⌘H / 隐藏其他 ⌥⌘H / 全部显示 / 退出 ⌘Q）、
-  编辑（撤销 / 重做 / 剪切 / 拷贝 / 粘贴 / 全选，系统文件面板里的 ⌘C / ⌘V 靠它）、窗口（最小化 ⌘M / 关闭窗口 ⌘W）
-- 关窗口（含主窗口、⌘W）不退出进程，菜单栏图标常驻；点 Dock 图标 / 在访达里再次打开时唤起主窗口（`on_reopen`，GPUI 只在没有可见窗口时回调）；
+  编辑（撤销 / 重做 / 剪切 / 拷贝 / 粘贴 / 全选，系统文件面板里的 ⌘C / ⌘V 靠它）、窗口（最小化 ⌘M / 关闭窗口 ⌘W；收纳箱是活动窗口时两者都不做）
+- 关窗口（含主窗口、⌘W）不退出进程，菜单栏图标常驻；点 Dock 图标 / 在访达里再次打开时唤起主窗口（`on_reopen`，GPUI 只在没有可见窗口时回调；
+  收纳箱是 NSPanel，按 Apple 文档不算可见窗口，所以有收纳箱时也能唤起——e2e MF07）；
   ⌘Q / 应用菜单 / 菜单栏图标「退出」退出。从菜单栏图标 / 单实例唤起时先 `cx.activate(true)` 把应用切到前台
 - 字体：界面 `.SystemUIFont`（San Francisco）+ `PingFang SC`，代码 `Menlo`，引用块 `Georgia` + `Songti SC`；设置里的字体下拉用 GPUI 的
   CoreText 枚举（去掉 `.` 开头的私有字体）
@@ -263,8 +288,8 @@ mini-todo/
   - 这个目录同时是 Windows 安装包的默认安装目录（与旧 Tauri 版一致）；安装器卸载只删自己装的程序文件，绝不递归删除该目录
   - 日志：`%LOCALAPPDATA%\com.tauri-app.mini-todo\logs\mini-todo.log`；macOS `~/Library/Logs/com.tauri-app.mini-todo/mini-todo.log`
     （没有 `logs` 子目录）（app `services::logging`，2MB 轮转；目录名 / 位置都为兼容旧版沿用）
-  - 收纳箱文件：`%USERPROFILE%\MiniTodo收纳箱\<收纳箱文件夹>\`（用户可见的真实文件夹，有收纳箱后才创建；不在数据目录里，
-    卸载 / 删库都不会丢文件）
+  - 收纳箱文件：`%USERPROFILE%\MiniTodo收纳箱\<收纳箱文件夹>\`；macOS `~/MiniTodo收纳箱/<收纳箱文件夹>/`（3.0.3-pre 起，2.5.0 mac 版没有）
+    （用户可见的真实文件夹，有收纳箱后才创建；不在数据目录里，卸载 / 删库都不会丢文件）
 - **迁移版本**：当前 v1~v30，通过 `pc-gpui/crates/core/src/db/migrations.rs` 的迁移表管理（`LATEST_VERSION`）；有待执行迁移时先备份，
   迁移期间关闭外键、提交前 `foreign_key_check`；库版本比程序新时只记警告、按现状继续运行（没有降级）
   - v23：移除所有 AI Agent / 任务调度 / 工作流相关表和字段（详见迁移注释）
@@ -356,7 +381,7 @@ mini-todo/
 | `images`（文件） | 是 | 先传图片再传 sync-data；一次 PROPFIND 列远端清单；文件名经 `is_safe_image_name` 校验 |
 | `screen_configs` | 否 | 设备特定的屏幕配置 |
 | `fences` / `fence_items` / `fence_layouts` | 否 | 桌面收纳箱：路径与屏幕坐标是设备相关数据，性质同 `screen_configs`；也不进导入导出 |
-| settings `fence_onedrive_notice_shown` | 否 | 设备本地提示标记，有意不进 `AppSettings` / `SYNCED_SETTING_KEYS` |
+| settings `fence_onedrive_notice_shown` | 否 | 设备本地提示标记（Windows 的 OneDrive 与 macOS 的 iCloud 提示共用），有意不进 `AppSettings` / `SYNCED_SETTING_KEYS` |
 | `sync_meta` / `migrations` | 否 | 本机状态 / 结构性表 |
 
 #### 向后兼容
@@ -457,7 +482,7 @@ macOS（与 2.5.0 mac 版 `mini-todo_2.5.0_universal.dmg` 的实物 Info.plist �
 | 已完成 | `completed::open` | 460×550，搜索、恢复、删除 |
 | 设置 | `settings::open(cx, parent, SettingsTab::{General, Appearance, Data, Screen, About})` | 680×560；常规 / 外观 / 数据与同步 / 屏幕配置 / 关于 |
 | 应用内通知 | `notification::open` | 320×120，透明、`WindowKind::PopUp`、不抢焦点 |
-| 收纳箱 | `services::fences`（`fence::open` 等转发） | 每个收纳箱一个窗口，key `fence-{id}`，始终嵌入桌面层，不可关闭（删除走 `close_deleted`） |
+| 收纳箱 | `services::fences`（`fence::open` 等转发） | 每个收纳箱一个窗口，key `fence-{id}`；Windows 始终嵌入桌面层，macOS 是桌面图标层之上的不激活面板（`PopUp`）；不可关闭（删除走 `close_deleted`） |
 | 控件样例 | `gallery::open` | 仅调试（`MINI_TODO_DEBUG_OPEN=gallery`） |
 
 打开方是主窗口 / 已完成 / 编辑窗口时，子窗口是模态的（同一时刻一个，打开方显示遮罩，Windows 上以打开方为 owner；macOS 没有 owner 关系）；
@@ -528,11 +553,13 @@ WebDAV 服务端差异（实测，见 `.trellis/spec/backend/sync-protocol.md`�
 ### 桌面收纳箱流程
 
 ```
-托盘「新增收纳箱」→ services::fences::create_fence
+托盘 / 菜单栏图标「新增收纳箱」→ services::fences::create_fence
   └── 后台 fence::create（先建文件夹 → INSERT fences → 记当前屏幕组合布局）
-       → open_fence_window（Windows 先隐藏建窗 → 按客户区定位 → TOOLWINDOW + 嵌入桌面层 → 显示；失败 rollback_create）
-       → ensure_watcher；200ms 守护（Explorer 重启重挂；每 10 tick 检测屏幕组合）
-拖入 → 后台 fence::items::move_in（先登记 begin_moving → IFileOperation → upsert fence_items，搬运 / 记录原始路径）→ FenceRefresh
+       → open_fence_window（先隐藏建窗 → 按客户区定位 → Windows：TOOLWINDOW + 嵌入桌面层 / macOS：PopUp 面板 make_desktop_layer
+         → 显示；失败 rollback_create）
+       → ensure_watcher；200ms 守护（Windows：Explorer 重启重挂；每 10 tick 检测屏幕组合）
+拖入 → 后台 fence::items::move_in（先登记 begin_moving →（macOS）判定 iCloud 项目 → IFileOperation / renamex_np(RENAME_EXCL)
+       → upsert fence_items，搬运 / 记录原始路径）→ FenceRefresh
 目录变化 → notify（300ms 去抖）→ fence-watch 线程里数据库锁内列举对账 → FenceRefresh 经 channel → 对应收纳箱窗口
 删除 → 后台 fence::delete → restore_all → 文件夹已清空才删记录 + close_deleted 关窗，否则整个收纳箱保留
 ```
@@ -544,14 +571,21 @@ WebDAV 服务端差异（实测，见 `.trellis/spec/backend/sync-protocol.md`�
 2. **中文换行**：GPUI 的换行器不做避头尾，全角标点（`，。、；：！？）`）可能落到行首，多行中文的折行位置与浏览器可能差一个字。
 3. GPUI 没有文字阴影、多色标渐变、位图变换等，个别装饰用近似实现（见 spec `gpui-conventions.md` §2.13）。
 4. **Linux 仅用于 CI、截图回归与 e2e**：没有托盘 / 单实例 / 开机自启 / 嵌入桌面 / 收纳箱真实文件操作，最后一个窗口关闭即退出，设置里的字体下拉为空。
-   Windows 专有能力（嵌入桌面、收纳箱、DPAPI、Toast、托盘、DirectComposition 透明）在 Linux 上只做交叉 clippy，靠 CI 的 Windows e2e 与用户实机验收。
+   Windows 专有能力（嵌入桌面、收纳箱的 Shell 实现、DPAPI、Toast、托盘、DirectComposition 透明）在 Linux 上只做交叉 clippy，靠 CI 的 Windows e2e 与用户实机验收；
+   mac 专属代码见 6。
 5. Win10 / Win11 ≤23H2 上 Win+D 可能盖住嵌入桌面的主窗口与收纳箱（显示桌面抬起的是 `WorkerW` 而不是 Progman）。
 6. **macOS 是预览版，未经真机验收**：维护者没有 Mac，mac 代码只能在 macOS runner 上编译、跑 e2e（runner 屏幕 1x、单显示器、半虚拟化 GPU），
    Retina、多显示器 / 混合缩放、Spaces / 全屏、阴影与圆角观感、Intel 机型（x86_64 切片只在 arm64 runner 上交叉编译、`lipo` 合并，
    CI 没有运行过它）都靠用户反馈。另外：
    - 只有 ad-hoc 签名、不公证：首次打开要放行（`xattr -cr` 或「隐私与安全性 → 仍要打开」），每次升级都要重新放行
    - 系统通知拿不到投递结果（授权被拒也视为已投递），`cargo run` 的裸二进制收不到通知；runner 上测不了通知横幅与授权
-   - 没有嵌入桌面、收纳箱，固定模式没有"不进 Dock / ⌘Tab"；固定模式在 Spaces / 全屏下的行为（`collectionBehavior`）没有处理
+   - 主窗口没有嵌入桌面，固定模式没有"不进 Dock / ⌘Tab"；固定模式在 Spaces / 全屏下的行为（`collectionBehavior`）没有处理
+   - 收纳箱（3.0.3-pre 起）只在 runner 上跑过 e2e（MF 组：桌面层层级、监听、真实拖入、移回、删除、⌘H、Dock 唤起、改名、拖动落库、菜单栏三项、
+     重启恢复），全部在临时目录里、没碰过真实 `~/Desktop`。改名（MF08）在 runner 上用粘贴 + 回车验证（系统输入流的 ⌘V / 回车；runner 上逐字注入的
+     Unicode 按键本来就进不了 GPUI 输入框，普通窗口也一样）。没验证过：真实桌面的隐私授权（TCC）流程、iCloud「桌面与文稿」、跨卷移动、
+     Spaces / 台前调度 / 调度中心 /「显示桌面」/「点按墙纸显示桌面」下的表现、Retina / 多显示器、收纳箱改名时的中文输入法、
+     打开 / 在访达中显示（e2e 不测，会拉起别的应用）
+   - 收纳箱的小偏差：访达拖入时光标带绿色"+"（GPUI 对外部拖入一律回报"拷贝"），实际执行的是移动；「自定义颜色」的取色面板会把应用切到前台
    - 混合缩放（Retina 笔记本 + 1x 外接屏）时主窗口位置的物理像素口径与 2.5.0 不同，2.5.0 记下的位置可能恢复不到（设备本地数据，只丢一次）
    - 文件对话框没有扩展名过滤器；WebDAV 密码明文；最低 macOS 11（2.5.0 写的是 10.13）
 
@@ -665,13 +699,14 @@ debug 专用环境变量（**只在 debug 构建读取，release 一律忽略**�
 | 变量 | 作用 |
 |---|---|
 | `MINI_TODO_DATA_DIR` | 数据目录（库 / 图片 / 备份 / 图标缓存）、日志（`<dir>\logs`）都改到该目录；不启用单实例、不刷新开机自启注册表项；托盘提示"Mini Todo（开发版）" |
-| `MINI_TODO_FENCES_ROOT` | 收纳根目录改为该目录（代替 `%USERPROFILE%\MiniTodo收纳箱`） |
+| `MINI_TODO_FENCES_ROOT` | 收纳根目录改为该目录（代替 `%USERPROFILE%\MiniTodo收纳箱` / macOS `~/MiniTodo收纳箱`） |
+| `MINI_TODO_DESKTOP_DIR` | "用户桌面"改为该目录（收纳箱移回的兜底目标、"不能收纳桌面本身"的保护、云同步提示的"来自桌面"判断）；mac e2e 用它避开真实 `~/Desktop` 的隐私授权框 |
 | `MINI_TODO_SCREEN_ID_FILE` | 文件内容非空时替代屏幕组合 ID，用于模拟显示器组合变化 |
 | `MINI_TODO_DEBUG_OPEN` | 加载完数据后额外打开的窗口（`main`、`editor:<id>[:view\|:edit]`、`settings[:<页>]`、`fence:new` 等，格式见 `pc-gpui/scripts/README.md`） |
 | `MINI_TODO_DEBUG_LATEST_VERSION` | 版本检查不联网，直接当作 GitHub 最新版本（如 `v2.6.0`） |
 | `MINI_TODO_DEBUG_DIALOG_PATH` | 导出 / 导入的文件对话框不弹出，直接返回该路径 |
 | `MINI_TODO_DEBUG_WINDOWS_UI` | `1` 时 Linux / macOS 上也显示 Windows 专有的设置项（截图对照用） |
-| `MINI_TODO_DEBUG_FENCE_STATE` | `onedrive` / `drag-hover`：收纳箱直接显示 OneDrive 提示面板 / 拖入悬停框 |
+| `MINI_TODO_DEBUG_FENCE_STATE` | `onedrive` / `drag-hover`：收纳箱直接显示云同步提示面板（Windows OneDrive / macOS iCloud 文案）/ 拖入悬停框 |
 
 ### CI 与发布（`.github/workflows/`）
 
@@ -685,16 +720,16 @@ debug 专用环境变量（**只在 debug 构建读取，release 一律忽略**�
 - `pc-gpui-ci.yml`：Windows fmt / clippy / test + release 构建（上传 `mini-todo-gpui-windows-x64` 产物），Linux clippy / test，
   macOS clippy / test + universal release 构建并组装 `.app`（上传 `mini-todo-gpui-macos-universal` 产物）
 - `pc-gpui-e2e-windows.yml`：Windows e2e（debug 套件 + release 冒烟 / 单实例）；手动触发，或推送到 `claude/**` 分支且改动 `pc-gpui/**` 时运行
-- `pc-gpui-e2e-macos.yml`：macOS 编译门 + e2e（`checks` clippy / test、`smoke` debug `.app` 的 M 组、`release-smoke` release `.app` 不隔离的 P 组）；
+- `pc-gpui-e2e-macos.yml`：macOS 编译门 + e2e（`checks` clippy / test、`smoke` debug `.app` 的 M 组与收纳箱 MF 组、`release-smoke` release `.app` 不隔离的 P 组）；
   触发条件同 Windows e2e。mac 代码没有别的编译门，改了就推分支看它
 - `cloud-ci.yml`：fmt / clippy / test + Skill 单测
-- **版本号只有一处**：`pc-gpui/Cargo.toml` 的 `[workspace.package] version`（改完 `Cargo.lock` 同步），当前 `3.0.2-pre`。cloud 版本在
+- **版本号只有一处**：`pc-gpui/Cargo.toml` 的 `[workspace.package] version`（改完 `Cargo.lock` 同步），当前 `3.0.3-pre`。cloud 版本在
   `cloud/Cargo.toml`，与 tag 无关。发布步骤与安装器契约见 `.trellis/spec/pc-gpui/release.md`
 
 ## 注意事项
 
 1. **目标平台**：Windows 10/11（x64）；macOS 11+（universal，预览版，未经真机验收）；Linux 可编译运行（CI 与 e2e 用），不提供 Linux 桌面包。
-   嵌入桌面、桌面收纳箱等 Win32 特性在 macOS / Linux 上不可用
+   主窗口嵌入桌面只在 Windows 上有；桌面收纳箱 Windows 与 macOS（预览）都有，Linux 上没有真实文件操作（只用于截图 / 冒烟）
 2. **运行环境**：开发只需 Rust stable；Windows release 构建另需 Windows SDK（`fxc.exe`）；macOS 构建需 Xcode Command Line Tools（clang + SDK，
    不需要 Metal 工具链）。用户运行不需要 WebView2
 3. **图标使用**：仅使用 Element Plus Icons，禁止 emoji
@@ -714,4 +749,5 @@ debug 专用环境变量（**只在 debug 构建读取，release 一律忽略**�
 11. **兼容名字不要改**：数据目录、日志目录、单实例 / 开机自启 / AppUserModelID / 安装身份、mac 的 bundle id / `.app` 名 / socket /
     LaunchAgent 沿用旧版（见「兼容旧版沿用的名字」）；
     数据结构改动按 `.trellis/spec/pc-gpui/data-compat.md` 考虑 cloud 与仍在用旧版本的设备
-12. **带 owner HWND 的收纳箱移动**（`fence::delete`、`fence::items::{move_in, restore, move_to}`）绝不在 UI 主线程调用（系统对话框会死锁）
+12. **带 owner HWND 的收纳箱移动**（`fence::delete`、`fence::items::{move_in, restore, move_to}`）绝不在 UI 主线程调用（Windows 系统对话框会死锁；
+    macOS 上隐私授权框、iCloud 下载、跨卷复制同样会阻塞调用线程）

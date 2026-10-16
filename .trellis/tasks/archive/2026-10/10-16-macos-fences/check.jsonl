@@ -1,0 +1,6 @@
+{"file": ".trellis/spec/backend/desktop-fences.md", "reason": "核对 mac 实现与收纳箱契约一致（不覆盖、不丢文件、线程、对账）"}
+{"file": ".trellis/spec/pc-gpui/gpui-conventions.md", "reason": "核对 App 借用、延后调用、macOS 约定、mac-check 分层"}
+{"file": ".trellis/spec/pc-gpui/verification.md", "reason": "门槛：fmt / clippy / test / Windows 交叉 clippy / mac-check"}
+{"file": ".trellis/tasks/10-16-macos-fences/research/codebase-map.md", "reason": "改动清单，核对是否有遗漏的闸门 / 文档"}
+{"file": ".trellis/tasks/10-16-macos-fences/research/mac-file-ops.md", "reason": "mac 文件操作 API 用法核对"}
+{"file": ".trellis/tasks/10-16-macos-fences/research/mac-desktop-window.md", "reason": "mac 窗口 API 用法核对"}

@@ -66,7 +66,12 @@
 //!   没有 Windows 那样的不可见边框；
 //! - **红绿灯**：所有窗口都带 `TitlebarOptions { appears_transparent: true }`，AppKit 会在左上角画系统的关闭 / 最小化 / 缩放按钮，
 //!   压在自绘标题栏上。[`crate::windows::open_window`] 建窗后立即 [`Hwnd::prepare_after_open`] 把它们隐藏（改 style mask 后
-//!   `ns` 会再隐藏一次），同时让 NSPanel（通知用的 `PopUp`）在应用失活时不自动隐藏；
+//!   `ns` 会再隐藏一次），同时让 NSPanel（通知 / 收纳箱用的 `PopUp`）在应用失活时不自动隐藏；
+//! - **收纳箱的桌面层**（[`Hwnd::make_desktop_layer`]，代替 Windows 的 `embed`）：收纳箱在 mac 上建成 GPUI `PopUp`
+//!   （不激活应用的 NSPanel：点它不切换菜单栏、⌘H 隐藏中的应用不会被取消隐藏，也不计入 Dock 唤起的"有可见窗口"），建窗后
+//!   层级改成 `CGWindowLevelForKey(kCGDesktopIconWindowLevelKey) + 1`（桌面图标之上、所有普通窗口之下）、collectionBehavior
+//!   整体换成 `CanJoinAllSpaces | Stationary | IgnoresCycle | FullScreenNone`、`canHide = NO`、不进「窗口」菜单、没有显示动画。
+//!   GPUI 建窗后不再改层级；本 crate 里会改层级的只有 [`set_topmost`] / [`Hwnd::set_topmost`]，收纳箱窗口绝不能调；
 //! - **no-op 项**：`set_tool_window`（程序坞 / ⌘Tab 是整个应用的）、`set_owner`（mac 子窗口会跟着父窗口移动，语义不同）、
 //!   `set_round_corners`、`set_system_menu`、`ex_style`（恒 0）、`owner` / `class_name`（`None`）、嵌入桌面（`embed`）。
 
@@ -459,6 +464,21 @@ impl Hwnd {
     /// [`crate::windows::open_window`] 立即调用，免得建窗时就显示的窗口闪一下红绿灯）。Windows / Linux no-op
     pub fn prepare_after_open(self) {
         imp::raw::prepare_after_open(self)
+    }
+    /// macOS 收纳箱：把窗口放到桌面图标层之上一层，所有桌面空间都显示、调度中心 / 显示桌面时不动、⌘H 不隐藏、
+    /// 不进 ⌘\` 循环与「窗口」菜单（见模块文档「macOS」）。不显示窗口，幂等；之后绝不能再 [`Hwnd::set_topmost`]。
+    /// Windows / Linux no-op 返回 false（Windows 的收纳箱走 [`embed`]）
+    pub fn make_desktop_layer(self) -> bool {
+        imp::raw::make_desktop_layer(self)
+    }
+    /// macOS：窗口实际生效的层级、collectionBehavior、canHide 等（写日志供 e2e 核对）；Windows / Linux `None`
+    pub fn describe_layer(self) -> Option<String> {
+        imp::raw::describe_layer(self)
+    }
+    /// macOS：本应用是否在前台、当前 key 窗口的窗口号、这个窗口是不是 key（写日志诊断键盘焦点；只读，随时可调）；
+    /// Windows / Linux `None`
+    pub fn describe_focus(self) -> Option<String> {
+        imp::raw::describe_focus(self)
     }
     pub fn set_owner(self, owner: Option<Hwnd>) {
         imp::raw::set_owner(self, owner)

@@ -68,7 +68,8 @@ rfd = { version = "0.16", default-features = false }
 tray-icon = { version = "0.21", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# GPUI 没有的窗口能力（摆窗、显示 / 隐藏、置顶、几何锁定、隐藏红绿灯、显示器枚举、光标；`platform/macos/ns.rs`）。
+# GPUI 没有的窗口能力（摆窗、显示 / 隐藏、置顶、几何锁定、隐藏红绿灯、显示器枚举、光标、收纳箱的桌面层与取色面板；
+# `platform/macos/ns.rs`）。
 # 与 gpui-pre-macos 同一版本（objc2 0.6 / objc2-foundation 0.3.2 / objc2-app-kit 0.3.2），不多编一份。
 # 改这里的版本或特性时同步改 `pc-gpui/scripts/mac-check/Cargo.toml`（本地交叉检查 ns.rs 用）
 objc2 = "0.6"
@@ -86,9 +87,13 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "objc2-core-foundation",
     "NSApplication",
     "NSButton",
+    "NSColor",
+    "NSColorPanel",
+    "NSColorSpace",
     "NSControl",
     "NSEvent",
     "NSGraphics",
+    "NSPanel",
     "NSResponder",
     "NSScreen",
     "NSView",

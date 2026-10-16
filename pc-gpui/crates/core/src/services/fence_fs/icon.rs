@@ -1,8 +1,11 @@
 //! 图标提取与缓存。
 //!
-//! 流程：`IShellItemImageFactory::GetImage(SIIGBF_ICONONLY)`（常驻 STA 线程 `fence-icon`）→
-//! 32 位 BGRA（直通 alpha）→ 去掉小图标的 Shell 边框 → `png` 编码 →
-//! 写入 `<应用数据目录>\fence-icons\`，前端用 `convertFileSrc` 加载。
+//! 流程：
+//! * Windows：`IShellItemImageFactory::GetImage(SIIGBF_ICONONLY)`（常驻 STA 线程 `fence-icon`）→
+//!   32 位 BGRA（直通 alpha）→ 去掉小图标的 Shell 边框 → `png` 编码
+//! * macOS：`NSWorkspace iconForFile:` 画进 N×N 位图 → AppKit 编码 PNG（`mac.rs`，在调用方的后台线程上执行）
+//!
+//! 然后写入 `<应用数据目录>\fence-icons\`（先写临时文件再改名），界面用 `img(PathBuf)` 加载。
 //!
 //! 缓存键 = 路径哈希（FNV-1a 64，路径规范化 + 小写）+ 文件修改时间 + 文件大小 + 像素尺寸档位，
 //! 文件变化后键随之变化，旧文件由 [`prune_icon_cache`] 清理。
@@ -176,7 +179,7 @@ pub(crate) fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>
 }
 
 /// 先写临时文件再改名，避免前端读到写了一半的 PNG
-#[cfg_attr(not(windows), allow(dead_code))] // 非 Windows 不提取图标，只有测试用到
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))] // 其他平台不提取图标，只有测试用到
 fn write_atomically(target: &Path, bytes: &[u8]) -> Result<(), String> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -223,7 +226,15 @@ pub(crate) fn icon_png_in(cache_dir: &Path, path: &Path, size_px: u32) -> Result
         super::sta::icon_worker()?.run(move || render_icon(&source, bucket, &output))??;
         Ok(target)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        // 不需要专用线程：AppKit 的这些绘图对象不是 MainThreadOnly，各线程各有自己的绘图上下文
+        fs::create_dir_all(cache_dir).map_err(|e| format!("创建图标缓存目录失败: {}", e))?;
+        let png = super::mac::icon_png(path, bucket)?;
+        write_atomically(&target, &png)?;
+        Ok(target)
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         Err(super::UNSUPPORTED.to_string())
     }
@@ -235,9 +246,10 @@ pub(crate) fn icon_png_in(cache_dir: &Path, path: &Path, size_px: u32) -> Result
 ///   向上取整到 [`ICON_SIZE_BUCKETS`] 档位。返回的 PNG 是正方形，边长通常等于档位；
 ///   只有小图标资源（≤48 px）的程序按大档位请求时返回其原尺寸（如 48×48，已去掉 Shell 加的边框），
 ///   前端统一用 CSS 固定宽高显示即可（会被拉伸到格子大小）
-/// * `.lnk` 取目标程序的图标，不带快捷方式小箭头；`.url` 取浏览器 / 网站图标；文件夹取文件夹图标
-/// * 文件不存在或提取失败返回 `Err`（前端显示占位图标）；非 Windows 返回 `Err`
-/// * 阻塞调用（内部在常驻 STA 线程排队执行），请在 `spawn_blocking` 中调用
+/// * Windows：`.lnk` 取目标程序的图标，不带快捷方式小箭头；`.url` 取浏览器 / 网站图标；文件夹取文件夹图标
+/// * macOS：访达里的图标（`.app` 是应用图标，替身 / 符号链接带小箭头），边长恰好等于档位
+/// * 文件不存在或提取失败返回 `Err`（前端显示占位图标）；既不是 Windows 也不是 macOS 返回 `Err`
+/// * 阻塞调用（Windows 在常驻 STA 线程排队执行，macOS 在调用线程上绘制），请在后台线程调用
 pub fn icon_png(path: &str, size_px: u32) -> Result<PathBuf, String> {
     icon_png_in(&icon_cache_dir(), Path::new(path), size_px)
 }
@@ -508,6 +520,56 @@ mod tests {
             assert_eq!(reader.info().height, expect);
             // 第二次命中缓存，路径相同
             assert_eq!(icon_png_in(&cache, path, size).unwrap(), png_path);
+        }
+    }
+
+    /// 真实提取（macOS）：系统自带程序、临时文件夹与普通文件，输出边长恰好等于档位的合法 PNG
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn extracts_real_icons_into_cache_on_macos() {
+        let tmp = TempDir::new("icon-real-mac");
+        let cache = tmp.path().join("cache");
+        let finder = PathBuf::from("/System/Library/CoreServices/Finder.app");
+        let folder = tmp.path().join("文件夹");
+        fs::create_dir_all(&folder).unwrap();
+        let file = tmp.path().join("报告.txt");
+        touch(&file);
+        let mut cases = vec![(folder.clone(), 48, 48), (file.clone(), 20, 24)];
+        if finder.exists() {
+            cases.push((finder, 60, 64));
+        }
+        for (path, size, expect) in cases {
+            let png_path = icon_png_in(&cache, &path, size).unwrap();
+            assert!(png_path.starts_with(&cache));
+            let mut decoder = png::Decoder::new(fs::File::open(&png_path).unwrap());
+            // AppKit 编码的位深 / 调色板不做假设：统一展开成 8 位
+            decoder
+                .set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+            let mut reader = decoder.read_info().unwrap();
+            assert_eq!(reader.info().width, expect, "{}", path.display());
+            assert_eq!(reader.info().height, expect, "{}", path.display());
+            let mut buf = vec![0; reader.output_buffer_size()];
+            let frame = reader.next_frame(&mut buf).unwrap();
+            // 图标不是全透明的
+            let pixels = &buf[..frame.buffer_size()];
+            let has_alpha = matches!(
+                frame.color_type,
+                png::ColorType::Rgba | png::ColorType::GrayscaleAlpha
+            );
+            if has_alpha {
+                let stride = if frame.color_type == png::ColorType::Rgba {
+                    4
+                } else {
+                    2
+                };
+                assert!(
+                    pixels.chunks(stride).any(|p| p[stride - 1] > 0),
+                    "{} 的图标全透明",
+                    path.display()
+                );
+            }
+            // 第二次命中缓存，路径相同
+            assert_eq!(icon_png_in(&cache, &path, size).unwrap(), png_path);
         }
     }
 }

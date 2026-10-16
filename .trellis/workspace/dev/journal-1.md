@@ -954,3 +954,43 @@ PC 前端（D1 正确性 / 安全 / 同步 UI、D2 性能 / 清理 / 测试）�
 ### Next Steps
 
 - None - task complete
+
+
+## Session 26: macOS 桌面收纳箱（预览）与 v3.0.3-pre 版本号
+
+**Date**: 2026-10-16
+**Task**: macOS 桌面收纳箱（预览）与 v3.0.3-pre 版本号
+**Branch**: `claude/serene-sagan-uuuz7r`
+
+### Summary
+
+把桌面收纳箱移植到 macOS：core 新增 fence_fs/mac.rs（renamex_np RENAME_EXCL 移动 + 撞名顺延、跨卷交给 NSFileManager，绝不覆盖；NSWorkspace 图标 / 打开 / 定位；iCloud 项目判定），mac 上不列举受保护目录避免 TCC 授权框，.DS_Store/Icon\r/.localized 当系统文件、包去重 X (2).app、UF_HIDDEN 等同隐藏属性、mac 合法文件名不再按 Windows 规则拒绝；app 侧收纳箱在 mac 上是 GPUI PopUp 非激活面板，建窗后放到桌面图标层 + 1（CanJoinAllSpaces|Stationary|IgnoresCycle|FullScreenNone、canHide=NO），菜单栏图标三项、启动恢复、setFrame 摆窗、NSColorPanel 取色、⌘+滚轮、在访达中显示、iCloud 提示文案；改名时先激活应用再让面板成为 key（含复查与宽限期）。mac e2e 新增 MF01~MF10（桌面层层级、监听、pyobjc 真实拖入、移回、删除、⌘H、Dock 唤起、改名、拖动落库、菜单栏三项与重启恢复），M07 翻转；查明 runner 上经 HID 逐字注入的 Unicode 进不了 GPUI 输入框，MF08 改用粘贴 + 回车。macOS e2e（checks / smoke / release-smoke）与 Windows e2e 全绿；文档 / 规范 / README 同步，新增 v3.0.3-pre 发布说明，版本号改为 3.0.3-pre。归档 10-16-macos-fences 与已完成的 10-16-macos-package。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `654f298` | (see git log) |
+| `e1c3a4b` | (see git log) |
+| `ddde4b4` | (see git log) |
+| `ee45a1e` | (see git log) |
+| `d64c005` | (see git log) |
+| `0a58393` | (see git log) |
+| `a9c9298` | (see git log) |
+| `c06ec66` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

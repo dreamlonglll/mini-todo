@@ -42,10 +42,11 @@ pub struct FenceRefresh {
     pub items: Vec<FenceEntry>,
 }
 
-/// 首次收纳时的 OneDrive 提示是否已显示过（`settings` 键，v29 迁移写入默认值 `false`）。
+/// 首次收纳时的云同步提示（Windows：OneDrive；macOS：iCloud）是否已显示过（`settings` 键，v29 迁移写入默认值 `false`；
+/// 键名沿用 OneDrive，两个平台共用"只提示一次"）。
 ///
 /// **设备本地**：不在 `SYNCED_SETTING_KEYS`、不在 `AppSettings`，导入导出与 WebDAV 同步都不碰它
-/// （桌面是否被 OneDrive 重定向本来就是这台设备的事）
+/// （桌面是否被 OneDrive 重定向、是否开了 iCloud「桌面与文稿」本来就是这台设备的事）
 pub const ONEDRIVE_NOTICE_KEY: &str = "fence_onedrive_notice_shown";
 
 /// 收纳箱上进行中的文件操作。移动 / 删除可能要等用户处理管理员权限、"文件正在使用"对话框，
@@ -315,7 +316,7 @@ fn reconcile_rows(
     Ok(keyed.into_iter().map(|(_, _, entry)| entry).collect())
 }
 
-/// 首次收纳的 OneDrive 提示：还没提示过就记下"已提示"并返回 true（只会返回一次 true）
+/// 首次收纳的云同步提示（OneDrive / iCloud）：还没提示过就记下"已提示"并返回 true（只会返回一次 true）
 fn claim_onedrive_notice(conn: &Connection) -> rusqlite::Result<bool> {
     if settings_kv::get_bool_setting(conn, ONEDRIVE_NOTICE_KEY, false) {
         return Ok(false);
@@ -553,7 +554,10 @@ pub fn get_items(db: &Database, id: i64) -> Result<Vec<FenceEntry>, String> {
 pub struct FenceMoveInResult {
     /// 与传入的 `paths` 一一对应
     pub results: Vec<ItemOpResult>,
-    /// 需要显示一次性提示"桌面被 OneDrive 重定向，移出桌面会同步到其他设备"
+    /// 需要显示一次性的云同步提示（字段名沿用 OneDrive）：
+    /// * Windows："桌面被 OneDrive 重定向，移出桌面会同步到其他设备"（至少一项从被重定向的桌面移入）
+    /// * macOS：至少一项在移动前由 iCloud 云盘（「桌面与文稿」同步等）或其它 File Provider 管理，移出后会从 iCloud 删除、
+    ///   其它设备上也会消失（`NSURLIsUbiquitousItemKey`）
     pub onedrive_notice: bool,
 }
 
@@ -611,9 +615,20 @@ pub fn move_in(
         );
     }
 
+    // macOS：iCloud 管理的项目移出后就不再是 iCloud 项目了，必须在移动之前判断（跨箱项本来就在收纳根目录里，不看）。
+    // 其他平台恒为空
+    let cloud_managed: HashSet<usize> = paths
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !carried.contains_key(index))
+        .filter(|(_, source)| fence_fs::is_ubiquitous_item(Path::new(source)))
+        .map(|(index, _)| index)
+        .collect();
+
     let results = fence_fs::move_into_fence(paths, &fence.folder_name, owner_hwnd)?;
 
     let mut moved_from_desktop = false;
+    let mut moved_from_cloud = false;
     let desktop = fence_fs::user_desktop_dir();
     // 文件已经移完：记账失败只记日志、照常返回逐项结果（下一次对账会补行，只是丢了原始路径），
     // 不能把已经成功的移动报成失败
@@ -639,6 +654,7 @@ pub fn move_in(
                     moved_from_desktop |= desktop.as_deref().is_some_and(|d| {
                         fence_fs::path_starts_with_ci(Path::new(&result.source), d)
                     });
+                    moved_from_cloud |= cloud_managed.contains(&index);
                 }
             }
         }
@@ -648,12 +664,12 @@ pub fn move_in(
         log::warn!("[fence] 保存收纳箱 #{id} 的项目记录失败（文件已移入，下次对账会补行）: {e}");
     }
 
-    let onedrive_notice = moved_from_desktop
-        && fence_fs::desktop_is_onedrive_redirected()
+    let onedrive_notice = (moved_from_cloud
+        || (moved_from_desktop && fence_fs::desktop_is_onedrive_redirected()))
         && db
             .with_connection(claim_onedrive_notice)
             .unwrap_or_else(|e| {
-                log::warn!("[fence] 记录 OneDrive 提示状态失败: {e}");
+                log::warn!("[fence] 记录云同步提示状态失败: {e}");
                 false
             });
 
@@ -1331,7 +1347,7 @@ mod tests {
     fn set_hidden_checks_the_name_and_the_fence_before_touching_files() {
         let id = 987_658;
         let db = db_with_fences(&[id]);
-        assert!(set_hidden(&db, id, r"..\x", true)
+        assert!(set_hidden(&db, id, "../x", true)
             .unwrap_err()
             .contains("文件名不合法"));
         assert_eq!(

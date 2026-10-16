@@ -1,0 +1,8 @@
+{"file": ".trellis/tasks/10-16-macos-fences/research/codebase-map.md", "reason": "mac 收纳箱要改的全部位置（闸门、几何、core 文件层、e2e、mac-check、CI、文档清单）"}
+{"file": ".trellis/tasks/10-16-macos-fences/research/mac-desktop-window.md", "reason": "mac 桌面层窗口：层级、collectionBehavior、canHide、激活、Dock 唤起"}
+{"file": ".trellis/tasks/10-16-macos-fences/research/mac-file-ops.md", "reason": "mac 文件操作：NSFileManager 移动、TCC、iCloud、图标、打开 / 定位、垃圾文件、取色"}
+{"file": ".trellis/spec/backend/desktop-fences.md", "reason": "收纳箱契约（不丢文件、绝不覆盖、线程、对账、几何落库），mac 实现必须保持同一语义"}
+{"file": ".trellis/spec/pc-gpui/gpui-conventions.md", "reason": "App 借用期间延后平台调用、后台执行、macOS 约定 §2.15（主线程、窗口号、统一系数、mac-check 分层）"}
+{"file": ".trellis/spec/pc-gpui/verification.md", "reason": "门槛：fmt / clippy / test / Windows 交叉 clippy / mac-check / mac e2e"}
+{"file": ".trellis/spec/guides/desktop-window-e2e-guide.md", "reason": "mac e2e 在 runner 上的做法与输入安全"}
+{"file": ".trellis/spec/backend/window-modes.md", "reason": "主窗口固定模式 / 贴边隐藏在 mac 上的语义（Dock 唤起、激活回调与收纳箱交互）"}

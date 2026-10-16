@@ -32,7 +32,7 @@
 |---|---|
 | [backend/sync-protocol.md](../backend/sync-protocol.md) | **全部**。实现在 `crates/core/src/sync/` + `db/sync_store.rs` + `db/time.rs` + `services/webdav.rs`（另一端是 cloud） |
 | [backend/window-modes.md](../backend/window-modes.md) | **全部**：主窗口三种模式。实现在 `crates/app/src/services/window_mode.rs`、`platform/embed.rs`、`platform/subclass.rs`，纯逻辑在 `crates/core/src/window_logic.rs`；macOS 的固定模式（`platform/macos/`）见其「Scenario: macOS」 |
-| [backend/desktop-fences.md](../backend/desktop-fences.md) | **全部**（仅 Windows；mac 上没有收纳箱入口）：桌面收纳箱。文件层与几何在 `crates/core/src/fence/`、`services/fence_fs/`；窗口在 `crates/app/src/services/fences.rs`、`windows/fence/` |
+| [backend/desktop-fences.md](../backend/desktop-fences.md) | **全部**（Windows 与 macOS；Linux 只用于截图 / 冒烟）：桌面收纳箱。文件层与几何在 `crates/core/src/fence/`、`services/fence_fs/`（macOS 后端 `mac.rs`）；窗口在 `crates/app/src/services/fences.rs`、`windows/fence/`（macOS 的桌面层在 `platform/macos/ns.rs`），mac 差异见其「场景：macOS 上的收纳箱」 |
 | [guides/desktop-window-e2e-guide.md](../guides/desktop-window-e2e-guide.md) | "开发版与安装版并存"与"输入安全"规则；Windows 验证用 `pc-gpui/scripts/e2e-windows/`，macOS 验证用 `pc-gpui/scripts/e2e-macos/`（runner 上的做法见该指南的 macOS 一节） |
 
 ---
@@ -53,7 +53,7 @@
 - [ ] 改主窗口模式 / 收纳箱窗口：先读 `backend/window-modes.md` / `backend/desktop-fences.md` 的契约
 - [ ] 颜色 / 尺寸 / 文案照抄 UI 规格（`research/ui-*.md`），不要凭感觉"近似"
 - [ ] 新窗口种类 / 新控件 / 新颜色 / 新平台能力 / 新依赖 / 新 debug 开关：按 `crates/app/README.md` §2.1「维护规则」登记
-- [ ] 会移动用户文件的收纳箱改动：只在隔离环境（`MINI_TODO_DATA_DIR` + `MINI_TODO_FENCES_ROOT`）验证
+- [ ] 会移动用户文件的收纳箱改动：只在隔离环境（`MINI_TODO_DATA_DIR` + `MINI_TODO_FENCES_ROOT`，mac 另加 `MINI_TODO_DESKTOP_DIR`）验证
 - [ ] 动到 `cfg(not(windows))` 分支、`platform/`、托盘 / 单实例 / 开机自启 / 通知 / 日志、`theme.rs` 字体：想清楚 mac 上落到哪里
       （[gpui-conventions.md §2.12 / §2.15](./gpui-conventions.md)），改了 mac 代码按 [verification.md §7](./verification.md) 推分支跑 macOS CI
 
@@ -77,7 +77,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 # 改了 cfg(windows) 代码（platform/、托盘、单实例、开机自启、Toast、core 的 DPAPI / fence_fs / 字体枚举）时，在 Linux 上开发必跑
 cargo clippy --workspace --all-targets --target x86_64-pc-windows-gnu -- -D warnings
-# 改了不依赖 GPUI 的 mac 源文件（platform/macos/ns.rs、autostart、单实例 socket、菜单栏图标）：本机交叉检查
+# 改了不依赖 GPUI 的 mac 源文件（platform/macos/ns.rs、autostart、单实例 socket、菜单栏图标、core 的 fence_fs/mac.rs）：本机交叉检查
 cargo clippy --manifest-path scripts/mac-check/Cargo.toml --target aarch64-apple-darwin -- -D warnings
 # 改了可见界面：相关场景截图并与改动前对照（--before），逐张看过
 scripts/regress.py --only 'main-*' --before <改动前的输出> --out /tmp/regress

@@ -40,5 +40,41 @@ windows = { version = "0.58", features = ["implement", "Win32_Foundation", "Win3
 # windows 0.58 的 #[implement] 宏展开后引用 ::windows_core，版本须与 windows 一致
 windows-core = "0.58"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# 桌面收纳箱的 macOS 文件层（services/fence_fs/mac.rs）：renamex_np(RENAME_EXCL) 移动、NSFileManager 跨卷移动、
+# NSWorkspace 图标 / 打开 / 在访达中显示、NSURL 资源属性（iCloud、替身）。
+# 版本与 app 的 macOS 依赖相同（= gpui-pre-macos 用的 objc2 0.6 / objc2-foundation 0.3.2 / objc2-app-kit 0.3.2），
+# Cargo 按目标统一特性，不多编一份。改这里的特性时同步改 `pc-gpui/scripts/mac-check/Cargo.toml`（本地交叉检查 mac.rs 用）
+libc = "0.2"
+block2 = "0.6"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "objc2-core-foundation",
+    "FoundationErrors",
+    "NSArray",
+    "NSData",
+    "NSDictionary",
+    "NSError",
+    "NSFileManager",
+    "NSGeometry",
+    "NSString",
+    "NSURL",
+    "NSValue",
+] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "objc2-core-foundation",
+    "block2",
+    "NSBitmapImageRep",
+    "NSColorSpace",
+    "NSGraphics",
+    "NSGraphicsContext",
+    "NSImage",
+    "NSImageRep",
+    "NSRunningApplication",
+    "NSWorkspace",
+] }
+
 [dev-dependencies]
 tiny_http = "0.12"

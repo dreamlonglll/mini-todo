@@ -1,6 +1,6 @@
 //! 桌面收纳箱文件层（纯 Rust 服务，与数据库无关）。
 //!
-//! 每个收纳箱对应收纳根目录 `%USERPROFILE%\MiniTodo收纳箱\` 下的一个真实文件夹，
+//! 每个收纳箱对应收纳根目录 `%USERPROFILE%\MiniTodo收纳箱\`（macOS：`~/MiniTodo收纳箱/`）下的一个真实文件夹，
 //! **文件夹是内容的 source of truth**；数据库只存元数据（由调用方负责）。本模块提供：
 //!
 //! | 能力 | 入口 |
@@ -9,29 +9,37 @@
 //! | 标题 → 文件夹名、去重、校验 | [`sanitize_folder_name`]、[`dedupe_name`]、[`is_valid_folder_name`] |
 //! | 创建 / 改名 / 删除空文件夹 / 列举 | [`create_fence_folder`]、[`rename_fence_folder`]、[`remove_fence_folder_if_empty`]、[`list_fence_items`] |
 //! | 移入 / 移回 / 跨箱 / 批量还原 | [`move_into_fence`]、[`restore_item`]、[`move_between_fences`]、[`restore_all`] |
-//! | OneDrive 判定 | [`desktop_is_onedrive_redirected`] |
-//! | 打开 / 打开所在位置 | [`launch_item`]、[`reveal_in_explorer`] |
+//! | OneDrive 判定（macOS 的 iCloud 判定：[`is_ubiquitous_item`]） | [`desktop_is_onedrive_redirected`] |
+//! | 打开 / 打开所在位置（macOS：在访达中显示） | [`launch_item`]、[`reveal_in_explorer`] |
 //! | 图标 | [`icon_png`]、[`prune_icon_cache`] |
 //! | 目录监听 | [`watch_fence_root`] |
 //!
 //! ## 线程
 //!
-//! 需要 COM STA 的操作（`IFileOperation`、`IShellItemImageFactory`、`ShellExecuteExW`、
-//! `SHOpenFolderAndSelectItems`）在内部专用 STA 线程执行，对外函数可从任意线程调用，但都是**阻塞**的：
-//! app 层放到后台线程调用（`db::spawn_db` / `background_executor`）。
-//! **不要在 UI 主线程（GPUI 事件处理、`update` / `render`、窗口事件回调）里调用带 `owner_hwnd` 的移动操作**：
-//! 系统对话框以该窗口为父窗口，会向主线程同步发消息，主线程阻塞等待时会死锁。
+//! 对外函数可从任意线程调用，但都是**阻塞**的：app 层放到后台线程调用（`db::spawn_db` / `background_executor`）。
+//! * Windows：需要 COM STA 的操作（`IFileOperation`、`IShellItemImageFactory`、`ShellExecuteExW`、
+//!   `SHOpenFolderAndSelectItems`）在内部专用 STA 线程执行。
+//!   **不要在 UI 主线程（GPUI 事件处理、`update` / `render`、窗口事件回调）里调用带 `owner_hwnd` 的移动操作**：
+//!   系统对话框以该窗口为父窗口，会向主线程同步发消息，主线程阻塞等待时会死锁。
+//! * macOS：在调用线程上执行（`mac.rs`，不需要主线程）；跨卷移动大文件、下载 iCloud 云端文件、等 LaunchServices
+//!   回调都可能阻塞很久，同样不能在 UI 主线程调用。
 //!
 //! ## 平台
 //!
-//! 文件夹管理、列举、命名、判定、监听全平台可用；移动 / 打开 / 定位 / 图标在非 Windows 上返回
-//! `Err("桌面收纳箱仅支持 Windows")`。
+//! 文件夹管理、列举、命名、判定、监听全平台可用；移动 / 打开 / 定位 / 图标在 Windows（Shell）与 macOS（`mac.rs`：
+//! `renamex_np` + NSFileManager + NSWorkspace）上可用，其他平台返回 `Err("桌面收纳箱仅支持 Windows 与 macOS")`
+//! （Linux 只用于截图 / 冒烟）。
+//!
+//! macOS 与 Windows 的差异：隐藏属性是 `UF_HIDDEN`；规划阶段不列举收纳根目录以外的目标目录（列举桌面会弹隐私授权框，
+//! 撞名交给执行层顺延）；没有提权对话框（`owner_hwnd` 不用）；访达的 `.DS_Store` 等元数据文件按系统元数据处理。
 //!
 //! 契约与线程约束见 `.trellis/spec/backend/desktop-fences.md`。
 
 mod folder;
 mod icon;
 mod location;
+#[cfg(target_os = "macos")]
+mod mac;
 mod naming;
 mod open;
 mod ops;
@@ -41,9 +49,23 @@ mod shell;
 mod sta;
 mod watch;
 
-/// 非 Windows 平台上 Shell 相关操作的统一错误信息
-#[cfg_attr(windows, allow(dead_code))]
-pub(crate) const UNSUPPORTED: &str = "桌面收纳箱仅支持 Windows";
+/// 既不是 Windows 也不是 macOS 时，移动 / 打开 / 定位 / 图标的统一错误信息
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
+pub(crate) const UNSUPPORTED: &str = "桌面收纳箱仅支持 Windows 与 macOS";
+
+/// 移入前判断：该项目是否由 iCloud 云盘（「桌面与文稿」同步等）管理。移出 iCloud 管理的桌面等于从 iCloud 删除，
+/// 首次收纳时提示一次（与 Windows 的 OneDrive 提示共用"只提示一次"）。只在 macOS 上可能为 `true`
+pub fn is_ubiquitous_item(path: &std::path::Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        mac::is_ubiquitous_item(path)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        false
+    }
+}
 
 // 契约见 `.trellis/spec/backend/desktop-fences.md`；这里只重新导出集成层（core 的 `fence` / `fence::items`）用到的项，
 // 其余函数仍可经子模块路径在本模块内使用（纯逻辑都有单元测试）

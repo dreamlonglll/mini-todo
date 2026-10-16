@@ -522,4 +522,18 @@ pub mod raw {
 
     /// macOS 专用（隐藏红绿灯）；Windows 的系统标题栏按钮由 [`set_system_menu`]`(false)` 去掉：no-op
     pub fn prepare_after_open(_h: Hwnd) {}
+
+    /// macOS 专用（收纳箱桌面层）；Windows 的收纳箱走 `platform::embed`（owner=Progman + 永远置底）：no-op
+    pub fn make_desktop_layer(_h: Hwnd) -> bool {
+        false
+    }
+
+    pub fn describe_layer(_h: Hwnd) -> Option<String> {
+        None
+    }
+
+    /// macOS 专用（改名时的焦点诊断）：None
+    pub fn describe_focus(_h: Hwnd) -> Option<String> {
+        None
+    }
 }

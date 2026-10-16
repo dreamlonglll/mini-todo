@@ -150,4 +150,13 @@ pub mod raw {
         false
     }
     pub fn prepare_after_open(_hwnd: Hwnd) {}
+    pub fn make_desktop_layer(_hwnd: Hwnd) -> bool {
+        false
+    }
+    pub fn describe_layer(_hwnd: Hwnd) -> Option<String> {
+        None
+    }
+    pub fn describe_focus(_hwnd: Hwnd) -> Option<String> {
+        None
+    }
 }
