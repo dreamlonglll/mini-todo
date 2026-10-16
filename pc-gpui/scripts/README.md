@@ -17,6 +17,8 @@ Windows 专有行为（嵌入桌面、DirectComposition 透明、托盘……）
 | `sample-data.json` | 样例数据（导出格式 4.0，内容与参考截图 harness 的 `fixtures.mjs` 一致；`settings` 是 harness 的 mock 形状，seed 会转换） |
 | `../crates/core/examples/seed.rs` | `cargo run -p mini-todo-core --example seed -- <data-dir> <json>`：把 JSON 导入到指定数据目录 |
 
+macOS 相关的三个目录见文末「macOS：打包、e2e 与交叉检查」（`macos/`、`e2e-macos/`、`mac-check/`）。
+
 依赖（Ubuntu）：`xvfb xdotool imagemagick mesa-vulkan-drivers`，以及 CJK 字体（`fonts-noto-cjk`）与
 `fonts-liberation`（界面字体在 Linux 上用 Liberation Sans + Noto Sans CJK SC 代替 Segoe UI + 微软雅黑，与参考截图相同）。
 
@@ -145,3 +147,30 @@ GPUI 版新增的 debug 专用环境变量（release 一律忽略）：
 | `MINI_TODO_DEBUG_DIALOG_PATH` | 非空时设置窗口的导出 / 导入文件对话框不弹出，直接返回该路径（导入导出冒烟测试） |
 | `MINI_TODO_DEBUG_WINDOWS_UI` | `1` 时 Linux 上也显示 Windows 专有的设置项（「固定模式时，嵌入桌面中」），与按 Windows 渲染的参考截图对照 |
 | `MINI_TODO_DEBUG_FENCE_STATE` | `onedrive`：收纳箱窗口打开即显示 OneDrive 提示面板；`drag-hover`：显示外部拖入悬停的虚线框（两者在 Linux 上无法真实触发） |
+
+## macOS：打包、e2e 与交叉检查
+
+mac 上的一切只能在 macOS 宿主上编译运行（GPUI 的 mac 平台层与 bundled sqlite / mac-notification-sys 的 C / ObjC 编译都要 Apple SDK），
+没有 Mac 时靠 GitHub 的 macOS runner：编译门与冒烟 e2e 在 `.github/workflows/pc-gpui-e2e-macos.yml`（推 `claude/**` 分支即跑），
+main / PR 上 `pc-gpui-ci.yml` 的 `macos` 作业另出 universal `.app` 产物，发版由 `release.yml` 的 `build-macos` 出 dmg。
+
+| 文件 | 作用 |
+|---|---|
+| `macos/bundle.sh` | `bundle.sh <arm64 或单架构二进制> <x86_64 二进制\|-> <输出目录>`：组装 `mini-todo.app`（Info.plist 身份沿用 2.5.0：bundle id `com.tauri-app.mini-todo`、`CFBundleExecutable` / `CFBundleName` = `mini-todo`、`LSMinimumSystemVersion` 11.0、不设 `LSUIElement`；版本号读 `pc-gpui/Cargo.toml`，`CFBundleShortVersionString` 去掉 `-pre` 等后缀）+ 图标 `crates/app/assets/icon.icns`（取自 2.5.0）+ 整包 ad-hoc 签名并校验。第二个参数给 x86_64 二进制时用 `lipo` 合并成 universal 并断言两个切片都在。路径按脚本位置解析，可从任何目录调用 |
+| `macos/make-dmg.sh` | `make-dmg.sh <app> <dmg>`：暂存目录（`.app` + `/Applications` 软链）→ `hdiutil create`（UDZO、HFS+、显式 `-size`，失败 detach / 尺寸翻倍 / 等 15s，最多 5 次）→ `hdiutil verify` → 挂载回读校验签名、架构、软链与可执行文件一致 |
+| `macos/gen-tray-icon.py` | 生成菜单栏模板图标 `crates/app/assets/tray-template.png`（36×36 = 18pt@2x，只用 alpha） |
+| `e2e-macos/` | macOS runner 上的冒烟 e2e（`run_e2e.py`：窗口枚举、截图有内容、Vision OCR、退出）；用例、输出与本地运行见 `e2e-macos/README.md` |
+| `mac-check/` | 不属于 workspace 的小 crate：用 `#[path]` 把 app 里**不依赖 GPUI** 的 mac 源文件（objc2 窗口代码、托盘、自启、单实例……）编进来，在 Linux / Windows 上 `cargo check` / `clippy --target aarch64-apple-darwin` 做类型检查（`rustup target add aarch64-apple-darwin`；命令见其 `Cargo.toml` 顶部）。依赖版本与特性必须和 `crates/app/Cargo.toml` 的 macOS 依赖一致；GPUI 胶水代码仍只有 CI 能编译 |
+
+本地（在 Mac 上）打一个 universal 包：
+
+```bash
+cd pc-gpui
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+cargo build --release -p mini-todo --locked --target aarch64-apple-darwin --target x86_64-apple-darwin
+bash scripts/macos/bundle.sh target/aarch64-apple-darwin/release/mini-todo target/x86_64-apple-darwin/release/mini-todo dist
+bash scripts/macos/make-dmg.sh dist/mini-todo.app dist/mini-todo_dev_universal.dmg
+```
+
+GPUI 开了 `runtime_shaders`（gpui-kit 强制）：Metal 着色器在运行时编译，构建只需要 Xcode Command Line Tools（clang + SDK），
+不需要 Metal 工具链；debug 构建也能拷到别的 Mac 上运行（与 Windows debug 构建不同）。

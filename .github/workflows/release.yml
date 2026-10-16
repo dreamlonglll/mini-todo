@@ -8,16 +8,21 @@ name: Release
 # - build-windows：pc-gpui release 构建 → NSIS 安装包 `mini-todo_<版本>_x64-setup.exe`
 #   （pc-gpui/scripts/windows-installer.nsi，安装身份沿用旧 Tauri 版，老用户原地升级）+ 便携版
 #   `mini-todo_<版本>_x64-portable.zip`（只有 mini-todo.exe；资源都嵌在 exe 里）
+# - build-macos：macos-15（arm64）上一次构建 aarch64 + x86_64 → `lipo` 合并 → 组装 `mini-todo.app`（身份沿用 2.5.0：
+#   bundle id `com.tauri-app.mini-todo`，pc-gpui/scripts/macos/bundle.sh）→ 整包 ad-hoc 签名（没有开发者账号、不公证）→
+#   `mini-todo_<版本>_universal.dmg`（pc-gpui/scripts/macos/make-dmg.sh，拖放安装）。**mac 是预览平台，失败不挡发布**：
+#   publish 照样等它结束，但只要 Windows / cloud 成功就转正，mac 失败只出 warning（release 里暂时没有 dmg）
 # - build-cloud：云端 API `minitodo-cloud-<cloud 版本>-linux-<arch>.tar.gz` + `.sha256`（x86_64 / aarch64）
-# - publish：全部构建成功后对 release 的**全部**资产算 SHA256SUMS.txt 上传，再把 draft 转正。匿名请求看不到
-#   draft —— 应用内更新检查（/releases/latest）不会在产物传齐前把用户引到空的 release 页，任一平台构建失败
+# - publish：构建结束后对 release 的**全部**资产算 SHA256SUMS.txt 上传，再把 draft 转正。匿名请求看不到
+#   draft —— 应用内更新检查（/releases/latest）不会在产物传齐前把用户引到空的 release 页，Windows / cloud 任一构建失败
 #   release 也不会公开；修好后在该次运行上 Re-run failed jobs（publish 随之重跑）
 #   ⚠️ pre-release 不会出现在 /releases/latest，已装正式版的用户不会被提示升级到预发布版
-# - 资产名不带 v 前缀；Windows 包沿用旧 Tauri 版 `mini-todo_<版本>_x64-…` 的形态
+# - 资产名不带 v 前缀；Windows 包沿用旧 Tauri 版 `mini-todo_<版本>_x64-…` 的形态，mac 包沿用 2.5.0 的 `mini-todo_<版本>_universal.dmg`
 #
 # 手动触发（workflow_dispatch）= 给**已存在**的 release 补建产物：不新建 release、不生成 changelog，
 # 从 inputs.tag 那个 tag 的代码构建 inputs.platforms 选中的平台，`--clobber` 覆盖同名资产，publish 只重算
-# SHA256SUMS.txt，**不碰** draft / prerelease 状态。workflow 文件取自触发时选的分支，代码取自 inputs.tag。
+# SHA256SUMS.txt（包括补上的 dmg），**不碰** draft / prerelease 状态。workflow 文件取自触发时选的分支，代码（含打包脚本）
+# 取自 inputs.tag —— 所以补建只能救偶发失败（runner / 网络 / hdiutil）；代码或打包脚本的问题要修好后发新版本。
 #
 # 安全口径：顶层只给 contents: read，写 release 的作业各自提权；checkout 一律不把 token 落进 .git/config
 # （构建期几百个依赖的 build.rs 都读得到那个文件），gh 命令只在各自那一步的 env 里拿 token；
@@ -38,7 +43,7 @@ on:
         required: true
         type: string
       platforms:
-        description: '要补建的平台，逗号分隔：windows / cloud-x86_64 / cloud-aarch64'
+        description: '要补建的平台，逗号分隔：windows / macos / cloud-x86_64 / cloud-aarch64'
         required: true
         default: 'windows'
         type: string
@@ -124,6 +129,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       windows: ${{ steps.plan.outputs.windows }}
+      macos: ${{ steps.plan.outputs.macos }}
       cloud: ${{ steps.plan.outputs.cloud }}
     steps:
       - id: plan
@@ -133,11 +139,12 @@ jobs:
           PLATFORMS: ${{ inputs.platforms }}
         run: |
           if [ "$EVENT_NAME" = "push" ]; then
-            keys="windows,cloud-x86_64,cloud-aarch64"
+            keys="windows,macos,cloud-x86_64,cloud-aarch64"
           else
             keys="$PLATFORMS"
           fi
           windows=false
+          macos=false
           cloud=()
           IFS=',' read -ra items <<< "$keys"
           for k in "${items[@]}"; do
@@ -145,19 +152,23 @@ jobs:
             [ -z "$k" ] && continue
             case "$k" in
               windows) windows=true ;;
+              macos) macos=true ;;
               cloud-x86_64) cloud+=('{"arch":"x86_64","runner":"ubuntu-24.04"}') ;;
               cloud-aarch64) cloud+=('{"arch":"aarch64","runner":"ubuntu-24.04-arm"}') ;;
-              *) echo "::error::未知平台 key: $k（可选 windows / cloud-x86_64 / cloud-aarch64）"; exit 1 ;;
+              *) echo "::error::未知平台 key: $k（可选 windows / macos / cloud-x86_64 / cloud-aarch64）"; exit 1 ;;
             esac
           done
           cloud_json="[$(IFS=,; echo "${cloud[*]}")]"
-          if [ "$windows" = false ] && [ "$cloud_json" = "[]" ]; then
+          if [ "$windows" = false ] && [ "$macos" = false ] && [ "$cloud_json" = "[]" ]; then
             echo "::error::platforms 为空，没有要构建的平台"
             exit 1
           fi
-          echo "windows=$windows, cloud=$cloud_json"
-          echo "windows=$windows" >> "$GITHUB_OUTPUT"
-          echo "cloud=$cloud_json" >> "$GITHUB_OUTPUT"
+          echo "windows=$windows, macos=$macos, cloud=$cloud_json"
+          {
+            echo "windows=$windows"
+            echo "macos=$macos"
+            echo "cloud=$cloud_json"
+          } >> "$GITHUB_OUTPUT"
 
   build-windows:
     name: Windows x64 (pc-gpui)
@@ -277,6 +288,76 @@ jobs:
           printf 'upload: %s\n' "${files[@]}"
           gh release upload "$RELEASE_TAG" "${files[@]}" --clobber
 
+  # mac 是预览平台：失败时本作业照常标红，但 publish 不因它停（见 publish 的 if）
+  build-macos:
+    name: macOS universal (pc-gpui)
+    needs: [create-release, plan]
+    if: >-
+      !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.macos == 'true' &&
+      (needs.create-release.result == 'success' || needs.create-release.result == 'skipped')
+    # ⚠️ 与 cache-warm.yml 的 gpui-macos 同一个标签（缓存键里带 runner OS / 架构，SDK 也要一致）。
+    # 不用 Intel runner：macos-15-intel 只到 2027-08，且 Metal 多重采样在上面会卡死（runner-images#14836）
+    runs-on: macos-15
+    timeout-minutes: 120
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          persist-credentials: false
+
+      # ⚠️ 与 cache-warm.yml 的 gpui-macos 作业一致（targets 也进缓存键）
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: release-gpui
+          save-if: false
+          workspaces: pc-gpui -> target
+
+      # GPUI 开了 runtime_shaders：Metal 着色器运行时编译，构建期不需要 Metal 工具链（只要 Xcode 自带的 clang / SDK）
+      - name: Build
+        working-directory: pc-gpui
+        run: cargo build --release -p mini-todo --locked --target aarch64-apple-darwin --target x86_64-apple-darwin
+
+      - name: Assemble .app (ad-hoc signed) and dmg
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${RELEASE_TAG#v}"
+          # 手动补建时 create-release 被跳过、tag 与版本号的校验没跑：这里再比一次
+          CARGO_VERSION=$(awk -F'"' '/^\[workspace\.package\]/{f=1;next} /^\[/{f=0} f && /^version *=/{print $2; exit}' pc-gpui/Cargo.toml)
+          if [ "$CARGO_VERSION" != "$VERSION" ]; then
+            echo "::error::tag $RELEASE_TAG 与 pc-gpui/Cargo.toml 的版本 $CARGO_VERSION 不一致"
+            exit 1
+          fi
+          bash pc-gpui/scripts/macos/bundle.sh \
+            pc-gpui/target/aarch64-apple-darwin/release/mini-todo \
+            pc-gpui/target/x86_64-apple-darwin/release/mini-todo dist
+          bash pc-gpui/scripts/macos/make-dmg.sh dist/mini-todo.app "dist/mini-todo_${VERSION}_universal.dmg"
+          ls -la dist
+
+      - name: Upload to release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          shopt -s nullglob
+          files=(dist/mini-todo_*_universal.dmg)
+          if [ "${#files[@]}" -ne 1 ]; then
+            echo "::error::dist/ 下应有 1 个 dmg，实际：${files[*]:-<none>}"
+            exit 1
+          fi
+          printf 'upload: %s\n' "${files[@]}"
+          gh release upload "$RELEASE_TAG" "${files[@]}" --clobber
+
   build-cloud:
     name: cloud (Linux ${{ matrix.arch }})
     needs: [create-release, plan]
@@ -353,21 +434,40 @@ jobs:
           printf 'upload: %s\n' "${files[@]}"
           gh release upload "$RELEASE_TAG" "${files[@]}" --clobber
 
-  # 全部选中的平台都构建成功之后：对 release 的**全部**资产算 SHA256 → SHA256SUMS.txt 覆盖上传；
+  # 选中的平台都构建结束之后：对 release 的**全部**资产算 SHA256 → SHA256SUMS.txt 覆盖上传；
   # push 路径再把 draft 转正。手动补建只重算校验和（补传的文件变了，旧的 SUMS 就过期了），
   # 不改 draft / prerelease —— 已发布的版本不能被改回 draft，还在 draft 的也不由补建来转正。
+  # Windows / cloud 失败（或被取消）时不发布；**macOS 失败不挡**：照常发布，只出 warning（PRD：mac 是预览平台）。
+  # 之后在该次运行上 Re-run failed jobs 或 workflow_dispatch（platforms=macos）补建 dmg，publish 随之重跑、SUMS 补上 dmg。
+  # 至少要有一个平台本次成功（只补建 mac 且失败时什么都不做）。
   # 校验：下载资产后 `sha256sum -c SHA256SUMS.txt --ignore-missing`
   publish:
-    needs: [create-release, plan, build-windows, build-cloud]
+    needs: [create-release, plan, build-windows, build-macos, build-cloud]
     if: >-
       !cancelled() && needs.plan.result == 'success' &&
       (needs.create-release.result == 'success' || needs.create-release.result == 'skipped') &&
-      !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') &&
-      (needs.build-windows.result == 'success' || needs.build-cloud.result == 'success')
+      needs.build-windows.result != 'failure' && needs.build-windows.result != 'cancelled' &&
+      needs.build-cloud.result != 'failure' && needs.build-cloud.result != 'cancelled' &&
+      (needs.build-windows.result == 'success' || needs.build-macos.result == 'success' ||
+       needs.build-cloud.result == 'success')
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
+      - name: Warn if the macOS build did not succeed
+        if: needs.plan.outputs.macos == 'true' && needs.build-macos.result != 'success'
+        shell: bash
+        env:
+          MACOS_RESULT: ${{ needs.build-macos.result }}
+        run: |
+          msg="macOS 构建未成功（build-macos: ${MACOS_RESULT}），本次没有产出 mini-todo_${RELEASE_TAG#v}_universal.dmg，其余平台照常发布。偶发失败（runner / 网络 / hdiutil）：在本次运行上 Re-run failed jobs，或 workflow_dispatch（tag=${RELEASE_TAG}，platforms=macos）补建，SHA256SUMS.txt 会随之重算；代码或打包脚本的问题（补建从 tag 的代码构建）要修好后发新版本"
+          echo "::warning title=macOS dmg 缺失::${msg}"
+          {
+            echo "### macOS 构建未成功"
+            echo ""
+            echo "${msg}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Generate & upload SHA256SUMS.txt
         shell: bash
         env:

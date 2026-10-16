@@ -90,3 +90,55 @@ jobs:
 
       - name: Tests
         run: cargo test --workspace --locked --no-fail-fast
+
+  # mac 专属代码唯一的编译门（Linux / Windows 上编不了 mac 目标：GPUI mac 平台层与 C / ObjC 依赖都要 Apple SDK）。
+  # 另出一份 universal .app（ad-hoc 签名，与 release.yml 的 dmg 里是同一个 bundle.sh 的产物）作为试用产物。
+  # GPUI 开了 runtime_shaders：Metal 着色器运行时编译，构建期不需要 Metal 工具链
+  macos:
+    name: clippy / tests / universal bundle (pc-gpui, macOS)
+    runs-on: macos-15
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: pc-gpui
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './pc-gpui -> target'
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace --locked --no-fail-fast
+
+      # arm64 runner 上一次构建两个架构（x86_64 交叉编译），bundle.sh 用 lipo 合并成 universal
+      - name: Release build (universal)
+        run: cargo build --release -p mini-todo --locked --target aarch64-apple-darwin --target x86_64-apple-darwin
+
+      - name: Bundle .app
+        working-directory: .
+        run: |
+          bash pc-gpui/scripts/macos/bundle.sh \
+            pc-gpui/target/aarch64-apple-darwin/release/mini-todo \
+            pc-gpui/target/x86_64-apple-darwin/release/mini-todo dist
+          # upload-artifact 会丢掉可执行位与软链，先用 ditto 打成 zip（保留签名与扩展属性）
+          ditto -c -k --keepParent dist/mini-todo.app dist/mini-todo-macos-universal.zip
+          ls -la dist
+
+      - name: Upload universal bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: mini-todo-gpui-macos-universal
+          path: dist/mini-todo-macos-universal.zip
+          if-no-files-found: error

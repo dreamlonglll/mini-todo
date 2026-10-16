@@ -13,7 +13,11 @@ name: Cache warm
 #
 #   作业           消费方（release.yml）    shared-key      workspaces
 #   gpui-windows   build-windows            release-gpui    pc-gpui -> target
+#   gpui-macos     build-macos              release-gpui    pc-gpui -> target
 #   cloud (×2)     build-cloud              release-cloud   cloud -> target
+#
+#   gpui-windows 与 gpui-macos 共用 shared-key：键里带 runner OS / 架构，两份缓存不会互相覆盖。gpui-macos 还要与
+#   build-macos 的 runs-on（macos-15）、装工具链那一步的 targets（aarch64 + x86_64）、两个 --target 的编译命令逐字一致
 #
 #   成员的 version 被规整、Cargo.lock 里的工作区包被剔掉 —— 发版改版本号不会让键变。依赖变了键才变；
 #   tag 先于这里重建跑到时，rust-cache 退回同前缀下最新的一份做部分恢复，大部分依赖照样不用重编。
@@ -76,6 +80,32 @@ jobs:
       - name: Build
         working-directory: pc-gpui
         run: cargo build --release -p mini-todo --locked
+
+  gpui-macos:
+    name: release cache (pc-gpui, macOS universal)
+    if: github.ref == 'refs/heads/main'
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: release-gpui
+          workspaces: pc-gpui -> target
+
+      - name: Build
+        working-directory: pc-gpui
+        run: cargo build --release -p mini-todo --locked --target aarch64-apple-darwin --target x86_64-apple-darwin
 
   cloud:
     name: release cache (cloud, Linux ${{ matrix.arch }})

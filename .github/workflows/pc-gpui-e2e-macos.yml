@@ -1,0 +1,147 @@
+name: PC (GPUI) e2e (macOS)
+
+# macOS 专属代码的编译门 + 冒烟 e2e，跑在 GitHub 托管的 macOS runner 上（arm64，Apple Paravirtual GPU / Metal；
+# 已登录的图形会话，bash / osascript / runner agent 预授权屏幕录制与辅助功能）。没有 Mac 真机时这是 mac 代码唯一的反馈回路：
+# Linux / Windows 上编不了 mac 目标（GPUI 的 mac 平台层与 bundled sqlite / mac-notification-sys 的 C / ObjC 编译都要 Apple SDK）。
+# - checks：clippy（-D warnings）+ cargo test（clippy 失败也照样跑测试，一轮 CI 拿到尽量多的信息）
+# - smoke：debug 构建 → scripts/macos/bundle.sh 包成 .app（bundle id 才有效）→ scripts/e2e-macos/run_e2e.py
+#   （窗口出现、截图有内容、OCR 认出界面文字、退出；用例与本地复现见 pc-gpui/scripts/e2e-macos/README.md）
+# 每个用例的 PASS / FAIL、窗口列表、OCR 文字、应用日志尾部都打印在日志里（汇总表也写进 Job Summary）；
+# 失败详情与关键截图另以注解输出（产物下载链接不可达时用 check-runs annotations API 取回），截图 / 日志作为产物上传。
+on:
+  workflow_dispatch:
+  push:
+    branches: ['claude/**']
+    paths:
+      - 'pc-gpui/**'
+      - '.github/workflows/pc-gpui-e2e-macos.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pc-gpui-e2e-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONUTF8: '1'
+  PYTHONIOENCODING: utf-8
+  CARGO_TERM_COLOR: never
+
+jobs:
+  checks:
+    name: clippy / tests (pc-gpui, macOS)
+    runs-on: macos-15
+    timeout-minutes: 75
+    defaults:
+      run:
+        working-directory: pc-gpui
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './pc-gpui -> target'
+          cache-on-failure: true
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Tests
+        if: ${{ !cancelled() }}
+        run: cargo test --workspace --locked --no-fail-fast
+
+  smoke:
+    name: smoke e2e (debug .app)
+    runs-on: macos-15
+    timeout-minutes: 75
+    defaults:
+      run:
+        working-directory: pc-gpui
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './pc-gpui -> target'
+          cache-on-failure: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies
+        run: >
+          python3 -m pip install --disable-pip-version-check -q
+          pyobjc-framework-Quartz pyobjc-framework-Vision pyobjc-framework-ApplicationServices pillow
+
+      # debug 构建：MINI_TODO_DATA_DIR / MINI_TODO_DEBUG_OPEN 等开关只在 debug 构建生效；seed 也拒绝在 release 下运行
+      - name: Build app and seed tool (debug)
+        run: |
+          cargo build -p mini-todo --locked
+          cargo build -p mini-todo-core --example seed --locked
+
+      - name: Bundle .app (debug, host arch)
+        run: |
+          bash scripts/macos/bundle.sh target/debug/mini-todo - "$RUNNER_TEMP/bundle"
+          # 登记到 LaunchServices：`tell application id "com.tauri-app.mini-todo"` 按 bundle id 找得到
+          /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+            -f "$RUNNER_TEMP/bundle/mini-todo.app" || echo "::warning::lsregister 失败（不影响测试）"
+
+      - name: Environment
+        continue-on-error: true
+        run: |
+          sw_vers || true
+          uname -a || true
+          system_profiler SPDisplaysDataType || true
+          csrutil status || true
+          echo "--- TCC (system) ---"
+          sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
+            "select service, client, auth_value from access" || true
+          echo "--- TCC (user) ---"
+          sqlite3 "$HOME/Library/Application Support/com.apple.TCC/TCC.db" \
+            "select service, client, auth_value from access" || true
+
+      - name: Run e2e (smoke)
+        run: >
+          python3 -u scripts/e2e-macos/run_e2e.py
+          --app "$RUNNER_TEMP/bundle/mini-todo.app"
+          --seed target/debug/examples/seed
+          --out "$RUNNER_TEMP/e2e-out"
+          --work "$RUNNER_TEMP/e2e-work"
+          --wallpaper 1F6F8B
+
+      # 产物 / 日志下载链接在某些环境下不可达：失败详情与关键截图另以注解输出（check-runs annotations API 可取回）。
+      # 一个 job 最多 50 条注解：失败 ≤ 11 条，截图分片两步各 ≤ 15 条
+      - name: Report failures as annotations
+        if: always()
+        run: python3 scripts/e2e-windows/emit_annotations.py failures "$RUNNER_TEMP/e2e-out"
+
+      - name: Emit screenshots as annotations (1/2)
+        if: always()
+        run: python3 scripts/e2e-windows/emit_annotations.py images "$RUNNER_TEMP/e2e-out" --skip 0 --max 15
+
+      - name: Emit screenshots as annotations (2/2)
+        if: always()
+        run: python3 scripts/e2e-windows/emit_annotations.py images "$RUNNER_TEMP/e2e-out" --skip 15 --max 15
+
+      - name: Upload e2e output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pc-gpui-e2e-macos
+          path: ${{ runner.temp }}/e2e-out
+          if-no-files-found: warn
