@@ -542,8 +542,8 @@ fn rename_fence_and_folder(
     })
 }
 
-/// 只更新 patch 里给出的字段；背景色须为 `#RRGGBB`，透明度夹到 0~1，图标大小夹到上下限。
-/// 任一字段校验失败时什么都不写
+/// 只更新 patch 里给出的字段；背景色须为 `#RRGGBB`，透明度夹到 0~1，图标大小夹到上下限，
+/// `show_hidden` 原样写入。任一字段校验失败时什么都不写
 fn update_fence_row(db: &Database, id: i64, patch: &UpdateFenceRequest) -> Result<Fence, String> {
     let bg_color = patch.bg_color.as_deref().map(normalize_color).transpose()?;
     let bg_alpha = patch.bg_alpha.map(|a| {
@@ -560,19 +560,21 @@ fn update_fence_row(db: &Database, id: i64, patch: &UpdateFenceRequest) -> Resul
         .with_connection(|conn| {
             conn.execute(
                 "UPDATE fences SET
-                    collapsed = COALESCE(?1, collapsed),
-                    locked    = COALESCE(?2, locked),
-                    bg_color  = COALESCE(?3, bg_color),
-                    bg_alpha  = COALESCE(?4, bg_alpha),
-                    icon_size = COALESCE(?5, icon_size),
-                    updated_at = datetime('now', 'localtime')
-                 WHERE id = ?6",
+                    collapsed   = COALESCE(?1, collapsed),
+                    locked      = COALESCE(?2, locked),
+                    bg_color    = COALESCE(?3, bg_color),
+                    bg_alpha    = COALESCE(?4, bg_alpha),
+                    icon_size   = COALESCE(?5, icon_size),
+                    show_hidden = COALESCE(?6, show_hidden),
+                    updated_at  = datetime('now', 'localtime')
+                 WHERE id = ?7",
                 rusqlite::params![
                     patch.collapsed,
                     patch.locked,
                     bg_color,
                     bg_alpha,
                     icon_size,
+                    patch.show_hidden,
                     id
                 ],
             )
@@ -734,8 +736,8 @@ pub fn get(db: &Database, id: i64) -> Result<Fence, String> {
     load_fence(db, id)
 }
 
-/// 更新折叠 / 锁定 / 外观 / 图标大小（只改给出的字段，`update_fence`）。只写库：折叠态的窗口尺寸由
-/// app 随后按 [`fence_view`] 呈现，锁定由 app 控制交互
+/// 更新折叠 / 锁定 / 外观 / 图标大小 /「显示隐藏的图标」（只改给出的字段，`update_fence`）。只写库：折叠态的
+/// 窗口尺寸由 app 随后按 [`fence_view`] 呈现，锁定与隐藏项的显示由 app 控制
 pub fn update(db: &Database, id: i64, patch: &UpdateFenceRequest) -> Result<Fence, String> {
     update_fence_row(db, id, patch)
 }
@@ -1440,6 +1442,62 @@ mod tests {
             "校验失败不写任何字段"
         );
         assert!(update_fence_row(&db, 999, &UpdateFenceRequest::default()).is_err());
+    }
+
+    #[test]
+    fn show_hidden_defaults_off_and_is_saved_per_fence() {
+        let db = Database::new_in_memory().unwrap();
+        let a = insert_fence(&db, "收纳箱", rect(10, 20, 368, 334), "收纳箱").unwrap();
+        let b = insert_fence(&db, "收纳箱 2", rect(40, 50, 368, 334), "收纳箱 2").unwrap();
+        assert!(
+            !a.show_hidden && !b.show_hidden,
+            "新建收纳箱默认不显示隐藏的图标"
+        );
+
+        let shown = update_fence_row(
+            &db,
+            a.id,
+            &UpdateFenceRequest {
+                show_hidden: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(shown.show_hidden);
+        assert!(
+            !shown.collapsed && !shown.locked && shown.icon_size == 48,
+            "只改 show_hidden"
+        );
+        assert!(load_fence(&db, a.id).unwrap().show_hidden, "写进了库");
+        assert!(
+            !load_fence(&db, b.id).unwrap().show_hidden,
+            "每个收纳箱独立"
+        );
+
+        // 不给出 show_hidden 的 patch 不动它
+        let locked = update_fence_row(
+            &db,
+            a.id,
+            &UpdateFenceRequest {
+                locked: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(locked.show_hidden && locked.locked);
+
+        let hidden_again = update_fence_row(
+            &db,
+            a.id,
+            &UpdateFenceRequest {
+                show_hidden: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!hidden_again.show_hidden);
+        let json = serde_json::to_string(&hidden_again).unwrap();
+        assert!(json.contains("\"showHidden\":false"), "{json}");
     }
 
     #[test]

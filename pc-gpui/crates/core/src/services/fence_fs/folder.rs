@@ -5,8 +5,8 @@
 
 use super::location::fence_root_dir;
 use super::naming::{
-    dedupe_name, display_name, is_shell_metadata_file, is_shortcut_name, is_valid_folder_name,
-    sanitize_folder_name,
+    dedupe_name, display_name, is_auto_hidden_name, is_shell_metadata_file, is_shortcut_name,
+    is_valid_folder_name, sanitize_folder_name,
 };
 use serde::Serialize;
 use std::collections::HashSet;
@@ -31,6 +31,17 @@ pub struct FenceEntry {
     pub is_shortcut: bool,
     /// 修改时间（Unix 毫秒），取不到时为 `None`
     pub modified_ms: Option<i64>,
+    /// 用户右键「隐藏」的（`fence_items.hidden`，对账时从行里带出；文件层列举时一律为 `false`）
+    pub hidden: bool,
+    /// 以 `.` 开头、按名字自动隐藏的（[`is_auto_hidden_name`]），不能单独取消隐藏
+    pub auto_hidden: bool,
+}
+
+impl FenceEntry {
+    /// 是否隐藏（用户隐藏或自动隐藏）：收纳箱没开「显示隐藏的图标」时不显示，开了时半透明显示
+    pub fn is_hidden(&self) -> bool {
+        self.hidden || self.auto_hidden
+    }
 }
 
 /// 路径上是否已有东西（含失效的符号链接）
@@ -51,20 +62,34 @@ pub(crate) fn existing_names_lower(dir: &Path) -> HashSet<String> {
         .unwrap_or_default()
 }
 
-/// 是否是隐藏或系统文件（Windows 看文件属性；其他平台看是否以 `.` 开头）
-pub(crate) fn is_hidden_or_system(meta: &fs::Metadata, file_name: &str) -> bool {
+/// 是否带 Windows 隐藏 / 系统属性（列举用：这类文件永不显示，"显示隐藏的图标"也不显示）。
+/// 其他平台没有这两个属性，恒为 `false`——以 `.` 开头的项目照常列出，标记为自动隐藏（[`FenceEntry::auto_hidden`]）
+pub(crate) fn has_hidden_or_system_attribute(meta: &fs::Metadata) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
         const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
         const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
-        let _ = file_name;
         meta.file_attributes() & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM) != 0
     }
     #[cfg(not(windows))]
     {
         let _ = meta;
-        file_name.starts_with('.')
+        false
+    }
+}
+
+/// 是否是隐藏或系统文件（移入校验用：Windows 看文件属性；其他平台看是否以 `.` 开头）
+pub(crate) fn is_hidden_or_system(meta: &fs::Metadata, file_name: &str) -> bool {
+    #[cfg(windows)]
+    {
+        let _ = file_name;
+        has_hidden_or_system_attribute(meta)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = meta;
+        is_auto_hidden_name(file_name)
     }
 }
 
@@ -321,7 +346,7 @@ pub(crate) fn list_items_at(root: &Path, folder_name: &str) -> Result<Vec<FenceE
                 return None;
             }
             let meta = entry.metadata().ok()?;
-            if is_hidden_or_system(&meta, &file_name) {
+            if has_hidden_or_system_attribute(&meta) {
                 return None;
             }
             let path = entry.path();
@@ -331,6 +356,8 @@ pub(crate) fn list_items_at(root: &Path, folder_name: &str) -> Result<Vec<FenceE
                 is_shortcut: !is_dir && is_shortcut_name(&file_name),
                 path: path.to_string_lossy().into_owned(),
                 modified_ms: modified_ms(&meta),
+                hidden: false,
+                auto_hidden: is_auto_hidden_name(&file_name),
                 file_name,
                 is_dir,
             })
@@ -340,7 +367,8 @@ pub(crate) fn list_items_at(root: &Path, folder_name: &str) -> Result<Vec<FenceE
     Ok(items)
 }
 
-/// 列举收纳文件夹内容（按文件名不区分大小写排序；跳过 `desktop.ini`、`Thumbs.db` 与隐藏 / 系统文件）。
+/// 列举收纳文件夹内容（按文件名不区分大小写排序；跳过 `desktop.ini`、`Thumbs.db` 与带 Windows 隐藏 / 系统属性的文件）。
+/// 以 `.` 开头的项目照常列出、`auto_hidden = true`；`hidden`（用户隐藏）由对账从数据库带出，这里一律 `false`。
 /// 文件夹不存在返回 `Err`。
 pub fn list_fence_items(folder_name: &str) -> Result<Vec<FenceEntry>, String> {
     list_items_at(&fence_root_dir()?, folder_name)
@@ -520,10 +548,12 @@ mod tests {
         touch(&dir.join("b.txt"));
         touch(&dir.join("desktop.ini"));
         fs::create_dir(dir.join("文件夹.lnk")).unwrap();
-        #[cfg(not(windows))]
-        touch(&dir.join(".hidden"));
+        // 以 . 开头的项目（没有隐藏属性）所有平台都列出，标记为自动隐藏
+        touch(&dir.join(".gitkeep"));
+        fs::create_dir(dir.join(".config")).unwrap();
         #[cfg(windows)]
         {
+            // 带隐藏属性的文件永不列出
             touch(&dir.join("hidden.txt"));
             let status = std::process::Command::new("attrib")
                 .arg("+h")
@@ -535,16 +565,33 @@ mod tests {
 
         let items = list_items_at(root, &name).unwrap();
         let names: Vec<&str> = items.iter().map(|i| i.file_name.as_str()).collect();
-        assert_eq!(names, vec!["b.txt", "Chrome.lnk", "官网.url", "文件夹.lnk"]);
+        assert_eq!(
+            names,
+            vec![
+                ".config",
+                ".gitkeep",
+                "b.txt",
+                "Chrome.lnk",
+                "官网.url",
+                "文件夹.lnk"
+            ]
+        );
+        assert!(items[0].auto_hidden && items[0].is_dir && items[0].is_hidden());
+        assert!(items[1].auto_hidden && !items[1].is_dir);
+        assert!(
+            items.iter().all(|i| !i.hidden),
+            "用户隐藏标记来自数据库，文件层列举一律为 false"
+        );
 
-        let chrome = &items[1];
+        let chrome = &items[3];
         assert_eq!(chrome.display_name, "Chrome");
         assert!(chrome.is_shortcut && !chrome.is_dir);
+        assert!(!chrome.auto_hidden && !chrome.is_hidden());
         assert_eq!(PathBuf::from(&chrome.path), dir.join("Chrome.lnk"));
         assert!(chrome.modified_ms.is_some());
 
-        assert_eq!(items[2].display_name, "官网");
-        let folder = &items[3];
+        assert_eq!(items[4].display_name, "官网");
+        let folder = &items[5];
         assert!(folder.is_dir && !folder.is_shortcut);
         assert_eq!(folder.display_name, "文件夹.lnk");
 

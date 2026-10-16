@@ -20,8 +20,21 @@ use crate::ui::ep_slider::EpSlider;
 use crate::ui::icon::icon;
 use crate::ui::message::{self, MessageKind};
 
-/// 「更多」菜单的估算宽度（三项里最长的「删除收纳箱」：16 + 14 + 5 + 5×14 + 16 + 2 边框）
-const TITLE_MENU_WIDTH: f32 = 123.;
+/// 「更多」菜单里「显示隐藏的图标」切换项的文案（EP 下拉菜单没有勾选态，用切换文案表达当前状态）
+fn show_hidden_label(show_hidden: bool) -> &'static str {
+    if show_hidden {
+        "不显示隐藏的图标"
+    } else {
+        "显示隐藏的图标"
+    }
+}
+
+/// 「更多」菜单的估算宽度：最长一项（左右内边距 16 + 图标 14 + 间距 5 + 每字 14）+ 2 边框。
+/// 各项都是中文，最长的是切换项（7 / 8 个字），其次「删除收纳箱」（5 个字）
+fn title_menu_width(labels: &[&str]) -> f32 {
+    let longest = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    16. + 14. + 5. + 14. * longest as f32 + 16. + 2.
+}
 
 impl FenceWindow {
     pub(super) fn set_panel(&mut self, panel: Panel, window: &mut Window, cx: &mut Context<Self>) {
@@ -36,7 +49,7 @@ impl FenceWindow {
     fn open_delete_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.delete_count = None;
         self.set_panel(Panel::Delete, window, cx);
-        // 以文件夹实际列举为准（隐藏文件不计入）
+        // 以文件夹实际列举为准：含收纳箱里隐藏的项目（它们同样会移回），不含带 Windows 隐藏 / 系统属性的文件
         let id = self.fence_id;
         let task = spawn_db(cx, move |db| {
             mini_todo_core::fence::items::get_items(db, id)
@@ -185,6 +198,7 @@ impl FenceWindow {
         match command {
             "rename" => self.start_rename(window, cx),
             "appearance" => self.set_panel(Panel::Appearance, window, cx),
+            "show-hidden" => self.toggle_show_hidden(window, cx),
             "delete" => self.open_delete_panel(window, cx),
             _ => {}
         }
@@ -200,9 +214,19 @@ impl FenceWindow {
         if !self.title_menu_open {
             return None;
         }
+        let show_hidden = self.show_hidden();
+        let toggle_label = show_hidden_label(show_hidden);
+        let width = title_menu_width(&["重命名", "外观", toggle_label, "删除收纳箱"]);
         let menu = EpDropdownMenu::new("fence-more-menu")
             .item(EpDropdownItem::new("rename", "重命名").icon(EpIcon::EditPen))
             .item(EpDropdownItem::new("appearance", "外观").icon(EpIcon::Brush))
+            .item(
+                EpDropdownItem::new("show-hidden", toggle_label).icon(if show_hidden {
+                    EpIcon::Hide
+                } else {
+                    EpIcon::View
+                }),
+            )
             .item(
                 EpDropdownItem::new("delete", "删除收纳箱")
                     .icon(EpIcon::Delete)
@@ -222,10 +246,10 @@ impl FenceWindow {
                 flip: false,
                 gap: ep_popper::OFFSET,
                 arrow: true,
-                width: TITLE_MENU_WIDTH,
-                height: EpDropdownMenu::estimated_height(3, 1),
+                width,
+                height: EpDropdownMenu::estimated_height(4, 1),
             },
-            div().w(px(TITLE_MENU_WIDTH)).child(menu),
+            div().w(px(width)).child(menu),
             move |window, cx| {
                 // 点在「更多」按钮上不会走到这里（交给按钮自己切换）
                 let _ = dismiss.update(cx, |this, cx| this.close_title_menu(window, cx));
@@ -585,6 +609,25 @@ mod tests {
         }
         assert!((soft_light(1., 0.3) - 1.).abs() < 1e-6);
         assert!((soft_light(0.5, 0.5) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn title_menu_width_follows_the_longest_label() {
+        assert_eq!(
+            title_menu_width(&["重命名", "外观", "删除收纳箱"]),
+            123.,
+            "只有三项时（最长「删除收纳箱」）的宽度不变"
+        );
+        assert_eq!(show_hidden_label(false), "显示隐藏的图标");
+        assert_eq!(show_hidden_label(true), "不显示隐藏的图标");
+        assert_eq!(
+            title_menu_width(&["重命名", "外观", show_hidden_label(false), "删除收纳箱"]),
+            151.
+        );
+        assert_eq!(
+            title_menu_width(&["重命名", "外观", show_hidden_label(true), "删除收纳箱"]),
+            165.
+        );
     }
 
     #[test]

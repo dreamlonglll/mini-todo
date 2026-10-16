@@ -15,7 +15,7 @@
 |-------|-------------|--------|
 | [Window Modes](./window-modes.md) | 主窗口普通 / 经典固定 / 固定 + 嵌入桌面：模式状态表、`services::window_mode` 的切换与 200ms 轮询、`platform::embed` / `subclass`、持久化键、Explorer 重启自愈、e2e | Active |
 | [Sync Protocol](./sync-protocol.md) | PC ↔ WebDAV ↔ cloud: document shape, time format, monotonic `updated_at`, record LWW + tombstones, settings LWW, WebDAV precondition rules measured on Apache / nginx | Active |
-| [Desktop Fences](./desktop-fences.md) | 桌面收纳箱：始终嵌入桌面层的窗口（建窗参数、嵌入守护、移动 / 缩放 / 几何落库）、core `fence` / `fence::items` 接口与 `FenceRefresh`、v29 三张表、文件层（文件夹为 source of truth、对账、`FenceActivity`、删除保留语义）、按屏幕组合记忆位置、debug 专用环境变量 | Active |
+| [Desktop Fences](./desktop-fences.md) | 桌面收纳箱：始终嵌入桌面层的窗口（建窗参数、嵌入守护、移动 / 缩放 / 几何落库）、core `fence` / `fence::items` 接口与 `FenceRefresh`、v29 三张表与 v30 隐藏图标两列（点开头自动隐藏、右键隐藏、显示隐藏的图标）、文件层（文件夹为 source of truth、对账、`FenceActivity`、删除保留语义）、按屏幕组合记忆位置、debug 专用环境变量 | Active |
 
 ---
 

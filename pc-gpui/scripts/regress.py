@@ -98,7 +98,9 @@ class Scene:
     # 停光标："main" = 主窗口标题栏空白处（先经过第 2 行刷新悬停）；"away" = 屏幕左下角；None = 不动
     park: str | None = "main"
     webdav: bool = False  # 设置窗口场景：补 WebDAV 设置 + 两条屏幕配置（与参考截图 harness 一致）
-    fences: str | None = None  # "items" = 收纳箱 #1 带 6 个样例项目 + 空的收纳箱 2；"empty" = 只有一个空收纳箱
+    # "items" = 收纳箱 #1 带 6 个样例项目 + 空的收纳箱 2；"hidden" = 同 items，#1 另有一个 .gitkeep（自动隐藏）；
+    # "empty" = 只有一个空收纳箱
+    fences: str | None = None
     wait: float = 4.0
     shot: bool = True  # 结束时按 window 截一张 <name>.png
     ref: str | None = None  # 对照用的参考图名（缺省同名）
@@ -258,7 +260,8 @@ SCENES: list[Scene] = [
         [
             ("click", FENCE, 350, 16),
             ("sleep", 0.3),
-            ("click", FENCE, 300, 133),
+            # 「更多」菜单：重命名 46-78、外观 78-110、显示隐藏的图标 110-142、分隔线、删除收纳箱 155-187
+            ("click", FENCE, 300, 171),
             ("sleep", 0.5),
             ("move", FENCE, 180, 200),
             ("sleep", 0.3),
@@ -269,6 +272,22 @@ SCENES: list[Scene] = [
     fence_scene("fence-drag-hover", env={"MINI_TODO_DEBUG_FENCE_STATE": "drag-hover"}),
     fence_scene("fence-onedrive-notice", env={"MINI_TODO_DEBUG_FENCE_STATE": "onedrive"}),
     fence_scene("fence-empty", fences="empty"),
+    # 隐藏图标（10-16 fence-hidden-items，没有参考图）：默认不显示 .gitkeep 与用户隐藏的项；「显示隐藏的图标」打开时
+    # 两者半透明排在网格里；全部隐藏时空状态"7 个项目已隐藏"
+    fence_scene(
+        "fence-hidden-items",
+        fences="hidden",
+        sql=["UPDATE fence_items SET hidden = 1 WHERE file_name = 'Q3 预算表.xlsx'"],
+    ),
+    fence_scene(
+        "fence-show-hidden",
+        fences="hidden",
+        sql=[
+            "UPDATE fence_items SET hidden = 1 WHERE file_name = 'Q3 预算表.xlsx'",
+            "UPDATE fences SET show_hidden = 1 WHERE id = 1",
+        ],
+    ),
+    fence_scene("fence-all-hidden", fences="hidden", sql=["UPDATE fence_items SET hidden = 1 WHERE fence_id = 1"]),
     # ---- 关键交互（没有同名参考图的和参考图 harness 的 w2-* 对照）----
     Scene(
         "main-toast",
@@ -405,7 +424,8 @@ SCENES: list[Scene] = [
             ("sleep", 0.2),
             ("rclick", FENCE, 141, 88),
             ("sleep", 0.3),
-            ("click", FENCE, 190, 190),
+            # 右键菜单（开在 (141, 88)，每行 28px）：打开 93-121、打开所在位置 121-149、隐藏 149-177、移回桌面 177-205、移动到… 205-233
+            ("click", FENCE, 190, 219),
             ("sleep", 0.6),
         ],
         group="interaction",
@@ -866,7 +886,8 @@ class Runner:
     def prep_fences(con, data: Path, kind: str):
         now = "2026-10-15 10:00:00"
         root = data / "fences"
-        fences = [(1, "收纳箱", 1528)] + ([(2, "收纳箱 2", 1144)] if kind == "items" else [])
+        with_items = kind in ("items", "hidden")
+        fences = [(1, "收纳箱", 1528)] + ([(2, "收纳箱 2", 1144)] if with_items else [])
         for fid, title, x in fences:
             (root / title).mkdir(parents=True, exist_ok=True)
             con.execute(
@@ -879,8 +900,9 @@ class Runner:
                 "VALUES (?, '1_1920x1080@100', ?, 24, 368, 336, ?)",
                 (fid, x, now),
             )
-        if kind == "items":
-            for order, (name, content) in enumerate(FENCE_ITEMS):
+        if with_items:
+            extra = [(".gitkeep", "")] if kind == "hidden" else []
+            for order, (name, content) in enumerate(FENCE_ITEMS + extra):
                 path = root / "收纳箱" / name
                 if content is None:
                     path.mkdir()

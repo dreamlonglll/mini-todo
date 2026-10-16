@@ -318,7 +318,7 @@ pub struct ExportData {
 
 /// fences 查询列，与 [`fence_from_row`] 的下标一一对应
 pub const FENCE_COLUMNS: &str = "id, title, folder_name, x, y, width, height, collapsed, locked, \
-     bg_color, bg_alpha, icon_size, sort_order, created_at, updated_at";
+     bg_color, bg_alpha, icon_size, sort_order, created_at, updated_at, show_hidden";
 
 pub fn fence_from_row(row: &Row) -> rusqlite::Result<Fence> {
     Ok(Fence {
@@ -337,6 +337,7 @@ pub fn fence_from_row(row: &Row) -> rusqlite::Result<Fence> {
         sort_order: row.get(12)?,
         created_at: row.get(13)?,
         updated_at: row.get(14)?,
+        show_hidden: row.get::<_, i32>(15)? != 0,
     })
 }
 
@@ -368,11 +369,14 @@ pub struct Fence {
     pub sort_order: i32,
     pub created_at: String,
     pub updated_at: String,
+    /// 「显示隐藏的图标」（v30）：开启时隐藏项（用户隐藏 + 以 `.` 开头的自动隐藏）半透明显示，关闭时不显示
+    #[serde(default)]
+    pub show_hidden: bool,
 }
 
-/// 收纳箱项目的附加信息（v29 `fence_items`）：只有排序与原始路径，内容以收纳文件夹为准。
+/// 收纳箱项目的附加信息（v29 `fence_items`）：只有排序、原始路径与隐藏标记，内容以收纳文件夹为准。
 ///
-/// 每次列举都按收纳文件夹对账（`commands::fence_items::reconcile_rows`）：文件夹有、表里没有 → 补行；
+/// 每次列举都按收纳文件夹对账（`fence::items::reconcile_rows`）：文件夹有、表里没有 → 补行；
 /// 表里有、文件夹没有 → 删行。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -384,6 +388,9 @@ pub struct FenceItem {
     /// 移入前的完整路径；在 Explorer 里直接放进收纳文件夹的为 `None`
     pub original_path: Option<String>,
     pub sort_order: i32,
+    /// 用户右键「隐藏」（v30）。只影响收纳箱的显示，不改文件属性；跨箱移动不携带
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 /// `update_fence` 的入参：只更新给出的字段（标题走 `rename_fence`，几何走 `commit_fence_geometry`）
@@ -395,6 +402,8 @@ pub struct UpdateFenceRequest {
     pub bg_color: Option<String>,
     pub bg_alpha: Option<f64>,
     pub icon_size: Option<i32>,
+    /// 「显示隐藏的图标」（v30）
+    pub show_hidden: Option<bool>,
 }
 
 /// 屏幕配置记录，用于存储不同屏幕组合下的窗口状态

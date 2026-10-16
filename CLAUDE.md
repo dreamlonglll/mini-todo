@@ -45,7 +45,7 @@ mini-todo/
 │   │   ├── core/                           # mini-todo-core：业务核心（不依赖 GPUI / Tauri / tokio，全部阻塞函数）
 │   │   │   ├── README.md                   # 公开 API、线程约束、与旧 Tauri 命令的对照
 │   │   │   ├── src/
-│   │   │   │   ├── db/                     # 连接 / 迁移前备份（connection、backup）、迁移 v1~v29（migrations）、模型（models）、
+│   │   │   │   ├── db/                     # 连接 / 迁移前备份（connection、backup）、迁移 v1~v30（migrations）、模型（models）、
 │   │   │   │   │                           # settings 读写助手（settings_kv）、变更计数 / 墓碑 / 合并（sync_store）、时间（time）、路径（paths）
 │   │   │   │   ├── services/               # webdav.rs（条件 GET/PUT、PROPFIND）、secret.rs（DPAPI）、fence_fs/（收纳箱文件层）
 │   │   │   │   ├── todo.rs / data.rs       # 待办 / 子任务 CRUD、图片保存；导入导出、AppSettings 读写（唯一来源）
@@ -177,10 +177,14 @@ mini-todo/
   定位并嵌入后再显示）；200ms 守护在 Explorer 重启后自动重挂（`services/fences.rs`）
 - **真收纳**：外部拖入（`ui::external_drop`）的文件 / 快捷方式 / 文件夹经 `IFileOperation` 从桌面移到 `%USERPROFILE%\MiniTodo收纳箱\<收纳箱名>\`，
   重名加 ` (2)` 绝不覆盖，公共桌面项弹 UAC；**文件夹是内容的 source of truth**（`notify` 监听，Explorer 里增删随之刷新），
-  数据库只存元数据与项目的排序 / 原始路径。不允许整体收纳用户桌面 / 公共桌面文件夹本身
-- 双击打开（`ShellExecuteExW`）、自绘右键菜单（打开 / 打开所在位置 / 移回桌面 / 移动到…）、箱内拖动排序、Ctrl+滚轮图标大小、
+  数据库只存元数据与项目的排序 / 原始路径 / 隐藏标记。不允许整体收纳用户桌面 / 公共桌面文件夹本身
+- 双击打开（`ShellExecuteExW`）、自绘右键菜单（打开 / 打开所在位置 / 隐藏或取消隐藏 / 移回桌面 / 移动到…）、箱内拖动排序、Ctrl+滚轮图标大小、
   双击标题改名（收纳文件夹同步改名，失败则保留旧文件夹名并提示）、折叠（悬停 / 拖文件经过时临时展开）、
   「固定」= 锁定位置和大小（仍可拖入、折叠、改名）、每个收纳箱独立的背景色 / 透明度
+- **隐藏图标**（v30，只影响收纳箱的显示，不改文件属性、不移动文件）：以 `.` 开头的项目自动隐藏（固定开启，不能单独取消隐藏；
+  拖入时提示一次）；右键「隐藏」/「取消隐藏」写 `fence_items.hidden`（`fence::items::set_hidden`）；「更多」→「显示隐藏的图标」
+  （每个收纳箱独立，`fences.show_hidden`）打开时隐藏项半透明显示，关闭时不显示，全部隐藏时空状态显示"N 个项目已隐藏"。
+  对账保留隐藏标记（含只改大小写的重命名），跨箱移动不携带；带 Windows 隐藏 / 系统属性的文件维持原样永不显示；删除收纳箱时隐藏项一并移回
 - 移动 / 缩放：标题栏移动超过 3px 才 `platform::begin_window_drag`（标题栏不用 `drag_region()`，否则双击改名收不到），缩放用窗口内 8 个手柄 +
   按客户区 `SetWindowPos`；只有用户拖动 / 缩放结束与托盘重置才 `fence::commit_geometry` / `reset_positions` 落库，系统挪窗不落库。几何一律是客户区的物理像素
 - 删除收纳箱：项目全部移回原位置（原目录不存在则回桌面）、空文件夹删除后才删记录并关窗口；有项目移不回去时删除中止、
@@ -224,7 +228,7 @@ mini-todo/
   - 日志：`%LOCALAPPDATA%\com.tauri-app.mini-todo\logs\mini-todo.log`（app `services::logging`，2MB 轮转；目录名为兼容旧版沿用）
   - 收纳箱文件：`%USERPROFILE%\MiniTodo收纳箱\<收纳箱文件夹>\`（用户可见的真实文件夹，有收纳箱后才创建；不在数据目录里，
     卸载 / 删库都不会丢文件）
-- **迁移版本**：当前 v1~v29，通过 `pc-gpui/crates/core/src/db/migrations.rs` 的迁移表管理（`LATEST_VERSION`）；有待执行迁移时先备份，
+- **迁移版本**：当前 v1~v30，通过 `pc-gpui/crates/core/src/db/migrations.rs` 的迁移表管理（`LATEST_VERSION`）；有待执行迁移时先备份，
   迁移期间关闭外键、提交前 `foreign_key_check`；库版本比程序新时只记警告、按现状继续运行（没有降级）
   - v23：移除所有 AI Agent / 任务调度 / 工作流相关表和字段（详见迁移注释）
   - v24：新增 `webdav_last_modified` settings key
@@ -235,6 +239,8 @@ mini-todo/
     `tombstones` 表、存量时间统一为 `YYYY-MM-DD HH:MM:SS`、新增 `webdav_remote_etag` / `webdav_synced_settings_at`
   - v29：桌面收纳箱 `fences` / `fence_items` / `fence_layouts` 三张表（后两张 `ON DELETE CASCADE`）与 settings key
     `fence_onedrive_notice_shown`；均为设备本地数据，不接 `local_seq` 触发器与墓碑、不导出不同步
+  - v30：收纳箱隐藏图标：`fence_items.hidden`（右键「隐藏」）、`fences.show_hidden`（「显示隐藏的图标」），均 `INTEGER NOT NULL DEFAULT 0`；
+    同 v29 是设备本地数据。旧版本打开 v30 库照常运行，只是看不到隐藏效果
 
 #### 主要数据表
 
@@ -246,8 +252,8 @@ mini-todo/
 | `screen_configs` | 屏幕配置 |
 | `sync_meta` | 同步计数器（`local_seq` / `synced_seq`），由触发器维护 |
 | `tombstones` | 删除墓碑 `(entity_type, entity_id, deleted_at)`，保留 30 天 |
-| `fences` | 桌面收纳箱元数据（标题、收纳文件夹名、物理像素几何、折叠 / 锁定、外观、图标大小） |
-| `fence_items` | 收纳箱项目的排序与原始路径（内容以收纳文件夹为准，列举时对账） |
+| `fences` | 桌面收纳箱元数据（标题、收纳文件夹名、物理像素几何、折叠 / 锁定、外观、图标大小、显示隐藏的图标） |
+| `fence_items` | 收纳箱项目的排序、原始路径与隐藏标记（内容以收纳文件夹为准，列举时对账） |
 | `fence_layouts` | 收纳箱按屏幕组合记忆的位置 `(fence_id, screen_config_id)` |
 | `migrations` | 迁移版本记录 |
 
