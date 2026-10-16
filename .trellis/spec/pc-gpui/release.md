@@ -31,7 +31,8 @@
 
 ```
 push v* tag
-  ├─ create-release   校验 tag = v<pc-gpui 版本> → changelog 占位 → gh release create --draft [--prerelease]
+  ├─ create-release   校验 tag = v<pc-gpui 版本> → 发布说明 → gh release create --draft [--prerelease]
+  │                   发布说明：tag 的代码里有 `.github/release-notes/<tag>.md` 就用它，否则按上一个 v* tag 以来的提交生成占位
   │                   （release 已存在则原样沿用：不重建、不改 draft、不覆盖 notes）
   ├─ plan             push = windows + macos + cloud-x86_64 + cloud-aarch64；dispatch = inputs.platforms 点名的
   ├─ build-windows    cargo build --release -p mini-todo --locked → 便携 zip + NSIS 安装包 → gh release upload --clobber
@@ -206,11 +207,11 @@ mini-todo.app/Contents/
   先拖进去再打开（直接在 dmg / 下载文件夹里打开会被 App Translocation 挪到临时路径，开机自启拒绝写入）
 - 放行（二选一）：`xattr -cr /Applications/mini-todo.app`；或先双击一次、点「完成」，到「系统设置 → 隐私与安全性」点「仍要打开」并输入密码
   （按钮只在尝试打开后约一小时内出现）；提示"已损坏"时只能用前者。每次升级都要重新放行
-- 文案草稿见 `.trellis/tasks/10-16-macos-package/release-notes-v3.0.2-pre.md`（归档后在 `archive/` 下）
+- 范例见 `.github/release-notes/v3.0.2-pre.md`（§3：create-release 直接用它作为发布说明）
 
 ## 7. 发版步骤
 
-1. 改 `pc-gpui/Cargo.toml` 版本 → `cargo update --workspace` → 提交
+1. 改 `pc-gpui/Cargo.toml` 版本 → `cargo update --workspace` → 写好 `.github/release-notes/v<ver>.md`（中文，版式照上一版）→ 提交
 2. 推 main，等 `PC (GPUI) CI` 绿（含 macOS 作业）；`Cache warm` 会因 `Cargo.lock` 变化触发，等它跑完发版能命中缓存
 3. `git tag v<ver> && git push origin v<ver>` → `Release` 运行：`gh run list --workflow Release --limit 3`
    （同一 tag 出现多份运行时它们会排队，必要时 `gh run cancel` 多余的）

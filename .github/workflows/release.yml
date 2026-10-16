@@ -90,6 +90,13 @@ jobs:
       - name: Generate changelog
         shell: bash
         run: |
+          # 仓库里有写好的发布说明（.github/release-notes/<tag>.md，随 tag 的代码一起）就直接用，否则按提交生成
+          NOTES_FILE=".github/release-notes/${RELEASE_TAG}.md"
+          if [ -f "$NOTES_FILE" ]; then
+            echo "release notes: $NOTES_FILE"
+            cp "$NOTES_FILE" "$RUNNER_TEMP/release-notes.md"
+            exit 0
+          fi
           # 基线 = 本 tag 父提交上最近的 v* tag。不能按版本号排序取第二个：预发布转正式时
           # v3.0.0-pre 排在 v3.0.0 前面，取到的正是当前 tag 自己，changelog 成了空的
           PREV_TAG=$(git describe --tags --abbrev=0 --match 'v*' "${RELEASE_TAG}^" 2>/dev/null || true)
