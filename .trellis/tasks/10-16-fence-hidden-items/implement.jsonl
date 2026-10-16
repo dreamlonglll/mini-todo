@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "backend spec 索引与开发前检查清单"}
+{"file": ".trellis/spec/backend/desktop-fences.md", "reason": "收纳箱 code-spec：FenceEntry、fence_items/fences 表、对账规则、upsert、跨箱、删除计数、测试清单（本任务主改动区）"}
+{"file": ".trellis/spec/backend/sync-protocol.md", "reason": "§3.6 收纳箱表是设备本地数据，新增列不接 local_seq / 墓碑、不进导出与同步"}
+{"file": ".trellis/spec/pc-gpui/index.md", "reason": "pc-gpui spec 索引"}
+{"file": ".trellis/spec/pc-gpui/gpui-conventions.md", "reason": "GPUI 约定：后台执行 spawn_db、theme token 唯一来源、ui/ 控件复用（EpDropdownItem 加能力用 builder）"}
+{"file": ".trellis/spec/pc-gpui/data-compat.md", "reason": "迁移 v30 对旧版本 / 回退的兼容规则"}
+{"file": ".trellis/spec/pc-gpui/verification.md", "reason": "验证门槛：fmt / clippy / test 命令与 Windows 目标检查"}

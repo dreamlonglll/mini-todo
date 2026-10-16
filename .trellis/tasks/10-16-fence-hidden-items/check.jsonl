@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/backend/desktop-fences.md", "reason": "核对收纳箱契约：对账在锁内、upsert、跨箱、删除计数、线程约束，以及 spec 是否随本任务更新"}
+{"file": ".trellis/spec/backend/sync-protocol.md", "reason": "核对新增列仍是设备本地数据（不计 local_seq、不导出不同步）"}
+{"file": ".trellis/spec/pc-gpui/gpui-conventions.md", "reason": "核对 GPUI 约定：后台执行、theme token、控件复用、App 借用期间不调 Win32"}
+{"file": ".trellis/spec/pc-gpui/data-compat.md", "reason": "核对迁移 v30 的向后兼容"}
+{"file": ".trellis/spec/pc-gpui/verification.md", "reason": "验证门槛命令"}
