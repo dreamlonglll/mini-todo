@@ -1,13 +1,17 @@
 name: PC (GPUI) e2e (macOS)
 
-# macOS 专属代码的编译门 + 冒烟 e2e，跑在 GitHub 托管的 macOS runner 上（arm64，Apple Paravirtual GPU / Metal；
+# macOS 专属代码的编译门 + e2e，跑在 GitHub 托管的 macOS runner 上（arm64，Apple Paravirtual GPU / Metal；
 # 已登录的图形会话，bash / osascript / runner agent 预授权屏幕录制与辅助功能）。没有 Mac 真机时这是 mac 代码唯一的反馈回路：
-# Linux / Windows 上编不了 mac 目标（GPUI 的 mac 平台层与 bundled sqlite / mac-notification-sys 的 C / ObjC 编译都要 Apple SDK）。
+# Linux / Windows 上编不了 mac 目标（GPUI 的 mac 平台层与 bundled sqlite 等 C / ObjC 编译都要 Apple SDK）。
 # - checks：clippy（-D warnings）+ cargo test（clippy 失败也照样跑测试，一轮 CI 拿到尽量多的信息）
-# - smoke：debug 构建 → scripts/macos/bundle.sh 包成 .app（bundle id 才有效）→ scripts/e2e-macos/run_e2e.py
-#   （窗口出现、截图有内容、OCR 认出界面文字、退出；用例与本地复现见 pc-gpui/scripts/e2e-macos/README.md）
-# 每个用例的 PASS / FAIL、窗口列表、OCR 文字、应用日志尾部都打印在日志里（汇总表也写进 Job Summary）；
-# 失败详情与关键截图另以注解输出（产物下载链接不可达时用 check-runs annotations API 取回），截图 / 日志作为产物上传。
+# - smoke：debug 构建 → scripts/macos/bundle.sh 包成 .app（bundle id 才有效）→ run_e2e.py --suite smoke（M 组：窗口、OCR、
+#   App 菜单、菜单栏图标、⌘Q / ⌘W / Dock 唤起、新建待办落库、固定模式；每个用例隔离数据目录）
+# - release-smoke：release 构建 → .app → run_e2e.py --suite release（P 组：不隔离，真实数据目录 / 日志 / 单实例 socket /
+#   LaunchAgent；一次性 VM 上才能这么跑）
+# 开跑前尝试把显示器调到 1920×1080（scripts/e2e-macos/set_display.py，失败不致命；尺寸断言按"期望与屏幕可见区域取小"）。
+# 用例与本地复现见 pc-gpui/scripts/e2e-macos/README.md。每个用例的 PASS / FAIL、窗口列表、OCR 文字、AX 菜单、应用日志尾部
+# 都打印在日志里（汇总表也写进 Job Summary）；失败详情与关键截图另以注解输出（产物下载不可达时用 check-runs annotations API
+# 取回），截图 / 日志作为产物上传。
 on:
   workflow_dispatch:
   push:
@@ -27,6 +31,9 @@ env:
   PYTHONUTF8: '1'
   PYTHONIOENCODING: utf-8
   CARGO_TERM_COLOR: never
+  HOMEBREW_NO_AUTO_UPDATE: '1'
+  HOMEBREW_NO_INSTALL_CLEANUP: '1'
+  HOMEBREW_NO_ENV_HINTS: '1'
 
 jobs:
   checks:
@@ -61,7 +68,7 @@ jobs:
   smoke:
     name: smoke e2e (debug .app)
     runs-on: macos-15
-    timeout-minutes: 75
+    timeout-minutes: 90
     defaults:
       run:
         working-directory: pc-gpui
@@ -97,9 +104,15 @@ jobs:
       - name: Bundle .app (debug, host arch)
         run: |
           bash scripts/macos/bundle.sh target/debug/mini-todo - "$RUNNER_TEMP/bundle"
-          # 登记到 LaunchServices：`tell application id "com.tauri-app.mini-todo"` 按 bundle id 找得到
+          # 登记到 LaunchServices：`tell application id "com.tauri-app.mini-todo"` 与 `open <app>`（M08 Dock 唤起）认得它
           /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
             -f "$RUNNER_TEMP/bundle/mini-todo.app" || echo "::warning::lsregister 失败（不影响测试）"
+
+      - name: Enlarge display (best effort)
+        continue-on-error: true
+        run: |
+          brew install displayplacer || echo "brew install displayplacer 失败"
+          python3 scripts/e2e-macos/set_display.py
 
       - name: Environment
         continue-on-error: true
@@ -115,14 +128,17 @@ jobs:
           sqlite3 "$HOME/Library/Application Support/com.apple.TCC/TCC.db" \
             "select service, client, auth_value from access" || true
 
+      # --strict-traffic-lights：红绿灯没隐藏时 M01 判失败（第二轮起应已隐藏；主会话看结果决定是否保留）
       - name: Run e2e (smoke)
         run: >
           python3 -u scripts/e2e-macos/run_e2e.py
+          --suite smoke
           --app "$RUNNER_TEMP/bundle/mini-todo.app"
           --seed target/debug/examples/seed
           --out "$RUNNER_TEMP/e2e-out"
           --work "$RUNNER_TEMP/e2e-work"
           --wallpaper 1F6F8B
+          --strict-traffic-lights
 
       # 产物 / 日志下载链接在某些环境下不可达：失败详情与关键截图另以注解输出（check-runs annotations API 可取回）。
       # 一个 job 最多 50 条注解：失败 ≤ 11 条，截图分片两步各 ≤ 15 条
@@ -143,5 +159,89 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pc-gpui-e2e-macos
+          path: ${{ runner.temp }}/e2e-out
+          if-no-files-found: warn
+
+  release-smoke:
+    name: release .app smoke (real profile)
+    runs-on: macos-15
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: pc-gpui
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './pc-gpui -> target'
+          cache-on-failure: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies
+        run: >
+          python3 -m pip install --disable-pip-version-check -q
+          pyobjc-framework-Quartz pyobjc-framework-Vision pyobjc-framework-ApplicationServices pillow
+
+      # host（arm64）单架构即可：universal 的 lipo / 签名由 pc-gpui-ci.yml 与 release.yml 覆盖
+      - name: Build app (release)
+        run: cargo build --release -p mini-todo --locked
+
+      - name: Bundle .app (release, host arch)
+        run: |
+          bash scripts/macos/bundle.sh target/release/mini-todo - "$RUNNER_TEMP/release-bundle"
+          /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+            -f "$RUNNER_TEMP/release-bundle/mini-todo.app" || echo "::warning::lsregister 失败（不影响测试）"
+
+      - name: Enlarge display (best effort)
+        continue-on-error: true
+        run: |
+          brew install displayplacer || echo "brew install displayplacer 失败"
+          python3 scripts/e2e-macos/set_display.py
+
+      # 一次性 VM：P 组不隔离，读写 ~/Library/Application Support/mini-todo、~/Library/Logs/com.tauri-app.mini-todo、
+      # /tmp/com_tauri_app_mini_todo_si.sock、~/Library/LaunchAgents/mini-todo.plist（release 构建忽略 MINI_TODO_* 开关）
+      - name: Run e2e (release)
+        run: >
+          python3 -u scripts/e2e-macos/run_e2e.py
+          --suite release
+          --allow-real-profile
+          --app "$RUNNER_TEMP/release-bundle/mini-todo.app"
+          --out "$RUNNER_TEMP/e2e-out"
+          --work "$RUNNER_TEMP/e2e-work"
+          --wallpaper 1F6F8B
+
+      - name: Report failures as annotations
+        if: always()
+        run: python3 scripts/e2e-windows/emit_annotations.py failures "$RUNNER_TEMP/e2e-out"
+
+      - name: Emit screenshots as annotations
+        if: always()
+        run: python3 scripts/e2e-windows/emit_annotations.py images "$RUNNER_TEMP/e2e-out" --skip 0 --max 15
+
+      - name: Collect real-profile files
+        if: always()
+        run: |
+          out="$RUNNER_TEMP/e2e-out/real-profile"
+          mkdir -p "$out"
+          cp -R "$HOME/Library/Logs/com.tauri-app.mini-todo" "$out/logs" 2>/dev/null || true
+          ls -la "$HOME/Library/Application Support/mini-todo" > "$out/data-dir.txt" 2>&1 || true
+          ls -la "$HOME/Library/LaunchAgents" > "$out/launch-agents.txt" 2>&1 || true
+          ls -la /tmp/com_tauri_app_mini_todo_si.sock > "$out/socket.txt" 2>&1 || true
+
+      - name: Upload e2e output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pc-gpui-e2e-macos-release
           path: ${{ runner.temp }}/e2e-out
           if-no-files-found: warn

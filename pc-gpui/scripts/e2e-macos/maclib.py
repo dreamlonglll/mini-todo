@@ -182,6 +182,45 @@ def main_display_points() -> tuple[float, float]:
         return (0.0, 0.0)
 
 
+@dataclass
+class ScreenInfo:
+    w: float          # 主屏 frame（逻辑点）
+    h: float
+    vis_x: float      # visibleFrame（去掉菜单栏与 Dock），换算成左上原点
+    vis_y: float
+    vis_w: float
+    vis_h: float
+    scale: float
+
+    def describe(self) -> str:
+        return (f"主屏 {self.w:.0f}×{self.h:.0f}pt @{self.scale:g}x，可见区域 ({self.vis_x:.0f},{self.vis_y:.0f}) "
+                f"{self.vis_w:.0f}×{self.vis_h:.0f}pt")
+
+
+def screen_info() -> ScreenInfo:
+    """主屏尺寸与可见区域（NSScreen；AppKit 不可用时用 CGDisplayBounds 粗估：菜单栏 25pt）"""
+    if AppKit is not None:
+        try:
+            s = AppKit.NSScreen.mainScreen() or AppKit.NSScreen.screens()[0]
+            f, v = s.frame(), s.visibleFrame()
+            # AppKit 坐标左下为原点：可见区域顶边 = 屏高 - (v.y + v.h)
+            return ScreenInfo(float(f.size.width), float(f.size.height), float(v.origin.x),
+                              float(f.size.height - v.origin.y - v.size.height),
+                              float(v.size.width), float(v.size.height), float(s.backingScaleFactor()))
+        except Exception as e:  # noqa: BLE001
+            print(f"  (NSScreen 读取失败: {e})")
+    w, h = main_display_points()
+    return ScreenInfo(w, h, 0, 25, w, max(0.0, h - 25), 1.0)
+
+
+def expected_size(spec: tuple[float, float], screen: ScreenInfo | None = None) -> tuple[float, float]:
+    """建窗尺寸与屏幕可见区域取小：AppKit 会把放不下的窗口夹到屏幕内（1024×768 的 runner 上 1080 宽的窗口变成 1024）"""
+    s = screen or screen_info()
+    if s.vis_w <= 0 or s.vis_h <= 0:
+        return spec
+    return (min(spec[0], s.vis_w), min(spec[1], s.vis_h))
+
+
 def screen_capture_preflight() -> str:
     if Quartz is None:
         return "未知（Quartz 不可用）"
@@ -477,48 +516,379 @@ def traffic_light_pixels(img: Image.Image, scale: float) -> dict:
     return counts
 
 
-# ----------------------------------------------------------------------------- 键盘（CGEvent）
+# ----------------------------------------------------------------------------- 键盘与鼠标（CGEvent）
+#
+# 坐标一律是全局逻辑点、主屏左上为原点（与 CGWindowList 的 kCGWindowBounds 相同）。CGEventPost(kCGHIDEventTap) 等同真实输入：
+# 发给光标下 / 前台的应用，所以键盘事件发之前先 bring_to_front() 并确认前台进程是被测应用。
 
-KEY_Q = 12  # kVK_ANSI_Q
+KEY_Q, KEY_W, KEY_A, KEY_V = 12, 13, 0, 9      # kVK_ANSI_*
+KEY_RETURN, KEY_ESCAPE = 36, 53
+
+
+def _quartz() -> object:
+    if Quartz is None:
+        raise AssertionError(f"pyobjc Quartz 不可用：{QUARTZ_ERR!r}")
+    return Quartz
+
+
+def cmd_flag() -> int:
+    return int(_quartz().kCGEventFlagMaskCommand)
+
+
+def _src():
+    Q = _quartz()
+    return Q.CGEventSourceCreate(Q.kCGEventSourceStateHIDSystemState)
 
 
 def post_key_to_pid(pid: int, keycode: int, flags: int) -> str:
     """按下 + 抬起一个键，直接投递到该进程（CGEventPostToPid：不经前台应用，不会误按到别的程序上）"""
-    if Quartz is None:
-        raise AssertionError(f"pyobjc Quartz 不可用：{QUARTZ_ERR!r}")
-    post = getattr(Quartz, "CGEventPostToPid", None)
+    Q = _quartz()
+    post = getattr(Q, "CGEventPostToPid", None)
     if post is None:
         raise AssertionError("pyobjc 没有 CGEventPostToPid")
-    src = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
+    src = _src()
     for down in (True, False):
-        ev = Quartz.CGEventCreateKeyboardEvent(src, keycode, down)
-        Quartz.CGEventSetFlags(ev, flags)
+        ev = Q.CGEventCreateKeyboardEvent(src, keycode, down)
+        Q.CGEventSetFlags(ev, flags)
         post(pid, ev)
         time.sleep(0.05)
     return "CGEventPostToPid"
 
 
-def post_key_hid(keycode: int, flags: int) -> str:
+def post_key_hid(keycode: int, flags: int = 0) -> str:
     """按下 + 抬起一个键，投递到系统输入流（发给前台应用；调用前先确认前台是目标进程）"""
-    src = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
+    Q = _quartz()
+    src = _src()
     for down in (True, False):
-        ev = Quartz.CGEventCreateKeyboardEvent(src, keycode, down)
-        Quartz.CGEventSetFlags(ev, flags)
-        Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+        ev = Q.CGEventCreateKeyboardEvent(src, keycode, down)
+        Q.CGEventSetFlags(ev, flags)
+        Q.CGEventPost(Q.kCGHIDEventTap, ev)
         time.sleep(0.05)
     return "CGEventPost(HID)"
 
 
+def type_text(text: str, delay: float = 0.04) -> None:
+    """逐字符输入（CGEventKeyboardSetUnicodeString，不经输入法；GPUI 按事件自带的字符 insertText）"""
+    Q = _quartz()
+    src = _src()
+    for ch in text:
+        n = len(ch.encode("utf-16-le")) // 2
+        for down in (True, False):
+            ev = Q.CGEventCreateKeyboardEvent(src, 0, down)
+            Q.CGEventKeyboardSetUnicodeString(ev, n, ch)
+            Q.CGEventPost(Q.kCGHIDEventTap, ev)
+            time.sleep(0.01)
+        time.sleep(delay)
+
+
+def set_clipboard(text: str) -> None:
+    subprocess.run(["pbcopy"], input=text.encode("utf-8"), timeout=10, check=True)
+
+
+def _mouse(kind: str, x: float, y: float, button: str = "left", clicks: int = 1) -> None:
+    Q = _quartz()
+    types = {
+        ("move", "left"): Q.kCGEventMouseMoved,
+        ("down", "left"): Q.kCGEventLeftMouseDown, ("up", "left"): Q.kCGEventLeftMouseUp,
+        ("drag", "left"): Q.kCGEventLeftMouseDragged,
+        ("down", "right"): Q.kCGEventRightMouseDown, ("up", "right"): Q.kCGEventRightMouseUp,
+    }
+    btn = Q.kCGMouseButtonRight if button == "right" else Q.kCGMouseButtonLeft
+    ev = Q.CGEventCreateMouseEvent(_src(), types[(kind, "left" if kind == "move" else button)], (x, y), btn)
+    if kind in ("down", "up"):
+        Q.CGEventSetIntegerValueField(ev, Q.kCGMouseEventClickState, clicks)
+    Q.CGEventPost(Q.kCGHIDEventTap, ev)
+
+
+def click(x: float, y: float, button: str = "left") -> None:
+    print(f"    click({button}) @ ({x:.0f},{y:.0f})")
+    _mouse("move", x, y)
+    time.sleep(0.15)
+    _mouse("down", x, y, button)
+    time.sleep(0.08)
+    _mouse("up", x, y, button)
+    time.sleep(0.2)
+
+
+def drag(x0: float, y0: float, x1: float, y1: float, steps: int = 15) -> None:
+    """左键按下 → 分步拖动 → 抬起（标题栏拖窗口用）"""
+    print(f"    drag ({x0:.0f},{y0:.0f}) → ({x1:.0f},{y1:.0f})")
+    _mouse("move", x0, y0)
+    time.sleep(0.2)
+    _mouse("down", x0, y0)
+    time.sleep(0.25)
+    for i in range(1, steps + 1):
+        _mouse("drag", x0 + (x1 - x0) * i / steps, y0 + (y1 - y0) * i / steps)
+        time.sleep(0.03)
+    time.sleep(0.15)
+    _mouse("up", x1, y1)
+    time.sleep(0.5)
+
+
+def park_cursor() -> None:
+    """光标挪到屏幕右下角（离开被测窗口，避免悬停效果影响截图 / OCR）"""
+    s = screen_info()
+    try:
+        _mouse("move", max(1, s.w - 3), max(1, s.h - 3))
+    except Exception as e:  # noqa: BLE001
+        print(f"  (park_cursor 失败: {e})")
+
+
+# ----------------------------------------------------------------------------- 前台应用
+
+def _spin_runloop(seconds: float = 0.1) -> None:
+    """NSWorkspace 的属性靠通知更新：命令行进程里先转一下 run loop，读到的才是最新值"""
+    try:
+        from Foundation import NSDate, NSRunLoop  # type: ignore
+        NSRunLoop.currentRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(seconds))
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def frontmost_pid() -> int | None:
+    """前台应用的 pid：优先 AX（系统级 AXFocusedApplication，实时），其次 NSWorkspace"""
+    if AS is not None:
+        try:
+            sysw = AS.AXUIElementCreateSystemWide()
+            el, err = _ax(sysw, "AXFocusedApplication")
+            if el is not None:
+                r = AS.AXUIElementGetPid(el, None)
+                pid = r[1] if isinstance(r, tuple) else r
+                if pid:
+                    return int(pid)
+        except Exception:  # noqa: BLE001
+            pass
     if AppKit is None:
         return None
+    _spin_runloop()
     app = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
     return int(app.processIdentifier()) if app is not None else None
+
+
+def describe_pid(pid: int | None) -> str:
+    if pid is None:
+        return "未知"
+    if AppKit is not None:
+        try:
+            ra = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+            if ra is not None:
+                return f"pid={pid} {ra.localizedName()!s} ({ra.bundleIdentifier()!s})"
+        except Exception:  # noqa: BLE001
+            pass
+    return f"pid={pid}"
+
+
+def activate_other(app_name: str = "Finder") -> int | None:
+    """把别的应用切到前台（测"被唤起"之前先让被测应用失去前台）；返回切换后的前台 pid"""
+    r = run(["osascript", "-e", f'tell application "{app_name}" to activate'], timeout=15)
+    if r.returncode != 0:
+        print(f"    activate {app_name}: rc={r.returncode} {(r.stdout + r.stderr).strip()!r}")
+    time.sleep(1.0)
+    pid = frontmost_pid()
+    print(f"    已切到 {app_name}，前台：{describe_pid(pid)}")
+    return pid
+
+
+# ----------------------------------------------------------------------------- AX：菜单与窗口
+
+def ax_title(el) -> str:
+    if el is None:
+        return ""
+    v, _ = _ax(el, "AXTitle")
+    return str(v) if v is not None else ""
+
+
+def ax_role(el) -> str:
+    v, _ = _ax(el, "AXRole")
+    return str(v) if v is not None else ""
+
+
+def ax_children(el) -> list:
+    v, _ = _ax(el, "AXChildren")
+    return list(v) if v is not None else []
+
+
+def ax_press(el, timeout: float = 3.0) -> int:
+    """AXPress；返回 AX 错误码（0 成功；-25204 CannotComplete = 应用没在超时内回复，弹出菜单时常见，动作照样执行）"""
+    if AS is None:
+        raise AssertionError(f"ApplicationServices 不可用：{AX_ERR!r}")
+    try:
+        AS.AXUIElementSetMessagingTimeout(el, float(timeout))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        return int(AS.AXUIElementPerformAction(el, "AXPress"))
+    except Exception as e:  # noqa: BLE001
+        print(f"    AXPress 异常：{e}")
+        return -1
+
+
+@dataclass
+class AxMenuItem:
+    title: str
+    enabled: bool | None
+    mark: str | None      # AXMenuItemMarkChar：勾选时是 ✓
+    el: object
+
+    def describe(self) -> str:
+        return f"{self.title or '—'}{' [' + self.mark + ']' if self.mark else ''}{'' if self.enabled is not False else ' (禁用)'}"
+
+
+def _menu_items_of(parent) -> list[AxMenuItem]:
+    """parent（AXMenuBarItem）的子菜单（AXMenu）里的菜单项"""
+    out: list[AxMenuItem] = []
+    for ch in ax_children(parent):
+        if ax_role(ch) != "AXMenu":
+            continue
+        for it in ax_children(ch):
+            enabled, _ = _ax(it, "AXEnabled")
+            mark, _ = _ax(it, "AXMenuItemMarkChar")
+            out.append(AxMenuItem(ax_title(it), None if enabled is None else bool(enabled),
+                                  str(mark) if mark else None, it))
+    return out
+
+
+def app_menus(pid: int) -> list[tuple[str, list[AxMenuItem]]]:
+    """菜单栏 1（应用菜单栏）：[(顶层菜单标题, 子项)]。主菜单不用展开，AX 就能读到子项"""
+    if AS is None:
+        raise AssertionError(f"ApplicationServices 不可用：{AX_ERR!r}")
+    app = AS.AXUIElementCreateApplication(pid)
+    bar, err = _ax(app, "AXMenuBar")
+    if bar is None:
+        raise AssertionError(f"读不到 AXMenuBar（{err}；-25211 = 没有辅助功能权限）")
+    return [(ax_title(top), _menu_items_of(top)) for top in ax_children(bar)]
+
+
+def status_item(pid: int):
+    """本进程的菜单栏状态项（AXExtrasMenuBar 的第一个子元素）；没有时 None"""
+    if AS is None:
+        return None
+    app = AS.AXUIElementCreateApplication(pid)
+    extras, _ = _ax(app, "AXExtrasMenuBar")
+    kids = ax_children(extras) if extras is not None else []
+    return kids[0] if kids else None
+
+
+def ax_frame(el) -> tuple[float, float, float, float] | None:
+    pos = _ax_xy(_ax(el, "AXPosition")[0], "point")
+    size = _ax_xy(_ax(el, "AXSize")[0], "size")
+    if pos and size:
+        return (pos[0], pos[1], size[0], size[1])
+    return None
+
+
+def open_status_menu(pid: int, timeout: float = 6) -> tuple[object, list[AxMenuItem], str]:
+    """打开菜单栏图标的菜单并读出菜单项：先 AXPress（NSStatusItem 设了 menu，AppKit 会弹出它），读不到再真实右键点状态项
+    （tray-icon 的视图只在右键按下时弹菜单）。返回 (状态项, 菜单项, 打开方式)；打不开时 AssertionError"""
+    item = status_item(pid)
+    if item is None:
+        raise AssertionError("AX 找不到本进程的菜单栏状态项（AXExtrasMenuBar 为空）")
+    frame = ax_frame(item)
+    print(f"    状态项 AX frame={frame} title={ax_title(item)!r}")
+    err = ax_press(item, 1.5)
+    print(f"    AXPress(状态项) → {err}")
+    try:
+        items = wait_until(lambda: _menu_items_of(item), 3, "状态项菜单（AXPress 后）")
+        return item, items, f"AXPress({err})"
+    except Timeout:
+        pass
+    if frame is None:
+        win = next((w for w in windows_of(pid, layer=None) if w.layer == 25), None)
+        if win is None:
+            raise AssertionError("AXPress 没打开菜单，且读不到状态项的位置（AX frame 与 layer 25 窗口都没有）")
+        frame = (win.x, win.y, win.w, win.h)
+    cx, cy = frame[0] + frame[2] / 2, frame[1] + frame[3] / 2
+    click(cx, cy, "right")
+    items = wait_until(lambda: _menu_items_of(item), timeout, "状态项菜单（右键后）")
+    return item, items, "右键"
+
+
+def close_open_menu(item) -> None:
+    """关掉还开着的状态项菜单（AXCancel，不行再按 Esc）"""
+    for ch in ax_children(item):
+        if ax_role(ch) == "AXMenu":
+            try:
+                AS.AXUIElementPerformAction(ch, "AXCancel")
+            except Exception:  # noqa: BLE001
+                pass
+    time.sleep(0.3)
+    if _menu_items_of(item):
+        post_key_hid(KEY_ESCAPE)
+        time.sleep(0.3)
+
+
+def press_status_menu_item(pid: int, title: str) -> list[AxMenuItem]:
+    """打开状态项菜单 → AXPress 标题为 title 的项；返回按之前读到的菜单项（打印）"""
+    item, items, how = open_status_menu(pid)
+    print(f"    状态项菜单（{how}）：{[i.describe() for i in items]}")
+    target = next((i for i in items if i.title == title), None)
+    if target is None:
+        close_open_menu(item)
+        raise AssertionError(f"状态项菜单里没有「{title}」：{[i.title for i in items]}")
+    err = ax_press(target.el, 3.0)
+    print(f"    AXPress(「{title}」) → {err}")
+    time.sleep(0.5)
+    return items
+
+
+def ax_window(pid: int, title: str | None = None, size: tuple[float, float] | None = None):
+    """本进程的 AX 窗口元素：按标题，其次按尺寸（±40）"""
+    if AS is None:
+        return None
+    app = AS.AXUIElementCreateApplication(pid)
+    wins, _ = _ax(app, "AXWindows")
+    cands = list(wins or [])
+    if title:
+        for w in cands:
+            if ax_title(w) == title:
+                return w
+    if size:
+        for w in cands:
+            f = ax_frame(w)
+            if f and abs(f[2] - size[0]) <= 40 and abs(f[3] - size[1]) <= 40:
+                return w
+    return cands[0] if len(cands) == 1 else None
+
+
+def ax_settable(el, attr: str) -> bool | None:
+    try:
+        r = AS.AXUIElementIsAttributeSettable(el, attr, None)
+        err, val = (r if isinstance(r, tuple) else (0, r))
+        return bool(val) if err == 0 else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def ax_set_xy(el, attr: str, a: float, b: float) -> str:
+    """设置 AXPosition / AXSize；返回结果描述（AX 失败时退回 System Events）"""
+    try:
+        Q = _quartz()
+        if attr == "AXPosition":
+            val = AS.AXValueCreate(AS.kAXValueCGPointType, Q.CGPointMake(a, b))
+        else:
+            val = AS.AXValueCreate(AS.kAXValueCGSizeType, Q.CGSizeMake(a, b))
+        err = AS.AXUIElementSetAttributeValue(el, attr, val)
+        return f"AX err={err}"
+    except Exception as e:  # noqa: BLE001
+        return f"AX 异常 {e}"
+
+
+def system_events_set(pid: int, prop: str, a: float, b: float) -> str:
+    """System Events 设置窗口 position / size（AX 设置失败时的备选）"""
+    script = (f'tell application "System Events" to set {prop} of window 1 of '
+              f'(first process whose unix id is {pid}) to {{{a:.0f}, {b:.0f}}}')
+    try:
+        r = run(["osascript", "-e", script], timeout=15)
+        return f"System Events rc={r.returncode} {(r.stdout + r.stderr).strip()[:200]!r}"
+    except subprocess.TimeoutExpired:
+        return "System Events 超时"
 
 
 # ----------------------------------------------------------------------------- 应用进程
 
 ALL_PROCS: list[subprocess.Popen] = []
+# 跨用例共用、用例结束时不要结束的进程（release 组 P01~P04 共用一个实例）；最终清理时照样结束
+KEEP_PIDS: set[int] = set()
 
 
 def _killpg(p: subprocess.Popen, sig: int) -> None:
@@ -533,8 +903,10 @@ def _killpg(p: subprocess.Popen, sig: int) -> None:
             pass
 
 
-def kill_all_procs() -> None:
+def kill_all_procs(include_kept: bool = True) -> None:
     for p in ALL_PROCS:
+        if not include_kept and p.pid in KEEP_PIDS:
+            continue
         if p.poll() is None:
             _killpg(p, signal.SIGKILL)
             try:
@@ -839,7 +1211,7 @@ class Report:
                 self.snapshot()
             # 本用例启动的进程一律结束（用例自己的 finally 被超时打断时兜底）
             for p in ALL_PROCS[procs_before:]:
-                if p.poll() is None:
+                if p.poll() is None and p.pid not in KEEP_PIDS:
                     print(f"    (兜底结束残留进程 pid={p.pid})")
                     _killpg(p, signal.SIGKILL)
                     try:
