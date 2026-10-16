@@ -9,7 +9,7 @@ PC 端（`pc-gpui/`，GPUI 版，3.0 起是唯一的 PC 实现）的业务核心
   或独立线程调用，再把结果交回前台。`sync::run`、`holiday::fetch`、`sync::test_connection` 用的是
   `reqwest::blocking`，**不能**在 tokio runtime 上下文里调用。
 - 错误类型沿用旧代码的 `String`（面向用户的中文提示），与旧版前端看到的文案一致。
-- 数据完全兼容旧版：同一数据目录（`db::paths`）、同一迁移（v1~v29）、同一同步文档（sync-data.json.gz）、
+- 数据完全兼容旧版：同一数据目录（`db::paths`）、同一迁移（v1~v29；v30 起为 GPUI 版新增，只加带默认值的收纳箱列）、同一同步文档（sync-data.json.gz）、
   同一导出格式（4.0）、同一 settings 键。
 
 ## 目录
@@ -94,7 +94,7 @@ Windows 专属测试（`fence_fs` 的 shell / sta / 真实图标提取 / Windows
 
 | 项 | 说明 |
 |---|---|
-| `Database::new() -> Result<Database, String>` | 打开 `paths::db_path()`；有待执行迁移时先 `VACUUM INTO` 备份；迁移 v1~v29 |
+| `Database::new() -> Result<Database, String>` | 打开 `paths::db_path()`；有待执行迁移时先 `VACUUM INTO` 备份；迁移 v1~v30 |
 | `Database::open(path: &Path) -> Result<Database, String>` | 打开指定库（同上） |
 | `Database::with_connection(f)` / `with_transaction(f)` | 持锁执行；事务为 `BEGIN IMMEDIATE`，`Err` / panic 回滚 |
 | `Database::new_in_memory()` | 测试用（`cfg(test)` 或 feature `test-util`） |
@@ -267,7 +267,7 @@ DWM 圆角（`lib.rs` L55）、`MessageBoxW` 致命错误（`lib.rs` L139）；�
 | `FENCE_TITLE_BAR_DIP`（32）、`MIN_WIDTH_DIP` / `MIN_EXPANDED_HEIGHT_DIP`（160）、`CELL_*`、`MIN_ICON_SIZE` / `MAX_ICON_SIZE`（24~128）、`MAX_TITLE_CHARS`（40）、`FALLBACK_WORK_AREA` 等 | 常量 | |
 | `Placement::for_screen(db, screen_id)`、`.rect(&Fence)`、`.screen_id` | 该组合下的存储几何：组合记录 → 本次运行临时几何 → 最近一次位置 | `Placement` |
 | `list(db) -> R<Vec<Fence>>` / `get(db, id) -> R<Fence>` | | `list_fences` / `get_fence` |
-| `update(db, id, &UpdateFenceRequest) -> R<Fence>` | 折叠 / 锁定 / 背景色（`#RRGGBB` 大写）/ 透明度（0~1）/ 图标大小（24~128）；只写库 | `update_fence` |
+| `update(db, id, &UpdateFenceRequest) -> R<Fence>` | 折叠 / 锁定 / 背景色（`#RRGGBB` 大写）/ 透明度（0~1）/ 图标大小（24~128）/「显示隐藏的图标」（`show_hidden`，v30）；只写库 | `update_fence` |
 | `rename(db, id, title) -> R<RenameFenceResult { fence, folder_error }>` | 改标题 + 改收纳文件夹（失败保留旧名并给原因）；app 随后改窗口标题 | `rename_fence` |
 | `create(db, work, scale, screen_id) -> R<Fence>` | 光标所在显示器工作区内右上角起找空位、默认标题、先建文件夹再插库、记组合位置；`Fence` 的 x/y/w/h 即存储几何。app：隐藏中先全部显示 → 建窗 → 失败 `rollback_create(db, &fence)` → 成功后确保监听 | `create_fence` / 托盘「新增收纳箱」（`create_fence_at_cursor`） |
 | `rollback_create(db, &Fence)` | 删记录 + 删空文件夹 | |
@@ -286,16 +286,17 @@ app 层负责（`crates/app/src/services/fences.rs`、`windows/fence/`；行号�
 
 | 项 | 说明 | 旧命令 |
 |---|---|---|
-| `FenceEntry`、`ItemOpResult`、`ItemOpStatus`（re-export 自 `services::fence_fs`） | 项目 / 逐项结果 | |
-| `FenceRefresh { fence_id, items }` | 对账后的完整列表，交给对应窗口 | `fence-items-changed` |
+| `FenceEntry`、`ItemOpResult`、`ItemOpStatus`、`is_auto_hidden_name`（re-export 自 `services::fence_fs`） | 项目 / 逐项结果；`FenceEntry.hidden`（用户隐藏，来自 `fence_items.hidden`）/ `auto_hidden`（以 `.` 开头）/ `is_hidden()` | |
+| `FenceRefresh { fence_id, items }` | 对账后的完整列表（含隐藏项，app 按 `Fence.show_hidden` 过滤显示），交给对应窗口 | `fence-items-changed` |
 | `get_items(db, id) -> R<Vec<FenceEntry>>` | 按文件夹对账后返回；不存在或删除中报错 | `get_fence_items` |
 | `reconcile(db, id) -> R<Option<Vec<FenceEntry>>>` / `refresh(db, id) -> Option<FenceRefresh>` | 对账（数据库锁内列举文件夹；删除中返回 `None`） | `reconcile_fence` / `reconcile_and_notify` |
 | `move_in(db, id, &[String], owner_hwnd) -> R<(FenceMoveInResult { results, onedrive_notice }, Vec<FenceRefresh>)>` | 拖入（文件 / 快捷方式 / 文件夹）；跨箱来源搬运原始路径并返回来源箱刷新；`onedrive_notice` 只会为 true 一次。**后台线程** | `fence_move_in` |
 | `restore(db, id, file_name, owner_hwnd) -> R<ItemOpResult>` | 移回原目录（不存在则桌面），重名改名。**后台线程** | `fence_restore_item` |
-| `move_to(db, id, file_name, target_id, owner_hwnd) -> R<(ItemOpResult, Option<FenceRefresh>)>` | 跨箱移动，返回目标箱刷新。**后台线程** | `fence_move_item` |
+| `move_to(db, id, file_name, target_id, owner_hwnd) -> R<(ItemOpResult, Option<FenceRefresh>)>` | 跨箱移动（搬运原始路径、不搬运隐藏标记），返回目标箱刷新。**后台线程** | `fence_move_item` |
 | `open(db, id, file_name) -> R<()>` / `reveal(db, id, file_name) -> R<()>` | `ShellExecuteExW` / 资源管理器定位（非 Windows 报"仅支持 Windows"） | `fence_open_item` / `fence_reveal_item` |
 | `icon(db, id, file_name, size_px) -> R<PathBuf>` | 图标 PNG 缓存路径（档位向上取整，`fence-icons/`），GPUI 用 `img(path)` | `fence_item_icon` |
-| `reorder(db, id, &[String]) -> R<()>` | 箱内排序 | `reorder_fence_items` |
+| `reorder(db, id, &[String]) -> R<()>` | 箱内排序（完整顺序，含隐藏项） | `reorder_fence_items` |
+| `set_hidden(db, id, file_name, hidden) -> R<FenceRefresh>` | 右键「隐藏」/「取消隐藏」（v30）：数据库锁内先对账再写 `fence_items.hidden`（文件名不区分大小写），返回最新完整列表；不改文件属性；删除中 / 不存在 / 找不到该项报错 | （GPUI 版新增） |
 | `watch(Arc<Database>, impl Fn(FenceRefresh) + Send + 'static) -> R<FenceWatcher>` | 监听收纳根目录（300ms 去抖），回调在 `fence-watch` 线程，经 channel 回前台；app 持有句柄（drop 即停）；首个收纳箱出现后再开 | `ensure_fence_watcher` / `on_fence_change` |
 | `spawn_startup_reconcile(Arc<Database>)` | 启动对账 + 20s 后清理图标缓存（独立线程） | 同名 |
 | `ONEDRIVE_NOTICE_KEY` | 设备本地 settings 键（不同步、不导出） | |
@@ -306,7 +307,7 @@ app 层负责（`crates/app/src/services/fences.rs`、`windows/fence/`；行号�
 |---|---|
 | `services::webdav` | `WebDavClient`（blocking；条件 GET/PUT、PROPFIND、MKCOL）——同步引擎内部使用 |
 | `services::secret` | `protect` / `reveal` / `is_protected`（Windows DPAPI，`dpapi:<base64>`；其它平台明文） |
-| `services::fence_fs` | 收纳箱文件层：`fence_root_dir`、`icon_cache_dir`、`user_desktop_dir`、`create_fence_folder`、`ensure_fence_folder`、`rename_fence_folder`、`remove_fence_folder_if_empty`、`fence_folder_path`、`list_fence_items`、`list_fence_folders`、`move_into_fence`、`restore_item`、`move_between_fences`、`restore_all`、`launch_item`、`reveal_in_explorer`、`icon_png`、`prune_icon_cache`、`watch_fence_root`、`FenceWatcher`、`FenceChange` 等（debug 下 `MINI_TODO_FENCES_ROOT` 覆盖收纳根目录） |
+| `services::fence_fs` | 收纳箱文件层：`fence_root_dir`、`icon_cache_dir`、`user_desktop_dir`、`create_fence_folder`、`ensure_fence_folder`、`rename_fence_folder`、`remove_fence_folder_if_empty`、`fence_folder_path`、`list_fence_items`（点文件照常列出、`auto_hidden`；带 Windows 隐藏 / 系统属性的跳过）、`is_auto_hidden_name`、`list_fence_folders`、`move_into_fence`、`restore_item`、`move_between_fences`、`restore_all`、`launch_item`、`reveal_in_explorer`、`icon_png`、`prune_icon_cache`、`watch_fence_root`、`FenceWatcher`、`FenceChange` 等（debug 下 `MINI_TODO_FENCES_ROOT` 覆盖收纳根目录） |
 
 ## 不在 core 的旧命令
 

@@ -91,6 +91,10 @@ scripts/shot.sh --open main,gallery --window 控件样例 /tmp/shots    # ui/ �
   避头尾，见 [gpui-conventions.md §2.13](./gpui-conventions.md)）。
 - 界面调整后要同步改脚本开头的 `SCENES` / `SMOKE` / `CALLS`（坐标与场景）；新窗口 / 新状态加场景，并在 `MINI_TODO_DEBUG_OPEN`
   里加入口（`windows/mod.rs` 的 `DebugOpen`）。
+- **菜单 / 列表里加减一项，后面所有点击坐标都会错位**：交互场景按写死的逻辑坐标点菜单项，插入一项会让后面的场景点到别的项、
+  截出错误的画面而不报错。改菜单后 grep `regress.py` 里打开同一菜单的全部场景，按行高重新推算坐标并在注释里写明各项的 y 范围。
+  例：收纳箱「更多」菜单加「显示隐藏的图标」后 `fence-delete-confirm` 从 y 133 改为 171；右键菜单加「隐藏」后 `fence-move-to`
+  从 (190, 190) 改为 (190, 219)（10-16 fence-hidden-items）。
 - 只覆盖 Linux 后端：DirectComposition 透明、嵌入桌面、托盘、Toast 等 Windows 行为看 §6。
 
 ---

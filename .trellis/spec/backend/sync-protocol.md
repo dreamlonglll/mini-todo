@@ -144,8 +144,8 @@ cloud keeps the equivalent in `meta` (`dirty`, `base_etag`, `base_last_modified`
 | 数据 | 引入 | 说明 |
 |---|---|---|
 | `screen_configs` 表 | 早期 | 按屏幕组合记忆的主窗口位置 / 固定态 |
-| `fences` 表 | v29 | 桌面收纳箱元数据（标题、收纳文件夹名、物理像素几何、折叠 / 锁定 / 外观 / 图标大小） |
-| `fence_items` 表 | v29 | 收纳箱项目的排序与原始路径（内容以本机收纳文件夹为准） |
+| `fences` 表 | v29（v30 加 `show_hidden`） | 桌面收纳箱元数据（标题、收纳文件夹名、物理像素几何、折叠 / 锁定 / 外观 / 图标大小 /「显示隐藏的图标」） |
+| `fence_items` 表 | v29（v30 加 `hidden`） | 收纳箱项目的排序、原始路径与隐藏标记（内容以本机收纳文件夹为准） |
 | `fence_layouts` 表 | v29 | 收纳箱按屏幕组合记忆的位置 |
 | settings `fence_onedrive_notice_shown` | v29 | 首次收纳时的 OneDrive 一次性提示是否已显示 |
 | settings `webdav_remote_etag` / `webdav_last_modified` / `webdav_synced_settings_at` / `webdav_last_sync_at` / `webdav_device_id` | 多个版本 | 同步自身的本机状态（见 §2），WebDAV 连接配置同样不同步 |
@@ -158,6 +158,7 @@ cloud keeps the equivalent in `meta` (`dirty`, `base_etag`, `base_last_modified`
   「维护检查清单」第 1 条的**有意偏离**（原因见 [desktop-fences.md §3.3](./desktop-fences.md)）。
 - 新增设备本地数据时：在本表登记，并在 `CLAUDE.md`「当前同步覆盖范围」表里标"否"。
 - 测试：`migrations::v29_fence_writes_do_not_count_as_sync_changes`（增删改收纳箱表后 `local_seq` 不变、墓碑数为 0）、
+  `migrations::v30_hidden_flags_do_not_count_as_sync_changes`（写 `hidden` / `show_hidden` 不计 `local_seq`）、
   `fence::items` 的 `onedrive_notice_is_claimed_once_and_stays_device_local`（不在 `SYNCED_SETTING_KEYS`，导出的 `AppSettings` JSON 里没有它）。
 
 ### 4. Validation & Error Matrix

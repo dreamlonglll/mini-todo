@@ -58,7 +58,8 @@ src/
 │   ├── settings/     设置：mod（窗口、菜单、加载）、general、appearance、data（导入导出 / WebDAV / 强制同步）、
 │   │                 screen（屏幕配置）、about（版本 / 检查更新）
 │   ├── fence/        桌面收纳箱：mod（窗口、标题栏、拖动 / 缩放 / 折叠 / 改名、拖入）、grid（项目网格、图标懒加载、
-│   │                 右键菜单、箱内排序、Ctrl+滚轮）、panels（外观 / 删除确认 / OneDrive 提示、「更多」菜单）、logic（纯函数）
+│   │                 右键菜单（含隐藏 / 取消隐藏）、隐藏项过滤与半透明、箱内排序、Ctrl+滚轮）、panels（外观 / 删除确认 /
+│   │                 OneDrive 提示、「更多」菜单（含显示隐藏的图标））、logic（纯函数）
 │   └── gallery.rs    控件样例（仅调试）
 ├── ui/               Element Plus 风格共享控件（见 §4.4，每种控件只有一个实现）
 ├── services/         进程级服务（见 §4.2）

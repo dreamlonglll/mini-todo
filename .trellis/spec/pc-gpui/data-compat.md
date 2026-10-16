@@ -74,7 +74,7 @@ pub struct Todo { /* … */ pub estimate_minutes: Option<i64> }
 ### Correct — 一个提交里走完整条链
 
 ```text
-db/migrations.rs        (30, migration_v30) + LATEST_VERSION = 30（ALTER TABLE todos ADD COLUMN … DEFAULT …）
+db/migrations.rs        (31, migration_v31) + LATEST_VERSION = 31（ALTER TABLE todos ADD COLUMN … DEFAULT …）
 db/models.rs            #[serde(default)] estimate_minutes
 db/sync_store.rs        行读写；data.rs 导入导出
 cloud/src/model.rs      TODO_FIELDS 加 ("estimateMinutes", 对应类型)

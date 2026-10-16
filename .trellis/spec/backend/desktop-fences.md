@@ -21,8 +21,8 @@
 
 ### 1. Scope / Trigger
 
-- 触发：一种特殊窗口（始终嵌入桌面层的透明窗口）、迁移 v29（3 张表 + 1 个 settings 键）、Win32 嵌入与置底、会移动用户文件的
-  Shell 操作（硬约束：**不丢文件、绝不覆盖**）、3 个 debug 专用环境变量。
+- 触发：一种特殊窗口（始终嵌入桌面层的透明窗口）、迁移 v29（3 张表 + 1 个 settings 键）与 v30（隐藏图标的两列）、Win32 嵌入与置底、
+  会移动用户文件的 Shell 操作（硬约束：**不丢文件、绝不覆盖**）、3 个 debug 专用环境变量。
 - 改动以下任何东西前先读本文件：
   - core `fence/**`、`services/fence_fs/**`、`settings::delete_screen_config`、`db/paths.rs` 的隔离变量、`fences` / `fence_items` /
     `fence_layouts` 表
@@ -49,7 +49,7 @@ pub fn layout_after_switch(..) -> PxRect;  pub fn effective_rect(..) -> PxRect; 
 pub fn normalize_title(raw: &str) -> Result<String, String>;  pub fn normalize_color(raw: &str) -> Result<String, String>;
 pub struct Placement { pub screen_id: String, .. }        // Placement::for_screen(db, screen_id).rect(&fence)
 pub fn list(db) -> R<Vec<Fence>>;  pub fn get(db, id) -> R<Fence>;
-pub fn update(db, id, &UpdateFenceRequest) -> R<Fence>;   // 折叠 / 锁定 / 外观 / 图标大小，只写库
+pub fn update(db, id, &UpdateFenceRequest) -> R<Fence>;   // 折叠 / 锁定 / 外观 / 图标大小 /「显示隐藏的图标」，只写库
 pub fn rename(db, id, title) -> R<RenameFenceResult { fence, folder_error }>;
 pub fn create(db, work: PxRect, scale: f64, screen_id: &str) -> R<Fence>;   pub fn rollback_create(db, &Fence);
 pub fn prepare_restore(db, screen_id) -> R<Vec<(Fence, PxRect)>>;
@@ -62,8 +62,8 @@ fn plan_delete(restored: &fence_fs::RestoreAllResult) -> DeletePlan;            
 static SESSION_RECTS: Mutex<BTreeMap<i64, PxRect>>;  static LAST_SCREEN_ID: Mutex<Option<String>>;
 
 // ===== core fence::items（crates/core/src/fence/items.rs） =====
-pub use crate::services::fence_fs::{FenceEntry, ItemOpResult, ItemOpStatus};
-pub struct FenceRefresh { pub fence_id: i64, pub items: Vec<FenceEntry> }   // 旧 `fence-items-changed` 事件的替代
+pub use crate::services::fence_fs::{is_auto_hidden_name, FenceEntry, ItemOpResult, ItemOpStatus};
+pub struct FenceRefresh { pub fence_id: i64, pub items: Vec<FenceEntry> }   // 旧 `fence-items-changed` 事件的替代；含隐藏项
 pub const ONEDRIVE_NOTICE_KEY: &str = "fence_onedrive_notice_shown";
 pub fn get_items(db, id) -> R<Vec<FenceEntry>>;
 pub fn reconcile(db, id) -> R<Option<Vec<FenceEntry>>>;   pub fn refresh(db, id) -> Option<FenceRefresh>;
@@ -72,12 +72,15 @@ pub fn restore(db, id, file_name, owner_hwnd) -> R<ItemOpResult>;               
 pub fn move_to(db, id, file_name, target_id, owner_hwnd) -> R<(ItemOpResult, Option<FenceRefresh>)>;                 // 后台线程
 pub fn open(db, id, file_name) -> R<()>;  pub fn reveal(db, id, file_name) -> R<()>;
 pub fn icon(db, id, file_name, size_px: u32) -> R<PathBuf>;   // 图标 PNG 缓存路径，GPUI 用 img(PathBuf)
-pub fn reorder(db, id, &[String]) -> R<()>;
+pub fn reorder(db, id, &[String]) -> R<()>;                  // 完整顺序（含隐藏项）
+pub fn set_hidden(db, id, file_name, hidden: bool) -> R<FenceRefresh>; // 右键「隐藏」/「取消隐藏」：只写 fence_items.hidden（v30）
 pub fn watch(db: Arc<Database>, on_refresh: impl Fn(FenceRefresh) + Send + 'static) -> R<FenceWatcher>; // 回调在 fence-watch 线程
 pub fn spawn_startup_reconcile(db: Arc<Database>);            // 线程 fence-startup
 pub(crate) fn begin_deleting(id) -> Result<DeletingGuard, String>;  pub(crate) fn begin_moving(ids: &[i64]) -> Result<MovingGuard, String>;
 pub(crate) fn is_deleting(id) -> bool;  pub(crate) fn is_moving(id) -> bool;   // FenceActivity 登记，drop 即注销
-fn reconcile_rows(..);  fn claim_onedrive_notice(conn) -> rusqlite::Result<bool>;
+fn reconcile_rows(..);  fn reconcile_locked(tx, id);  fn apply_hidden(conn, id, file_name, hidden, items);  // 隐藏标记写库（有单测）
+fn record_cross_move(conn, from_id, from_name, to_id, to_name, original_path);  // 跨箱记账：搬运原始路径、不搬运隐藏标记
+fn claim_onedrive_notice(conn) -> rusqlite::Result<bool>;
 
 // ===== core db =====
 pub const FENCE_COLUMNS: &str;  pub fn fence_from_row(row: &Row) -> rusqlite::Result<Fence>;   // db/models.rs
@@ -93,6 +96,8 @@ pub fn icon_cache_dir() -> PathBuf;                          // <app_data_dir>\f
 pub fn user_desktop_dir() -> Option<PathBuf>;                // dirs::desktop_dir()（公共桌面 public_desktop_dir 只在模块内用）
 pub fn path_starts_with_ci(path: &Path, prefix: &Path) -> bool;  pub fn same_path_ci(a: &Path, b: &Path) -> bool;
 pub fn is_valid_item_name(name: &str) -> bool;               // 单个路径段：拦 ..、绝对路径、ADS
+pub fn is_auto_hidden_name(file_name: &str) -> bool;         // 以 . 开头 = 自动隐藏（纯函数，core / app 共用）
+impl FenceEntry { pub fn is_hidden(&self) -> bool }          // hidden || auto_hidden
 pub fn create_fence_folder(title: &str, taken: &[String]) -> Result<String, String>;
 pub fn ensure_fence_folder(folder_name: &str) -> Result<PathBuf, String>;
 pub fn rename_fence_folder(old_folder: &str, new_title: &str, taken: &[String]) -> Result<String, String>;
@@ -127,7 +132,11 @@ pub fn fence_key(fence_id: i64) -> String;     // = core fence_label
 pub fn normalize_fence_title(raw) -> Option<String>;  pub fn exceeds_drag_threshold(dx, dy, threshold) -> bool;
 pub struct GeometryCommitGate { arm(now), accept(now) -> bool, is_armed(now) -> bool, disarm() }
 pub fn resize_rect(..) -> PxRect;  pub fn icon_bucket(..);  pub fn icon_request_px(..);  pub fn clamp_icon_size(..);  pub fn next_icon_size(..);
-pub fn summarize_op_results(..);  pub fn describe_move_in(..);  pub fn describe_delete_kept(..);  pub fn delete_hint(..);
+pub fn summarize_op_results(..) -> OpSummary { moved, cancelled, failed, notes, auto_hidden };
+pub fn describe_move_in(&OpSummary, show_hidden: bool);  pub fn describe_delete_kept(..);  pub fn delete_hint(..);
+pub fn visible_items(&[FenceEntry], show_hidden) -> Vec<&FenceEntry>;    // 网格显示哪些项
+pub fn merge_sorted<T>(full: &[T], sorted_visible: &[T], key) -> Vec<T>;  // 排序结束：隐藏项按原位置并回完整顺序
+pub fn empty_hint(total_items: usize) -> String;                         // "把桌面图标拖到这里" / "N 个项目已隐藏"
 pub const ICON_BUCKETS: [u32; 8] = [16, 24, 32, 48, 64, 96, 128, 256];  pub const ICON_SIZE_STEP: i32 = 8;
 pub mod timing { HOVER_EXPAND_DELAY 150ms, HOVER_COLLAPSE_DELAY 400ms, DRAG_COLLAPSE_DELAY 300ms, GEOMETRY_ARM_MS 3000,
                  GEOMETRY_COMMIT_DEBOUNCE 300ms, MAX_ICON_REQUESTS 3, .. }
@@ -250,9 +259,10 @@ gpui-pre 0.3.9 的文件拖放不改输入模态，`on_drop` 要求 `is_hovered`
 #### 3.2 返回结构与刷新
 
 - `Fence`（serde camelCase）：`id, title, folderName, x, y, width, height, collapsed, locked, bgColor, bgAlpha, iconSize,
-  sortOrder, createdAt, updatedAt`。几何是物理像素：x/y 为虚拟屏幕坐标（折叠态即标题栏左上角），width/height 为展开态尺寸。
+  sortOrder, createdAt, updatedAt, showHidden`。几何是物理像素：x/y 为虚拟屏幕坐标（折叠态即标题栏左上角），width/height 为展开态尺寸。
+  `showHidden`（v30，`#[serde(default)]`）=「显示隐藏的图标」，每个收纳箱独立。`FENCE_COLUMNS` 末尾追加 `show_hidden`（下标 15）。
 - `UpdateFenceRequest`：字段全可选，只更新给出的；`bgColor` 只接受 `#RRGGBB`（统一大写），`bgAlpha` 夹到 0~1（非有限数按
-  0.45），`iconSize` 夹到 24~128。任一字段校验失败什么都不写。标题走 `fence::rename`，几何走 `commit_geometry`。
+  0.45），`iconSize` 夹到 24~128，`showHidden` 原样写入。任一字段校验失败什么都不写。标题走 `fence::rename`，几何走 `commit_geometry`。
 - `RenameFenceResult { fence, folder_error }`：`folder_error` 非空 = 标题已改、收纳文件夹没跟着改名（保留旧 `folder_name`），
   界面提示"标题已修改，但收纳文件夹没能跟着改名：…"，窗口标题随之更新。
 - `DeleteFenceResult { deleted, restored, remaining, failures }`：
@@ -260,10 +270,25 @@ gpui-pre 0.3.9 的文件拖放不改输入模态，`on_drop` 要求 `is_hovered`
     移除 `SESSION_RECTS`；界面随后 `close_deleted` 关窗
   - `deleted = false`：删除**中止**，收纳箱整个保留（记录、窗口、文件夹、布局）；已移回项的 `fence_items` 行删掉，注销"删除中"后
     `items::refresh` 刷新窗口；界面关掉确认框，用 `describe_delete_kept` 提示"N 个项目未能移回桌面，收纳箱已保留：名字（原因）…"（8 秒）
-  - `restored` 已移回项数；`remaining` 仍留在文件夹里的文件名（含隐藏文件）；`failures` 为 `failed` / `cancelled` 的逐项结果
+  - `restored` 已移回项数；`remaining` 仍留在文件夹里的文件名（含带隐藏属性的文件）；`failures` 为 `failed` / `cancelled` 的逐项结果
   - 返回 `Err`：还原整体无法进行（桌面路径未知、根目录不可用等），什么都没删
-- `FenceEntry { file_name, display_name, path, is_dir, is_shortcut, modified_ms }`：`display_name` 去掉 `.lnk` / `.url`；
-  文件夹（含指向文件夹的链接）`is_dir = true`。
+- `FenceEntry { file_name, display_name, path, is_dir, is_shortcut, modified_ms, hidden, auto_hidden }`（serde camelCase）：
+  `display_name` 去掉 `.lnk` / `.url`；文件夹（含指向文件夹的链接）`is_dir = true`。隐藏信息（v30）：
+  - `hidden`：用户右键「隐藏」的标记，对账时从 `fence_items.hidden` 带出（文件层 `list_fence_items` 一律 `false`）
+  - `auto_hidden`：文件名以 `.` 开头（`is_auto_hidden_name`，所有平台一样），按名字自动隐藏，不存标记、不能单独取消隐藏
+  - `is_hidden() = hidden || auto_hidden`。隐藏只影响收纳箱的显示，不改文件属性、不移动文件
+- **隐藏项的显示（app）**：`get_items` / `FenceRefresh` / `set_hidden` 返回**全部**项目（含隐藏项）；窗口按 `Fence.show_hidden` 过滤
+  （`logic::visible_items`）：关闭时网格只排可见项，全部被隐藏时空状态显示"N 个项目已隐藏"；开启时隐藏项照常排在网格里，图标与名字
+  整体半透明（`theme::FENCE_HIDDEN_ITEM_OPACITY`）。图标懒加载只请求显示中的项目；选中项 / 右键菜单对应项不再显示时取消选中 / 关闭菜单。
+  箱内拖动排序只排显示项，松手后 `logic::merge_sorted` 把隐藏项按原位置并回完整顺序再 `items::reorder`。
+- **右键菜单**：「打开所在位置」之后是「隐藏」（`EpIcon::Hide`）；隐藏状态的项（显示隐藏的图标时才看得到）是「取消隐藏」（`EpIcon::View`）；
+  点文件的「取消隐藏」禁用（半透明 + 右侧说明与 tooltip"以 . 开头的项目自动隐藏"，同「移动到…」无目标时的写法）。
+  隐藏 / 取消隐藏经 `spawn_db` 后台 `items::set_hidden`，返回的列表交给 `set_items`，失败 `message::error_with` 后补一次列举。
+- **标题栏「更多」菜单**：重命名 / 外观 /「显示隐藏的图标」（`EpIcon::View`，开启后文案换成「不显示隐藏的图标」、`EpIcon::Hide`——EP 下拉菜单
+  没有勾选态）/ 分隔线 / 删除收纳箱；切换走 `patch_fence(UpdateFenceRequest { show_hidden })`，菜单宽度按最长一项估算（151 / 165）。
+- **拖入提示**：`OpSummary.auto_hidden` = 移入后（按收纳文件夹里的新名字）以 `.` 开头的项数；收纳箱没开「显示隐藏的图标」时
+  `describe_move_in` 补一句"N 个以 . 开头的项目已自动隐藏，可在「更多」中显示隐藏的图标"——全部成功时单独作为一条信息提示，
+  有其他提示（失败 / 取消 / 附注）时接在后面合成一条，不连弹两条。
 - `ItemOpResult { source, status, file_name, dest_path, error }`，`status ∈ moved | cancelled | failed | skipped`。
   `moved` 偶尔带 `error` 提示（"已放入目标位置，但源文件未能删除…"、"已移动，但无法确定新的文件名…"）。
 - `FenceMoveInResult { results, onedrive_notice }`：`results` 与传入路径一一对应、顺序相同；`onedrive_notice = true` 时界面
@@ -274,9 +299,10 @@ gpui-pre 0.3.9 的文件拖放不改输入模态，`on_drop` 要求 `is_hovered`
   经 channel 回前台）、`move_in` / `move_to` 的返回值（来源 / 目标收纳箱）、删除中止后的 `items::refresh`。窗口给每次列表编号，
   箱内拖动排序期间不接收推送，松手后补一次列举。
 
-#### 3.3 数据库 v29
+#### 3.3 数据库 v29 / v30
 
 ```sql
+-- v29
 CREATE TABLE fences (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT NOT NULL,
@@ -306,13 +332,20 @@ CREATE TABLE fence_layouts (
 );
 INSERT OR IGNORE INTO settings (key, value, updated_at)
     VALUES ('fence_onedrive_notice_shown', 'false', datetime('now', 'localtime'));
+
+-- v30（10-16 fence-hidden-items）：隐藏图标
+ALTER TABLE fence_items ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;      -- 用户右键「隐藏」
+ALTER TABLE fences ADD COLUMN show_hidden INTEGER NOT NULL DEFAULT 0;      -- 「显示隐藏的图标」
 ```
 
-- `LATEST_VERSION = 29`，迁移表驱动追加 `(29, migration_v29)`。
+- `LATEST_VERSION = 30`，迁移表驱动追加 `(29, migration_v29)`、`(30, migration_v30)`。
+- v30 两列都有默认值 0：旧库升级后已有项目全部可见、开关关闭。以 `.` 开头的项目按名字自动隐藏，不存标记。
+  旧版本（3.0.0 等）打开 v30 库只记警告、按现状继续运行（`db/connection.rs`，没有降级）；它们按显式列名读写这两张表，新列不影响，
+  只是看不到隐藏效果（收纳箱数据不同步，只影响同一台机器上装回旧版本的情况，见 [pc-gpui/data-compat.md](../pc-gpui/data-compat.md)）。
 - 级联删除依赖连接上 `PRAGMA foreign_keys = 1`（`migrate` 完成后开启，有单测）。删收纳箱只删 `fences` 行。
 - `settings::delete_screen_config(config_id)` 在一个事务里删 `screen_configs` 行**和** `fence_layouts WHERE screen_config_id = ?`。
-- `fence_items` 只是排序与原始路径的附加信息，内容以文件夹为准（3.4）。
-- 三张表都是**设备本地数据**：不接 v28 的 `local_seq` 变更计数触发器与墓碑，不进 `ExportData` / `SyncData`
+- `fence_items` 只是排序、原始路径与隐藏标记的附加信息，内容以文件夹为准（3.4）。
+- 三张表（含 v30 的两列）都是**设备本地数据**：不接 v28 的 `local_seq` 变更计数触发器与墓碑，不进 `ExportData` / `SyncData`
   （见 [sync-protocol.md §3.6](./sync-protocol.md)）。
 - `fence_onedrive_notice_shown`：经 `settings_kv::get_bool_setting` / `set_bool_setting` 读写，`claim_onedrive_notice`
   只会返回一次 `true`。它**有意**不进 `AppSettings`、不进 `SYNCED_SETTING_KEYS`、不被 `read_app_settings` /
@@ -328,16 +361,23 @@ INSERT OR IGNORE INTO settings (key, value, updated_at)
   保留设备名加 `_`、空则 `收纳箱`），再与数据库里**全部** `folder_name`（即使文件夹已被用户删掉，防 UNIQUE 冲突）和磁盘上
   已有项不区分大小写去重（` (2)` 后缀）。新建：**先建文件夹再插库**；插库失败 → `remove_fence_folder_if_empty` 回滚；
   建窗失败 → `rollback_create`（删记录 + 回滚文件夹）。改名：整个过程持有数据库锁，文件夹改名失败则保留旧 `folder_name`。
+- **列举（`list_fence_items`）**：跳过 `desktop.ini` / `Thumbs.db` 与带 Windows 隐藏 / 系统属性的文件（`has_hidden_or_system_attribute`，
+  永不显示，"显示隐藏的图标"也不显示）；以 `.` 开头的项目所有平台都列出、`auto_hidden = true`（非 Windows 上不再按点开头排除，
+  Linux 截图 / 冒烟里也能看到点文件）。移入校验 `plan_move_in` 仍用 `is_hidden_or_system`（Windows 看属性、其他平台看点开头），规则不变。
 - **文件夹是 source of truth**：每次列举都对账（`reconcile_rows`）：名字先精确匹配、再不区分大小写匹配（资源管理器里只改大小写
-  时保留原始路径与排序，并把行里的名字改成新写法）；表里有、文件夹没有 → 删行；文件夹有、表里没有 → 补行
-  （`original_path = NULL`，按文件名顺序排到末尾）；返回按 `sort_order` 排序。
+  时保留原始路径、排序与隐藏标记，并把行里的名字改成新写法）；表里有、文件夹没有 → 删行（改成别的名字 = 新项目，隐藏标记随旧行丢掉）；
+  文件夹有、表里没有 → 补行（`original_path = NULL`、可见，按文件名顺序排到末尾）；返回按 `sort_order` 排序，`hidden` 取自对应行。
 - **对账在数据库锁内列举**：`items::reconcile` 在一个 `with_transaction` 里依次检查"删除中"、读 `folder_name`、
-  `list_fence_items`（一次本地 `read_dir`）、写行。文件夹不存在时 `ensure_fence_folder` 按原名重建后再列举（显示为空）。
-- **移入 / 跨箱写库一律 upsert**：`INSERT … ON CONFLICT(fence_id, file_name) DO UPDATE SET original_path = excluded.original_path`
-  （新行排末尾；已有行保留排序）。监听回调触发的对账可能已经先补了一行 `NULL`。
-- **跨箱拖入**：源路径形如 `<根目录>\<另一个收纳箱的文件夹>\<项>` 时按跨箱处理：在移动**之前**读旧行的 `original_path`
-  （移动一完成监听对账就可能删掉旧行），成功后删旧行、在本箱 upsert 并搬运原始路径，然后返回来源收纳箱的 `FenceRefresh`。
-  其他来源：`original_path = 源路径`。
+  `list_fence_items`（一次本地 `read_dir`）、写行（`reconcile_locked`）。文件夹不存在时 `ensure_fence_folder` 按原名重建后再列举（显示为空）。
+- **隐藏 / 取消隐藏（`items::set_hidden`）**：先校验文件名（`is_valid_item_name`），然后在一个事务（数据库锁）里：检查"删除中"→
+  `reconcile_locked`（行不存在——监听还没补行、只改了大小写——也先对上）→ `apply_hidden` 按文件名先精确、再不区分大小写匹配，
+  `UPDATE fence_items SET hidden = ?` → 返回写入后的完整列表（`FenceRefresh`）。只写库，不改文件属性；锁顺序同上（数据库锁 → 登记锁）。
+- **移入 / 跨箱写库一律 upsert**：`INSERT … ON CONFLICT(fence_id, file_name) DO UPDATE SET original_path = excluded.original_path, hidden = 0`
+  （新行排末尾；已有行保留排序）。监听回调触发的对账可能已经先补了一行 `NULL`。刚移进来的项一律可见：已有同名行（监听先补的、或残留的
+  旧行）的隐藏标记清零。
+- **跨箱拖入 / 「移动到…」**：源路径形如 `<根目录>\<另一个收纳箱的文件夹>\<项>` 时按跨箱处理：在移动**之前**读旧行的 `original_path`
+  （移动一完成监听对账就可能删掉旧行），成功后 `record_cross_move`：删旧行、在本箱 upsert 并搬运原始路径（**不**搬运隐藏标记，
+  目标收纳箱里可见），然后返回来源收纳箱的 `FenceRefresh`。其他来源：`original_path = 源路径`。移回桌面后在桌面照常可见（文件属性没变过）。
 - **记账失败不翻案**：文件已经移动成功而写库失败时只记 `warn` 日志、照常返回逐项成功（下次对账补行，只是丢了原始路径）。
 - **`FenceActivity`（进行中的文件操作登记，`fence/items.rs`）**：移动 / 删除可能要等用户处理管理员权限或"文件正在使用"对话框，
   不能一直占着数据库锁，靠登记互斥：
@@ -355,7 +395,8 @@ INSERT OR IGNORE INTO settings (key, value, updated_at)
   "已按旧文件夹名开始移动 / 还原，文件夹却被改名"的交错。**锁顺序：数据库锁 → 登记锁**，持有登记锁时绝不拿数据库锁。
 - **删除 = `plan_delete`**：`restore_all` 之后 `delete_fence = restored.folder_removed`；`restored` = `moved` 项的文件名
   （取 `source` 的最后一段）；`failures` = `failed` + `cancelled`。**只有收纳文件夹已清空并删除才删收纳箱**；只要有项目留在文件夹里
-  （失败、取消、或 `remaining` 里的隐藏文件），整体保留，不产生没有收纳箱管理的孤儿文件夹。
+  （失败、取消、或 `remaining` 里带隐藏属性的文件），整体保留，不产生没有收纳箱管理的孤儿文件夹。收纳箱里隐藏的项目（用户隐藏 + 点文件）
+  同样移回，删除确认框的 N（`get_items` 的数量）也计入它们。
 - **线程**：`fence_fs` 与 core `fence` 全部阻塞，app 一律放后台（`db::spawn_db`）。带 owner HWND 的移动（`fence::delete`、
   `items::{move_in, restore, move_to}`，内部是 `move_into_fence` / `restore_item` / `move_between_fences` / `restore_all`）**绝不在 UI 主线程**：
   系统"需要管理员权限"对话框以收纳箱窗口为父窗口，会给主线程同步发消息，主线程等结果就死锁。做法：HWND 在前台取好（`isize`），
@@ -368,7 +409,7 @@ INSERT OR IGNORE INTO settings (key, value, updated_at)
   | 非绝对路径 / 磁盘根 / 无法访问 | `failed`（"需要完整路径" / "无法收纳磁盘根目录" / "无法访问: …"） |
   | 同一批重复源路径 | `skipped`（"重复的项目"） |
   | `desktop.ini` / `Thumbs.db` | `skipped` |
-  | 隐藏或系统文件 | `skipped`（列举也跳过它们，避免"移走后哪里都看不到"） |
+  | 隐藏或系统文件（Windows 看属性；其他平台看点开头） | `skipped`（列举也跳过带这两个属性的文件，避免"移走后哪里都看不到"）。没有隐藏属性的点文件（`.env`）在 Windows 上照常移入，移入后自动隐藏并提示 |
   | 收纳根目录本身或其上级 | `failed`（"不能收纳收纳目录本身或其上级目录"） |
   | **`protected`**：用户桌面、公共桌面本身或其上级 | `failed`（"不能收纳桌面文件夹本身或其上级目录"）——经 Shell 移动已知文件夹会让系统把"桌面"重定向到收纳文件夹里 |
   | 已在本收纳箱 | `skipped`（"已在该收纳箱中"） |
@@ -383,8 +424,8 @@ INSERT OR IGNORE INTO settings (key, value, updated_at)
   `cancelled`（"已跳过"）。
 - **移回目标**：`original_path` 的上级目录是绝对路径、不在收纳根目录内且仍存在 → 原目录；否则（含 `NULL`）→ 用户桌面
   （`dirs::desktop_dir()`）。文件名：收纳时因重名被改成 `X (2).lnk` 的恢复成 `X.lnk`，用户在资源管理器里改过的名字保留；
-  目标处已有同名再加后缀。`restore_all` 处理文件夹里的**所有**项（含隐藏文件，`desktop.ini` / `Thumbs.db` 除外），所有项在同一个
-  `IFileOperation` 里执行。删除确认框里的 N 用 `get_items` 的实际列举数（不含隐藏文件）。
+  目标处已有同名再加后缀。`restore_all` 处理文件夹里的**所有**项（含带隐藏属性的文件，`desktop.ini` / `Thumbs.db` 除外），所有项在同一个
+  `IFileOperation` 里执行。删除确认框里的 N 用 `get_items` 的实际列举数（含收纳箱里隐藏的项目，不含带隐藏 / 系统属性的文件）。
 - **监听**：`watch_fence_root`（`notify` 递归监听根目录，只关心第一、二层），最后一个事件后安静 300ms 回调一次、持续变化时最多 1.5s
   必回调；回调在线程 `fence-watch` 上 → 按文件夹名（不区分大小写）匹配收纳箱（`rescan` 时全部）→ 对账 → `FenceRefresh` 经 channel 回前台。
   `FenceWatcher` 由 app 的 `FenceRuntime` 一直持有（drop 即停止）；`services::fences::ensure_watcher` 在启动恢复（有收纳箱时）与新建后调用。
@@ -398,7 +439,8 @@ INSERT OR IGNORE INTO settings (key, value, updated_at)
   （防 `..`、绝对路径、ADS 逃逸出收纳文件夹）。
 - **图标**：界面请求 `ceil(icon_size × 缩放)`（`icon_request_px`），向上取整到档位 `[16, 24, 32, 48, 64, 96, 128, 256]`；
   `SIIGBF_ICONONLY`（`.lnk` 不带箭头，图片 / 视频显示类型图标）；缓存在 `<app_data_dir>\fence-icons\`，键
-  `{路径哈希 FNV-1a 64}-{mtime 毫秒}-{大小}-{档位}.png`，先写临时文件再改名。界面按可见项懒加载，同时最多 3 个请求
+  `{路径哈希 FNV-1a 64}-{mtime 毫秒}-{大小}-{档位}.png`，先写临时文件再改名。界面按可见项懒加载（只请求显示中的项目，没开
+「显示隐藏的图标」时不请求隐藏项），同时最多 3 个请求
   （`timing::MAX_ICON_REQUESTS`；后端图标在单个 STA 线程排队）。图标一律先渲染进缓存再由 `img(PathBuf)` 加载，从不直接加载收纳文件夹
   或桌面上的文件。
 - **OneDrive 提示**：本次至少有一项从用户桌面移入（`path_starts_with_ci(source, desktop)`）、桌面被 OneDrive 重定向、且
@@ -457,6 +499,10 @@ release 不编译。Windows e2e 的 P01 在 release 构建上验证忽略 `MINI_
 | `items::move_in` 的路径为空 | `Ok` 空结果 |
 | 文件名不合法（`..`、绝对路径、`a:b`） | `Err("文件名不合法: …")` |
 | 项目不在文件夹里（移回 / 跨箱） | 逐项 `failed`（"收纳文件夹中找不到该项目"） |
+| `items::set_hidden`：收纳箱正在删除 / 不存在 / 文件夹里已没有该项 | `Err("收纳箱正在删除")` / `Err("收纳箱 #{id} 不存在")` / `Err("收纳文件夹中找不到该项目")`；界面"隐藏失败" / "取消隐藏失败"提示后补一次列举 |
+| 以 `.` 开头的项目 | 自动隐藏，右键「取消隐藏」禁用（"以 . 开头的项目自动隐藏"）；`set_hidden(.., false)` 只清标记，仍按名字隐藏 |
+| 带 Windows 隐藏 / 系统属性的文件 | 永不显示（不受「显示隐藏的图标」影响），移入时 `skipped`，删除收纳箱时一并移回 |
+| 拖入点文件且没开「显示隐藏的图标」 | 照常移入，提示"N 个以 . 开头的项目已自动隐藏，可在「更多」中显示隐藏的图标"（与其他拖入提示合成一条） |
 | 用户在 UAC / 管理员权限对话框点取消；在错误对话框选"跳过" | 逐项 `cancelled`（"用户取消了操作" / "已跳过"），文件留在原处；界面"已取消 N 项" |
 | 文件被占用 | Shell 弹"文件正在使用"，用户选择前调用一直阻塞（后台线程）；取消 / 跳过 → `cancelled`，其他失败 → `failed` + 中文原因 |
 | 拖入用户桌面 / 公共桌面文件夹本身或其上级 | 逐项 `failed`（"不能收纳桌面文件夹本身或其上级目录"） |
@@ -501,21 +547,28 @@ release 不编译。Windows e2e 的 P01 在 release 构建上验证忽略 `MINI_
 | | `collapsed_view_is_just_the_title_bar` / `expanding_near_the_bottom_grows_upward_and_keeps_the_title_area_covered` / `title_bar_height_follows_the_target_monitor_scale` | 折叠高度按目标显示器缩放；向上展开仍覆盖标题栏原位置 |
 | | `reset_layout_rows_from_the_top_right_and_stays_on_screen` / `default_title_takes_the_first_free_number` / `titles_are_trimmed_and_validated` / `colors_must_be_six_digit_hex` / `fence_labels_round_trip` | 重置排布、默认标题、校验 |
 | | `insert_stores_the_folder_and_increasing_sort_order` / `update_only_touches_given_fields_and_validates_them` | patch 只改给出字段；任一字段非法全不写 |
+| | `show_hidden_defaults_off_and_is_saved_per_fence` | 新建默认关闭；`UpdateFenceRequest.show_hidden` 只改它、按收纳箱独立、不给出时不动；JSON 为 `showHidden` |
 | | `rename_normalizes_the_title_and_moves_the_folder` / `rename_keeps_the_old_folder_when_the_folder_cannot_be_renamed` / `rename_keeps_the_folder_while_files_are_moving_and_is_refused_while_deleting` | `folder_error` 语义与登记检查 |
 | | `geometry_from_a_collapsed_view_keeps_the_expanded_height` / `saving_geometry_writes_the_current_screen_layout_and_the_latest_position` / `deleting_a_fence_removes_its_layouts` / `effective_geometry_prefers_screen_record_then_session_then_latest` / `switching_screens_uses_the_record_or_keeps_the_current_window_position` | 落库同时写两处；有效几何优先级；切换不写库 |
 | | `delete_goes_ahead_only_when_the_folder_was_emptied_and_removed` / `delete_keeps_the_whole_fence_when_anything_is_left_behind` | `delete_fence == folder_removed`；只删已移回项的行；`failures` 含 failed + cancelled |
 | core `fence/items.rs` | `first_reconcile_adds_rows_in_listing_order` / `reconcile_follows_saved_order_drops_missing_and_appends_new_items` / `case_only_rename_keeps_original_path_and_order` / `exact_match_wins_over_case_insensitive_match` | 对账规则 |
 | | `upsert_fills_in_the_original_path_of_a_row_added_by_reconcile` / `originals_and_deletes_are_scoped_to_one_fence` / `reorder_ignores_unknown_names` | upsert 保留排序；按收纳箱隔离；不为未知名字建行 |
+| | `hidden_flag_is_set_and_cleared_case_insensitively` / `reconcile_keeps_hidden_flags_through_case_only_renames` | 设置 / 清除隐藏标记（不区分大小写、按收纳箱隔离、返回列表同步）；重新对账保留标记，只改大小写保留、改成别的名字丢失；点文件 `auto_hidden` 但没有标记；找不到的项什么都不写 |
+| | `moving_to_another_fence_does_not_carry_the_hidden_flag` / `set_hidden_checks_the_name_and_the_fence_before_touching_files` | 跨箱搬运原始路径、不搬运隐藏标记（目标已有同名隐藏行也清零）；`set_hidden` 文件名不合法 / 收纳箱不存在 / 正在删除时报错且不写行 |
 | | `onedrive_notice_is_claimed_once_and_stays_device_local` | v29 默认 `'false'`；只返回一次 true；不在 `SYNCED_SETTING_KEYS`、导出的 `AppSettings` JSON 里没有它 |
 | | `deleting_guard_blocks_reentry_and_releases_on_drop` / `moving_blocks_deletion_until_every_move_is_done` / `reconcile_skips_a_fence_that_is_being_deleted` | 登记互斥、drop 注销、删除中对账返回 `None` 且不补行 |
 | | `affected_fences_match_folder_names_case_insensitively` / `sources_inside_another_fence_folder_are_recognized` | 监听匹配；跨箱来源识别（只认第二层） |
 | core `window_logic.rs` | `tool_window_style_is_repaired_only_when_wiped` / `needs_reattach` 各例 | 自愈判定（与主窗口共用） |
-| core `db/migrations.rs` | `v29_creates_fence_tables_with_contract_defaults` / `v29_deleting_a_fence_cascades_to_its_items_and_layouts` / `v29_fence_writes_do_not_count_as_sync_changes`；`LATEST_VERSION == 29` | 列默认值、UNIQUE、外键；`PRAGMA foreign_keys = 1` 后级联；写收纳箱表 `local_seq` 不变、墓碑为 0 |
+| core `db/migrations.rs` | `v29_creates_fence_tables_with_contract_defaults` / `v29_deleting_a_fence_cascades_to_its_items_and_layouts` / `v29_fence_writes_do_not_count_as_sync_changes`；`LATEST_VERSION == 30` | 列默认值、UNIQUE、外键；`PRAGMA foreign_keys = 1` 后级联；写收纳箱表 `local_seq` 不变、墓碑为 0 |
+| | `v30_adds_hidden_columns_defaulting_to_visible` / `v30_hidden_flags_do_not_count_as_sync_changes` | v29 旧库升级后已有项目可见、`show_hidden` 关闭，旧版本的显式列写法照常可用；写两列不计 `local_seq` |
 | core `db/paths.rs` | `release_builds_ignore_the_dev_data_dir_variable` / `debug_builds_use_a_non_empty_dev_data_dir` | release 恒 None；空值不生效；相对路径转绝对 |
 | core `services/fence_fs` | `plan_move_in_validates_sources` | 预去重 `b (2).lnk` / `b (3).lnk`；`protected` 的桌面文件夹本身 `failed`；根目录及上级、别的收纳箱文件夹本身 `failed`；跨箱项允许 |
 | | `restore_dir_selection` / `plan_restore_picks_dir_and_name` / `restore_all_keeps_folder_when_items_remain` / `move_in_results_keep_input_order` / `classify_*` | 移回目录与名字；剩余项时保留文件夹；结果顺序；取消 / 失败归类 |
+| | `list_items_filters_and_describes` / `dot_names_are_auto_hidden` | 列举跳过 `desktop.ini` 与带隐藏属性的文件（Windows），点文件 / 点文件夹所有平台都列出且 `auto_hidden`，`hidden` 一律 false；点文件判定 |
 | | 命名（`sanitize_*`、`folder_name_validation_rejects_traversal`、`item_name_validation`、`unique_file_name_adds_suffix_before_extension`、`restore_name_undoes_collision_suffix`）、图标（`bucket_rounds_up`、`cache_key_is_stable_and_case_insensitive`、`strips_shell_frame_around_small_icons`、`prune_cache`）、监听（`watcher_reports_debounced_folder_changes`）、`release_build_ignores_override`（release） | |
 | app `windows/fence/logic.rs` | `titles_follow_backend_rules` / `drag_threshold` / `geometry_gate_vectors` / `resize_vectors` / `icon_size_vectors` / `move_in_messages` / `delete_kept_messages` / `delete_hint_text` 等 | 测试向量来自旧前端 `fence.test.ts`：标题与后端同规则；闸门未 arm 的移动不算数、拖动中续期、超时 / `disarm` 后失效；缩放到最小尺寸不推动对边；图标档位与后端一致；提示文案 |
+| | `visible_items_follow_show_hidden` / `sorting_merges_hidden_items_back_in_place` / `empty_hint_text` / `move_in_mentions_auto_hidden_dot_files` | 按 `show_hidden` 过滤（用户隐藏 + 点文件）；排序后隐藏项留在原位、显示项按新顺序填回；空状态"N 个项目已隐藏"；点文件自动隐藏提示（按移入后的名字计数、开着显示隐藏时不提示、与其他提示合成一条） |
+| app `windows/fence/panels.rs` | `title_menu_width_follows_the_longest_label` | 「更多」菜单切换项文案与估算宽度（123 → 151 / 165） |
 | app `platform/mod.rs` | `fence_geometry_is_the_visible_client_area` | 库里的几何 = 客户区 |
 
 **E2E**（Windows，`pc-gpui/scripts/e2e-windows/run_e2e.py` 的 F 组；CI `.github/workflows/pc-gpui-e2e-windows.yml`，见其 README 与
@@ -550,6 +603,22 @@ if plan.delete_fence {
 } else {
     // 删掉已移回项的行 → drop(deleting) → items::refresh，返回 deleted = false，收纳箱整个保留
 }
+```
+
+#### Wrong — 把过滤后的显示列表当完整顺序保存
+
+```rust
+// sorting 只含显示中的项（没开「显示隐藏的图标」时不含隐藏项）
+let names: Vec<String> = sorted.iter().map(|i| i.file_name.clone()).collect();
+items::reorder(db, id, &names);  // 隐藏项不在 names 里，保留旧 sort_order，与新编号撞号，下次对账顺序错乱
+```
+
+#### Correct — 先把隐藏项按原位置并回完整顺序
+
+```rust
+let list = logic::merge_sorted(&self.items, &sorted, |i: &FenceEntry| i.file_name.as_str());
+let names: Vec<String> = list.iter().map(|i| i.file_name.clone()).collect(); // 完整顺序（含隐藏项）
+// 顺序没变也要 refresh_items：拖动期间 replace_items 丢掉的推送（目录监听、隐藏结果）靠这次补列举找回
 ```
 
 #### Wrong — 移入后普通 INSERT
@@ -659,6 +728,9 @@ fn on_geometry_event(&mut self, window: &mut Window, cx: &mut Context<Self>) {
 - **Win10 / Win11 ≤ 23H2**：显示桌面时抬起的是 `WorkerW` 而不是 Progman，Win+D 可能盖住收纳箱（与主窗口嵌入桌面相同的限制，
   见 [window-modes.md](./window-modes.md)）。实测环境为 Win11 24H2 之后的版本。
 - **无法自动化的路径**：公共桌面项的 UAC 取消、删除时文件被占用（"文件正在使用"对话框）只能人工验证；判定逻辑有单测。
-- 收纳的图片 / 视频显示类型图标而不是缩略图（`SIIGBF_ICONONLY`）；隐藏文件不显示、不计入删除确认的 N，但删除时会一并移回。
+- 收纳的图片 / 视频显示类型图标而不是缩略图（`SIIGBF_ICONONLY`）；带 Windows 隐藏 / 系统属性的文件永不显示（「显示隐藏的图标」也不显示）、
+  不计入删除确认的 N，但删除时会一并移回。
+- 收纳箱里的「隐藏」只是本应用的标记（不改文件属性）：资源管理器里改名（只改大小写除外）后成了新项目，隐藏标记丢失；装回旧版本
+  （3.0.0 等，没有 v30 迁移）时隐藏不生效（全部显示，点文件在 Windows 上也会显示）。以 `.` 开头的项目固定自动隐藏，没有开关。
 - Explorer 重启后某个收纳箱的 Z 序可能落在隐身的 Shell CoreWindow 之上（仍在所有普通应用窗口之下），不影响可见行为（旧版实测）。
 - GPUI 窗口外沿那圈不可见边框（96 DPI 下左 / 右 / 下各 8px）仍会接住鼠标（`HTBORDER`），见 gpui-conventions §2.2。
