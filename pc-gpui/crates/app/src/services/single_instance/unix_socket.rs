@@ -14,7 +14,7 @@ use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 /// 读一条消息的超时：旧版 / 新版第二个实例都是写完立即关闭，卡住的连接不能挡住后面的唤起请求
 const READ_TIMEOUT: Duration = Duration::from_secs(2);
@@ -78,17 +78,37 @@ fn forward(path: &Path, payload: &str) -> std::io::Result<()> {
     stream.flush()
 }
 
-/// socket 文件的 (设备, inode)：退出时只删自己 bind 的那个文件
-fn file_identity(path: &Path) -> Option<(u64, u64)> {
-    std::fs::symlink_metadata(path)
-        .ok()
-        .map(|m| (m.dev(), m.ino()))
+/// socket 文件的身份：退出时只删自己 bind 的那个文件。
+///
+/// 只比 (设备, inode) 不够：文件被删后立刻新建的文件常常复用同一个 inode 号（tmpfs 上实测），所以再比较文件的
+/// 状态改变时间 / 修改时间（秒 + 纳秒；新建文件时取当时的时间，此后没人改它）与创建时间（macOS APFS 的 birthtime，
+/// Linux statx 的 btime，文件系统不支持时为 `None`）。新文件晚于我们 bind，只要时钟走过了一个刻度，这几项就不同。
+/// 判断失误的方向是保守的：我们的文件元数据被改过时认不出来、不删，残留文件由下次启动 connect 得
+/// ConnectionRefused 时清理
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileIdentity {
+    dev: u64,
+    ino: u64,
+    ctime: (i64, i64),
+    mtime: (i64, i64),
+    created: Option<SystemTime>,
+}
+
+fn file_identity(path: &Path) -> Option<FileIdentity> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    Some(FileIdentity {
+        dev: meta.dev(),
+        ino: meta.ino(),
+        ctime: (meta.ctime(), meta.ctime_nsec()),
+        mtime: (meta.mtime(), meta.mtime_nsec()),
+        created: meta.created().ok(),
+    })
 }
 
 /// 首个实例的监听 socket
 pub struct Server {
     path: PathBuf,
-    identity: Option<(u64, u64)>,
+    identity: Option<FileIdentity>,
     listener: UnixListener,
 }
 
@@ -108,11 +128,11 @@ impl Server {
 /// 首个实例 bind 的 socket 文件
 pub struct SocketFile {
     path: PathBuf,
-    identity: Option<(u64, u64)>,
+    identity: Option<FileIdentity>,
 }
 
 impl SocketFile {
-    /// 退出时删除 socket 文件；文件已被别人换掉（如 /tmp 被清理后另一个实例重新 bind）时不删
+    /// 退出时删除 socket 文件；文件已被别人换掉（如 /tmp 被清理后另一个实例重新 bind，哪怕复用了同一个 inode 号）时不删
     pub fn remove(&self) {
         if self.identity.is_some() && file_identity(&self.path) == self.identity {
             let _ = std::fs::remove_file(&self.path);
@@ -249,12 +269,38 @@ mod tests {
         };
         let (listener, file) = server.split();
         drop(listener);
-        // 文件被删后另一个实例重新 bind 了同名 socket：退出清理不能删掉它
+        let ours = file_identity(&path).unwrap();
+        // 文件被删后另一个实例重新 bind 了同名 socket：退出清理不能删掉它。
+        // 新文件常常复用同一个 inode 号（tmpfs）——正是要覆盖的情况；隔开几个时钟刻度（Linux 粗粒度时钟一刻最长 10ms），
+        // 模拟"另一个实例稍后才 bind"，判断靠的是实现里的时间戳比较，与 inode 号是否复用无关
         std::fs::remove_file(&path).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
         let other = UnixListener::bind(&path).unwrap();
+        let theirs = file_identity(&path).unwrap();
+        assert_ne!(ours, theirs);
         file.remove();
         assert!(path.exists());
         drop(other);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn identity_differs_when_inode_number_is_reused() {
+        let path = test_socket("identity");
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+        let ours = file_identity(&path).unwrap();
+        // 同一个文件读两次：身份不变（自己 bind 的文件退出时能删掉）
+        assert_eq!(file_identity(&path), Some(ours.clone()));
+        // 同设备同 inode 号、时间不同 = 新建的另一个文件
+        let reused = FileIdentity {
+            ctime: (ours.ctime.0 + 1, ours.ctime.1),
+            mtime: (ours.mtime.0 + 1, ours.mtime.1),
+            created: None,
+            ..ours.clone()
+        };
+        assert_ne!(ours, reused);
+        drop(listener);
         let _ = std::fs::remove_file(&path);
     }
 }

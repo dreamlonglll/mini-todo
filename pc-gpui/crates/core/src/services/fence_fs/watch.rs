@@ -209,6 +209,11 @@ mod tests {
         let root = tmp.path().join("root");
         std::fs::create_dir_all(root.join("甲")).unwrap();
         std::fs::create_dir_all(root.join("乙")).unwrap();
+        // macOS 的临时目录 /var/folders 是 /private/var/folders 的符号链接，FSEvents 报告的是解析后的路径，
+        // 用未解析的 root 匹配不上（收纳箱只在 Windows 上用，生产代码不处理）。Windows 上不能规范化：
+        // 会变成 `\\?\` 路径，与 notify 报告的路径对不上
+        #[cfg(target_os = "macos")]
+        let root = root.canonicalize().unwrap();
         let (tx, rx) = mpsc::channel::<FenceChange>();
         let watcher = watch_root_at(root.clone(), Duration::from_millis(150), move |change| {
             let _ = tx.send(change);

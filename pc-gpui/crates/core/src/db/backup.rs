@@ -131,7 +131,10 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         let last = last.expect("文件库应当产生快照");
-        assert!(last.starts_with(dir.join(BACKUP_DIR_NAME)));
+        // SQLite 把库路径解析成去掉符号链接的绝对路径（macOS 的临时目录 /var/folders → /private/var/folders），
+        // 两边都规范化后再比较（Windows 上两边都带 `\\?\` 前缀，同样一致）
+        let backups = dir.join(BACKUP_DIR_NAME).canonicalize().unwrap();
+        assert!(last.canonicalize().unwrap().starts_with(&backups));
         assert!(last
             .file_name()
             .unwrap()
