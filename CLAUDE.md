@@ -39,7 +39,7 @@ mini-todo/
 │   └── 开发文档/                            # 开发相关文档
 ├── pc-gpui/                                # PC 端（Cargo workspace；详见各 crate README）
 │   ├── Cargo.toml                          # [workspace] members = crates/core、crates/app；[workspace.package] version 是
-│   │                                       # 版本号唯一来源（当前 3.0.0-pre）；release thin LTO + strip
+│   │                                       # 版本号唯一来源（当前 3.0.1-pre）；release thin LTO + strip
 │   ├── Cargo.lock                          # 提交；CI 一律 --locked
 │   ├── crates/
 │   │   ├── core/                           # mini-todo-core：业务核心（不依赖 GPUI / Tauri / tokio，全部阻塞函数）
@@ -605,7 +605,7 @@ debug 专用环境变量（**只在 debug 构建读取，release 一律忽略**�
 - `pc-gpui-ci.yml`：Windows fmt / clippy / test + release 构建（上传 `mini-todo-gpui-windows-x64` 产物），Linux clippy / test
 - `pc-gpui-e2e-windows.yml`：Windows e2e（debug 套件 + release 冒烟 / 单实例）；手动触发，或推送到 `claude/**` 分支且改动 `pc-gpui/**` 时运行
 - `cloud-ci.yml`：fmt / clippy / test + Skill 单测
-- **版本号只有一处**：`pc-gpui/Cargo.toml` 的 `[workspace.package] version`（改完 `Cargo.lock` 同步），当前 `3.0.0-pre`。cloud 版本在
+- **版本号只有一处**：`pc-gpui/Cargo.toml` 的 `[workspace.package] version`（改完 `Cargo.lock` 同步），当前 `3.0.1-pre`。cloud 版本在
   `cloud/Cargo.toml`，与 tag 无关。发布步骤与安装器契约见 `.trellis/spec/pc-gpui/release.md`
 
 ## 注意事项
