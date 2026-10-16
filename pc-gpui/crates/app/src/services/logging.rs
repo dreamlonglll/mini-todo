@@ -1,6 +1,8 @@
 //! 日志：与旧版 tauri-plugin-log 相同的文件位置与轮转规则。
 //!
 //! - 文件：`%LOCALAPPDATA%\com.tauri-app.mini-todo\logs\mini-todo.log`（Linux：`dirs::data_local_dir()` 下同名目录）；
+//!   macOS：`~/Library/Logs/com.tauri-app.mini-todo/mini-todo.log`（2.5.0 mac 版 tauri-plugin-log `LogDir` 的位置，
+//!   即 Tauri `app_log_dir()` 的 mac 分支，没有 `logs` 子目录）；
 //!   开发专用数据隔离（`MINI_TODO_DATA_DIR`，仅 debug）时为 `<dir>/logs/mini-todo.log`
 //! - 超过 2MB 轮转：当前文件改名为 `mini-todo_<YYYY-MM-DD_HH-MM-SS>.log`，只保留 1 份旧日志
 //! - 本地时间；格式 `[YYYY-MM-DD][HH:MM:SS][target][LEVEL] message`
@@ -8,7 +10,8 @@
 //! - 已知无害的第三方错误降为 Debug（不落盘）：GPUI 的拖放图像助手 `IDropTargetHelper` 在拖放源的数据对象没有拖动图像时
 //!   每次 DragEnter / DragOver / Drop 都报 `DV_E_FORMATETC`（"Invalid FORMATETC structure (0x80040064)"），不影响拖入
 //!
-//! release 版是 Windows 子系统程序（没有控制台），日志必须落盘；业务代码统一用 `log::{info,warn,error}!`。
+//! release 版是 Windows 子系统程序（没有控制台；mac 从 Finder / Dock 启动同样看不到标准输出），日志必须落盘；
+//! 业务代码统一用 `log::{info,warn,error}!`。
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -31,10 +34,26 @@ pub fn log_dir() -> PathBuf {
     if let Some(dir) = mini_todo_core::db::paths::dev_data_dir_override() {
         return dir.join("logs");
     }
+    platform_log_dir()
+}
+
+/// Windows / Linux：`<data_local_dir>/com.tauri-app.mini-todo/logs`
+#[cfg(not(target_os = "macos"))]
+fn platform_log_dir() -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(LOG_IDENTIFIER)
         .join("logs")
+}
+
+/// macOS：`~/Library/Logs/com.tauri-app.mini-todo`（与 2.5.0 mac 版相同）
+#[cfg(target_os = "macos")]
+fn platform_log_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Library")
+        .join("Logs")
+        .join(LOG_IDENTIFIER)
 }
 
 struct FileState {

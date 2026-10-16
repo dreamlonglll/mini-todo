@@ -1,19 +1,29 @@
-//! 单实例（Windows）。
+//! 单实例（Windows、macOS）。
 //!
 //! 与旧版 `tauri-plugin-single-instance` 2.x 使用**同一组名字与消息格式**，新旧两版互相识别，
-//! 不会同时打开同一个数据库：
+//! 不会同时打开同一个数据库。Windows：
 //! - 命名互斥量 `com.tauri-app.mini-todo-sim`：已存在说明有实例在运行；
 //! - 接收窗口：类名 `com.tauri-app.mini-todo-sic`、标题 `com.tauri-app.mini-todo-siw` 的隐藏顶层窗口
 //!   （旧版用 `FindWindowW` 找它，所以不能是 message-only 窗口），收 `WM_COPYDATA`
 //!   （`dwData = 1542`，内容 `"<cwd>|<arg0>|<arg1>…\0"`）；
 //! - 第二个实例把参数发过去后退出；参数含 `--autostart`（开机自启拉起）时静默，不唤起窗口。
 //!
+//! macOS（2.5.0 mac 版插件的实现，见 `single_instance/unix_socket.rs`）：Unix socket `/tmp/com_tauri_app_mini_todo_si.sock`，
+//! 第二个实例连上后写 `"<cwd>\0\0<arg0>\0<arg1>…"` 再退出（含 `--autostart` 时也照发，由首个实例判断是否唤起，与旧版一致）；
+//! 首个实例在后台线程接收、经 channel 交给前台唤起主窗口，退出时删除 socket 文件。从 Finder / Dock 再次打开同一个 `.app`
+//! 时 LaunchServices 本来就只激活已运行的进程，socket 兜住的是开机自启（LaunchAgent 直接执行可执行文件）、`open -n`、
+//! 终端直接运行，以及新旧两版同时存在的情况。
+//!
 //! 开发专用数据隔离（`MINI_TODO_DATA_DIR`，仅 debug）时不启用（要与正在运行的安装版并存）。
-//! 非 Windows 不做单实例（Linux 只用于 CI 与截图）。
+//! Linux 不做单实例（只用于 CI 与截图）。
 
 use gpui_kit::App;
 
 use super::autostart::AUTOSTART_ARG;
+
+#[cfg(any(target_os = "macos", all(test, unix)))]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod unix_socket;
 
 /// 旧版 Tauri identifier（互斥量 / 窗口名的前缀）
 pub const IDENTIFIER: &str = "com.tauri-app.mini-todo";
@@ -35,8 +45,8 @@ pub fn acquire() -> Option<InstanceGuard> {
     imp::acquire()
 }
 
-/// 在 GPUI 主线程（`Application::run` 回调里）建好接收窗口；收到第二个实例的唤起请求时调用 `on_activate`。
-/// 开发隔离 / 非 Windows 时什么也不做。
+/// 在 GPUI 主线程（`Application::run` 回调里）开始接收第二个实例的唤起请求（Windows：建好接收窗口；macOS：起接收线程，
+/// 并登记退出时删除 socket 文件），收到时调用 `on_activate`。开发隔离 / Linux 时什么也不做。
 pub fn listen(cx: &mut App, on_activate: impl Fn(&mut App) + 'static) {
     if mini_todo_core::db::paths::dev_data_dir_override().is_some() {
         return;
@@ -49,7 +59,7 @@ pub fn should_activate(args: &[String]) -> bool {
     !args.iter().any(|a| a == AUTOSTART_ARG)
 }
 
-/// 解析 `WM_COPYDATA` 内容 `"<cwd>|<arg0>|…"`（去掉结尾的 `\0`）→ `(cwd, args)`
+/// 解析 Windows `WM_COPYDATA` 内容 `"<cwd>|<arg0>|…"`（去掉结尾的 `\0`）→ `(cwd, args)`
 pub fn parse_payload(data: &str) -> (String, Vec<String>) {
     let data = data.trim_end_matches('\0');
     let mut parts = data.split('|');
@@ -202,7 +212,92 @@ mod imp {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+mod imp {
+    use std::os::unix::net::UnixListener;
+    use std::sync::Mutex;
+
+    use gpui_kit::App;
+
+    use super::unix_socket::{self, Acquired, SocketFile};
+    use super::{IDENTIFIER, InstanceGuard, should_activate};
+
+    /// `acquire` 时 bind 好的监听 socket，`listen` 时取走交给接收线程。在这之间到达的连接在内核队列里等着
+    /// （第二个实例 connect 立即成功、写完即退出，不受影响）
+    static SERVER: Mutex<Option<(UnixListener, SocketFile)>> = Mutex::new(None);
+
+    pub fn acquire() -> Option<InstanceGuard> {
+        let path = unix_socket::socket_path(IDENTIFIER);
+        // 与旧版插件一样：cwd 不是 UTF-8 时发空串；参数按 UTF-8 有损转换（旧版 `env::args()` 遇到非 UTF-8 会 panic）
+        let cwd = std::env::current_dir()
+            .ok()
+            .and_then(|dir| dir.to_str().map(str::to_string))
+            .unwrap_or_default();
+        let args: Vec<String> = std::env::args_os()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        match unix_socket::acquire(&path, &unix_socket::encode_payload(&cwd, &args)) {
+            Acquired::Forwarded => {
+                if should_activate(&args) {
+                    log::info!("[app] 检测到已运行的实例，已请求它唤起窗口");
+                } else {
+                    log::info!("[app] 开机自启拉起的重复实例，静默退出");
+                }
+                None
+            }
+            Acquired::Primary(server) => {
+                *SERVER.lock().unwrap_or_else(|e| e.into_inner()) = Some(server.split());
+                Some(InstanceGuard {})
+            }
+            Acquired::Standalone(e) => {
+                log::warn!("[app] 单实例检测失败（{}），照常启动: {e}", path.display());
+                Some(InstanceGuard {})
+            }
+        }
+    }
+
+    pub fn listen(cx: &mut App, on_activate: impl Fn(&mut App) + 'static) {
+        let Some((listener, socket_file)) = SERVER.lock().unwrap_or_else(|e| e.into_inner()).take()
+        else {
+            return;
+        };
+        // 正常退出（⌘Q / 托盘「退出」/ Dock「退出」/ 注销都经 `terminate:` → GPUI 的 on_app_quit）时删除 socket 文件；
+        // 崩溃留下的残留由下次启动 connect 得 ConnectionRefused 时清理
+        cx.on_app_quit(move |_| {
+            socket_file.remove();
+            async {}
+        })
+        .detach();
+
+        let (tx, rx) = async_channel::unbounded::<()>();
+        let spawned = std::thread::Builder::new()
+            .name("single-instance".into())
+            .spawn(move || {
+                unix_socket::serve(listener, |_cwd, args| {
+                    if should_activate(&args) {
+                        log::info!("[app] 检测到重复启动，唤起已运行的窗口");
+                        let _ = tx.try_send(());
+                    }
+                });
+            });
+        if let Err(e) = spawned {
+            log::warn!("[app] 启动单实例接收线程失败: {e}");
+            return;
+        }
+        cx.spawn(async move |cx| {
+            while rx.recv().await.is_ok() {
+                cx.update(|cx| {
+                    // 第二个实例在别的应用里被拉起：先把本应用切到前台，否则主窗口落在当前前台应用之后
+                    cx.activate(true);
+                    on_activate(cx);
+                });
+            }
+        })
+        .detach();
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 mod imp {
     use gpui_kit::App;
 

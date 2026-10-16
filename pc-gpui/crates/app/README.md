@@ -154,14 +154,14 @@ cx.subscribe_in(&state, window, |_, _, e: &AppStateEvent, window, cx| …)  // �
 
 | 模块 | 内容 |
 |---|---|
-| `logging` | `%LOCALAPPDATA%\com.tauri-app.mini-todo\logs\mini-todo.log`（隔离时 `<dir>/logs`），2MB 轮转保留 1 份；本应用 Info 起，第三方 crate Warn 起 |
-| `single_instance` | Windows 命名互斥量 + 与旧版 Tauri 插件相同的接收窗口 / `WM_COPYDATA` 格式（新旧版互相识别）；第二实例唤起 `main_window::show_and_activate` |
+| `logging` | `%LOCALAPPDATA%\com.tauri-app.mini-todo\logs\mini-todo.log`；macOS `~/Library/Logs/com.tauri-app.mini-todo/mini-todo.log`（同 2.5.0 mac 版）；隔离时 `<dir>/logs`。2MB 轮转保留 1 份；本应用 Info 起，第三方 crate Warn 起 |
+| `single_instance` | 与旧版 Tauri 插件同名同格式（新旧版互相识别）：Windows 命名互斥量 + 接收窗口 / `WM_COPYDATA`；macOS Unix socket `/tmp/com_tauri_app_mini_todo_si.sock`（`<cwd>\0\0<args 以 \0 连接>`，`single_instance/unix_socket.rs`，退出时删除）。第二实例唤起 `main_window::show_and_activate`（mac 上先 `cx.activate(true)`） |
 | `sync` | `run_sync(cx, SyncMode)`（标题栏按钮、自动同步、设置页立即同步 / 强制拉取 / 强制推送共用）：期间 `AppState.syncing = true`；成功后 `apply_sync_report`（本地数据变了且主窗口没有模态子窗口 → 重新拉待办；`settings_applied` → 重读设置与运行时偏好）。文案（`syncReport.ts` 逐字移植）：`describe_sync_report`、`describe_skipped_records`、`has_local_data_changes`、`is_sync_busy_error`、`report_message_kind` |
 | `auto_sync` | 自动同步定时器（`start` / `stop`；间隔轮询、失败段只提示一次；设置窗口关闭后 WindowManager 自动再 `start`） |
-| `autostart` | `is_enabled` / `enable` / `disable` / `set_enabled` / `refresh_if_enabled`（阻塞，放后台）；与旧版同名同参数（`HKCU\…\Run\mini-todo = "<exe>" --autostart`）；开发隔离时不刷新 |
-| `tray` | 托盘（Windows）：添加待办 / 设置 / 固定模式勾选 / 开机自启勾选 / 收纳箱三个入口 / 重置位置 / 退出；左键单击唤起（300ms 去抖）；Linux 为 no-op |
-| `scheduler` | 提醒调度：启动 5s 后补发错过的重复提醒，此后对齐整分钟 `run_due`；系统通知走 `notify`，应用内通知经通道交给前台建窗（建窗失败不推进、下一分钟重试） |
-| `notify` | 系统通知（Windows Toast，AppUserModelID 与旧版一致；notify-rust） |
+| `autostart` | `is_enabled` / `enable` / `disable` / `set_enabled` / `refresh_if_enabled`（阻塞，放后台）；与旧版同名同参数（Windows `HKCU\…\Run\mini-todo = "<exe>" --autostart`；macOS LaunchAgent `~/Library/LaunchAgents/mini-todo.plist`，`[<可执行文件绝对路径>, --autostart]`，从 App Translocation 临时位置运行时拒绝写入）；开发隔离时不刷新 |
+| `tray` | 托盘 / 菜单栏图标（Windows、macOS）：添加待办 / 设置 / 固定模式勾选 / 开机自启勾选 / 收纳箱三个入口（仅 Windows）/ 重置位置 / 退出；左键单击唤起（300ms 去抖）。图标：Windows exe 资源；macOS 模板图标 `assets/tray-template.png`（36×36，`scripts/macos/gen-tray-icon.py` 生成）。Linux 为 no-op |
+| `scheduler` | 提醒调度：启动 5s 后补发错过的重复提醒，此后对齐整分钟 `run_due`；系统通知走 `notify`（macOS 经通道交给前台、交出即视为已投递），应用内通知经通道交给前台建窗（建窗失败不推进、下一分钟重试） |
+| `notify` | 系统通知：Windows Toast（AppUserModelID 与旧版一致；notify-rust）；macOS GPUI `show_system_notification`（`UNUserNotificationCenter`，归属 bundle id `com.tauri-app.mini-todo`，需从 ad-hoc 签名的 `.app` 启动，拿不到投递结果） |
 | `window_mode` | 主窗口普通 / 经典固定 / 固定 + 嵌入桌面、贴边隐藏与唤起、位置 / 尺寸与屏幕配置记忆（防抖保存）、托盘唤起 / 重置位置、200ms 轮询（Explorer 重启重挂、样式自愈） |
 | `update_check` | GitHub 最新 release：`check_for_updates(cx)`（启动，失败静默）、`check(cx) -> Task<Result<UpdateInfo, String>>`（设置「关于 → 检查更新」）、`releases_url(cx)`；结果写进 `AppState.has_update / latest_version / release_url` |
 | `fences` | 桌面收纳箱生命周期：建窗 + 嵌入、启动恢复、新增 / 显示隐藏 / 重置位置、目录监听 → 前台刷新、200ms 嵌入守护、约 2 秒一次的屏幕组合检测 |
