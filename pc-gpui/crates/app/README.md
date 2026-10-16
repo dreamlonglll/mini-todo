@@ -193,7 +193,7 @@ editor::open(cx, Some(parent), None, EditorMode::Edit);
 | 方法 | 说明 |
 |---|---|
 | `open_child(cx, parent: Option<&ChildOf>, kind, key, spec: WindowSpec, build) -> Option<AnyWindowHandle>` | 各窗口 `open` 的公共实现：打开方已有模态子窗口 → 带到前台并返回 `None`；在打开方显示器（整块）居中；登记；Windows 设 owner（去掉 `WS_EX_APPWINDOW`）；记模态关系。**打开方是主窗口时，子窗口关闭后自动 `reload_todos`，设置窗口再重读设置 + `auto_sync::start`** |
-| `open_window(cx, &spec, build)`（模块函数） | 不走模态逻辑的底层开窗（Root 包装 + 透明处理）；建好后（Windows）按**客户区**把窗口摆到规格位置（GPUI 按逻辑 `window_bounds` 建出的客户区偏高半个底边框，见 §4.5） |
+| `open_window(cx, &spec, build)`（模块函数） | 不走模态逻辑的底层开窗（Root 包装 + 透明处理）；建好后（Windows，同一个延后任务）先去掉 `WS_SYSMENU`（否则 DWM 标题栏按钮会从半透明客户区透出来），再按**客户区**把窗口摆到规格位置（GPUI 按逻辑 `window_bounds` 建出的客户区偏高半个底边框），见 §4.5 与 `platform` 模块文档 |
 | `WindowSpec::new(title, bounds)` + 字段 `client_rect / resizable / minimizable / transparent / focus / show / kind / min_size / display_id` | 统一窗口参数；`bounds` 是客户区的逻辑矩形，`client_rect` 是精确的物理客户区（主窗口按屏幕配置恢复、收纳箱），`None` 时取 `bounds` × 目标显示器缩放 |
 | `register(cx, kind, key, handle)` / `on_closed(cx, handle, FnOnce(&mut App))` / `close(cx, handle)` | 登记、关闭回调、关闭 |
 | `main(cx)` / `all(cx, kind)` / `find(cx, kind, key)` / `kind_of(cx, id)` | 查询 |
@@ -245,7 +245,7 @@ editor::open(cx, Some(parent), None, EditorMode::Edit);
 | `monitors(cx)` / `primary_monitor` / `monitor_of_window(window, cx)` / `monitor_at_cursor(cx)` | `MonitorInfo { display_id, rect, work, scale, primary }`（物理像素；`logical_rect()` / `logical_work()`）；Linux 缩放按 1 |
 | `cursor_position_physical()`、`screen_config_id(cx)` | 光标（Linux `None`）、屏幕组合 ID（debug 下 `MINI_TODO_SCREEN_ID_FILE` 可覆盖） |
 | `set_topmost` / `show_window`（不激活）/ `hide_window` / `is_window_visible` / `set_tool_window` / `set_minimizable` / `set_resizable_frame` / `set_owner` / `restore_if_minimized` / `bring_to_front` / `set_round_corners` | 窗口样式与显隐；`set_resizable_frame` 只改系统样式，缩放热区由 `subclass` 锁定 |
-| `Hwnd::{rect, set_rect, set_position, client_rect, set_client_rect, set_client_position, set_topmost, show, hide, is_visible, is_minimized, restore, is_alive, ex_style, set_tool_window, set_minimizable, set_resizable_frame, set_geometry_locked, set_owner, owner, set_foreground, set_round_corners, class_name}` | 立即执行的原始调用（只在 App 未借用时） |
+| `Hwnd::{rect, set_rect, set_position, client_rect, set_client_rect, set_client_position, set_topmost, show, hide, is_visible, is_minimized, restore, is_alive, ex_style, set_tool_window, set_minimizable, set_resizable_frame, set_system_menu, set_geometry_locked, set_owner, owner, set_foreground, set_round_corners, class_name}` | 立即执行的原始调用（只在 App 未借用时）；`set_system_menu` 只有 `open_window` 建窗后用（去掉 `WS_SYSMENU`，所有 GPUI 窗口都不带它） |
 | `embed::{desktop_host, attach_to_desktop, detach_from_desktop, set_always_on_bottom, needs_reattach}` | 嵌入桌面层：owner = Progman + 永远置底（`subclass::FLAG_BOTTOM`）+ `WS_EX_TOOLWINDOW`；主窗口与收纳箱共用；非 Windows 为安全空实现 |
 | `subclass::set_flag(hwnd, FLAG_BOTTOM \| FLAG_LOCK_GEOMETRY, on)` | `SetWindowSubclass` 子类过程：置底（`WM_WINDOWPOSCHANGING`）、固定模式锁定位置与尺寸（`WM_NCHITTEST` / `WM_SYSCOMMAND`） |
 | `fence_win::choose_color(cx, owner, initial) -> Task<Option<(u8, u8, u8)>>` | 收纳箱「自定义颜色」：Windows `ChooseColorW`（独立线程）；其它平台 `None` |

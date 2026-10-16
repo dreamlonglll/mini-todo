@@ -127,6 +127,7 @@ pub mod raw {
     pub fn set_tool_window(_hwnd: Hwnd, _tool: bool) {}
     pub fn set_minimizable(_hwnd: Hwnd, _minimizable: bool) {}
     pub fn set_resizable_frame(_hwnd: Hwnd, _resizable: bool) {}
+    pub fn set_system_menu(_hwnd: Hwnd, _on: bool) {}
     pub fn set_owner(_hwnd: Hwnd, _owner: Option<Hwnd>) {}
     pub fn owner(_hwnd: Hwnd) -> Option<Hwnd> {
         None

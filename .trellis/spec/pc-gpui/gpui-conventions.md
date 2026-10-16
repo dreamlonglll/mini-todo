@@ -63,6 +63,17 @@
   （`WindowSpec::client_rect` 给精确物理矩形，否则 `bounds` × 目标显示器缩放），窗口代码不要再各写一遍。
 - 不要子类化 `WM_NCCALCSIZE` 去掉这圈边框：GPUI 只在建窗和 `WM_DPICHANGED` 时缓存边框差值（`border_offset`），之后改边框会让它的
   `WM_GETMINMAXINFO` 最小尺寸、`resize`、`window_bounds` 都按旧差值算错。代价是外框外沿那圈不可见边框仍会接住鼠标（`HTBORDER`）。
+- **GPUI 窗口不带 `WS_SYSMENU`**：GPUI 建出的无标题栏窗口（`WindowKind::PopUp` 除外，它本来就没有）带 `WS_SYSMENU`、被系统补上
+  `WS_CAPTION`，标题栏样式还在（只是 `WM_NCCALCSIZE` 把客户区顶边拉到窗口顶），DWM 照常在右上角布置系统标题栏按钮
+  （`DWMWA_CAPTION_BUTTON_BOUNDS` 非空）并画在客户区内容之下——DirectComposition 透明窗口（收纳箱、深色半透明的主窗口）的半透明处
+  会透出一个系统 ×，激活时还带红底。`windows::open_window` 建好后在客户区校正的同一个延后任务里先对**所有**窗口
+  `Hwnd::set_system_menu(false)`（排在窗口代码自己的 Win32 操作之前，隐藏建窗的收纳箱显示时已经没有按钮），窗口代码不要再各写一遍，
+  运行时改样式也不要把它加回来。只去这一位：`WS_CAPTION` / `WS_MINIMIZEBOX` / `WS_MAXIMIZEBOX` / `WS_THICKFRAME` 不动（外框 ↔ 客户区换算、
+  窗口模式、任务栏单击最小化、标题栏双击最大化靠它们）；`WS_SYSMENU` 不改边框厚度，GPUI 缓存的 `border_offset` 仍然有效。代价是
+  没有系统菜单（Alt+Space、标题栏右键菜单）；其余系统行为实测不受影响（Win11 26H2，2026-10-16）：普通模式单击任务栏按钮最小化 / 还原
+  （S08）、标题栏双击最大化 / 还原（S01）、Win+↑ / Win+↓、拖到屏幕顶边贴靠最大化、Alt+F4。GPUI 运行期不改写 `WS_SYSMENU`（只有本项目不用的 `toggle_fullscreen` 整体重写样式），不加守护，
+  由 Windows e2e（W 组、S01–S03 / S07 / S08、F01、N01 断言无 `WS_SYSMENU` 且按钮区宽度为 0；S01 真实双击最大化、S08 真实单击任务栏按钮
+  最小化）兜底。
 
 ### 2.3 拖动窗口
 
@@ -225,7 +236,8 @@
 1. 读新版本源码，逐项核对本项目依赖的行为：`start_window_move` 在 Windows 上是否仍为空操作；`GWLP_USERDATA` 占用；是否开始处理
    `WM_WINDOWPOSCHANGING` / 改写 ex style；`WindowControlArea::Drag` → `HTCAPTION`；缩放热区是否仍按建窗时的 `is_resizable`；
    `WindowKind::PopUp` 的样式映射；`calculate_window_rect` 的边框对半分（客户区偏高）与 `WM_NCCALCSIZE` 只去顶边是否还在
-   （`windows::open_window` 的客户区校正、`platform::FrameInsets` 的单测依赖它）；文件拖放是否仍不改输入模态、`on_drop` 是否仍要求
+   （`windows::open_window` 的客户区校正、`platform::FrameInsets` 的单测依赖它）；建窗样式是否仍带 `WS_SYSMENU`、运行期是否开始
+   改写 `GWL_STYLE`（`open_window` 建窗后去掉 `WS_SYSMENU` 依赖它）；文件拖放是否仍不改输入模态、`on_drop` 是否仍要求
    `is_hovered`（`ui::external_drop` 依赖它）；透明窗口（DirectComposition）实现；`QuitMode` 默认值；`Root` / `RootPlugin` 接口
    （`UiLayer` 依赖）；`gpui_kit::base::TextView::markdown(..).image_source(..)`；`img(&str)` 的 URI 判定；换行器规则；
    Windows release 构建的 `fxc.exe` 着色器预编译（`gpui-pre-windows/build.rs`）。

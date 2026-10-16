@@ -212,7 +212,7 @@ impl WindowSpec {
     }
 }
 
-/// 打开一个窗口（根视图包一层 `Root`，透明窗口把 Root 背景覆盖为透明），建好后按客户区校正位置与尺寸
+/// 打开一个窗口（根视图包一层 `Root`，透明窗口把 Root 背景覆盖为透明），建好后去掉 `WS_SYSMENU`、按客户区校正位置与尺寸
 pub fn open_window<V: Render>(
     cx: &mut App,
     spec: &WindowSpec,
@@ -230,7 +230,7 @@ pub fn open_window<V: Render>(
             }
         })
     })?;
-    place_client_area(cx, handle.into(), spec);
+    adjust_native_window(cx, handle.into(), spec);
     Ok(handle)
 }
 
@@ -246,10 +246,17 @@ fn client_target(spec: &WindowSpec, monitors: &[MonitorInfo]) -> PhysRect {
     })
 }
 
-/// GPUI 按逻辑 `window_bounds` 建窗时把不可见边框算错（客户区比请求的高半个底边框，见 `platform` 模块文档）：
-/// 建好后（App 未借用时）按客户区摆到规格位置。通知的叠放、主窗口居中、子窗口居中、收纳箱几何都靠它；
-/// 窗口自己之后再摆（通知按真实尺寸、主窗口切模式）的操作排在它后面执行。其它平台没有 HWND，不做
-fn place_client_area(cx: &mut App, handle: AnyWindowHandle, spec: &WindowSpec) {
+/// 建好后（App 未借用时）补上 GPUI 没做对的两件事（原因见 `platform` 模块文档）：
+///
+/// 1. 去掉 `WS_SYSMENU`：GPUI 的无标题栏窗口仍带标题栏样式，DWM 会把系统标题栏按钮画在半透明客户区下面透出来；
+/// 2. 按客户区摆到规格位置：GPUI 按逻辑 `window_bounds` 建窗时把不可见边框算错（客户区比请求的高半个底边框）。
+///    通知的叠放、主窗口居中、子窗口居中、收纳箱几何都靠它。
+///
+/// 这个前台任务在 `open_window` 返回前就已排队，窗口代码之后排的 Win32 操作（通知按真实尺寸再摆、主窗口切模式、
+/// 收纳箱嵌入桌面后再显示）都在它后面执行——所以隐藏建窗的窗口（收纳箱）显示时已经没有标题栏按钮。
+/// 建窗时就显示的窗口（`spec.show`，GPUI 在建窗过程中就已显示）从显示到这个任务执行之间仍带着 `WS_SYSMENU`。
+/// 其它平台没有 HWND，不做
+fn adjust_native_window(cx: &mut App, handle: AnyWindowHandle, spec: &WindowSpec) {
     let Some(hwnd) = cx
         .update_window(handle, |_, window, _| platform::hwnd(window))
         .ok()
@@ -259,6 +266,8 @@ fn place_client_area(cx: &mut App, handle: AnyWindowHandle, spec: &WindowSpec) {
     };
     let target = client_target(spec, &platform::monitors(cx));
     cx.spawn(async move |_| {
+        // 先改样式再摆窗：SWP_FRAMECHANGED 之后量到的边框才是最终的（WS_SYSMENU 本身不改边框厚度）
+        hwnd.set_system_menu(false);
         hwnd.set_client_rect(target);
     })
     .detach();

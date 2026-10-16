@@ -164,7 +164,8 @@ core 与 app 必须成对的常量：`logic::ICON_BUCKETS` ↔ `fence_fs::ICON_S
    `services::fences::close_deleted` → `WindowManager::close`；窗口关闭回调里从 `FenceRuntime.windows` 注销，最后一个关闭时 `forget_screen_config`。
 4. 建好后（Windows，`embed_after_open`，async 块里）：`set_client_rect` → `set_tool_window(true)` → `set_minimizable(false)` →
    `set_round_corners(true)` → `platform::embed::attach_to_desktop` → `set_always_on_bottom(true)` → 不处于"全部隐藏"时 `show()`。
-   然后启动 200ms 守护（只启动一次）。
+   然后启动 200ms 守护（只启动一次）。在它之前，`windows::open_window` 排队的前台任务已经去掉 `WS_SYSMENU` 并按客户区校正过
+   （同一个前台队列、先排先执行），所以显示时 DWM 不会在半透明底色下透出系统 ×（[pc-gpui/gpui-conventions.md §2.2](../pc-gpui/gpui-conventions.md)）。
 
 **嵌入后的 Win32 状态**（Windows e2e F 组断言，任何操作之后都不变）：
 
@@ -173,6 +174,7 @@ core 与 app 必须成对的常量：`logic::ICON_BUCKETS` ↔ `fence_fs::ICON_S
 | owner（`GWLP_HWNDPARENT`） | Progman（`GetShellWindow()`） |
 | `WS_EX_TOOLWINDOW` / `WS_EX_APPWINDOW` | 有 / 无（不进任务栏、不参与 Alt+Tab） |
 | `WS_MINIMIZEBOX` | 无 |
+| `WS_SYSMENU` | 无（`open_window` 建窗后去掉；DWM 标题栏按钮区 `DWMWA_CAPTION_BUTTON_BOUNDS` 宽度为 0） |
 | `WS_EX_TOPMOST` / `WS_EX_NOACTIVATE` | 无 / 无 |
 | Z 序 | `subclass::FLAG_BOTTOM`：每次改 Z 序都压到 `HWND_BOTTOM` = Progman owned 组内最底，始终在所有普通应用窗口之下 |
 
@@ -191,7 +193,7 @@ core 与 app 必须成对的常量：`logic::ICON_BUCKETS` ↔ `fence_fs::ICON_S
 | 摆窗（`services::fences::apply_window_rect` / `platform::set_client_rect_physical`） | 按客户区一次 `SetWindowPos(NOZORDER \| NOACTIVATE)`（延后到下一个前台任务）；跨 DPI 时按新边框再校正 |
 | 改标题（改名后） | `window.set_window_title` |
 | 显示 / 隐藏全部 | `Hwnd::show` / `hide`（`ShowWindow`，不改 ex style）；显示后再 `attach_to_desktop` + `set_always_on_bottom`（幂等） |
-| 改 resizable / minimizable / 加 `WS_EX_NOACTIVATE` / `WS_EX_LAYERED` | **禁止** |
+| 改 resizable / minimizable / 加 `WS_EX_NOACTIVATE` / `WS_EX_LAYERED` / 加回 `WS_SYSMENU` | **禁止** |
 
 **锁定（「固定」）完全由界面控制**：锁定时不发起拖动、不显示缩放手柄；仍可拖入、折叠、改名、打开项目。Win32 样式不随锁定变化。
 
@@ -521,7 +523,7 @@ release 不编译。Windows e2e 的 P01 在 release 构建上验证忽略 `MINI_
 
 | 用例 | 断言 |
 |---|---|
-| F01 `fence:new` | 嵌入桌面（3.1 状态表）、收纳文件夹建在 `MINI_TODO_FENCES_ROOT` 下 |
+| F01 `fence:new` | 嵌入桌面（3.1 状态表，含无 `WS_SYSMENU`、DWM 标题栏按钮区宽度为 0）、收纳文件夹建在 `MINI_TODO_FENCES_ROOT` 下 |
 | F02 往收纳文件夹放文件 | 监听刷新出图标 |
 | F04 / F09 / F08 真实 OLE 拖入（.NET `DataObject`、Shell 数据对象、资源管理器窗口作拖放源） | 新实例第一次拖入即生效；文件离开来源、进入收纳文件夹 |
 | F03 / F10 / F11 双击标题改名；改名后 / 单击标题后紧接着的拖入 | 文件夹同步改名；第一次拖入不丢 |

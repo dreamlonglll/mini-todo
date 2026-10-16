@@ -93,6 +93,11 @@ There is **no** `screen_configs.is_desktop` column and no `is_desktop` key: "emb
 | 经典固定 | true | false | 0 | `WS_EX_TOOLWINDOW`，无 APPWINDOW | 有 | 是 | 顶层；只在贴边唤起（`top_on_wake`）/ 托盘唤起时置顶 | 无 |
 | 固定 + 嵌入桌面 | false | true | Progman（`GetShellWindow()`） | `WS_EX_TOOLWINDOW`，无 APPWINDOW，无 TOPMOST | **无** | 是 | `FLAG_BOTTOM`：每次改 Z 序都压到 `HWND_BOTTOM` = 紧贴 Progman 之上 | 有 |
 
+三种模式都**没有 `WS_SYSMENU`**、DWM 标题栏按钮区（`DWMWA_CAPTION_BUTTON_BOUNDS`）宽度为 0：`windows::open_window` 建窗后统一去掉
+（否则系统 × 会从深色半透明主窗口的客户区透出来，见 [pc-gpui/gpui-conventions.md §2.2](../pc-gpui/gpui-conventions.md)），模式切换只改上表各列、
+不碰它；只去这一位，`WS_CAPTION` 等其它样式位不动。去掉后普通模式的系统行为实测不受影响（Win11 26H2，2026-10-16）：单击任务栏按钮
+最小化 / 还原（e2e S08）、标题栏双击最大化 / 还原（S01）、Win+↑ / Win+↓、拖到屏幕顶边贴靠最大化、Alt+F4；只是没有了系统菜单（Alt+Space）。
+
 **偏好开关的跨窗口契约**
 
 1. 设置窗口 → `AppState::set_fixed_embed_desktop(v)`：先改状态再写键（`settings::set_fixed_embed_desktop`），失败回滚。
@@ -157,13 +162,16 @@ E2E（Windows，`pc-gpui/scripts/e2e-windows/run_e2e.py` 的 S 组；CI `.github
 
 | 用例 | 断言 |
 |---|---|
-| S01 普通模式 | APPWINDOW、无 owner、`HTCAPTION` / `HTLEFT`，拖动标题栏移动且位置落库 |
+| S01 普通模式 | APPWINDOW、无 owner、`HTCAPTION` / `HTLEFT`，拖动标题栏移动且位置落库；真实双击标题栏最大化、再双击还原且几何复原 |
 | S02 点锁按钮 → 经典固定 | TOOLWINDOW、`WM_NCHITTEST` 不再是拖动 / 缩放区、真实拖动不动、`is_fixed` 落库 |
 | S03 `fixed_embed_desktop=true` 重启恢复 | owner = 桌面宿主、TOOLWINDOW、无 MINIMIZEBOX |
 | S04 Z 序 | 普通应用窗口（探针）在它之上 |
 | S05 Win+D | 之后仍可见 |
 | S06 Explorer 重启 | 自动重挂 owner |
 | S07 点锁按钮回普通模式 | 状态表"普通"一行 |
+| S08 普通模式单击任务栏按钮 | 真实点击（UIA 找按钮）：前台时最小化、再单击还原到前台 |
+
+S01 / S02 / S03 / S07 / S08 每次切换后都另外断言无 `WS_SYSMENU`、DWM 标题栏按钮区宽度为 0。
 
 ### 7. Wrong vs Correct
 

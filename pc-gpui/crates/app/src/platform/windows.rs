@@ -22,7 +22,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     IsWindowVisible, IsZoomed, SW_HIDE, SW_MAXIMIZE, SW_RESTORE, SW_SHOWNOACTIVATE,
     SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageW,
     SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_NCLBUTTONDOWN,
-    WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_THICKFRAME,
+    WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU, WS_THICKFRAME,
 };
 
 use super::{FrameInsets, Hwnd, MonitorInfo, PhysRect};
@@ -388,6 +388,14 @@ pub mod raw {
             update_long(h, GWL_STYLE, bits, 0);
         } else {
             update_long(h, GWL_STYLE, 0, bits);
+        }
+    }
+
+    pub fn set_system_menu(h: Hwnd, on: bool) {
+        if on {
+            update_long(h, GWL_STYLE, WS_SYSMENU.0, 0);
+        } else {
+            update_long(h, GWL_STYLE, 0, WS_SYSMENU.0);
         }
     }
 

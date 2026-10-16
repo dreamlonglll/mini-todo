@@ -31,6 +31,22 @@
 //! - 运行时摆窗：[`set_client_rect_physical`] / [`set_client_position_physical`]（延后执行）或 [`Hwnd::set_client_rect`] /
 //!   [`Hwnd::set_client_position`]（立即执行）；读几何用 [`client_rect_physical`] / [`Hwnd::client_rect`]；
 //! - [`window_rect_physical`] / [`Hwnd::rect`] / [`Hwnd::set_rect`] 是外框（含不可见边框），只用于换算与诊断。
+//!
+//! ## 去掉 `WS_SYSMENU`：否则 DWM 标题栏按钮会从半透明客户区透出来
+//!
+//! 与上一节同源：GPUI 的无标题栏窗口（`WindowKind::PopUp` 除外，见下）建出来带 `WS_SYSMENU`（另按参数加
+//! `WS_THICKFRAME | WS_MAXIMIZEBOX`、`WS_MINIMIZEBOX`），系统再补上 `WS_CAPTION`；GPUI 只在 `WM_NCCALCSIZE` 里把客户区顶边
+//! 拉到窗口顶，标题栏样式还在。DWM 因此仍在右上角布置系统标题栏按钮（`DWMWA_CAPTION_BUTTON_BOUNDS` 非空），画在客户区内容
+//! **之下**：不透明的窗口把它盖住了；DirectComposition 透明窗口（收纳箱、深色半透明的主窗口）的半透明处会透出一个系统 ×，
+//! 窗口激活时还带红底（命中测试由 GPUI 返回 `HTCLIENT`，点不到，只是视觉问题）。没有 `WS_SYSMENU` 时 DWM 不布置任何标题栏按钮，
+//! 所以 [`crate::windows::open_window`] 建好后对**所有**窗口 [`Hwnd::set_system_menu`]`(false)`（与客户区校正同一个延后任务，
+//! 先于隐藏建窗的窗口显示；通知用的 `PopUp` 窗口 GPUI 本来就不给 `WS_SYSMENU`，对它是空操作）：
+//!
+//! - 只去这一位，`WS_CAPTION` / `WS_MINIMIZEBOX` / `WS_MAXIMIZEBOX` / `WS_THICKFRAME` 不动——外框 ↔ 客户区换算、窗口模式、
+//!   任务栏单击最小化、标题栏双击最大化都靠它们；`WS_SYSMENU` 也不影响边框厚度（GPUI 建窗时缓存的边框差值仍然有效）；
+//! - 代价是没有系统菜单（Alt+Space、标题栏右键菜单），自绘标题栏的窗口本来就不该有；单击任务栏按钮最小化 / 还原、标题栏双击
+//!   最大化 / 还原、Win+↑ / Win+↓、拖到屏幕顶边贴靠、Alt+F4 实测不受影响（Windows e2e S08 / S01 用真实输入断言前两项）；
+//! - GPUI 运行期不改写 `WS_SYSMENU`（只有本项目不用的全屏切换会整体重写样式），所以不需要守护；运行时改样式也不要把它加回来。
 
 use gpui_kit::{App, Bounds, DisplayId, Pixels, Window, point, px, size};
 
@@ -362,6 +378,10 @@ impl Hwnd {
     }
     pub fn set_resizable_frame(self, resizable: bool) {
         imp::raw::set_resizable_frame(self, resizable)
+    }
+    /// `WS_SYSMENU`（系统菜单；有它 DWM 才布置标题栏按钮）。建窗后由 [`crate::windows::open_window`] 统一去掉，见模块文档
+    pub fn set_system_menu(self, on: bool) {
+        imp::raw::set_system_menu(self, on)
     }
     pub fn set_owner(self, owner: Option<Hwnd>) {
         imp::raw::set_owner(self, owner)
