@@ -150,7 +150,7 @@ GPUI 版新增的 debug 专用环境变量（release 一律忽略）：
 
 ## macOS：打包、e2e 与交叉检查
 
-mac 上的一切只能在 macOS 宿主上编译运行（GPUI 的 mac 平台层与 bundled sqlite / mac-notification-sys 的 C / ObjC 编译都要 Apple SDK），
+mac 上的一切只能在 macOS 宿主上编译运行（GPUI 的 mac 平台层与 bundled sqlite 的 C 编译都要 Apple SDK），
 没有 Mac 时靠 GitHub 的 macOS runner：编译门与冒烟 e2e 在 `.github/workflows/pc-gpui-e2e-macos.yml`（推 `claude/**` 分支即跑），
 main / PR 上 `pc-gpui-ci.yml` 的 `macos` 作业另出 universal `.app` 产物，发版由 `release.yml` 的 `build-macos` 出 dmg。
 
@@ -159,7 +159,7 @@ main / PR 上 `pc-gpui-ci.yml` 的 `macos` 作业另出 universal `.app` 产物�
 | `macos/bundle.sh` | `bundle.sh <arm64 或单架构二进制> <x86_64 二进制\|-> <输出目录>`：组装 `mini-todo.app`（Info.plist 身份沿用 2.5.0：bundle id `com.tauri-app.mini-todo`、`CFBundleExecutable` / `CFBundleName` = `mini-todo`、`LSMinimumSystemVersion` 11.0、不设 `LSUIElement`；版本号读 `pc-gpui/Cargo.toml`，`CFBundleShortVersionString` 去掉 `-pre` 等后缀）+ 图标 `crates/app/assets/icon.icns`（取自 2.5.0）+ 整包 ad-hoc 签名并校验。第二个参数给 x86_64 二进制时用 `lipo` 合并成 universal 并断言两个切片都在。路径按脚本位置解析，可从任何目录调用 |
 | `macos/make-dmg.sh` | `make-dmg.sh <app> <dmg>`：暂存目录（`.app` + `/Applications` 软链）→ `hdiutil create`（UDZO、HFS+、显式 `-size`，失败 detach / 尺寸翻倍 / 等 15s，最多 5 次）→ `hdiutil verify` → 挂载回读校验签名、架构、软链与可执行文件一致 |
 | `macos/gen-tray-icon.py` | 生成菜单栏模板图标 `crates/app/assets/tray-template.png`（36×36 = 18pt@2x，只用 alpha） |
-| `e2e-macos/` | macOS runner 上的冒烟 e2e（`run_e2e.py`：窗口枚举、截图有内容、Vision OCR、退出）；用例、输出与本地运行见 `e2e-macos/README.md` |
+| `e2e-macos/` | macOS runner 上的 e2e（`run_e2e.py`）：`--suite smoke`（debug `.app` 隔离运行，M01~M10：各窗口截图与 Vision OCR、退出、App 菜单、菜单栏图标菜单、⌘W 与 Dock 唤起、新建待办落库、固定模式）与 `--suite release`（release `.app` 真实目录，P01~P04：迁移版本、日志位置、单实例、LaunchAgent、退出清理）；用例、输出与本地运行见 `e2e-macos/README.md` |
 | `mac-check/` | 不属于 workspace 的小 crate：用 `#[path]` 把 app 里**不依赖 GPUI** 的 mac 源文件（objc2 窗口代码、托盘、自启、单实例……）编进来，在 Linux / Windows 上 `cargo check` / `clippy --target aarch64-apple-darwin` 做类型检查（`rustup target add aarch64-apple-darwin`；命令见其 `Cargo.toml` 顶部）。依赖版本与特性必须和 `crates/app/Cargo.toml` 的 macOS 依赖一致；GPUI 胶水代码仍只有 CI 能编译 |
 
 本地（在 Mac 上）打一个 universal 包：
