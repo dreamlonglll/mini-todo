@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 23
+- **Total Sessions**: 24
 - **Last Active**: 2026-10-16
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~887 | Active |
+| `journal-1.md` | ~921 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 24 | 2026-10-16 | 去掉 DWM 透出的系统标题栏按钮（收纳箱 / 主窗口右上角小 ×） | `44c41fe`, `fbaa33c` | `main` |
 | 23 | 2026-10-16 | GPUI 版合入、删除 Tauri 版并发布 v3.0.0-pre | `0422e7a`, `b0f26d6`, `ee8f287`, `8117b1f`, `5e09540` | `main` |
 | 22 | 2026-10-15 | 使用 Rust + gpui-pre 重写 PC 端（pc-gpui）并完成 Linux / Windows e2e | `2fed656`, `03d4800`, `68cc14c`, `7bedc5b`, `71a5f29`, `833da43`, `beaf38b`, `faccced`, `a7d48a3`, `b92f457`, `57a0e12`, `facd951`, `9b51a3d` | `claude/determined-mccarthy-6rfxev` |
 | 21 | 2026-10-15 | 桌面收纳箱（Desktop Fence） | `e1827e5`, `409c5c6`, `845e121`, `8ffca8c` | `main` |

@@ -885,3 +885,37 @@ PC 前端（D1 正确性 / 安全 / 同步 UI、D2 性能 / 清理 / 测试）�
 ### Next Steps
 
 - None - task complete
+
+
+## Session 24: 去掉 DWM 透出的系统标题栏按钮（收纳箱 / 主窗口右上角小 ×）
+
+**Date**: 2026-10-16
+**Task**: 去掉 DWM 透出的系统标题栏按钮（收纳箱 / 主窗口右上角小 ×）
+**Branch**: `main`
+
+### Summary
+
+分析用户反馈的收纳箱 / 主窗口右上角小 ×（激活时红底）：GPUI 无标题栏窗口仍带 WS_CAPTION|WS_SYSMENU，DWM 把系统标题栏按钮画在半透明 DirectComposition 客户区下透出（DWMWA_CAPTION_BUTTON_BOUNDS 实测非空、PrintWindow 复现、去 WS_SYSMENU 后消失）；open_window 建窗后统一去掉 WS_SYSMENU（新增 Hwnd::set_system_menu），几何不变；e2e 加无 WS_SYSMENU / 按钮区宽 0 断言、S01 真实双击最大化、新增 S08 任务栏单击最小化（taskbar-button.ps1）。本机 e2e：S08 / S01 / W / N / F01 通过，Win+↑↓、贴靠补测通过；首轮 F 组拖放因测试收纳箱与安装版收纳箱重叠而落进真实收纳箱（文件已移出、教训写入 e2e 指南），隐藏安装版收纳箱后重跑 F 组全过。待用户实机：任务栏右键关闭窗口、缩略图 ×。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `44c41fe` | (see git log) |
+| `fbaa33c` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
