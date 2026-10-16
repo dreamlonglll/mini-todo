@@ -147,7 +147,7 @@ cloud keeps the equivalent in `meta` (`dirty`, `base_etag`, `base_last_modified`
 | `fences` 表 | v29（v30 加 `show_hidden`） | 桌面收纳箱元数据（标题、收纳文件夹名、物理像素几何、折叠 / 锁定 / 外观 / 图标大小 /「显示隐藏的图标」） |
 | `fence_items` 表 | v29（v30 加 `hidden`） | 收纳箱项目的排序、原始路径与隐藏标记（内容以本机收纳文件夹为准） |
 | `fence_layouts` 表 | v29 | 收纳箱按屏幕组合记忆的位置 |
-| settings `fence_onedrive_notice_shown` | v29 | 首次收纳时的 OneDrive 一次性提示是否已显示 |
+| settings `fence_onedrive_notice_shown` | v29 | 首次收纳时的云同步一次性提示是否已显示（Windows OneDrive；macOS 的 iCloud 提示共用这个键，键名不变） |
 | settings `webdav_remote_etag` / `webdav_last_modified` / `webdav_synced_settings_at` / `webdav_last_sync_at` / `webdav_device_id` | 多个版本 | 同步自身的本机状态（见 §2），WebDAV 连接配置同样不同步 |
 
 规则：

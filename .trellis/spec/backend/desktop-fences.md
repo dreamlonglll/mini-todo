@@ -2,18 +2,24 @@
 
 > 收纳箱的 code-spec。实现：
 > - core（`pc-gpui/crates/core/src/`）：`fence/mod.rs`（元数据、几何、按屏幕组合记忆位置、删除）、`fence/items.rs`（内容对账、移入 /
->   移回 / 跨箱、打开、图标、目录监听、`FenceActivity` 登记）、`services/fence_fs/`（文件层，与数据库无关）；
-> - app（`pc-gpui/crates/app/src/`）：`services/fences.rs`（建窗与嵌入、启动恢复、托盘三个入口、监听结果回前台、200ms 嵌入守护、
->   约 2 秒一次的屏幕组合检测）、`windows/fence/`（`mod.rs` 标题栏 / 折叠 / 移动 / 缩放 / 改名 / 外部拖入，`grid.rs` 项目网格，
->   `panels.rs` 外观 / 删除确认 / OneDrive 面板，`logic.rs` 纯函数）、`platform/embed.rs`（与主窗口共用的嵌入核心）。
+>   移回 / 跨箱、打开、图标、目录监听、`FenceActivity` 登记）、`services/fence_fs/`（文件层，与数据库无关；Windows 走 `shell.rs` / `sta.rs`，
+>   macOS 走叶子模块 `mac.rs`）；
+> - app（`pc-gpui/crates/app/src/`）：`services/fences.rs`（建窗与嵌入 / mac 桌面层、启动恢复、托盘 / 菜单栏图标三个入口、监听结果回前台、
+>   200ms 嵌入守护（Windows）、约 2 秒一次的屏幕组合检测）、`windows/fence/`（`mod.rs` 标题栏 / 折叠 / 移动 / 缩放 / 改名 / 外部拖入，
+>   `grid.rs` 项目网格，`panels.rs` 外观 / 删除确认 / 云同步（OneDrive / iCloud）面板，`logic.rs` 纯函数）、`platform/embed.rs`
+>   （Windows：与主窗口共用的嵌入核心）、`platform/macos/ns.rs`（macOS：`make_desktop_layer`、取色面板）、`platform/fence_win.rs`（「自定义颜色」）。
 >
 > 建立于任务 `10-15-desktop-fence`（2026-10-15，旧 Tauri 版，Win11 10.0.26300、双屏混合 DPI 150% + 125% 上 e2e 实测），随
 > `10-15-gpui-rewrite` 移植到 GPUI；旧 Tauri 版已删除（见 git 历史）。主窗口的三种模式见 [window-modes.md](./window-modes.md)，本文件只讲收纳箱。
 > 文件层逐函数说明见归档任务文档 `.trellis/tasks/archive/2026-10/10-15-desktop-fence/fence-fs-api.md`。
+> macOS 移植于任务 `10-16-macos-fences`（2026-10-16；**只在 GitHub macOS runner 上验证，未经真机验收**），mac 的差异集中在后文
+> 「场景：macOS 上的收纳箱」，调研资料在该任务的 `research/`（桌面层窗口、文件操作与 TCC）。
 >
 > **几何一律是客户区（= 可见区域）的物理像素**：GPUI 窗口在左 / 右 / 下另有不可见边框（96 DPI 下各 8px），摆窗用
 > `platform::set_client_rect_physical` / `Hwnd::set_client_rect`，落库 / 缩放起点 / 屏幕组合切换读 `client_rect_physical`
-> （旧版无边框窗口的外框就是客户区，库里的几何沿用它；e2e F07 断言可见区域 = 库里的几何）。
+> （旧版无边框窗口的外框就是客户区，库里的几何沿用它；e2e F07 断言可见区域 = 库里的几何）。macOS 的窗口 frame 就是客户区，
+> 物理像素 = 全局点坐标 × 统一系数（[pc-gpui/gpui-conventions.md §2.15](../pc-gpui/gpui-conventions.md)；mac e2e MF01 / MF09 断言库里的几何 =
+> 窗口 × 统一系数）。
 
 ---
 
@@ -21,15 +27,19 @@
 
 ### 1. Scope / Trigger
 
-- 触发：一种特殊窗口（始终嵌入桌面层的透明窗口）、迁移 v29（3 张表 + 1 个 settings 键）与 v30（隐藏图标的两列）、Win32 嵌入与置底、
-  会移动用户文件的 Shell 操作（硬约束：**不丢文件、绝不覆盖**）、3 个 debug 专用环境变量。
+- 触发：一种特殊窗口（始终在桌面层的透明窗口：Windows 嵌入桌面，macOS 桌面图标层之上的不激活面板）、迁移 v29（3 张表 + 1 个 settings 键）
+  与 v30（隐藏图标的两列）、Win32 嵌入与置底 / AppKit 窗口层级、会移动用户文件的 Shell / `renamex_np` 操作（硬约束：**不丢文件、绝不覆盖**）、
+  一组 debug 专用环境变量（§3.6）。
 - 改动以下任何东西前先读本文件：
   - core `fence/**`、`services/fence_fs/**`、`settings::delete_screen_config`、`db/paths.rs` 的隔离变量、`fences` / `fence_items` /
     `fence_layouts` 表
-  - app `services/fences.rs`、`windows/fence/**`、`platform/embed.rs`（主窗口也用）、托盘收纳箱菜单项（`services/tray.rs`）
-- 平台：托盘入口与启动恢复（`services::fences::restore_all`）只在 Windows（macOS 的菜单栏图标菜单不含收纳箱三项，`tray.rs` 按 `cfg(windows)`
-  加入）；core 的移动 / 打开 / 定位 / 图标在非 Windows 返回 `Err("桌面收纳箱仅支持 Windows")`。Linux 上收纳箱窗口只用于截图 / 冒烟
-  （`MINI_TODO_DEBUG_OPEN=fence:<id>` / `fence:new`）；mac 上没有入口（v29 / v30 的表照样建，不用）。
+  - app `services/fences.rs`、`windows/fence/**`、`platform/embed.rs`（主窗口也用）、`platform/macos/ns.rs` 的桌面层 / 取色面板、
+    `platform/fence_win.rs`、托盘 / 菜单栏图标的收纳箱菜单项（`services/tray.rs`）、`services/mac_menu.rs` 的 ⌘M / ⌘W、
+    `scripts/macos/bundle.sh` 的隐私用途说明键
+- 平台：托盘 / 菜单栏图标的收纳箱三项（`tray.rs`，Windows 与 macOS 都编译）与启动恢复（`services::fences::restore_all`）在 Windows 与 macOS 上；
+  core 的移动 / 打开 / 定位 / 图标在 Windows（Shell）与 macOS（`fence_fs/mac.rs`）上可用，其他平台返回 `Err("桌面收纳箱仅支持 Windows 与 macOS")`。
+  Linux 上收纳箱窗口只用于截图 / 冒烟（`MINI_TODO_DEBUG_OPEN=fence:<id>` / `fence:new`），启动不恢复、`apply_window_rect` 只改尺寸。
+  §3 ~ §7 以 Windows 为准写成；macOS 与之不同的地方见「场景：macOS 上的收纳箱」，两处冲突时以 mac 场景为准（只对 mac）。
 
 ### 2. Signatures
 
@@ -92,9 +102,11 @@ fn data_dir_override(raw: Option<OsString>, debug_build: bool) -> Option<PathBuf
 pub fn settings::delete_screen_config(db, config_id) -> R<()>;   // 连带删 fence_layouts
 
 // ===== core services::fence_fs（全部阻塞，Result 错误为中文） =====
-pub fn fence_root_dir() -> Result<PathBuf, String>;          // 不存在则创建
+pub fn fence_root_dir() -> Result<PathBuf, String>;          // 不存在则创建；macOS 返回 canonicalize 后的路径
 pub fn icon_cache_dir() -> PathBuf;                          // <app_data_dir>\fence-icons，不创建
-pub fn user_desktop_dir() -> Option<PathBuf>;                // dirs::desktop_dir()（公共桌面 public_desktop_dir 只在模块内用）
+pub fn user_desktop_dir() -> Option<PathBuf>;                // dirs::desktop_dir()；debug 下 MINI_TODO_DESKTOP_DIR 覆盖（公共桌面 public_desktop_dir 只在模块内用）
+pub const DESKTOP_DIR_ENV: &str = "MINI_TODO_DESKTOP_DIR";   // location.rs；FENCES_ROOT_ENV 同理
+pub fn is_ubiquitous_item(path: &Path) -> bool;             // macOS：移动前判定 iCloud 管理（NSURLIsUbiquitousItemKey）；其他平台恒 false
 pub fn path_starts_with_ci(path: &Path, prefix: &Path) -> bool;  pub fn same_path_ci(a: &Path, b: &Path) -> bool;
 pub fn is_valid_item_name(name: &str) -> bool;               // 单个路径段：拦 ..、绝对路径、ADS
 pub fn is_auto_hidden_name(file_name: &str) -> bool;         // 以 . 开头 = 自动隐藏（纯函数，core / app 共用）
@@ -115,15 +127,36 @@ pub fn launch_item(path: &str) -> Result<(), String>;  pub fn reveal_in_explorer
 pub fn icon_png(path: &str, size_px: u32) -> Result<PathBuf, String>;
 pub fn prune_icon_cache<P: AsRef<Path>>(live_paths: &[P]) -> Result<usize, String>;
 pub fn watch_fence_root(on_change: impl Fn(FenceChange) + Send + 'static) -> Result<FenceWatcher, String>;
+// 内部（naming.rs / ops.rs）：系统元数据文件表 SHELL_METADATA_FILES、包扩展名表 PACKAGE_EXTENSIONS + is_package_name(name)；
+// pub(crate) struct Reserved { root, list_outside_root, taken }：Reserved::new(root)（macOS 不列举收纳根目录以外的目标目录）/ with_policy(..)
+
+// ===== core services::fence_fs::mac（cfg(target_os = "macos")；叶子模块，不 use super:: / crate::，scripts/mac-check 原样编译） =====
+pub struct MoveResult { pub final_path: Option<PathBuf>, pub errno: Option<i32>, pub message: Option<String>, pub source_left: bool }
+pub fn move_item(source: &Path, dest_dir: &Path, first_name: &str, next_name: &dyn Fn(u32) -> String) -> MoveResult; // renamex_np(RENAME_EXCL)
+pub const MAX_NAME_ATTEMPTS: u32 = 64;
+pub fn describe_errno(source: &Path, dest_dir: &Path, errno: i32) -> String;
+pub fn has_hidden_flag(meta: &Metadata) -> bool;  pub fn is_locked(path: &Path) -> bool;   // UF_HIDDEN / uchg、schg、仅追加
+pub fn has_legacy_icloud_stub(path: &Path) -> bool;  pub fn is_ubiquitous_item(path: &Path) -> bool;
+pub fn allow_materialize_on_this_thread() -> c_int;  pub fn restore_materialize_policy(old: c_int);  // dataless 文件按需下载
+pub fn icon_png(path: &Path, px: u32) -> Result<Vec<u8>, String>;   // 恰好 px × px（夹到 16..=1024）的 PNG 字节
+pub fn launch(path: &Path) -> Result<(), String>;  pub fn reveal(path: &Path) -> Result<(), String>;
 
 // ===== app services::fences（crates/app/src/services/fences.rs） =====
 pub struct FenceRuntime { hidden: bool, windows: HashMap<i64, FenceWindowRecord { handle, view, hwnd }>, watcher: Option<FenceWatcher>, guard_started: bool } // Global
 pub fn open_fence_window(cx, fence: Fence, rect: PxRect, scale: f64) -> Option<AnyWindowHandle>; // 已存在则直接返回
-pub fn restore_all(cx);            // 启动恢复（仅 Windows）
-pub fn create_fence(cx);           // 托盘「新增收纳箱」/ MINI_TODO_DEBUG_OPEN=fence:new
+pub fn restore_all(cx);            // 启动恢复（Windows 与 macOS；Linux 直接返回）
+pub fn create_fence(cx);           // 托盘 / 菜单栏图标「新增收纳箱」/ MINI_TODO_DEBUG_OPEN=fence:new
 pub fn toggle_visibility(cx) -> bool;  pub fn reset_positions(cx);   // 托盘「显示/隐藏所有收纳箱」「重置收纳箱位置」
 pub fn ensure_watcher(cx);  pub fn deliver_refresh(cx, FenceRefresh);  pub fn close_deleted(cx, fence_id);
-pub fn apply_window_rect(window, cx, rect: PxRect, scale: f64);   // Windows：按客户区一次 SetWindowPos（延后执行）
+pub fn apply_window_rect(window, cx, rect: PxRect, scale: f64);   // Windows：按客户区一次 SetWindowPos；macOS setFrame:（都延后执行）；Linux 只改尺寸
+fn embed_after_open(cx, hwnd: Option<Hwnd>, rect);               // 建窗后：Windows 嵌入桌面 / macOS make_desktop_layer → 显示（"全部隐藏"中不显示）
+
+// ===== app platform（macOS 收纳箱专用；Windows / Linux 为 no-op） =====
+impl Hwnd { pub fn make_desktop_layer(self) -> bool; pub fn describe_layer(self) -> Option<String> }
+// platform/macos/ns.rs：desktop_layer_level() -> NSWindowLevel（CGWindowLevelForKey(kCGDesktopIconWindowLevelKey) + 1）、
+// make_desktop_layer(number) -> bool、describe_window(number) -> Option<String>、
+// show_color_panel(initial) -> bool、color_panel_state() -> Option<ColorPanelState { visible, color }>
+pub fn fence_win::choose_color(cx, owner: Option<Hwnd>, initial: (u8, u8, u8)) -> Task<Option<(u8, u8, u8)>>; // Windows ChooseColorW / macOS NSColorPanel / Linux None
 pub fn monitor_areas(cx) -> Vec<MonitorArea>;                    // 主显示器排第一；取不到工作区时用整块显示器
 const GUARD_TICK: Duration = 200ms;  const SCREEN_CHECK_TICKS: u32 = 10;
 
@@ -156,7 +189,7 @@ core 与 app 必须成对的常量：`logic::ICON_BUCKETS` ↔ `fence_fs::ICON_S
 **建窗**（`open_fence_window`，已有同 id 窗口时直接返回它）：
 
 1. 建窗与所有会给窗口同步发消息的 Win32 调用都不在 App 借用期间执行（[pc-gpui/gpui-conventions.md §2.2](../pc-gpui/gpui-conventions.md)）：
-   托盘回调只把事件投进 channel，由前台任务执行；嵌入在 `cx.spawn` 的 async 块里做。
+   托盘回调只把事件投进 channel，由前台任务执行；嵌入（macOS：`setFrame:` 与改层级）在 `cx.spawn` 的 async 块里做。
 2. `WindowSpec` 参数**一次给齐**：
 
    | 参数 | 值 | 原因 |
@@ -166,13 +199,14 @@ core 与 app 必须成对的常量：`logic::ICON_BUCKETS` ↔ `fence_fs::ICON_S
    | `resizable` | false | GPUI 的缩放热区按建窗时的 `is_resizable` 计算：不可缩放、不参与 Aero Snap；缩放走窗口内手柄（见下） |
    | `minimizable` | false | Win+M 不最小化它 |
    | `focus` | false | 建窗不抢焦点 |
-   | `show` | Windows 上 false | 先藏着建好，定位、改样式、嵌入之后再 `SW_SHOWNOACTIVATE` 显示，不闪任务栏 |
+   | `show` | Windows / macOS 上 false | 先藏着建好，定位、改样式、嵌入之后再 `SW_SHOWNOACTIVATE` 显示，不闪任务栏（macOS：改好层级再 `orderFrontRegardless`，不在 `PopUp` 默认的 101 层闪一下） |
+   | `kind` | 默认 `Normal`；**macOS 上 `PopUp`** | macOS 是不激活应用的 NSPanel，见「场景：macOS 上的收纳箱」 |
    | `min_size` | 160 × 32（逻辑） | 折叠态只有标题栏高；展开态最小高度由界面逻辑保证 |
    | `display_id` | 矩形所在显示器 | |
 
 3. 关闭：`window.on_window_should_close(cx, |_, _| false)`——没有关闭按钮，Alt+F4 / `WM_CLOSE` 一律拦截。删除收纳箱走
    `services::fences::close_deleted` → `WindowManager::close`；窗口关闭回调里从 `FenceRuntime.windows` 注销，最后一个关闭时 `forget_screen_config`。
-4. 建好后（Windows，`embed_after_open`，async 块里）：`set_client_rect` → `set_tool_window(true)` → `set_minimizable(false)` →
+4. 建好后（Windows，`embed_after_open`，async 块里；macOS 分支见 mac 场景 §M1）：`set_client_rect` → `set_tool_window(true)` → `set_minimizable(false)` →
    `set_round_corners(true)` → `platform::embed::attach_to_desktop` → `set_always_on_bottom(true)` → 不处于"全部隐藏"时 `show()`。
    然后启动 200ms 守护（只启动一次）。在它之前，`windows::open_window` 排队的前台任务已经去掉 `WS_SYSMENU` 并按客户区校正过
    （同一个前台队列、先排先执行），所以显示时 DWM 不会在半透明底色下透出系统 ×（[pc-gpui/gpui-conventions.md §2.2](../pc-gpui/gpui-conventions.md)）。
@@ -200,10 +234,11 @@ core 与 app 必须成对的常量：`logic::ICON_BUCKETS` ↔ `fence_fs::ICON_S
 
 | 操作 | 规则 |
 |---|---|
-| 摆窗（`services::fences::apply_window_rect` / `platform::set_client_rect_physical`） | 按客户区一次 `SetWindowPos(NOZORDER \| NOACTIVATE)`（延后到下一个前台任务）；跨 DPI 时按新边框再校正 |
+| 摆窗（`services::fences::apply_window_rect` / `platform::set_client_rect_physical`） | 按客户区一次 `SetWindowPos(NOZORDER \| NOACTIVATE)`（延后到下一个前台任务）；跨 DPI 时按新边框再校正。macOS `setFrame:display:`（同样延后）；Linux 只改尺寸 |
 | 改标题（改名后） | `window.set_window_title` |
-| 显示 / 隐藏全部 | `Hwnd::show` / `hide`（`ShowWindow`，不改 ex style）；显示后再 `attach_to_desktop` + `set_always_on_bottom`（幂等） |
+| 显示 / 隐藏全部 | `Hwnd::show` / `hide`（`ShowWindow`，不改 ex style）；显示后再 `attach_to_desktop` + `set_always_on_bottom`（幂等）。macOS：显示前再 `make_desktop_layer`（幂等）→ `orderFrontRegardless`，隐藏 `orderOut:` |
 | 改 resizable / minimizable / 加 `WS_EX_NOACTIVATE` / `WS_EX_LAYERED` / 加回 `WS_SYSMENU` | **禁止** |
+| macOS：`set_topmost` / `ns::set_floating` / `setFloatingPanel:` / `bring_to_front` / `cx.activate(true)` | **禁止**（前三个会把层级改回 0 / 3；后两个激活应用） |
 
 **锁定（「固定」）完全由界面控制**：锁定时不发起拖动、不显示缩放手柄；仍可拖入、折叠、改名、打开项目。Win32 样式不随锁定变化。
 
@@ -213,8 +248,10 @@ core 与 app 必须成对的常量：`logic::ICON_BUCKETS` ↔ `fence_fs::ICON_S
 （`HTCAPTION` 区域双击会触发系统行为）。改名中不拖动。
 
 **缩放**：窗口是 `resizable: false`，系统不进缩放循环。8 个手柄（n/s/w/e/nw/ne/sw/se）只在 `can_resize()`（未锁定、未折叠、
-不在改名）时显示：按下 → 先 `flush_geometry` → 记客户区起点与光标（Windows 用屏幕物理坐标，拖左 / 上边时窗口在动）；移动 → `resize_rect`
-（拖哪条边改哪条边，对边不动，不小于 `round(160 × dpr)`）→ 每帧最多一次 `apply_window_rect`（`on_next_frame`，只保留最新一帧）；
+不在改名）时显示：按下 → 先 `flush_geometry` → 记客户区起点与光标（Windows / macOS 用屏幕物理坐标 `cursor_position_physical`，拖左 / 上边时
+窗口在动；Linux 取不到，用窗口逻辑坐标 × 系数）；移动 → `resize_rect`（拖哪条边改哪条边，对边不动，不小于 `round(160 × 系数)`，系数 =
+`platform::physical_scale(window)`：Windows / Linux 是 `scale_factor()`，macOS 是统一系数）→ 每帧最多一次 `apply_window_rect`
+（`on_next_frame`，只保留最新一帧）；
 松开 → 最后一帧落地后（约 16ms）`commit_geometry`。
 
 **几何落库（只有用户发起的才落库）**：
@@ -236,12 +273,13 @@ core 与 app 必须成对的常量：`logic::ICON_BUCKETS` ↔ `fence_fs::ICON_S
 - `fence::update({ collapsed })` 只写库；窗口形态由 `sync_view` 呈现（`Placement::for_screen(..).rect(..)` → `fence_view` → 摆窗，不写库）。
 - 临时展开不改持久化的折叠态。原因集合（`ExpandReason`，任一存在即展开）：`Hover`（进入 150ms 后展开、离开 400ms 后收回，拖动闸门
   打开期间不展开也不收回）、`Drag`（外部文件拖入经过；离开 / 放下后 300ms 收回）、`Menu`（标题栏「更多」菜单）、`Panel`（外观 / 删除确认 /
-  OneDrive 提示）、`ItemMenu`（项目右键菜单）。形态切换带代次，晚到的旧计算结果丢弃。
+  云同步提示）、`ItemMenu`（项目右键菜单）。形态切换带代次，晚到的旧计算结果丢弃。
 - `view_rect`：折叠 = 标题栏矩形（高度 = `round(32 × 目标显示器缩放)`）；展开 = 库里的展开尺寸，下方空间不够时整体上移
   （向上展开，标题栏原位置仍在窗口内）。两者都按标题栏所在工作区夹回（交叠面积最大的工作区；都不交叠取离中心最近的）。
 - 缩放比例按**目标位置**所在显示器取（`title_scale`），不取窗口当前所在显示器：混合 DPI 下重置位置 / 启动夹回时两者不同。
 
-**必须可激活**：不加 `WS_EX_NOACTIVATE`。否则双击打开的程序可能拿不到前台；未激活的收纳箱上第一次点击即生效。
+**必须可激活**（Windows）：不加 `WS_EX_NOACTIVATE`。否则双击打开的程序可能拿不到前台；未激活的收纳箱上第一次点击即生效。
+macOS 相反：收纳箱是**不激活应用**的面板（点它菜单栏不切换），鼠标事件不要求 key 窗口，只有改名要先 `activate_window()`（mac 场景 §M1）。
 
 **外部拖入**：用 `ui::external_drop::ExternalDrop`（`DropScope::Window`），**不用** GPUI 的 `.on_drop::<ExternalPaths>()`：
 gpui-pre 0.3.9 的文件拖放不改输入模态，`on_drop` 要求 `is_hovered`，窗口最后一次输入是键盘时（改名回车后）松手会被丢掉（e2e F10，
@@ -282,7 +320,7 @@ gpui-pre 0.3.9 的文件拖放不改输入模态，`on_drop` 要求 `is_hovered`
   （`logic::visible_items`）：关闭时网格只排可见项，全部被隐藏时空状态显示"N 个项目已隐藏"；开启时隐藏项照常排在网格里，图标与名字
   整体半透明（`theme::FENCE_HIDDEN_ITEM_OPACITY`）。图标懒加载只请求显示中的项目；选中项 / 右键菜单对应项不再显示时取消选中 / 关闭菜单。
   箱内拖动排序只排显示项，松手后 `logic::merge_sorted` 把隐藏项按原位置并回完整顺序再 `items::reorder`。
-- **右键菜单**：「打开所在位置」之后是「隐藏」（`EpIcon::Hide`）；隐藏状态的项（显示隐藏的图标时才看得到）是「取消隐藏」（`EpIcon::View`）；
+- **右键菜单**：「打开所在位置」（macOS 文案「在访达中显示」，`grid.rs::reveal_label`；失败提示同名 +"失败"）之后是「隐藏」（`EpIcon::Hide`）；隐藏状态的项（显示隐藏的图标时才看得到）是「取消隐藏」（`EpIcon::View`）；
   点文件的「取消隐藏」禁用（半透明 + 右侧说明与 tooltip"以 . 开头的项目自动隐藏"，同「移动到…」无目标时的写法）。
   隐藏 / 取消隐藏经 `spawn_db` 后台 `items::set_hidden`，返回的列表交给 `set_items`，失败 `message::error_with` 后补一次列举。
 - **标题栏「更多」菜单**：重命名 / 外观 /「显示隐藏的图标」（`EpIcon::View`，开启后文案换成「不显示隐藏的图标」、`EpIcon::Hide`——EP 下拉菜单
@@ -293,7 +331,8 @@ gpui-pre 0.3.9 的文件拖放不改输入模态，`on_drop` 要求 `is_hovered`
 - `ItemOpResult { source, status, file_name, dest_path, error }`，`status ∈ moved | cancelled | failed | skipped`。
   `moved` 偶尔带 `error` 提示（"已放入目标位置，但源文件未能删除…"、"已移动，但无法确定新的文件名…"）。
 - `FenceMoveInResult { results, onedrive_notice }`：`results` 与传入路径一一对应、顺序相同；`onedrive_notice = true` 时界面
-  打开 OneDrive 提示面板（只会有一次）。
+  打开云同步提示面板（只会有一次；字段名沿用 OneDrive）。文案按平台（`panels.rs::cloud_notice_text`）：Windows / Linux「桌面由 OneDrive 同步」
+  （旧版文案），macOS「桌面由 iCloud 同步」（"也会从 iCloud 云盘中移除（你其他设备的桌面上也会少掉这些项目）"）。
 - `items::icon` 返回缓存 PNG 的绝对路径，界面 `img(PathBuf)` 加载；失败时显示占位图标。
 - **`FenceRefresh`（旧 `fence-items-changed` 事件的替代）**：对账后按 `sort_order` 排好的完整列表，只交给对应收纳箱窗口
   （`services::fences::deliver_refresh` → `FenceWindow::set_items`；窗口不存在时丢弃）。来源：目录监听回调（`fence-watch` 线程，
@@ -350,21 +389,31 @@ ALTER TABLE fences ADD COLUMN show_hidden INTEGER NOT NULL DEFAULT 0;      -- �
   （见 [sync-protocol.md §3.6](./sync-protocol.md)）。
 - `fence_onedrive_notice_shown`：经 `settings_kv::get_bool_setting` / `set_bool_setting` 读写，`claim_onedrive_notice`
   只会返回一次 `true`。它**有意**不进 `AppSettings`、不进 `SYNCED_SETTING_KEYS`、不被 `read_app_settings` /
-  `write_app_settings` 读写——这是对 `CLAUDE.md`「维护检查清单」第 1 条的**有意偏离**。原因：桌面是否被 OneDrive 重定向、
-  这台设备是否已提示过，都是设备自身的事；同步或随备份导入会让另一台设备从未显示过的提示被跳过，或让已提示过的设备再提示一次。
+  `write_app_settings` 读写——这是对 `CLAUDE.md`「维护检查清单」第 1 条的**有意偏离**。macOS 的 iCloud 提示共用这个键（键名沿用 OneDrive）。
+  原因：桌面是否被 OneDrive 重定向 / 是否开了 iCloud「桌面与文稿」、这台设备是否已提示过，都是设备自身的事；同步或随备份导入会让另一台设备从未显示过的提示被跳过，或让已提示过的设备再提示一次。
   性质同 `webdav_*` 设备键。
 
 #### 3.4 文件层规则
 
-- **根目录**：`%USERPROFILE%\MiniTodo收纳箱\`（`dirs::home_dir()` + `FENCE_ROOT_DIR_NAME`）。按需创建：只有出现第一个收纳箱
-  （新建 / 启动恢复）后才开始监听和列举，没有收纳箱的用户不会多出这个文件夹。
+- **根目录**：`%USERPROFILE%\MiniTodo收纳箱\`（macOS `~/MiniTodo收纳箱/`；都是 `dirs::home_dir()` + `FENCE_ROOT_DIR_NAME`，家目录根不受
+  macOS 隐私保护）。按需创建：只有出现第一个收纳箱（新建 / 启动恢复）后才开始监听和列举，没有收纳箱的用户不会多出这个文件夹。
+  macOS 上 `fence_root_dir()` 返回 `canonicalize` 后的路径（访达拖放、FSEvents 给的都是解析过符号链接的路径，"已在该收纳箱中""来自别的收纳箱"
+  按路径前缀比较，两边要同一种写法）；Windows 上不能 `canonicalize`（会变成 `\\?\` 路径）。
 - **文件夹名**：`sanitize_folder_name(title)`（去首尾空白、控制字符与 `<>:"/\|?*` 换 `_`、去尾部 `.` 与空格、最多 48 字符、
   保留设备名加 `_`、空则 `收纳箱`），再与数据库里**全部** `folder_name`（即使文件夹已被用户删掉，防 UNIQUE 冲突）和磁盘上
   已有项不区分大小写去重（` (2)` 后缀）。新建：**先建文件夹再插库**；插库失败 → `remove_fence_folder_if_empty` 回滚；
   建窗失败 → `rollback_create`（删记录 + 回滚文件夹）。改名：整个过程持有数据库锁，文件夹改名失败则保留旧 `folder_name`。
-- **列举（`list_fence_items`）**：跳过 `desktop.ini` / `Thumbs.db` 与带 Windows 隐藏 / 系统属性的文件（`has_hidden_or_system_attribute`，
-  永不显示，"显示隐藏的图标"也不显示）；以 `.` 开头的项目所有平台都列出、`auto_hidden = true`（非 Windows 上不再按点开头排除，
-  Linux 截图 / 冒烟里也能看到点文件）。移入校验 `plan_move_in` 仍用 `is_hidden_or_system`（Windows 看属性、其他平台看点开头），规则不变。
+- **系统元数据文件**（`naming::SHELL_METADATA_FILES`，不区分大小写，**所有平台同一张表**）：`desktop.ini`、`Thumbs.db`（资源管理器）与
+  `.DS_Store`、`Icon\r`（文件夹自定义图标，名字末尾是回车）、`.localized`（访达）。不显示、不收纳（移入 `skipped`）、`restore_all` 不移动、
+  删除收纳箱时不算剩余（文件夹只剩它们时连同它们一起删掉；只删这些名字的**文件**，同名文件夹照样算内容）。后三个是 macOS 移植时加的：
+  访达打开过收纳文件夹就会写 `.DS_Store`，不加的话它会作为点文件出现、删除收纳箱时被搬到桌面（变成 `.DS_Store (2)`）、文件夹删不掉。
+  **Windows 上的行为也随之变了**（Mac 拷来的 U 盘 / 共享上常见 `.DS_Store`）：以前当普通点文件收纳、移回，现在跳过。副作用：旧版本
+  （3.0.2-pre 及更早）已经收进收纳文件夹的这类文件升级后不再列出（对账删掉它的行），删除收纳箱时不移回、随空文件夹一起删掉——它们是访达 /
+  资源管理器的缓存，可再生，按"系统元数据"处理是有意的。
+- **列举（`list_fence_items`）**：跳过系统元数据文件与带隐藏 / 系统属性的文件（`has_hidden_or_system_attribute`：Windows 的
+  `FILE_ATTRIBUTE_HIDDEN | SYSTEM`，macOS 的 `UF_HIDDEN`（`chflags hidden`，访达不显示）；永不显示，"显示隐藏的图标"也不显示）；以 `.` 开头的
+  项目所有平台都列出、`auto_hidden = true`（非 Windows 上不再按点开头排除，Linux 截图 / 冒烟里也能看到点文件）。移入校验 `plan_move_in` 用
+  `is_hidden_or_system`（Windows 看属性、macOS 看 `UF_HIDDEN`——两者的点文件都照常移入、移入后按名字自动隐藏；Linux 看点开头）。
 - **文件夹是 source of truth**：每次列举都对账（`reconcile_rows`）：名字先精确匹配、再不区分大小写匹配（资源管理器里只改大小写
   时保留原始路径、排序与隐藏标记，并把行里的名字改成新写法）；表里有、文件夹没有 → 删行（改成别的名字 = 新项目，隐藏标记随旧行丢掉）；
   文件夹有、表里没有 → 补行（`original_path = NULL`、可见，按文件名顺序排到末尾）；返回按 `sort_order` 排序，`hidden` 取自对应行。
@@ -398,7 +447,8 @@ ALTER TABLE fences ADD COLUMN show_hidden INTEGER NOT NULL DEFAULT 0;      -- �
   （取 `source` 的最后一段）；`failures` = `failed` + `cancelled`。**只有收纳文件夹已清空并删除才删收纳箱**；只要有项目留在文件夹里
   （失败、取消、或 `remaining` 里带隐藏属性的文件），整体保留，不产生没有收纳箱管理的孤儿文件夹。收纳箱里隐藏的项目（用户隐藏 + 点文件）
   同样移回，删除确认框的 N（`get_items` 的数量）也计入它们。
-- **线程**：`fence_fs` 与 core `fence` 全部阻塞，app 一律放后台（`db::spawn_db`）。带 owner HWND 的移动（`fence::delete`、
+- **线程**：`fence_fs` 与 core `fence` 全部阻塞，app 一律放后台（`db::spawn_db`）。macOS 的文件操作在调用线程上执行（不需要主线程、
+  不需要专用线程），隐私授权框、下载 iCloud 云端文件、跨卷复制、等 LaunchServices 回调都会阻塞调用线程，同样绝不在 UI 主线程调用。带 owner HWND 的移动（`fence::delete`、
   `items::{move_in, restore, move_to}`，内部是 `move_into_fence` / `restore_item` / `move_between_fences` / `restore_all`）**绝不在 UI 主线程**：
   系统"需要管理员权限"对话框以收纳箱窗口为父窗口，会给主线程同步发消息，主线程等结果就死锁。做法：HWND 在前台取好（`isize`），
   移动在后台线程里跑。需要 COM STA 的操作在 fence_fs 内部线程执行：移动 / 启动 / 定位每次新开 STA 线程（`fence-move` / `fence-launch` /
@@ -409,8 +459,8 @@ ALTER TABLE fences ADD COLUMN show_hidden INTEGER NOT NULL DEFAULT 0;      -- �
   |---|---|
   | 非绝对路径 / 磁盘根 / 无法访问 | `failed`（"需要完整路径" / "无法收纳磁盘根目录" / "无法访问: …"） |
   | 同一批重复源路径 | `skipped`（"重复的项目"） |
-  | `desktop.ini` / `Thumbs.db` | `skipped` |
-  | 隐藏或系统文件（Windows 看属性；其他平台看点开头） | `skipped`（列举也跳过带这两个属性的文件，避免"移走后哪里都看不到"）。没有隐藏属性的点文件（`.env`）在 Windows 上照常移入，移入后自动隐藏并提示 |
+  | 系统元数据文件（`desktop.ini` / `Thumbs.db` / `.DS_Store` / `Icon\r` / `.localized`） | `skipped`（"desktop.ini 等系统文件不收纳"） |
+  | 隐藏或系统文件（Windows 看属性；macOS 看 `UF_HIDDEN`；Linux 看点开头） | `skipped`（"隐藏或系统文件不收纳"；列举也跳过带这些属性的文件，避免"移走后哪里都看不到"）。没有隐藏属性的点文件（`.env`）在 Windows / macOS 上照常移入，移入后自动隐藏并提示 |
   | 收纳根目录本身或其上级 | `failed`（"不能收纳收纳目录本身或其上级目录"） |
   | **`protected`**：用户桌面、公共桌面本身或其上级 | `failed`（"不能收纳桌面文件夹本身或其上级目录"）——经 Shell 移动已知文件夹会让系统把"桌面"重定向到收纳文件夹里 |
   | 已在本收纳箱 | `skipped`（"已在该收纳箱中"） |
@@ -419,33 +469,42 @@ ALTER TABLE fences ADD COLUMN show_hidden INTEGER NOT NULL DEFAULT 0;      -- �
 
   `protected` 由 `move_into_fence` 传入 `[user_desktop_dir(), public_desktop_dir()]`；桌面**上的**项照常可以收纳。
 - **目标名预去重，绝不覆盖**：执行前按目标目录的实际列表（小写）加本批已预订的名字算好不冲突的名字（` (2)` 插在扩展名前，文件夹
-  整体加后缀）；`IFileOperation` 标志 `FOF_RENAMEONCOLLISION | FOF_NOCONFIRMMKDIR | FOFX_NOMINIMIZEBOX`，`RENAMEONCOLLISION` 只作兜底。
+  整体加后缀；**包**——扩展名在 `naming::PACKAGE_EXTENSIONS` 里的文件夹，如 `.app` / `.bundle` / `.framework` / `.rtfd` / `.pages`——按文件处理：
+  `Safari.app` → `Safari (2).app`，否则访达不再当它是应用；纯函数、所有平台一样，Windows 上这类文件夹几乎只来自 Mac）。
+  **macOS 不列举收纳根目录以外的目标目录**（`Reserved::new` 的 `list_outside_root = false`：列举桌面 / 文稿 / 下载会弹隐私授权框），
+  这些目录只按本批已预订的名字去重，与磁盘上已有项的重名交给执行层的 `RENAME_EXCL` 撞名顺延（见 mac 场景 §M2）。
+  Windows 执行：`IFileOperation` 标志 `FOF_RENAMEONCOLLISION | FOF_NOCONFIRMMKDIR | FOFX_NOMINIMIZEBOX`，`RENAMEONCOLLISION` 只作兜底。
   不带 `FOF_NOERRORUI`：权限不足弹系统对话框 → UAC，文件被占用弹"文件正在使用"（行为同资源管理器）。结果按 `PostMoveItem` 回调与文件
   系统实际状态归类：`COPYENGINE_E_USER_CANCELLED` / `ERROR_CANCELLED` → `cancelled`（"用户取消了操作"），`COPYENGINE_S_USER_IGNORED` →
   `cancelled`（"已跳过"）。
 - **移回目标**：`original_path` 的上级目录是绝对路径、不在收纳根目录内且仍存在 → 原目录；否则（含 `NULL`）→ 用户桌面
-  （`dirs::desktop_dir()`）。文件名：收纳时因重名被改成 `X (2).lnk` 的恢复成 `X.lnk`，用户在资源管理器里改过的名字保留；
-  目标处已有同名再加后缀。`restore_all` 处理文件夹里的**所有**项（含带隐藏属性的文件，`desktop.ini` / `Thumbs.db` 除外），所有项在同一个
-  `IFileOperation` 里执行。删除确认框里的 N 用 `get_items` 的实际列举数（含收纳箱里隐藏的项目，不含带隐藏 / 系统属性的文件）。
+  （`user_desktop_dir()` = `dirs::desktop_dir()`；debug 下 `MINI_TODO_DESKTOP_DIR`）。文件名：收纳时因重名被改成 `X (2).lnk` 的恢复成 `X.lnk`
+  （包两种写法都认：`Safari (2).app` 与以前版本的 `Safari.app (2)`），用户在资源管理器 / 访达里改过的名字保留；目标处已有同名再加后缀。
+  `restore_all` 处理文件夹里的**所有**项（含带隐藏属性的文件，系统元数据文件除外）；Windows 所有项在同一个 `IFileOperation` 里执行，macOS 逐项移动。删除确认框里的 N 用 `get_items` 的实际列举数（含收纳箱里隐藏的项目，不含带隐藏 / 系统属性的文件）。
 - **监听**：`watch_fence_root`（`notify` 递归监听根目录，只关心第一、二层），最后一个事件后安静 300ms 回调一次、持续变化时最多 1.5s
   必回调；回调在线程 `fence-watch` 上 → 按文件夹名（不区分大小写）匹配收纳箱（`rescan` 时全部）→ 对账 → `FenceRefresh` 经 channel 回前台。
   `FenceWatcher` 由 app 的 `FenceRuntime` 一直持有（drop 即停止）；`services::fences::ensure_watcher` 在启动恢复（有收纳箱时）与新建后调用。
-  本应用自己的移动同样触发回调，不区分来源。
+  本应用自己的移动同样触发回调，不区分来源。macOS 上 `notify` 走 FSEvents，报告解析过符号链接的路径：`watch_root_at` 先 `canonicalize(root)`
+  （否则 `MINI_TODO_FENCES_ROOT` 在 `/var/folders` → `/private/var/folders` 这类路径下时算不出收纳文件夹名、不刷新）；Windows 不规范化。
 - **启动**：`services::fences::restore_all` → `fence::prepare_restore`（逐个 `ensure_fence_folder`，用户可能删了文件夹；给出各自的存储几何；
   记屏幕组合检测起点）→ 逐个 `fence_view` + `open_fence_window` → 有收纳箱则 `ensure_watcher` → `items::spawn_startup_reconcile`
   （线程 `fence-startup`）：逐个对账、记录根目录下不属于任何收纳箱的文件夹（只记日志）、等 20 秒后 `prune_icon_cache(全部现存项目路径)`；
   任何一个收纳箱对账失败就跳过这次清理。
-- **打开**：`launch_item` 用 `ShellExecuteExW`（`SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC`），目标失效的 `.lnk` 约 3 秒后才返回错误，
-  界面在此期间显示"正在打开"。`items::open` / `reveal` / `icon` 先 `is_valid_item_name` 校验文件名
+- **打开**：Windows `launch_item` 用 `ShellExecuteExW`（`SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC`），目标失效的 `.lnk` 约 3 秒后才返回错误，
+  界面在此期间显示"正在打开"；macOS 用 `NSWorkspace openURL:configuration:completionHandler:`（先拦下失效的替身 / 符号链接，错误取自回调，
+  最多等 30 秒、超时按成功），定位用 `activateFileViewerSelectingURLs:`（先 lstat，它没有错误返回）。`items::open` / `reveal` / `icon` 先 `is_valid_item_name` 校验文件名
   （防 `..`、绝对路径、ADS 逃逸出收纳文件夹）。
 - **图标**：界面请求 `ceil(icon_size × 缩放)`（`icon_request_px`），向上取整到档位 `[16, 24, 32, 48, 64, 96, 128, 256]`；
-  `SIIGBF_ICONONLY`（`.lnk` 不带箭头，图片 / 视频显示类型图标）；缓存在 `<app_data_dir>\fence-icons\`，键
+  Windows `SIIGBF_ICONONLY`（`.lnk` 不带箭头，图片 / 视频显示类型图标），macOS `NSWorkspace iconForFile:` 画进自建的 N×N 位图再由 AppKit
+  编码 PNG（边长恰好是档位；替身 / 符号链接带访达同款小箭头；在调用方的后台线程上画，`autoreleasepool` 包裹）；缓存在 `<app_data_dir>\fence-icons\`，键
   `{路径哈希 FNV-1a 64}-{mtime 毫秒}-{大小}-{档位}.png`，先写临时文件再改名。界面按可见项懒加载（只请求显示中的项目，没开
 「显示隐藏的图标」时不请求隐藏项），同时最多 3 个请求
-  （`timing::MAX_ICON_REQUESTS`；后端图标在单个 STA 线程排队）。图标一律先渲染进缓存再由 `img(PathBuf)` 加载，从不直接加载收纳文件夹
+  （`timing::MAX_ICON_REQUESTS`；Windows 后端图标在单个 STA 线程排队）。图标一律先渲染进缓存再由 `img(PathBuf)` 加载，从不直接加载收纳文件夹
   或桌面上的文件。
-- **OneDrive 提示**：本次至少有一项从用户桌面移入（`path_starts_with_ci(source, desktop)`）、桌面被 OneDrive 重定向、且
-  `claim_onedrive_notice` 返回 true 时，`onedrive_notice = true`。
+- **云同步提示**（`onedrive_notice`）：`claim_onedrive_notice` 返回 true，且满足其一时为 true：
+  - Windows：本次至少有一项从用户桌面移入（`path_starts_with_ci(source, desktop)`）且桌面被 OneDrive 重定向；
+  - macOS：本次至少有一项（跨箱项不看）在**移动之前** `fence_fs::is_ubiquitous_item`（`NSURLIsUbiquitousItemKey`：由 iCloud 云盘或其它
+    File Provider 管理）且移动成功——移走之后它就不是 iCloud 项目了，所以必须先判断；只读该项目自身的属性（拖放已授权它），不碰桌面目录。
 
 #### 3.5 屏幕组合布局（PRD R5）
 
@@ -472,10 +531,11 @@ ALTER TABLE fences ADD COLUMN show_hidden INTEGER NOT NULL DEFAULT 0;      -- �
 | `MINI_TODO_DATA_DIR` | `db::paths::app_data_dir()` 返回该目录（空值视为未设置，相对路径转绝对）：库、图片、备份、节假日缓存、图标缓存 `fence-icons` 全部落到这里（新库没有 WebDAV 配置，不会同步）。另外：日志写到 `<dir>\logs`；**不启用单实例**；**跳过开机自启自愈**（不刷新与安装版共用的注册表项）；托盘提示改为"Mini Todo（开发版）" |
 | `MINI_TODO_FENCES_ROOT` | 收纳根目录改为该目录（去空白后非空才生效，不存在由 `fence_root_dir` 创建） |
 | `MINI_TODO_SCREEN_ID_FILE` | 文件内容（去首尾空白后非空）替代真实屏幕组合 ID，每次计算时重新读取；e2e 改写它模拟"屏幕组合变化"，走与真实切换相同的轮询 → 恢复路径 |
-| `MINI_TODO_DEBUG_FENCE_STATE` | GPUI 版新增：`onedrive` 打开即显示 OneDrive 提示面板，`drag-hover` 显示外部拖入悬停框（Linux 上无法真实触发，截图用） |
+| `MINI_TODO_DEBUG_FENCE_STATE` | GPUI 版新增：`onedrive` 打开即显示云同步提示面板（Windows / Linux OneDrive 文案，macOS iCloud 文案），`drag-hover` 显示外部拖入悬停框（Linux 上无法真实触发，截图用） |
+| `MINI_TODO_DESKTOP_DIR` | macOS 移植时新增：`fence_fs::user_desktop_dir()` 返回该目录（去空白后非空才生效；macOS 上 `canonicalize`），即移回的兜底目标、`protected`（"不能收纳桌面本身"）、云同步提示的"来自桌面"判断都改用它。mac e2e 用它让"移回桌面"落在临时目录：碰真实 `~/Desktop` 可能弹隐私授权框，runner 上没人点，后台移动线程会一直卡住 |
 
 release 保证：`dev_data_dir_override()` 的 `cfg(not(debug_assertions))` 分支直接 `None`、不读环境变量，纯函数
-`data_dir_override(_, false) == None`（单测）；`location::fence_root_override` 的 release 分支恒 `None`（单测
+`data_dir_override(_, false) == None`（单测）；`location::fence_root_override` 与 `location::desktop_dir_override` 的 release 分支恒 `None`（单测
 `release_build_ignores_override`，只在 `cargo test --release` 时编译）；`dev_screen_id_override` 整段 `#[cfg(debug_assertions)]`，
 release 不编译。Windows e2e 的 P01 在 release 构建上验证忽略 `MINI_TODO_DATA_DIR` / `MINI_TODO_DEBUG_OPEN`。
 
@@ -498,11 +558,12 @@ release 不编译。Windows e2e 的 P01 在 release 构建上验证忽略 `MINI_
 | 移动类操作：涉及的收纳箱正在删除 | `Err("收纳箱正在删除")` |
 | `items::move_to` 源 = 目标 | `Err("目标收纳箱与当前收纳箱相同")` |
 | `items::move_in` 的路径为空 | `Ok` 空结果 |
-| 文件名不合法（`..`、绝对路径、`a:b`） | `Err("文件名不合法: …")` |
+| 文件名不合法（`..`、绝对路径、`a:b`） | `Err("文件名不合法: …")`（`is_valid_item_name` 按 Windows 规则拦 `<>:"/\|?*` 与控制字符：macOS 上这些字符合法的项目也会被拒，见 mac 场景 §M4） |
 | 项目不在文件夹里（移回 / 跨箱） | 逐项 `failed`（"收纳文件夹中找不到该项目"） |
 | `items::set_hidden`：收纳箱正在删除 / 不存在 / 文件夹里已没有该项 | `Err("收纳箱正在删除")` / `Err("收纳箱 #{id} 不存在")` / `Err("收纳文件夹中找不到该项目")`；界面"隐藏失败" / "取消隐藏失败"提示后补一次列举 |
 | 以 `.` 开头的项目 | 自动隐藏，右键「取消隐藏」禁用（"以 . 开头的项目自动隐藏"）；`set_hidden(.., false)` 只清标记，仍按名字隐藏 |
-| 带 Windows 隐藏 / 系统属性的文件 | 永不显示（不受「显示隐藏的图标」影响），移入时 `skipped`，删除收纳箱时一并移回 |
+| 带隐藏 / 系统属性的文件（Windows 属性；macOS `UF_HIDDEN`） | 永不显示（不受「显示隐藏的图标」影响），移入时 `skipped`，删除收纳箱时一并移回 |
+| 系统元数据文件（`desktop.ini` / `Thumbs.db` / `.DS_Store` / `Icon\r` / `.localized`） | 不列举；移入 `skipped`（"desktop.ini 等系统文件不收纳"）；删除收纳箱时不移动、不算剩余，随空文件夹一起删掉 |
 | 拖入点文件且没开「显示隐藏的图标」 | 照常移入，提示"N 个以 . 开头的项目已自动隐藏，可在「更多」中显示隐藏的图标"（与其他拖入提示合成一条） |
 | 用户在 UAC / 管理员权限对话框点取消；在错误对话框选"跳过" | 逐项 `cancelled`（"用户取消了操作" / "已跳过"），文件留在原处；界面"已取消 N 项" |
 | 文件被占用 | Shell 弹"文件正在使用"，用户选择前调用一直阻塞（后台线程）；取消 / 跳过 → `cancelled`，其他失败 → `failed` + 中文原因 |
@@ -512,8 +573,8 @@ release 不编译。Windows e2e 的 P01 在 release 构建上验证忽略 `MINI_
 | 双击目标失效的 `.lnk` | 约 3 秒后 `Err("快捷方式指向的目标不存在，可能已被移动或卸载")` |
 | 打开 / 定位不存在的路径 | `Err("文件不存在")` |
 | 图标提取失败 | `Err`，界面占位图标 |
-| 非 Windows：移动 / 打开 / 定位 / 图标 | `Err("桌面收纳箱仅支持 Windows")`；Linux 没有托盘、macOS 的菜单栏图标菜单没有收纳箱项，`restore_all` 直接返回 |
-| `GetShellWindow()` 为空（Explorer 未运行） | `attach_to_desktop` 返回 false 不挂；守护等 Explorer 回来再挂 |
+| 既不是 Windows 也不是 macOS（Linux）：移动 / 打开 / 定位 / 图标 | `Err("桌面收纳箱仅支持 Windows 与 macOS")`；Linux 没有托盘，`restore_all` 直接返回。macOS 专有的错误见 mac 场景 §M4 |
+| （Windows）`GetShellWindow()` 为空（Explorer 未运行） | `attach_to_desktop` 返回 false 不挂；守护等 Explorer 回来再挂 |
 | Explorer 重启（新 Progman） | 下一个 tick 内全部重挂，窗口不随旧 owner 销毁 |
 | 收纳箱 ex style 丢了 TOOLWINDOW / 带上 APPWINDOW | 下一个 tick `lacks_tool_window_style` 命中，重挂（GPUI 下是防御） |
 | 聚焦收纳箱按 Alt+F4 | `on_window_should_close` 返回 false，不关闭 |
@@ -565,11 +626,17 @@ release 不编译。Windows e2e 的 P01 在 release 构建上验证忽略 `MINI_
 | core `db/paths.rs` | `release_builds_ignore_the_dev_data_dir_variable` / `debug_builds_use_a_non_empty_dev_data_dir` | release 恒 None；空值不生效；相对路径转绝对 |
 | core `services/fence_fs` | `plan_move_in_validates_sources` | 预去重 `b (2).lnk` / `b (3).lnk`；`protected` 的桌面文件夹本身 `failed`；根目录及上级、别的收纳箱文件夹本身 `failed`；跨箱项允许 |
 | | `restore_dir_selection` / `plan_restore_picks_dir_and_name` / `restore_all_keeps_folder_when_items_remain` / `move_in_results_keep_input_order` / `classify_*` | 移回目录与名字；剩余项时保留文件夹；结果顺序；取消 / 失败归类 |
-| | `list_items_filters_and_describes` / `dot_names_are_auto_hidden` | 列举跳过 `desktop.ini` 与带隐藏属性的文件（Windows），点文件 / 点文件夹所有平台都列出且 `auto_hidden`，`hidden` 一律 false；点文件判定 |
+| | `list_items_filters_and_describes` / `dot_names_are_auto_hidden` | 列举跳过系统元数据文件（`desktop.ini` / `.DS_Store` / `.localized` / 非 Windows 上的 `Icon\r`）与带隐藏属性的文件（Windows 属性、macOS `UF_HIDDEN`），点文件 / 点文件夹所有平台都列出且 `auto_hidden`，`hidden` 一律 false；点文件判定 |
+| | `remove_only_when_empty` / `shell_metadata_files` | 只剩系统元数据文件的文件夹算空、连同它们一起删；名字叫 `.DS_Store` 的**文件夹**算内容；`Icon` / `.DS_Store (2)` 不是元数据 |
+| | `package_folders_keep_their_extension_last` | 包扩展名判定（不区分大小写，`x.app.bak` / `.app` 不是包）；`Safari.app` → `Safari (2).app`、`a.b.framework` → `a.b (3).framework`，普通文件夹 `v1.2` → `v1.2 (2)`；移回时 `Safari (2).app` 与旧写法 `Safari.app (2)` 都恢复成 `Safari.app` |
+| | `protected_targets_outside_the_root_are_not_listed` | `Reserved::with_policy(root, false)`（macOS 规则）不列举收纳根目录以外的目标目录、只按本批预订去重；根目录内照常列举；`Reserved::new` 只有 macOS 不列举 |
+| | `default_desktop_is_the_system_desktop` | 不设 `MINI_TODO_DESKTOP_DIR` 时 `user_desktop_dir() == dirs::desktop_dir()` |
 | | 命名（`sanitize_*`、`folder_name_validation_rejects_traversal`、`item_name_validation`、`unique_file_name_adds_suffix_before_extension`、`restore_name_undoes_collision_suffix`）、图标（`bucket_rounds_up`、`cache_key_is_stable_and_case_insensitive`、`strips_shell_frame_around_small_icons`、`prune_cache`）、监听（`watcher_reports_debounced_folder_changes`）、`release_build_ignores_override`（release） | |
 | app `windows/fence/logic.rs` | `titles_follow_backend_rules` / `drag_threshold` / `geometry_gate_vectors` / `resize_vectors` / `icon_size_vectors` / `move_in_messages` / `delete_kept_messages` / `delete_hint_text` 等 | 测试向量来自旧前端 `fence.test.ts`：标题与后端同规则；闸门未 arm 的移动不算数、拖动中续期、超时 / `disarm` 后失效；缩放到最小尺寸不推动对边；图标档位与后端一致；提示文案 |
 | | `visible_items_follow_show_hidden` / `sorting_merges_hidden_items_back_in_place` / `empty_hint_text` / `move_in_mentions_auto_hidden_dot_files` | 按 `show_hidden` 过滤（用户隐藏 + 点文件）；排序后隐藏项留在原位、显示项按新顺序填回；空状态"N 个项目已隐藏"；点文件自动隐藏提示（按移入后的名字计数、开着显示隐藏时不提示、与其他提示合成一条） |
 | app `windows/fence/panels.rs` | `title_menu_width_follows_the_longest_label` | 「更多」菜单切换项文案与估算宽度（123 → 151 / 165） |
+| | `cloud_notice_names_the_platform_service` | 云同步提示：macOS「桌面由 iCloud 同步」，其他平台沿用 OneDrive 旧文案 |
+| app `windows/fence/grid.rs` | `icon_zoom_accepts_ctrl_everywhere_and_cmd_on_mac` / `reveal_label_follows_the_platform` | 调图标大小的修饰键（Ctrl 全平台，⌘ 只在 macOS）；右键菜单「在访达中显示」/「打开所在位置」 |
 | app `platform/mod.rs` | `fence_geometry_is_the_visible_client_area` | 库里的几何 = 客户区 |
 
 **E2E**（Windows，`pc-gpui/scripts/e2e-windows/run_e2e.py` 的 F 组；CI `.github/workflows/pc-gpui-e2e-windows.yml`，见其 README 与
@@ -585,6 +652,8 @@ release 不编译。Windows e2e 的 P01 在 release 构建上验证忽略 `MINI_
 | F05 / F06 | Win+D 后仍可见；Explorer 重启后自动重挂 |
 
 仅能人工验证：公共桌面拖入点 UAC 取消；删除时占用一个文件选"跳过"；混合 DPI 下的折叠高度；OneDrive 重定向桌面的提示。
+
+macOS 的单测（只在 macOS 上编译，CI `pc-gpui-e2e-macos.yml` 的 `checks` 作业）与 mac e2e（MF01~MF10）见「场景：macOS 上的收纳箱」§M5。
 
 ### 7. Wrong vs Correct
 
@@ -700,6 +769,227 @@ fn on_geometry_event(&mut self, window: &mut Window, cx: &mut Context<Self>) {
 
 ---
 
+## 场景：macOS 上的收纳箱（预览，未经真机验收）
+
+> 任务 `10-16-macos-fences`（2026-10-16）。数据、迁移、core 的元数据 / 几何 / 对账 / 登记逻辑与 Windows **完全相同**（同一套代码），
+> 不同的只有窗口（没有 Progman 可挂）与文件层（没有 Shell）。维护者没有 Mac：下面的行为只在 GitHub macOS runner（`macos-15` arm64，
+> 单屏 1x、一个桌面空间）上由单测与 e2e MF 组验证过，标「未验证」的只能靠用户反馈。背景调研：任务目录 `research/mac-desktop-window.md`、
+> `research/mac-file-ops.md`。
+
+### M1. 窗口：桌面图标层之上的不激活面板
+
+**为什么不是普通窗口**：普通 NSWindow 被点击会激活应用（菜单栏切换、⌘H 隐藏中的应用被取消隐藏、主窗口一起弹回），还会计入 Dock 唤起的
+`hasVisibleWindows`——只要有收纳箱可见，关掉主窗口后点 Dock 就唤不回来。所以 mac 上收纳箱建成 GPUI `WindowKind::PopUp`（`GPUIPanel`，
+NSPanel + `NSWindowStyleMaskNonactivatingPanel`），再改成桌面层。Windows / Linux 仍是 `Normal`。收纳箱**不走** `platform::embed`。
+
+**建窗**（`services::fences::open_fence_window` + `embed_after_open` 的 mac 分支）：
+
+1. `WindowSpec`：`kind = PopUp`（`cfg!(target_os = "macos")`）、`show = false`（PopUp 默认在 101 层，所有窗口之上，不能先显示）、
+   `resizable = false`、`minimizable = false`、`focus = false`，其余同 §3.1。`windows::open_window` 照常 `prepare_after_open`
+   （隐藏红绿灯、`hidesOnDeactivate = NO`）并按客户区校正。
+2. `cx.spawn` 的 async 块里（App 未借用；`setFrame:` / `orderFrontRegardless` 会同步触发 GPUI 回调）：`Hwnd::set_client_rect(rect)` →
+   `Hwnd::make_desktop_layer()`（失败只记 warn）→ 不处于"全部隐藏"时 `Hwnd::show()`（= `orderFrontRegardless`：应用不在前台也显示，
+   不改 key 窗口）→ 日志自报 `Hwnd::describe_layer()`。
+
+**`make_desktop_layer` 之后的状态**（`platform/macos/ns.rs`；幂等，建窗后与每次重新显示前各调一次）：
+
+| 属性 | 值 | 作用 |
+|---|---|---|
+| 类 / styleMask | NSPanel + `NonactivatingPanel`（建窗时由 GPUI `PopUp` 给，运行时加不上）；无 `Resizable` / `Miniaturizable` | 点击不激活应用；按 Apple 文档 NSPanel 不计入 `hasVisibleWindows` |
+| `level` | `CGWindowLevelForKey(kCGDesktopIconWindowLevelKey) + 1`（= -2147483602；`ns.rs` 用 `extern "C"` 直接链接 CoreGraphics，key 18，不引入 objc2-core-graphics） | Finder 桌面图标窗口之上一层、所有普通窗口（0）之下。正好等于图标层时与 Finder 图标窗口前后不定，点击可能被它截走 |
+| `collectionBehavior` | **整体替换**为 `CanJoinAllSpaces \| Stationary \| IgnoresCycle \| FullScreenNone` = `0x251`（GPUI `PopUp` 建窗时给的是 `CanJoinAllSpaces \| FullScreenAuxiliary`） | 所有桌面空间可见；调度中心 / 显示桌面时不动不藏（非 Normal 层级默认 `Transient`，会被藏起来）；不进 ⌘\` 循环；不进全屏空间 |
+| `canHide` | NO | ⌘H（`[NSApp hide:]`）与别的应用「隐藏其他」都不隐藏它 |
+| `hidesOnDeactivate` | NO | NSPanel 默认 YES（应用失活就藏） |
+| `excludedFromWindowsMenu` | YES | 不进「窗口」菜单（GPUI 只给名为 `"Window"` 的菜单 `setWindowsMenu:`，本来也不会列出） |
+| `animationBehavior` | None | 「显示/隐藏所有收纳箱」没有淡入淡出 |
+
+日志自报（e2e MF01 / MF10 据此核对 CGWindowList 读不到的属性）：
+`[fence] 收纳箱窗口 #<窗口号> 已放到桌面层：level=… behavior=0x… canHide=… excludedFromWindowsMenu=… hidesOnDeactivate=… nonactivating=… panel=… visible=…`。
+
+**规则**：
+
+- GPUI 建窗后不再改 level / collectionBehavior（gpui-pre-macos 只在 `MacWindow::open` 里设）；本 crate 里会改层级的只有 `ns::set_floating`
+  （`set_topmost` / `Hwnd::set_topmost`），**收纳箱窗口绝不能调**；也不调 `setFloatingPanel:`（会改层级）、`bring_to_front` / `cx.activate(true)`
+  （激活应用，失去不激活的意义）。
+- 摆窗：`apply_window_rect` → `platform::set_client_rect_physical` → `setFrame:display:`（延后执行）；frame = 客户区，物理像素 = 全局点 × 统一系数。
+  缩放手柄的光标取 `cursor_position_physical()`（`NSEvent.mouseLocation` × 统一系数），最小尺寸与逻辑 → 物理换算用 `platform::physical_scale(window)`，
+  **不用** `window.scale_factor()`（窗口所在屏自己的缩放，混合缩放时不同）；`check_screen_layout` 找不到显示器时的兜底系数同理。
+- 显示 / 隐藏全部：显示前再 `make_desktop_layer`（幂等）→ `orderFrontRegardless`；隐藏 `orderOut:`。
+- 守护：没有 Windows 那样的重挂（层级是全局排序、GPUI 不改它，Finder 重启后图标窗口仍在原层级——**未在真机验证**）；200ms 守护在 mac 上只做
+  每 ~2 秒的屏幕组合检测。
+- 拖动：标题栏超过 3px 后 `begin_window_drag` = `start_window_move`（`performWindowDragWithEvent:` + 当前的 mouse-dragged 事件），落库照常走
+  `GeometryCommitGate`（e2e MF09）。
+- 改名：非激活面板单击不一定成为 key 窗口，键盘进不来，`start_rename` 先 `window.activate_window()`（`makeKeyAndOrderFront:`，GPUI 延后执行；
+  应用仍不激活）；用户点到别的应用时面板失去 key，经 `observe_window_activation` 照常提交改名（e2e MF08：访达在前台时双击标题、键入、回车）。
+  **MF08 在 runner 上没通过**（2026-10-16 首轮）：双击后经系统输入流（`CGEventPost(kCGHIDEventTap)`）键入的标题没有进到面板、没落库，而
+  `CGEventPostToPid` 直接投给进程可以改名——即"非激活面板收不到真实键盘"在 runner 上成立，真机上是否一样未知。若确认是真实问题，按 PRD D1
+  的退路改用 `Normal` + 自己的 reopen Apple Event handler（见下文 Dock 唤起），或在改名时临时激活应用。**中文输入法在非激活 key 面板里是否正常未验证**。
+- ⌘M / ⌘W（`services/mac_menu.rs`）：活动窗口是收纳箱时两者都不做（`is_fence`；`miniaturize:` 不看 style mask，必须显式拦）。
+- Dock 唤起：只有收纳箱可见时 `on_reopen` 照常回调（NSPanel 不算可见窗口，e2e MF07）。**退路**（若某个 macOS 版本上失效）：改用 `Normal` +
+  自己注册 `kAEReopenApplication` Apple Event handler（调研 `mac-desktop-window.md` §5.3 有草图），其余设置不变。
+- 外部拖入：GPUI 对所有窗口（含 NSPanel）注册 `NSFilenamesPboardType`，`ui::external_drop` 不分平台；但 GPUI 对外部拖入一律回报
+  `NSDragOperationCopy`——访达光标带绿色"+"，实际执行的是移动（与 Windows 一样"真收纳"）。没有改。
+- 挂在收纳箱上的 sheet / 系统对话框会和它同层（被所有应用窗口盖住）：收纳箱里的确认 / 提示一律用窗口内弹层（`ui::message_box` 一类）。
+- 「自定义颜色」（`platform/fence_win.rs` 的 mac `imp`）：前台任务里 `ns::show_color_panel(initial)`（共享的 `NSColorPanel`：不显示透明度、
+  `hidesOnDeactivate = NO`——否则用户点一下桌面面板就藏起来、被当成"关掉了"——设初始色、**先激活应用**再 `makeKeyAndOrderFront:`），之后每 150ms
+  `ns::color_panel_state()`，面板不可见时返回最后读到的颜色，和初始色相同视为取消。读分量前先 `colorUsingColorSpace(sRGB)` 并确认是 RGB 模型
+  （对非 RGB 颜色读 `redComponent` 会抛 ObjC 异常，穿过 Rust 帧直接 abort）。代价：打开取色面板会让菜单栏切到 mini-todo（与"不激活"相反，接受）。
+- 其它界面差异：右键菜单「在访达中显示」、⌘+滚轮也能调图标大小（⌃+滚轮在开了「辅助功能 → 缩放」时被系统拿去放大屏幕）、云同步面板写 iCloud。
+
+### M2. 文件层：`services/fence_fs/mac.rs`
+
+`mac.rs` 是**叶子模块**：不 `use super::` / `crate::`，入参出参只有路径、字符串、bool 与普通结构，同一份源码按 edition 2021（core）与 2024
+（`scripts/mac-check`）都能编译（extern 块写 `unsafe extern "C"`，unsafe 操作放进显式 `unsafe {}`）。适配（`MoveJob` ↔ `MoveResult`、
+去重规则）留在 `ops.rs` 的 `execute_mac`。core 的 mac 依赖（libc / block2 / objc2 / objc2-foundation / objc2-app-kit）与 app 同版本，
+`scripts/mac-check/Cargo.toml` 的特性 = app 与 core 的 mac 依赖的并集。
+
+**移动（`move_item`，绝不覆盖）**：
+
+1. 逐项 `renamex_np(src, dest_dir/name, RENAME_EXCL)`：内核持 rename 锁原子判重，目标已存在返回 `EEXIST`（不区分大小写的 APFS 上只差大小写 /
+   Unicode 规范化形式也算重名）。
+2. `EEXIST` → 换下一个候选名 `naming::suffixed_file_name(dest_name, n, is_dir)`（n = 2, 3, …，包按文件处理），最多 `MAX_NAME_ATTEMPTS = 64` 个名字，
+   用完失败（"目标位置同名项目过多"），源原样保留。
+3. `EXDEV`（跨卷）/ `ENOTSUP`（卷不支持 `RENAME_EXCL`，部分网络卷）→ `NSFileManager moveItemAtURL:toURL:error:`：目标已存在报 516 / `EEXIST`
+   → 换下一个名字；跨卷是 copyfile（EXCL，逐项不覆盖）+ 删源，复制中途失败 Foundation 删掉目标里的半成品；**复制完成但删源失败不回滚**——
+   返回 `final_path` + 提示"已复制到目标位置，但原位置的项目未能删除"（`source_left = true`，`classify` 归为 Moved + 附注），绝不删目标。
+   `ENOTSUP` 卷上 NSFileManager 同卷是 lstat + rename，有极小的竞争窗口（只在这类卷上）。
+4. 其他 errno → `describe_errno`（下表），`MoveOutcome { hr: Some(-errno), error: Some(中文) }`；成功 `hr: Some(0)`、`new_path` = 实际路径。
+   mac 没有提权 / "文件正在使用"对话框，所以没有 `cancelled`；`owner_hwnd` 不用。
+5. 整批在调用线程（后台）上执行；开始前 `allow_materialize_on_this_thread()`（`setiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES,
+   IOPOL_SCOPE_THREAD, ON)`），结束后还原：rename 一个"只在云端"的 dataless 文件（macOS 14+ iCloud 走 File Provider）时内核先让它下载完再改名，
+   不会留下坏文件，只是可能阻塞很久；策略禁止下载时返回 `EDEADLK`。
+
+**禁止** `std::fs::rename` / `rename(2)` 做生产移动：目标已存在时它会**静默替换**（`fake_exec` 测试执行器先断言目标不存在，只适合测试）。
+
+| errno（`describe_errno`） | 中文原因 |
+|---|---|
+| `EPERM`，且源 / 源所在文件夹 / 目标文件夹带 `uchg` / `schg` / 仅追加标志 | "项目或所在文件夹已锁定（访达「显示简介」里勾选了「已锁定」），请先解锁" |
+| `EPERM`（其余：沙盒 / TCC 拒绝） | "macOS 拒绝访问该位置：请在「系统设置 → 隐私与安全性 → 文件与文件夹」中允许 mini-todo 访问相应文件夹" |
+| `EACCES` | "没有权限" |
+| `ENOENT`：源还在 / 同目录有 `.名字.icloud` 占位（macOS ≤ 13 的云端文件）/ 其余 | "目标文件夹不存在" / "该文件只在 iCloud 中，请先在访达中下载该文件" / "文件不存在" |
+| `EDEADLK` / `ETIMEDOUT` | "该文件只在 iCloud 中、未能下载，请先在访达中下载该文件" |
+| `ENOSPC` / `EROFS` / `ENAMETOOLONG` / `EBUSY` / `EEXIST`（名字用完） | 磁盘空间不足 / 目标位置是只读的 / 路径过长 / 正被系统占用 / 目标位置同名项目过多 |
+
+规划阶段 `plan_move_in` lstat 源失败时，`EPERM` 与"`ENOENT` + iCloud 占位"同样给上表的说明（`describe_access_error`），其余仍是"无法访问: …"。
+`describe_io_error` 的 Win32 错误码分支只在 Windows 编译（mac 上 32 是 `EPIPE`）；mac 的 `PermissionDenied` 是"没有权限"（不带"可能正被占用"）。
+
+**隐私权限（TCC，「隐私与安全性 → 文件与文件夹」）**：
+
+- 事实（Apple WWDC19-701 / DTS，见调研）：拖放即授权被拖的项目（user intent，授权记在项目上）；在桌面 / 文稿 / 下载等受保护目录里**新建**
+  目录项不需要同意；**列举**它们（读已有内容）会弹「想访问桌面文件夹中的文件」授权框，拒绝后返回 `EPERM`。授权框**阻塞调用线程**直到用户点按钮。
+  ad-hoc 签名每次升级 cdhash 都变，授权会失效、再弹一次。`cargo run` 的裸二进制套用终端的授权，测不出问题，要测就用 `bundle.sh` 的 `.app`。
+- 设计：正常路径一次框都不弹。mac 上规划阶段**只列举收纳根目录内的目标目录**（`Reserved::new(root)` → `list_outside_root = false`），
+  移回桌面 / 原目录时只按本批预订的名字去重，与磁盘上已有项的重名交给 `RENAME_EXCL` 顺延；`choose_restore_dir` 只 `stat` 原目录（是否存在），
+  预计不弹框（**未验证**）；iCloud 判定只读被拖项目自身的属性。
+- 拖放授权是否覆盖"把项目从桌面目录里移走"（rename 源端要改父目录）**未验证**；失败时得到 `EPERM`，按上表引导用户去系统设置授权。
+- `bundle.sh` 的 Info.plist 带 `NSDesktopFolderUsageDescription` / `NSDocumentsFolderUsageDescription` / `NSDownloadsFolderUsageDescription`
+  （万一弹框时的中文说明）；**不是身份键**，改了不影响升级。
+- e2e 与本地测试**绝不碰**真实 `~/Desktop` / `~/Documents` / `~/Downloads`（runner 上授权框没人点，后台移动线程会永久阻塞）：
+  `MINI_TODO_FENCES_ROOT` + `MINI_TODO_DESKTOP_DIR` 指向临时目录，且拖入的来源 / 移回的原目录都在临时目录里。
+
+**其它与 Windows 对齐的细节**（规则在 §3.4，这里只列 mac 的实现）：
+
+| 能力 | macOS 实现 |
+|---|---|
+| 隐藏属性 | `UF_HIDDEN`（`chflags hidden`）：列举永不显示、移入 `skipped`、删除时一并移回；点文件照常移入（按名字自动隐藏） |
+| 系统元数据 | `.DS_Store` / `Icon\r` / `.localized`（全平台表，§3.4） |
+| 包 | `PACKAGE_EXTENSIONS` 里的文件夹按文件去重：`Safari (2).app` |
+| 打开 | `NSWorkspace openURL:configuration:completionHandler:`（`setActivates(true)`）；先拦失效的符号链接（"符号链接指向的目标不存在…"）与替身（`NSURLIsAliasFileKey` + `URLByResolvingAliasFileAtURL` 不弹界面、不挂载："替身指向的原身不存在…"）；回调错误 → "打开失败：…"；最多等 30 秒，超时按成功 |
+| 定位 | `activateFileViewerSelectingURLs:`（没有错误返回，先 lstat） |
+| 图标 | `NSWorkspace iconForFile:` 画进自建 N×N `NSBitmapImageRep`（1 point = 1 像素、sRGB、预乘 alpha）→ AppKit 编码 PNG → `write_atomically`；不改 `iconForFile:` 返回的共享图片；后台线程画要自己 `flushGraphics` |
+| iCloud 提示 | 移动前 `is_ubiquitous_item`（§3.4「云同步提示」），共用 `fence_onedrive_notice_shown` |
+| 监听 | `notify` = FSEvents；`watch_root_at` 先 `canonicalize(root)` |
+| 根目录 | `~/MiniTodo收纳箱/`（`fence_root_dir` 返回 canonicalize 后的路径）；不是旧版沿用的名字（2.5.0 mac 版没有收纳箱） |
+
+### M3. 线程
+
+- core `mac.rs` 全是阻塞函数，**从不需要** `MainThreadMarker`：NSFileManager / NSWorkspace / NSImage / NSBitmapImageRep / NSGraphicsContext 都不是
+  `MainThreadOnly`，Apple 文档写明 `iconForFile:`、`openURL:configuration:completionHandler:`、`activateFileViewerSelectingURLs:` 可在任意线程调用；
+  用到 Foundation / AppKit 的函数都包在 `autoreleasepool` 里（Rust 线程没有自动释放池）。app 一律经 `spawn_db` 放后台。
+- app `ns.rs`（桌面层、取色面板）只在主线程（GPUI 前台）、App 未借用时调用：建窗后的处理与显示隐藏在 `cx.spawn` 的 async 块里、`update` 之外；
+  取色面板在 `choose_color` 返回的前台任务里显示与轮询（[pc-gpui/gpui-conventions.md §2.15](../pc-gpui/gpui-conventions.md)）。
+
+### M4. mac 专有的错误与边界
+
+| 条件 | 行为 |
+|---|---|
+| 拖入 / 移回撞名 | `RENAME_EXCL` 撞名顺延 ` (2)`、` (3)`…（包 `X (2).app`），绝不覆盖；64 个名字都占用 → 逐项 `failed`，源保留 |
+| 项目被锁定（`uchg`） | 逐项 `failed`（"…已锁定…请先解锁"），原样不动 |
+| 隐私权限被拒（`EPERM`） | 逐项 `failed`，引导到「系统设置 → 隐私与安全性 → 文件与文件夹」 |
+| 只在 iCloud 的文件 | 先下载再移动（阻塞）；下载被禁止 / 超时 / macOS ≤ 13 的占位 → `failed` + "请先在访达中下载该文件" |
+| 跨卷移动 | NSFileManager 复制 + 删源；删源失败 → Moved + 附注（两边各一份） |
+| 名字含 `<>:"\|?*` 或控制字符（mac 上合法，`Icon\r` 是元数据除外） | 能收纳、能列举、能随删除收纳箱整体移回（这些路径不校验名字）；但打开 / 在访达中显示 / 图标（占位）/ 隐藏 / 单独移回 / 移动到… 报"文件名不合法"（`is_valid_item_name` 按 Windows 规则） |
+| 失效的替身 / 符号链接 | 打开报"替身指向的原身不存在…" / "符号链接指向的目标不存在…" |
+| `make_desktop_layer` 失败（窗口号找不到） | warn 日志，窗口留在 `PopUp` 默认层级（不会发生在正常路径上） |
+| 取色面板打不开 / 颜色不是 RGB | warn 日志 / 视为取消 |
+| 当前活动窗口是收纳箱时按 ⌘M / ⌘W | 不做任何事 |
+
+### M5. 测试
+
+- **单测**（只在 macOS 上编译，CI `pc-gpui-e2e-macos.yml` 的 `checks` 作业跑）：`fence_fs::ops::real_moves_mac::{move_in_restore_and_cross_fence_round_trip,
+  rename_excl_never_overwrites_and_tries_the_next_name, locked_items_fail_with_a_clear_reason_and_stay_put, icloud_placeholders_are_recognized}`
+  （临时目录里真实 `renamex_np`：往返移入移回、跨箱、包 `Safari (2).app`、点文件移入 / `UF_HIDDEN` 跳过、桌面不列举时靠撞名顺延不覆盖、
+  `restore_all` 不搬 `.DS_Store` 且删掉文件夹、只差大小写也不覆盖、名字用完失败、已锁定报"锁定"）；`icon::extracts_real_icons_into_cache_on_macos`
+  （输出边长恰好等于档位的合法、非全透明 PNG，二次命中缓存）；`folder::list_items_filters_and_describes` 的 `UF_HIDDEN` 分支；
+  `watch::watcher_reports_debounced_folder_changes`（根目录被规范化）。全平台跑的新增单测见 §6。
+- **交叉检查**：`scripts/mac-check` 收录 `crates/core/src/services/fence_fs/mac.rs` 与 `crates/app/src/platform/macos/ns.rs`（Linux / Windows 上
+  `--target aarch64-apple-darwin` 的 clippy）；`fences.rs` / `fence_win.rs` 的 mac 分支与 core 里 `mac.rs` 以外的 mac 分支只有 CI 能编译。
+- **e2e**（`pc-gpui/scripts/e2e-macos/run_e2e.py` 的 MF 组，smoke 作业，debug `.app`，全部在临时目录）：MF01 新建（层级 = 桌面图标层 + 1、排在所有
+  layer ≥ 0 的窗口之后、368×336pt 右上角、库与文件夹、日志自报 `0x251` / `canHide=false` / 非激活面板）、MF02 目录监听、MF03 真实拖入
+  （`drag_source.py` 拖放源）与撞名不覆盖、MF04 移回原目录 / 桌面、MF05 删除收纳箱全部移回且 `.DS_Store` 不搬到桌面、MF06 ⌘H 与别的应用隐藏都不藏
+  收纳箱 + 点收纳箱不激活应用、MF07 有收纳箱时 Dock 唤起主窗口、MF08 键盘改名、MF09 拖标题栏落库、MF10 菜单栏图标三项与重启恢复；M07 断言菜单栏图标
+  菜单**有**收纳箱三项。窗口枚举不带 `kCGWindowListExcludeDesktopElements`（详见 `pc-gpui/scripts/e2e-macos/README.md`）。
+- **runner 测不了**（写进交付说明）：Spaces / 台前调度 / 调度中心 /「显示桌面」/「点按墙纸显示桌面」、Retina / 多显示器 / 混合缩放、中文输入法、
+  真实 `~/Desktop` 的 TCC 流程、iCloud「桌面与文稿」、跨卷移动、打开 / 在访达中显示（会拉起别的应用）、Finder 重启后的层级、光标形状。
+
+### M6. Wrong vs Correct（mac）
+
+#### Wrong — 用 `std::fs::rename` 移动
+
+```rust
+if !dest.exists() {
+    std::fs::rename(&source, &dest)?;  // exists 与 rename 之间出现的同名文件会被静默替换；跨卷直接 EXDEV 失败
+}
+```
+
+#### Correct — `renamex_np(RENAME_EXCL)`，撞名换下一个名字，跨卷交给 NSFileManager
+
+```rust
+let rc = unsafe { libc::renamex_np(src.as_ptr(), dst.as_ptr(), libc::RENAME_EXCL) }; // 内核原子判重
+match last_errno() {
+    libc::EEXIST => name = next_name(attempt + 1),                         // 绝不覆盖
+    libc::EXDEV | libc::ENOTSUP => /* move_with_file_manager：516 / EEXIST 也换名 */,
+    errno => return MoveResult::failed(Some(errno), describe_errno(source, dest_dir, errno)),
+}
+```
+
+#### Wrong — 规划时列举桌面去重
+
+```rust
+let taken = existing_names_lower(&desktop);  // read_dir(~/Desktop)：弹「文件与文件夹」授权框、阻塞后台线程；拒绝后列表为空
+```
+
+#### Correct — 只列举收纳根目录内的目标目录
+
+```rust
+let mut reserved = Reserved::new(root);  // macOS：list_outside_root = false，桌面只按本批预订去重，与已有项的重名交给 RENAME_EXCL
+```
+
+#### Wrong — 对收纳箱窗口"置顶一下"
+
+```rust
+h.set_topmost(false);  // ns::set_floating(false) 把层级改回 NSNormalWindowLevel：收纳箱盖住其它应用的窗口
+```
+
+#### Correct — 层级只由 `make_desktop_layer` 设置
+
+```rust
+h.make_desktop_layer();  // 桌面图标层 + 1、0x251、canHide = NO …（幂等，重新显示前再调一次）
+h.show();                // orderFrontRegardless：同层最前，不改 key 窗口、不激活应用
+```
+
+---
+
 ## Design Decisions
 
 ### Design Decision: 真收纳 + 可见文件夹为 source of truth
@@ -707,15 +997,35 @@ fn on_geometry_event(&mut self, window: &mut Window, cx: &mut Context<Self>) {
 **Context**：Fences / 腾讯 / 360 让图标从桌面消失靠的是接管 Explorer 桌面视图（要注入 Explorer）；纯引用（NoFences）零风险但桌面
 不会变干净。
 
-**Decision**：物理移动文件（TuckPane 模式）到 `%USERPROFILE%\MiniTodo收纳箱\<名称>\`，文件夹是内容的唯一来源，数据库只存元数据、
-排序与原始路径。卸载 / 崩溃 / 数据库丢失都不丢文件，最坏情况是用户在该文件夹里手动找回。代价：依赖桌面路径的脚本会失效；OneDrive
-桌面下的移动会同步到其他设备（首次提示一次）；公共桌面项需要 UAC。
+**Decision**：物理移动文件（TuckPane 模式）到 `%USERPROFILE%\MiniTodo收纳箱\<名称>\`（macOS `~/MiniTodo收纳箱/<名称>/`），文件夹是内容的
+唯一来源，数据库只存元数据、排序与原始路径。卸载 / 崩溃 / 数据库丢失都不丢文件，最坏情况是用户在该文件夹里手动找回。代价：依赖桌面路径的
+脚本会失效；OneDrive / iCloud「桌面与文稿」桌面下的移动会同步到其他设备（首次提示一次）；公共桌面项需要 UAC（Windows）。
 
 ### Design Decision: 始终嵌入，「固定」只是界面锁定
 
 **Decision**：收纳箱复用主窗口的嵌入方案（owner=Progman + `FLAG_BOTTOM` 永远置底 + `WS_EX_TOOLWINDOW`，`platform::embed`），
 建窗参数一次给齐、之后不改；窗口建成 `resizable: false`，缩放用窗口内手柄 + `SetWindowPos`。锁定 / 解锁、折叠 / 展开都不碰窗口样式。
 旧版实测多个收纳箱重叠时点击不会成组重排（被点的升到组内最上，其余相对顺序不变）。
+
+### Design Decision: macOS 用不激活面板 + 桌面图标层，而不是普通窗口
+
+**Context**：mac 没有 Progman 可挂。候选：普通 NSWindow 放到桌面层；`Floating`（激活型 NSPanel）；`PopUp`（不激活的 NSPanel）；
+Electron `type: 'desktop'` 那样放到 `kCGDesktopWindowLevel - 1`（收不到鼠标键盘）。
+
+**Decision**：GPUI `PopUp` + `CGWindowLevelForKey(kCGDesktopIconWindowLevelKey) + 1` + `CanJoinAllSpaces | Stationary | IgnoresCycle |
+FullScreenNone` + `canHide = NO`（Plash 的可交互模式、Hammerspoon "能可靠收点击的最低层级"同一层）。不激活应用：点收纳箱不切换菜单栏、
+不把隐藏中的应用（连同主窗口）取消隐藏、不计入 Dock 唤起的 `hasVisibleWindows`；`PopUp` 有 `ActiveAlways` 跟踪区，应用不在前台时悬停折叠 /
+展开照常。代价：改名要先 `activate_window()`，且 runner 上经系统输入流的键盘仍没进到面板（MF08 首轮失败，§M1）；中文输入法未验证。`Floating` 点击仍激活应用且没有跟踪区；普通 NSWindow 计入
+`hasVisibleWindows`（退路：普通窗口 + 自己的 reopen Apple Event handler）。
+
+### Design Decision: macOS 移动用 `renamex_np(RENAME_EXCL)`，不用 NSFileManager / `rename(2)` 打头
+
+**Context**：硬约束"绝不覆盖"。`rename(2)` / `std::fs::rename` 目标存在时静默替换；`NSFileManager moveItemAtURL` 同卷是先 lstat 再普通 rename，
+中间有竞争窗口。
+
+**Decision**：同卷（桌面与 `~/MiniTodo收纳箱` 同在 Data 卷，几乎全部情况）用内核原子判重的 `RENAME_EXCL`，撞名换下一个后缀名重试（等价于
+Windows 的 `FOF_RENAMEONCOLLISION`）；只有跨卷 / 卷不支持时交给 NSFileManager（复制阶段同样 EXCL）。规划阶段不列举受隐私保护的目标目录，
+撞名完全交给内核判重——比按字符串比较还准（大小写、Unicode 规范化）。
 
 ### Design Decision: 收纳箱数据是设备本地数据
 
@@ -735,3 +1045,10 @@ fn on_geometry_event(&mut self, window: &mut Window, cx: &mut Context<Self>) {
   （3.0.0 等，没有 v30 迁移）时隐藏不生效（全部显示，点文件在 Windows 上也会显示）。以 `.` 开头的项目固定自动隐藏，没有开关。
 - Explorer 重启后某个收纳箱的 Z 序可能落在隐身的 Shell CoreWindow 之上（仍在所有普通应用窗口之下），不影响可见行为（旧版实测）。
 - GPUI 窗口外沿那圈不可见边框（96 DPI 下左 / 右 / 下各 8px）仍会接住鼠标（`HTBORDER`），见 gpui-conventions §2.2。
+- **macOS（预览，未经真机验收）**：只在 runner 上验证过（单屏 1x、一个桌面空间、临时目录）；其中键盘改名（MF08）在 runner 上没通过（§M1「改名」）。没验证过 Spaces / 台前调度 / 调度中心 /
+  「显示桌面」/「点按墙纸显示桌面」下的表现、Retina 与多显示器、非激活面板里的中文输入法、真实 `~/Desktop` 的隐私授权流程（含 ad-hoc 签名
+  升级后重新授权）、iCloud「桌面与文稿」、跨卷移动、Finder 重启后的层级、打开 / 在访达中显示；访达拖入时光标带"+"（GPUI 回报 Copy）但实际是移动；
+  取色面板会激活应用；名字含 Windows 非法字符的项目只能整体移回（§M4）。混合缩放下统一系数随显示器组合变化时"最近一次位置"可能按新系数解释
+  （与主窗口同性质，见 CLAUDE.md 已知限制）。
+- **装回旧版本**（Windows 与 macOS 都是）：3.0.2-pre 及更早的 mac 版不恢复收纳箱（`restore_all` 在 mac 上直接返回）、菜单栏图标没有入口，
+  2.5.0 mac 版完全不认这些表——收纳箱不显示，但文件都还在 `~/MiniTodo收纳箱/<名称>/` 里，可在访达里找回；再装回新版本后照常恢复。

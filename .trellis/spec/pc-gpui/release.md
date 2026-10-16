@@ -172,9 +172,10 @@ mini-todo.app/Contents/
 | `LSApplicationCategoryType` | `public.app-category.productivity` | 只影响分类展示 |
 | `NSHighResolutionCapable` | `true` | 与 2.5.0 一致 |
 | `LSUIElement` | **不设** | 2.5.0 没设，Dock 图标照常显示；而且 GPUI 在 `applicationDidFinishLaunching` 里按自身状态重设激活策略（默认 Regular），写了也会被覆盖——要隐藏 Dock 图标只能用 `cx.set_activation_policy(Accessory)` |
+| `NSDesktopFolderUsageDescription` / `NSDocumentsFolderUsageDescription` / `NSDownloadsFolderUsageDescription` | 中文用途说明（"mini-todo 需要访问桌面文件夹，才能把桌面上的项目收进收纳箱或移回桌面。"等） | 桌面收纳箱移入 / 移回时万一触发「文件与文件夹」授权框，框里显示的说明（正常路径不列举这些受保护目录，不会弹框，见 `backend/desktop-fences.md`「场景：macOS 上的收纳箱」）。**不是身份键**，加 / 改不影响覆盖升级与已有授权的归属 |
 
-不写：`LSRequiresCarbon` / `CSResourcesFileMapped`（Tauri 模板遗留）、`NSPrincipalClass`（GPUI 自己建 NSApplication）、各种 `*UsageDescription`
-（没用到受保护资源）。`plutil -lint` 校验；版本号只从 `pc-gpui/Cargo.toml` 读（§1）。
+不写：`LSRequiresCarbon` / `CSResourcesFileMapped`（Tauri 模板遗留）、`NSPrincipalClass`（GPUI 自己建 NSApplication）、上表以外的 `*UsageDescription`
+（没用到别的受保护资源）。`plutil -lint` 校验；版本号只从 `pc-gpui/Cargo.toml` 读（§1）。
 
 ### 6.3 签名：整包 ad-hoc，不公证（没有 Apple 开发者账号）
 

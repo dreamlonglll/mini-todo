@@ -35,6 +35,7 @@
 - `reqwest::blocking`（core 的同步 / 节假日 / 版本检查）不能在 tokio runtime 里调用；app 不引入 tokio。
 - **带 `owner_hwnd` 的收纳箱移动**（`fence::delete`、`fence::items::{move_in, restore, move_to}`）绝不在 UI 主线程调用：
   系统的"需要管理员权限 / 文件正在使用"对话框以收纳箱窗口为父窗口，会同步给主线程发消息，主线程阻塞等待时死锁。
+  macOS 不用 `owner_hwnd`，但「文件与文件夹」隐私授权框、下载 iCloud 云端文件、跨卷复制同样阻塞调用线程，规则相同。
   HWND 在主线程取好（`isize`），移动派到后台。
 
 ### 2.2 App 借用期间禁止同步 Win32 调用（`platform` 延后）
@@ -46,7 +47,8 @@
 - `platform::Hwnd` 上的方法、`platform::embed::*`、`subclass::set_flag` 是**立即执行**的原始调用：只能在 `cx.spawn` 的 async 块里、
   `update` 闭包**之外**调用（200ms 守护轮询、窗口模式切换都是这么写的）。
 - 读操作（`GetWindowRect`、显示器枚举、光标位置）不发消息，随时可调。
-- 任何**模态**系统调用（同步拖窗循环、同步文件 / 取色对话框）都不能在事件处理里直接调：`platform::file_dialog` / `fence_win::choose_color`
+- 任何**模态**系统调用（同步拖窗循环、同步文件 / 取色对话框）都不能在事件处理里直接调：`platform::file_dialog` / `fence_win::choose_color`（Windows；
+  mac 的取色面板非模态，在前台任务里显示后轮询，§2.15）
   已放独立线程，`begin_window_drag` 已延后。
 - 窗口代码里**不直接写 Win32 / AppKit**：新能力加在 `platform/`（`windows.rs` 实现 + `macos/` 实现 + `fallback.rs` 的 no-op / 近似 +
   `mod.rs` 跨平台签名；mac 的分层见 §2.15）。macOS 的 `setFrame:` 等同样会同步触发 GPUI 回调，本节规则对 mac 一样成立。
@@ -182,13 +184,14 @@
 | 变量 | 作用 |
 |---|---|
 | `MINI_TODO_DATA_DIR` | 数据目录（库 / 图片 / 备份 / 图标缓存）、日志 `<dir>/logs`；**不启用单实例、不刷新开机自启项**。与安装版并存实测时必须带上 |
-| `MINI_TODO_FENCES_ROOT` | 收纳根目录（代替 `%USERPROFILE%\MiniTodo收纳箱`） |
+| `MINI_TODO_FENCES_ROOT` | 收纳根目录（代替 `%USERPROFILE%\MiniTodo收纳箱`；macOS `~/MiniTodo收纳箱`） |
 | `MINI_TODO_SCREEN_ID_FILE` | 文件内容非空时替代屏幕组合 ID |
 | `MINI_TODO_DEBUG_OPEN` | 加载完数据后额外打开的窗口（截图 / e2e 用，格式见 `pc-gpui/scripts/README.md`）；这些窗口不走模态关系 |
 | `MINI_TODO_DEBUG_LATEST_VERSION` | 版本检查不联网，直接当作最新版本 |
 | `MINI_TODO_DEBUG_DIALOG_PATH` | 导出 / 导入的文件对话框不弹出，直接返回该路径 |
 | `MINI_TODO_DEBUG_WINDOWS_UI` | `1` 时 Linux / macOS 上也显示 Windows 专有的设置项 |
-| `MINI_TODO_DEBUG_FENCE_STATE` | `onedrive` / `drag-hover`：收纳箱直接显示 OneDrive 提示 / 拖入悬停框 |
+| `MINI_TODO_DEBUG_FENCE_STATE` | `onedrive` / `drag-hover`：收纳箱直接显示云同步提示（OneDrive / macOS iCloud 文案）/ 拖入悬停框 |
+| `MINI_TODO_DESKTOP_DIR` | 代替"用户桌面"（core `fence_fs::user_desktop_dir`：收纳箱移回的兜底目标等）；mac e2e 用它避开真实 `~/Desktop` 的隐私授权框 |
 
 - 前三个与旧版同名同义（core `db::paths`、`services::fence_fs`、`settings::screen_config_id` 读取）。新增 debug 开关同样只在
   `cfg(debug_assertions)` 下读取，并写进 app README §5 与 `pc-gpui/scripts/README.md`。
@@ -281,17 +284,30 @@ gpui-pre-macos 能建窗（位置 / 显示器 / 置顶层级 / 可缩放都只�
   e2e / 本地调试要先 `scripts/macos/bundle.sh <二进制> - <目录>` 包成 `.app`。
 - **代码分层**（这样 Linux / Windows 上也能检查大部分 mac 代码）：
   - objc2 的 AppKit 调用写进**不依赖 GPUI 与本 crate 其它模块**的文件（`platform/macos/ns.rs`；同类的还有 `services/autostart.rs`、
-    `services/single_instance/unix_socket.rs`、`services/tray/mac_icon.rs`），并在 `scripts/mac-check/src/lib.rs` 里加一行 `#[path]` 模块；
-    改 app 的 mac 依赖版本 / 特性时同步改 `scripts/mac-check/Cargo.toml`（逐项一致）
+    `services/single_instance/unix_socket.rs`、`services/tray/mac_icon.rs`，以及 core 的收纳箱文件层 `services/fence_fs/mac.rs`——core 整体依赖
+    bundled SQLite，只能在 Mac 上编译，所以 `mac.rs` 必须是不 `use super::` / `crate::` 的叶子模块，同一份源码按 edition 2021 / 2024 都能编译），
+    并在 `scripts/mac-check/src/lib.rs` 里加一行 `#[path]` 模块；改 app / core 的 mac 依赖版本 / 特性时同步改 `scripts/mac-check/Cargo.toml`
+    （特性 = 两者的并集，逐项一致）
   - 纯换算 / 纯逻辑写成全平台编译带单测（`mac_geometry.rs`；`mac_menu.rs` 全平台编译、只在 mac 上调用，Linux clippy 能检查它对 GPUI API 的用法），
     用 `#[cfg_attr(not(target_os = "macos"), allow(dead_code))]` 压住非 mac 的未使用警告
   - `platform/macos/mod.rs` 等 GPUI 胶水尽量薄——它只有 CI 的 macOS 作业能编译（[verification.md](./verification.md) §7）
 - **测试里的临时目录**：mac 的临时目录 `/var/folders/…` 是 `/private/var/folders/…` 的符号链接，SQLite（库路径）与 FSEvents（`notify`）报告的是
-  解析后的路径。比较路径前两边都 `canonicalize`（`db/backup.rs` 的测试），或只在 mac 上 `canonicalize` 输入（`fence_fs/watch.rs` 的测试：Windows 上
-  `canonicalize` 会变成 `\\?\` 路径，反而对不上）。
+  解析后的路径。比较路径前两边都 `canonicalize`（`db/backup.rs` 的测试），或只在 mac 上 `canonicalize`（Windows 上 `canonicalize` 会变成 `\\?\` 路径，
+  反而对不上）。收纳箱的生产代码也要处理（访达拖放给的同样是解析后的路径）：mac 上 `fence_fs::fence_root_dir`、`watch_root_at` 与
+  `MINI_TODO_DESKTOP_DIR` 的覆盖目录都先 `canonicalize`（真实 `~/Desktop` 不碰，它受隐私保护）。
+- **收纳箱窗口（桌面层的不激活面板）**：mac 上收纳箱建成 `WindowKind::PopUp`（NSPanel + `NonactivatingPanel`，只能建窗时给）、`show: false`，
+  建窗后在 `cx.spawn` 里 `Hwnd::make_desktop_layer`（层级 `CGWindowLevelForKey(kCGDesktopIconWindowLevelKey) + 1`、collectionBehavior
+  **整体替换**成 `CanJoinAllSpaces | Stationary | IgnoresCycle | FullScreenNone`、`canHide = NO` 等）再 `orderFrontRegardless`。GPUI 建窗后不再改层级，
+  本 crate 里会改的只有 `ns::set_floating`（`set_topmost`）——**收纳箱窗口绝不能调它**，也不调 `setFloatingPanel:` / `bring_to_front` /
+  `cx.activate(true)`。非激活面板单击不一定成为 key 窗口：要键盘（改名）时先 `window.activate_window()`。菜单动作（⌘M / ⌘W）对收纳箱跳过。
+  契约见 [backend/desktop-fences.md](../backend/desktop-fences.md)「场景：macOS 上的收纳箱」。
+- **系统取色面板**（`fence_win::choose_color` 的 mac 实现，`ns::show_color_panel` / `color_panel_state`）：`NSColorPanel` 是 `MainThreadOnly` 的共享
+  非模态面板，只能在前台任务里碰；要 `setHidesOnDeactivate(false)`（NSPanel 默认失活就藏，会被轮询误判成"关掉了"）；读分量前先
+  `colorUsingColorSpace(sRGB)` 并确认 RGB 模型——对非 RGB 颜色读 `redComponent` 抛 ObjC 异常，穿过 Rust 帧直接 abort。
+  显示它会激活应用并让当前 key 窗口失去 key（触发 GPUI 回调），所以放在任务里、不在事件处理（App 被借用）里直接做。
 - Windows 专有的 `platform::*` 在 mac 上是 no-op：`set_tool_window`（程序坞 / ⌘Tab 是整个应用的）、`set_owner`（mac 子窗口会跟着父窗口移动，语义不同；
-  模态只靠遮罩与 `forward_activation`）、`set_round_corners`、`set_system_menu`、`embed::*`；`ex_style()` 恒 0（`window_mode` 的 tool window 自愈只在
-  Windows 上做）。
+  模态只靠遮罩与 `forward_activation`）、`set_round_corners`、`set_system_menu`、`embed::*`（mac 收纳箱走 `Hwnd::make_desktop_layer`）；`ex_style()` 恒 0
+  （`window_mode` 的 tool window 自愈只在 Windows 上做）。反过来 `Hwnd::make_desktop_layer` / `describe_layer` 在 Windows / Linux 上是 no-op。
 
 ---
 
@@ -320,6 +336,9 @@ gpui-pre-macos 能建窗（位置 / 显示器 / 置顶层级 / 可缩放都只�
    显示器本地坐标、`displays()` 原点是否仍恒为 0（`creation_bounds`、`mac_geometry` 依赖它）；`TitlebarOptions` 的 style mask 与红绿灯、
    NSPanel 的 `hidesOnDeactivate`；`app_owns_titlebar_drag`；`.SystemUIFont` 别名只认主字体族；`show_system_notification` 的 bundle 守卫与线程要求；
    `did_finish_launching` 是否仍重设激活策略、`on_reopen` 的回调条件；`set_menus` / `MenuItem::os_action`；`setReleasedWhenClosed:NO`。
+   收纳箱（desktop-fences.md「场景：macOS 上的收纳箱」）：`PopUp` 是否仍是带 `NonactivatingPanel` 的 NSPanel、层级 / collectionBehavior 是否仍只在
+   `MacWindow::open` 里设（运行期不重设）、`PopUp` 是否仍有 `ActiveAlways` 跟踪区；所有窗口是否仍 `registerForDraggedTypes:` 文件类型、外部拖入回报的
+   拖放操作；`start_window_move` 是否仍是 `performWindowDragWithEvent:`；`acceptsFirstMouse` / `canBecomeKeyWindow`。
 2. 对齐 app 的 `windows` crate 版本与 gpui-pre-windows 一致；mac 的 `objc2` / `objc2-foundation` / `objc2-app-kit` 与 gpui-pre-macos 一致
    （同步改 `scripts/mac-check/Cargo.toml`）。
 3. 若开启 `gpui-kit/test-support`：旧 lock 会出现 `cocoa` / `unicode-properties` 版本冲突，删掉 lock 重新生成（见 gpui-api.md §C1）。

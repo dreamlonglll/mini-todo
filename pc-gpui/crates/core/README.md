@@ -52,6 +52,8 @@ cargo clippy -p mini-todo-core --all-targets -- -D warnings
 cargo test -p mini-todo-core
 # Windows 目标交叉检查（覆盖 cfg(windows) 的 COM / Shell / DPAPI / DirectWrite 代码）
 cargo clippy -p mini-todo-core --all-targets --target x86_64-pc-windows-gnu -- -D warnings
+# macOS：core 整体（bundled SQLite）只能在 Mac 上编译；收纳箱文件层的叶子模块 services/fence_fs/mac.rs 可在 Linux / Windows 上交叉检查
+cargo clippy --manifest-path scripts/mac-check/Cargo.toml --target aarch64-apple-darwin -- -D warnings
 
 # 重新生成农历对照数据（在仓库根目录执行；lunar-javascript 装在临时目录，版本与旧前端锁定的 1.7.7 相同）
 mkdir -p /tmp/lunar-js && npm i --prefix /tmp/lunar-js lunar-javascript@1.7.7
@@ -73,7 +75,7 @@ macOS 专属测试（`fence_fs` 的真实 `renamex_np` 移动往返 / 撞名顺�
 | 约束 | 说明 |
 |---|---|
 | 阻塞函数放后台 | 数据库、文件、网络、Shell 调用都会阻塞；GPUI 前台只做状态更新 |
-| 带 `owner_hwnd` 的收纳箱移动绝不在 UI 主线程调用 | `fence::delete`、`fence::items::{move_in, restore, move_to}`：系统"需要管理员权限" / "文件正在使用"对话框以收纳箱窗口为父窗口，会同步给主线程发消息，主线程阻塞等待时死锁。HWND 在主线程取好（`isize`），移动派到后台 |
+| 带 `owner_hwnd` 的收纳箱移动绝不在 UI 主线程调用 | `fence::delete`、`fence::items::{move_in, restore, move_to}`：Windows 上系统"需要管理员权限" / "文件正在使用"对话框以收纳箱窗口为父窗口，会同步给主线程发消息，主线程阻塞等待时死锁。HWND 在主线程取好（`isize`），移动派到后台。macOS 不用 `owner_hwnd`，但「文件与文件夹」隐私授权框、下载 iCloud 云端文件、跨卷复制同样会阻塞调用线程，也只能在后台调用 |
 | 单同步互斥 | `sync::run` 同一时刻只允许一个（含强制拉取 / 推送），重入立即返回 `Err("同步正在进行中")` |
 | 进程级静态量留在 core | 同步互斥 / 轮次计数、收纳箱 `FenceActivity`（删除中 / 移动中登记）、收纳箱临时几何 `SESSION_RECTS` 与屏幕组合检测起点、通知槽位池、通知窗口真实尺寸、托盘唤起代次 |
 | 窗口状态留在 app | 固定 / 嵌入模式标志、Progman owner、`TOP_ON_WAKE` 缓存、`AutoHideState` 实例、收纳箱显示 / 隐藏、嵌入窗口登记 |
@@ -280,9 +282,9 @@ DWM 圆角（`lib.rs` L55）、`MessageBoxW` 致命错误（`lib.rs` L139）；�
 | `screen_switch(db, previous, current, &[(id, Option<PxRect>, scale)]) -> Vec<(Fence, PxRect)>` | 组合变化后的新存储几何（有记录用记录，否则沿用窗口当前位置、只记内存）；app 再按 `fence_view(.., !fence.collapsed, ..)` 摆窗 | `apply_screen_switch` |
 | `delete(db, id, owner_hwnd: Option<isize>) -> R<DeleteFenceResult { deleted, restored, remaining, failures }>` | 先全部移回原位置；文件夹清空并删除才删记录（`deleted = true` → app 销毁窗口）；否则整个保留、删掉已移回项的行，app 用 `items::refresh` 刷新窗口。**后台线程** | `delete_fence` |
 
-app 层负责（`crates/app/src/services/fences.rs`、`windows/fence/`；行号指旧版 `src-tauri/src/commands/fence.rs`）：建窗参数（L833-898：无边框透明、不可缩放 / 最小化、`show:false` → 嵌入 → 显示、
-关闭拦截）、`set_fence_bounds`（缩放手柄逐帧 `SetWindowPos`，不落库）、`set_fence_view`（`Placement::for_screen(..).rect(..)` → `fence_view` → 摆窗）、
-显示 / 隐藏全部（`FENCES_HIDDEN` 运行时状态，不持久化）、嵌入窗口登记与 200ms 守护。
+app 层负责（`crates/app/src/services/fences.rs`、`windows/fence/`；行号指旧版 `src-tauri/src/commands/fence.rs`）：建窗参数（L833-898：无边框透明、不可缩放 / 最小化、`show:false` → 嵌入 → 显示
+（macOS：`PopUp` 面板 → 桌面图标层之上一层 → 显示）、关闭拦截）、`set_fence_bounds`（缩放手柄逐帧 `SetWindowPos`，不落库）、`set_fence_view`（`Placement::for_screen(..).rect(..)` → `fence_view` → 摆窗）、
+显示 / 隐藏全部（`FENCES_HIDDEN` 运行时状态，不持久化）、嵌入窗口登记与 200ms 守护（Windows）。
 
 ### `fence::items`（收纳箱内容）
 

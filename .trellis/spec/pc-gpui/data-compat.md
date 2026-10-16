@@ -32,7 +32,8 @@
 | 项 | 事实 | 后果 / 注意 |
 |---|---|---|
 | 应用身份 | 同一个 bundle id `com.tauri-app.mini-todo`、同名 `mini-todo.app` / 可执行文件 `mini-todo`（`scripts/macos/bundle.sh`） | 拖进「应用程序」直接替换旧版；通知授权与显示设置挂在同一个 bundle id 上（2.5.0 用已弃用的 `NSUserNotificationCenter`，新版用 `UNUserNotificationCenter`，升级后第一次提醒是否还会请求授权未经验证）；LaunchServices 认为是同一个应用 |
-| 数据目录 | 同一个 `~/Library/Application Support/mini-todo/`（core `db/paths.rs` 与 2.5.0 都是 `dirs::data_local_dir()/mini-todo`，`dirs` 5） | 升级即沿用全部数据；首次打开时迁移 v29 / v30（2.5.0 是 v28），v29 / v30 的收纳箱表在 mac 上建了但不用。装回 2.5.0 时它打开 v30 库只记警告、照常运行（规则同 §3 第一行） |
+| 数据目录 | 同一个 `~/Library/Application Support/mini-todo/`（core `db/paths.rs` 与 2.5.0 都是 `dirs::data_local_dir()/mini-todo`，`dirs` 5） | 升级即沿用全部数据；首次打开时迁移 v29 / v30（2.5.0 是 v28）。v29 / v30 的收纳箱表在 3.0.2-pre 的 mac 版上建了但不用，之后的版本 mac 也有收纳箱、开始读写它们（见下一行）。装回 2.5.0 时它打开 v30 库只记警告、照常运行（规则同 §3 第一行） |
+| 桌面收纳箱（3.0.2-pre 之后新增到 mac） | 收纳根目录 `~/MiniTodo收纳箱/<名称>/`（不在数据目录里，2.5.0 没有这个名字，不是"沿用"的名字）；`fences` / `fence_items` / `fence_layouts` 与 `fence_onedrive_notice_shown` 同 Windows，是设备本地数据、不导出不同步；几何同主窗口的物理像素口径（全局点 × 统一系数），屏幕组合 ID 同 `screen_configs` | 装回 3.0.2-pre（mac 上不恢复收纳箱、菜单栏图标没有入口）或 2.5.0（不认这些表）时收纳箱不显示，文件都还在 `~/MiniTodo收纳箱/` 里、可在访达里找回；再升级回来照常恢复。混用缩放下统一系数随显示器组合变化，没有当前组合记录时"最近一次位置"会按新系数解释（被夹回工作区，与主窗口同性质） |
 | 日志 | 同一个 `~/Library/Logs/com.tauri-app.mini-todo/mini-todo.log`（2.5.0 tauri-plugin-log `LogDir`） | 与 Windows / Linux 的 `<data_local_dir>/com.tauri-app.mini-todo/logs/` 口径不同（mac 没有 `logs` 子目录、不在数据目录旁边），`services/logging.rs` 按平台分支；开发隔离时三个平台都是 `<MINI_TODO_DATA_DIR>/logs` |
 | 单实例 | 同一个 Unix socket `/tmp/com_tauri_app_mini_todo_si.sock`、同一消息格式（`<cwd>\0\0<args 以 \0 连接>`） | 新旧两版互相识别，不会同时打开同一个库；只删自己绑定的那个 socket 文件（按文件身份判断），不会误删另一个实例新建的 |
 | 开机自启 | 同一个 LaunchAgent `~/Library/LaunchAgents/mini-todo.plist`（`Label = mini-todo`、`[<可执行文件绝对路径>, --autostart]`） | 旧 plist 在覆盖安装后照样拉起新版（路径不变）；已开启时每次启动刷新路径，从 App Translocation 临时位置运行时不刷新 |

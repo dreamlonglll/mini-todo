@@ -58,15 +58,17 @@ src/
 │   ├── settings/     设置：mod（窗口、菜单、加载）、general、appearance、data（导入导出 / WebDAV / 强制同步）、
 │   │                 screen（屏幕配置）、about（版本 / 检查更新）
 │   ├── fence/        桌面收纳箱：mod（窗口、标题栏、拖动 / 缩放 / 折叠 / 改名、拖入）、grid（项目网格、图标懒加载、
-│   │                 右键菜单（含隐藏 / 取消隐藏）、隐藏项过滤与半透明、箱内排序、Ctrl+滚轮）、panels（外观 / 删除确认 /
-│   │                 OneDrive 提示、「更多」菜单（含显示隐藏的图标））、logic（纯函数）
+│   │                 右键菜单（含隐藏 / 取消隐藏；macOS「在访达中显示」）、隐藏项过滤与半透明、箱内排序、Ctrl+滚轮
+│   │                 （macOS 另认 ⌘+滚轮））、panels（外观 / 删除确认 / 云同步提示（Windows OneDrive、macOS iCloud）、
+│   │                 「更多」菜单（含显示隐藏的图标））、logic（纯函数）
 │   └── gallery.rs    控件样例（仅调试）
 ├── ui/               Element Plus 风格共享控件（见 §4.4，每种控件只有一个实现）
 ├── services/         进程级服务（见 §4.2）
 └── platform/         GPUI 没有的窗口能力（见 §4.5）：mod.rs 跨平台接口、windows.rs（Win32）、
-                      macos/（mod.rs GPUI 胶水 + ns.rs AppKit 原始调用，objc2）、mac_geometry.rs（macOS 坐标换算，
-                      全平台编译带单测）、fallback.rs（Linux）、embed.rs（嵌入桌面层）、subclass.rs（窗口子类过程）、
-                      fence_win.rs（系统取色对话框）、file_dialog.rs（带过滤器的打开 / 保存对话框）
+                      macos/（mod.rs GPUI 胶水 + ns.rs AppKit 原始调用，objc2；含收纳箱桌面层与取色面板）、
+                      mac_geometry.rs（macOS 坐标换算，全平台编译带单测）、fallback.rs（Linux）、embed.rs（Windows 嵌入桌面层）、
+                      subclass.rs（窗口子类过程）、fence_win.rs（收纳箱「自定义颜色」：Windows ChooseColorW / macOS NSColorPanel）、
+                      file_dialog.rs（带过滤器的打开 / 保存对话框）
 ```
 
 ### 2.1 维护规则
@@ -164,13 +166,13 @@ cx.subscribe_in(&state, window, |_, _, e: &AppStateEvent, window, cx| …)  // �
 | `sync` | `run_sync(cx, SyncMode)`（标题栏按钮、自动同步、设置页立即同步 / 强制拉取 / 强制推送共用）：期间 `AppState.syncing = true`；成功后 `apply_sync_report`（本地数据变了且主窗口没有模态子窗口 → 重新拉待办；`settings_applied` → 重读设置与运行时偏好）。文案（`syncReport.ts` 逐字移植）：`describe_sync_report`、`describe_skipped_records`、`has_local_data_changes`、`is_sync_busy_error`、`report_message_kind` |
 | `auto_sync` | 自动同步定时器（`start` / `stop`；间隔轮询、失败段只提示一次；设置窗口关闭后 WindowManager 自动再 `start`） |
 | `autostart` | `is_enabled` / `enable` / `disable` / `set_enabled` / `refresh_if_enabled`（阻塞，放后台）；与旧版同名同参数（Windows `HKCU\…\Run\mini-todo = "<exe>" --autostart`；macOS LaunchAgent `~/Library/LaunchAgents/mini-todo.plist`，`[<可执行文件绝对路径>, --autostart]`，从 App Translocation 临时位置运行时拒绝写入）；开发隔离时不刷新 |
-| `tray` | 托盘 / 菜单栏图标（Windows、macOS）：添加待办 / 设置 / 固定模式勾选 / 开机自启勾选 / 收纳箱三个入口（仅 Windows）/ 重置位置 / 退出；左键单击唤起（300ms 去抖）。图标：Windows exe 资源；macOS 模板图标 `assets/tray-template.png`（36×36，`scripts/macos/gen-tray-icon.py` 生成）。Linux 为 no-op |
+| `tray` | 托盘 / 菜单栏图标（Windows、macOS）：添加待办 / 设置 / 固定模式勾选 / 开机自启勾选 / 收纳箱三个入口 / 重置位置 / 退出；左键单击唤起（300ms 去抖）。图标：Windows exe 资源；macOS 模板图标 `assets/tray-template.png`（36×36，`scripts/macos/gen-tray-icon.py` 生成）。Linux 为 no-op |
 | `scheduler` | 提醒调度：启动 5s 后补发错过的重复提醒，此后对齐整分钟 `run_due`；系统通知走 `notify`（macOS 经通道交给前台、交出即视为已投递），应用内通知经通道交给前台建窗（建窗失败不推进、下一分钟重试） |
 | `notify` | 系统通知：Windows Toast（AppUserModelID 与旧版一致；notify-rust）；macOS GPUI `show_system_notification`（`UNUserNotificationCenter`，归属 bundle id `com.tauri-app.mini-todo`，需从 ad-hoc 签名的 `.app` 启动，拿不到投递结果） |
 | `window_mode` | 主窗口普通 / 经典固定 / 固定 + 嵌入桌面、贴边隐藏与唤起、位置 / 尺寸与屏幕配置记忆（防抖保存）、托盘唤起 / 重置位置、200ms 轮询（Explorer 重启重挂、样式自愈）。macOS 同一套（固定 = `setMovable:NO` + 不可缩放，置顶 = 浮动层级，无嵌入桌面）；唤起前先 `cx.activate(true)` |
-| `mac_menu` | macOS 应用菜单：Mini Todo（关于 / 设置… ⌘, / 服务 / 隐藏 ⌘H / 隐藏其他 ⌥⌘H / 全部显示 / 退出 ⌘Q）、编辑（撤销 / 重做 / 剪切 / 拷贝 / 粘贴 / 全选，动作是输入框的 `input::*`，剪切等映射系统选择器）、窗口（最小化 ⌘M / 关闭窗口 ⌘W）；`on_reopen`（Dock / Finder 唤起主窗口）。全平台编译，只在 macOS 上由 `lib.rs` 调用 |
+| `mac_menu` | macOS 应用菜单：Mini Todo（关于 / 设置… ⌘, / 服务 / 隐藏 ⌘H / 隐藏其他 ⌥⌘H / 全部显示 / 退出 ⌘Q）、编辑（撤销 / 重做 / 剪切 / 拷贝 / 粘贴 / 全选，动作是输入框的 `input::*`，剪切等映射系统选择器）、窗口（最小化 ⌘M / 关闭窗口 ⌘W；收纳箱是活动窗口时两者都不做）；`on_reopen`（Dock / Finder 唤起主窗口）。全平台编译，只在 macOS 上由 `lib.rs` 调用 |
 | `update_check` | GitHub 最新 release：`check_for_updates(cx)`（启动，失败静默）、`check(cx) -> Task<Result<UpdateInfo, String>>`（设置「关于 → 检查更新」）、`releases_url(cx)`；结果写进 `AppState.has_update / latest_version / release_url` |
-| `fences` | 桌面收纳箱生命周期：建窗 + 嵌入、启动恢复、新增 / 显示隐藏 / 重置位置、目录监听 → 前台刷新、200ms 嵌入守护、约 2 秒一次的屏幕组合检测 |
+| `fences` | 桌面收纳箱生命周期：建窗 + 嵌入（Windows）/ 桌面层（macOS：`PopUp` 面板 → `Hwnd::make_desktop_layer` → 显示，日志自报层级与行为）、启动恢复（Windows / macOS）、新增 / 显示隐藏 / 重置位置、目录监听 → 前台刷新、200ms 嵌入守护（Windows）、约 2 秒一次的屏幕组合检测 |
 
 ### 4.3 `windows`：WindowManager 与各窗口入口
 
@@ -191,7 +193,7 @@ editor::open(cx, Some(parent), None, EditorMode::Edit);
 | `completed::open(cx, parent)` | 已完成 | 460×550 |
 | `settings::open(cx, parent, SettingsTab::{General, Appearance, Data, Screen, About})` | 设置 | 680×560，不可缩放；`SettingsTab::label()` = 菜单文案 |
 | `notification::open(cx, NotificationContent { todo_id, title, description }) -> Option<AnyWindowHandle>`、`notification::close_all(cx)` | 应用内通知 | 320×120，透明、`WindowKind::PopUp`（置顶、不进任务栏）、不抢焦点；core 槽位与叠放算法，关窗归还槽位 |
-| `fence::open(cx, fence_id)`、`fence::restore_all(cx)`、`fence::tray_create_fence / tray_toggle_fences / tray_reset_fences(cx)`、`fence::fence_key(id)` | 收纳箱 | 透明、不可缩放；登记 key `fence-{id}`；实现在 `services::fences` |
+| `fence::open(cx, fence_id)`、`fence::restore_all(cx)`、`fence::tray_create_fence / tray_toggle_fences / tray_reset_fences(cx)`、`fence::fence_key(id)` | 收纳箱 | 透明、不可缩放、不可最小化、建窗不显示（定位后再显示）；macOS 上 `kind = PopUp`（不激活应用的 NSPanel）；登记 key `fence-{id}`；实现在 `services::fences` |
 | `gallery::open(cx)` | 控件样例 | 仅调试 |
 
 `WindowManager`（Global）：
@@ -253,9 +255,10 @@ editor::open(cx, Some(parent), None, EditorMode::Edit);
 | `creation_bounds(cx, bounds, display_id)` / `physical_scale(window)` | 建窗参数换算（macOS 的 GPUI 按显示器本地坐标建窗，`open_window` 已处理；其它平台原样）/ 逻辑 → 物理像素的系数（Windows / Linux = `scale_factor()`，macOS = 统一系数） |
 | `set_topmost` / `show_window`（不激活）/ `hide_window` / `is_window_visible` / `set_tool_window` / `set_minimizable` / `set_resizable_frame` / `set_owner` / `restore_if_minimized` / `bring_to_front` / `set_round_corners` | 窗口样式与显隐；`set_resizable_frame` 只改系统样式，缩放热区由 `subclass` 锁定。macOS：置顶 = `NSFloatingWindowLevel`，显示 `orderFrontRegardless` / 隐藏 `orderOut:`，可缩放 / 可最小化改 style mask（运行时生效）；`set_tool_window` / `set_owner` / `set_round_corners` 是 no-op |
 | `Hwnd::{rect, set_rect, set_position, client_rect, set_client_rect, set_client_position, set_topmost, show, hide, is_visible, is_minimized, restore, is_alive, ex_style, set_tool_window, set_minimizable, set_resizable_frame, set_system_menu, set_geometry_locked, set_owner, owner, set_foreground, set_round_corners, class_name}` | 立即执行的原始调用（只在 App 未借用时）；`set_system_menu` 只有 `open_window` 建窗后用（去掉 `WS_SYSMENU`，所有 GPUI 窗口都不带它）；`prepare_after_open` 同样只有 `open_window` 用（macOS：隐藏红绿灯、NSPanel 不随应用失活隐藏；其它平台 no-op） |
-| `embed::{desktop_host, attach_to_desktop, detach_from_desktop, set_always_on_bottom, needs_reattach}` | 嵌入桌面层：owner = Progman + 永远置底（`subclass::FLAG_BOTTOM`）+ `WS_EX_TOOLWINDOW`；主窗口与收纳箱共用；非 Windows 为安全空实现 |
+| `Hwnd::{make_desktop_layer, describe_layer}` | macOS 收纳箱专用（Windows / Linux no-op 返回 `false` / `None`）：层级 `CGWindowLevelForKey(kCGDesktopIconWindowLevelKey) + 1`、collectionBehavior 整体换成 `CanJoinAllSpaces \| Stationary \| IgnoresCycle \| FullScreenNone`（`0x251`）、`canHide = NO`、`hidesOnDeactivate = NO`、不进「窗口」菜单、无动画；不显示、幂等。之后绝不能对该窗口 `set_topmost`（会把层级改回 0 / 3）。`describe_layer` 返回实际生效的属性（日志 / e2e 用） |
+| `embed::{desktop_host, attach_to_desktop, detach_from_desktop, set_always_on_bottom, needs_reattach}` | 嵌入桌面层：owner = Progman + 永远置底（`subclass::FLAG_BOTTOM`）+ `WS_EX_TOOLWINDOW`；Windows 上主窗口与收纳箱共用；非 Windows 为安全空实现（macOS 收纳箱走 `Hwnd::make_desktop_layer`） |
 | `subclass::set_flag(hwnd, FLAG_BOTTOM \| FLAG_LOCK_GEOMETRY, on)` | `SetWindowSubclass` 子类过程：置底（`WM_WINDOWPOSCHANGING`）、固定模式锁定位置与尺寸（`WM_NCHITTEST` / `WM_SYSCOMMAND`） |
-| `fence_win::choose_color(cx, owner, initial) -> Task<Option<(u8, u8, u8)>>` | 收纳箱「自定义颜色」：Windows `ChooseColorW`（独立线程）；其它平台 `None` |
+| `fence_win::choose_color(cx, owner, initial) -> Task<Option<(u8, u8, u8)>>` | 收纳箱「自定义颜色」：Windows `ChooseColorW`（独立线程）；macOS 共享的 `NSColorPanel`（`ns::show_color_panel` / `color_panel_state`；前台任务里显示——会把应用切到前台——之后每 150ms 读一次，面板关掉时返回最后的颜色，没改过视为取消）；Linux `None` |
 | `file_dialog::{save_file, open_file}` | 带标题 / 过滤器 / 默认文件名的对话框（Windows `rfd`，独立线程；其它平台 GPUI 自带对话框）；debug 下 `MINI_TODO_DEBUG_DIALOG_PATH` 直接返回路径 |
 
 ## 5. 调试开关（只在 debug 构建读取，release 一律忽略）
@@ -263,13 +266,14 @@ editor::open(cx, Some(parent), None, EditorMode::Edit);
 | 变量 | 作用 |
 |---|---|
 | `MINI_TODO_DATA_DIR` | 数据目录（库 / 图片 / 备份 / 图标缓存）、日志 `<dir>/logs`；不启用单实例、不刷新开机自启项（与安装版并存实测时必须带上） |
-| `MINI_TODO_FENCES_ROOT` | 收纳根目录（代替 `%USERPROFILE%\MiniTodo收纳箱`） |
+| `MINI_TODO_FENCES_ROOT` | 收纳根目录（代替 `%USERPROFILE%\MiniTodo收纳箱`；macOS `~/MiniTodo收纳箱`） |
+| `MINI_TODO_DESKTOP_DIR` | "用户桌面"（core `fence_fs::user_desktop_dir`：收纳箱移回的兜底目标、"不能收纳桌面本身"的保护、云同步提示的"来自桌面"判断）改为该目录；mac e2e 用它避开真实 `~/Desktop`（隐私授权框在 runner 上没人点） |
 | `MINI_TODO_SCREEN_ID_FILE` | 文件内容非空时替代屏幕组合 ID（模拟显示器组合变化） |
 | `MINI_TODO_DEBUG_OPEN` | 加载完数据后额外打开的窗口，逗号分隔：`main`、`editor:new`、`editor:<id>[:view\|:edit]`、`subtask:<id>[:view\|:edit]`、`settings[:general\|appearance\|data\|screen\|about]`、`completed`、`notification[:<todoId>]`、`fence:<id>`、`fence:new`、`calendar`、`gallery`、`toast:<success\|info\|warning\|error>:<文字>`、`confirm:<标题>:<内容>`（不走模态关系，详见 `../../scripts/README.md`） |
 | `MINI_TODO_DEBUG_LATEST_VERSION` | 版本检查不联网，直接当作 GitHub 最新版本（如 `v2.6.0`，截图更新红点 / 「版本更新」确认框） |
 | `MINI_TODO_DEBUG_DIALOG_PATH` | 设置窗口导出 / 导入的文件对话框不弹出，直接返回该路径（导入导出冒烟） |
 | `MINI_TODO_DEBUG_WINDOWS_UI` | `1` 时 Linux 上也显示 Windows 专有的设置项（「固定模式时，嵌入桌面中」），与按 Windows 渲染的参考截图对照 |
-| `MINI_TODO_DEBUG_FENCE_STATE` | `onedrive`：收纳箱窗口打开即显示 OneDrive 提示面板；`drag-hover`：显示外部拖入悬停的虚线框（两者在 Linux 上无法真实触发） |
+| `MINI_TODO_DEBUG_FENCE_STATE` | `onedrive`：收纳箱窗口打开即显示云同步提示面板（Windows / Linux OneDrive 文案，macOS iCloud 文案）；`drag-hover`：显示外部拖入悬停的虚线框（两者在 Linux 上无法真实触发） |
 
 ## 6. 已知限制 / 注意
 
@@ -277,7 +281,8 @@ editor::open(cx, Some(parent), None, EditorMode::Edit);
   开机自启）在 Linux 上只做了交叉 `clippy`，需要实机验收。
 - macOS 的 GPUI 胶水（`platform/macos/mod.rs`、`lib.rs` 里 `cfg(target_os = "macos")` 的几行）只有 CI 的 macOS 作业能编译；
   `platform/macos/ns.rs` 可在 Linux 上用 `scripts/mac-check` 交叉检查，`mac_geometry.rs` / `services/mac_menu.rs` 全平台编译。
-  真机行为（红绿灯是否全部隐藏、Retina / 多屏摆窗、固定模式、通知面板在应用失活时是否显示）只能靠 CI 截图与用户反馈。
+  真机行为（红绿灯是否全部隐藏、Retina / 多屏摆窗、固定模式、通知面板在应用失活时是否显示、收纳箱桌面层在 Spaces / 台前调度 / 显示桌面下的表现、
+  非激活面板里的中文输入法）只能靠 CI 截图与用户反馈。
 - debug 构建的 Windows exe 在运行时从构建机 cargo registry 编译着色器，只能在构建它的机器上运行；release 必须在装了
   Windows SDK（`fxc.exe`）的 Windows 上构建。
 - Xvfb 下透明窗口的透明像素截图为黑色（无合成器）；GPUI 在光标离开窗口后不清除悬停（回归脚本会把光标停在空白处）。

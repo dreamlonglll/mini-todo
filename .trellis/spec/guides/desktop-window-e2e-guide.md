@@ -23,6 +23,7 @@
 - [ ] 改了通知窗口定位、托盘、单实例、开机自启、Toast、DPAPI，或 release profile / `build.rs`
 - [ ] 改了 macOS 的窗口平台层（`platform/macos/`、`mac_geometry.rs`）、建窗 / 红绿灯（`windows/mod.rs`）、应用菜单（`services/mac_menu.rs`）、
       菜单栏图标 / 单实例 socket / LaunchAgent / 系统通知 / 日志的 mac 分支、`scripts/macos/bundle.sh`
+- [ ] 改了 macOS 的收纳箱：桌面层（`ns::make_desktop_layer`、`services/fences.rs` 的 mac 分支）、取色面板、core `services/fence_fs/mac.rs`
 
 ---
 
@@ -80,6 +81,9 @@
 5. 混合 DPI：折叠高度按目标显示器缩放（150% → 48px，125% → 40px）——CI 虚拟机是单屏，需用户实机验收。
 6. 外部拖入：新实例第一次拖入、改名回车后 / 单击标题后紧接着的第一次拖入都要生效（GPUI 输入模态问题，e2e F04 / F10 / F11）。
 7. 文件层只在测试收纳根目录与桌面上 `__fence_e2e_` 前缀的测试文件上操作；绝不移动、改名、删除用户真实的桌面文件。
+8. macOS（runner，MF 组）：上面 1–3 是 Windows 的状态；mac 上断言的是层级（`kCGWindowLayer` = 桌面图标层 + 1、排在所有 layer ≥ 0 的窗口之后）、
+   应用日志自报的 collectionBehavior / `canHide` / 非激活面板，以及行为（⌘H 后仍在、点它前台应用不变、有它时 Dock 唤起主窗口）。
+   文件层一律在临时目录（`MINI_TODO_FENCES_ROOT` + `MINI_TODO_DESKTOP_DIR` + 临时来源目录），**绝不碰** `~/Desktop` / `~/Documents` / `~/Downloads`。
 
 ---
 
@@ -127,7 +131,25 @@
 - **在自己的 Mac 上跑**（目前没有人这么做，留给有 Mac 的贡献者）：终端要有「屏幕录制」与「辅助功能」权限；smoke 组会接管鼠标键盘；
   不要加 `--wallpaper`（真的换壁纸）、不要跑 `set_display.py`（改分辨率）、不要跑 release 组（读写真实数据目录、socket 与 LaunchAgent，
   会和装着的 mini-todo 冲突）；M04 的 AppleScript `quit` 第一次会弹自动化授权。
+- **收纳箱（桌面层窗口）**：
+  - **窗口枚举要含桌面元素**：`maclib.list_windows` 默认带 `kCGWindowListExcludeDesktopElements`，Apple 没写它按什么判定"桌面元素"，桌面图标层 + 1
+    的收纳箱可能被它滤掉；收纳箱用例一律 `windows_of(pid, layer=None, include_desktop=True)`，收纳箱 = 本进程负层级的窗口（或日志自报过的窗口号，
+    层级不对时也找得到、交给层级断言判失败）。参照值 `Quartz.CGWindowLevelForKey(kCGDesktopIconWindowLevelKey) + 1`（`maclib.desktop_icon_level`）。
+  - **读不到的属性让应用自报**：collectionBehavior、`canHide`、是否 NSPanel / 非激活在 CGWindowList / AX 里都没有，核对应用日志
+    `[fence] 收纳箱窗口 #<窗口号> 已放到桌面层：level=… behavior=0x…`（只证明"设了且没被重设"，不证明系统行为）。
+  - **真实文件拖放源**：访达窗口里的图标位置难定位，用 pyobjc 起一个小拖放源进程（`e2e-macos/drag_source.py`：窗口里按下即
+    `beginDraggingSessionWithItems:` 放文件 `NSURL`），CGEvent 在它上面按下、慢速拖到收纳箱内容区再松开；没生效时换旧式 `NSFilenamesPboardType`
+    再试一次作诊断。
+  - **主窗口挡着收纳箱**：主窗口（layer 0）盖住的地方点不到收纳箱、也拖不进；1024×768 的 runner 上居中的主窗口常与右上角的收纳箱重叠，
+    交互前先把主窗口拖开（`clear_main_off`）。
+  - **非激活**：先 `activate_other("Finder")` 再点收纳箱，断言 `frontmost_pid()` 仍是 Finder；别的应用发起的隐藏用
+    `NSRunningApplication.hide()` 模拟。键盘改名同样在访达在前台时做（面板成为 key、应用不激活），失败时再用 `CGEventPostToPid` 区分原因
+    （2026-10-16 首轮：HID 事件流的按键没进不激活面板、`CGEventPostToPid` 能改名——MF08 失败，见 desktop-fences.md §M1）。
+  - **预置数据**：需要已有收纳箱 / 项目的用例启动前直接写库 + 建文件夹（`seed_fence`），不依赖拖入。
+  - **隐私授权框**：runner 有图形会话、没人点，授权框会让后台移动线程**永久阻塞**；所有来源 / 移回目标都在 `--work` 下的临时目录。
+  - 测不了：Spaces（runner 只有一个桌面空间）、台前调度、调度中心 /「显示桌面」、中文输入法候选窗、Retina / 多屏、真实 `~/Desktop` 的 TCC 流程。
 - **取回结果**：产物下载不可用时用注解 API，再不行从 job 日志按 PNG 头切分还原截图（`verification.md` §7.3）。
 
 → Executable details: `.trellis/spec/backend/window-modes.md` §6, `.trellis/spec/backend/desktop-fences.md` §6,
-`pc-gpui/scripts/e2e-windows/README.md`; macOS: `window-modes.md`「Scenario: macOS」, `pc-gpui/scripts/e2e-macos/README.md`.
+`pc-gpui/scripts/e2e-windows/README.md`; macOS: `window-modes.md`「Scenario: macOS」, `desktop-fences.md`「场景：macOS 上的收纳箱」§M5,
+`pc-gpui/scripts/e2e-macos/README.md`.

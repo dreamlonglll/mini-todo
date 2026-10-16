@@ -19,8 +19,8 @@
 | core 的同步、导入导出、迁移、提醒调度；单实例、日志 | + §5 Linux e2e（F / S / L 组；同步改动跑 S 组 Apache + nginx），并按 [data-compat.md](./data-compat.md) 确认 cloud 侧也改了 |
 | 版本号、`release.yml` / `cache-warm.yml`、NSIS 安装器、`scripts/macos/{bundle.sh,make-dmg.sh}` | 见 [release.md](./release.md)；改 mac 打包脚本另跑 §7.2 的 CI（`pc-gpui-ci.yml` 的 macos 作业或 mac e2e 会调用 `bundle.sh`） |
 | Windows 窗口行为（窗口模式、嵌入桌面、透明、通知窗口定位、收纳箱、托盘、开机自启、单实例、DPAPI、Toast、release 构建） | + §6 Windows e2e（CI 或本机），交付说明里列出需要用户实机验收的项 |
-| 不依赖 GPUI 的 mac 源文件：`platform/macos/ns.rs`、`services/autostart.rs`、`services/single_instance/unix_socket.rs`、`services/tray/mac_icon.rs`（`scripts/mac-check/src/lib.rs` 收录的那些） | + §7.1 `mac-check` 交叉检查（本机就能跑） |
-| `cfg(target_os = "macos")` 代码与 mac 行为：`platform/{macos/,mac_geometry.rs,mod.rs}`、`windows/mod.rs`（建窗 / 红绿灯）、`services/{mac_menu,tray,single_instance,autostart,notify,logging,scheduler,window_mode}` 的 mac 分支、`theme.rs` 的 mac 字体、`lib.rs`、`crates/app/Cargo.toml` 的 mac 依赖 | + §7.1（能覆盖的部分）+ §7.2 推 `claude/**` 分支跑 `pc-gpui-e2e-macos.yml`（mac 代码唯一的编译门），交付说明里写明哪些只在 runner 上验证过 |
+| 不依赖 GPUI 的 mac 源文件：`platform/macos/ns.rs`、`services/autostart.rs`、`services/single_instance/unix_socket.rs`、`services/tray/mac_icon.rs`、core 的 `services/fence_fs/mac.rs`（`scripts/mac-check/src/lib.rs` 收录的那些） | + §7.1 `mac-check` 交叉检查（本机就能跑） |
+| `cfg(target_os = "macos")` 代码与 mac 行为：`platform/{macos/,mac_geometry.rs,mod.rs,fence_win.rs}`、`windows/mod.rs`（建窗 / 红绿灯）、`windows/fence/`、`services/{mac_menu,tray,single_instance,autostart,notify,logging,scheduler,window_mode,fences}` 的 mac 分支、`theme.rs` 的 mac 字体、`lib.rs`、core `services/fence_fs/` 的 mac 分支、`crates/{app,core}/Cargo.toml` 的 mac 依赖 | + §7.1（能覆盖的部分）+ §7.2 推 `claude/**` 分支跑 `pc-gpui-e2e-macos.yml`（mac 代码唯一的编译门），交付说明里写明哪些只在 runner 上验证过 |
 | 共享代码里会影响 mac 的改动（新窗口种类 / `WindowSpec`、新快捷键、托盘菜单、文件对话框、`cfg(not(windows))` 分支、测试里的临时目录路径） | + §7.2：mac 上 `cfg(not(windows))` 落到 mac 而不是 Linux，测试路径有 `/var` → `/private/var` 陷阱（[gpui-conventions.md §2.15](./gpui-conventions.md)） |
 | 升级 `gpui-kit` | 以上全部（[gpui-conventions.md §3](./gpui-conventions.md)） |
 
@@ -48,7 +48,8 @@ cargo test -p mini-todo-core
   - app：纯逻辑放在 `util/`、`windows/*/logic.rs`、`services/*` 等不依赖窗口的函数里并就地 `#[cfg(test)]`（旧 vitest 用例已移植到
     `util/*.rs`）。没有使用 GPUI 的 headless 测试（`gpui-kit/test-support` 会扰动 `Cargo.lock`，见 gpui-api.md §C1）——界面用 §4 验证。
   - app 测试需要内存库时依赖 `mini-todo-core` 的 feature `test-util`（`Database::new_in_memory()`，dev-dependencies 已开）。
-  - Windows 专属测试（`fence_fs` 的 shell / sta / 图标、`secret` 的 DPAPI 往返）只在 Windows 上编译运行（CI Windows job 覆盖）。
+  - Windows 专属测试（`fence_fs` 的 shell / sta / 图标、`secret` 的 DPAPI 往返）只在 Windows 上编译运行（CI Windows job 覆盖）；
+    macOS 专属测试（`fence_fs` 的真实 `renamex_np` 移动、图标、`UF_HIDDEN`）只在 macOS 上编译运行（§7.2 的 `checks` 作业），只在临时目录里操作。
   - mac 的纯逻辑尽量写成全平台编译、在 Linux 上就能跑的单测：坐标换算 `platform/mac_geometry.rs`、单实例协议
     `services/single_instance/unix_socket.rs`（`cfg(any(target_os = "macos", all(test, unix)))`）、应用菜单结构 `services/mac_menu.rs`、
     菜单栏模板图标（`tray.rs` 的测试）、App Translocation 判定（`autostart.rs`）、字体下拉过滤（`settings/appearance.rs`）。
@@ -160,17 +161,21 @@ cargo check  --manifest-path scripts/mac-check/Cargo.toml --target aarch64-apple
 cargo clippy --manifest-path scripts/mac-check/Cargo.toml --target aarch64-apple-darwin -- -D warnings
 ```
 
-- 是什么：不属于 workspace 的小 crate（有自己的 `Cargo.lock`），`src/lib.rs` 用 `#[path]` 把 app 里**不依赖 GPUI** 的 mac 源文件原样编进来，
-  做类型检查 + clippy。Linux 与 Windows 上都能跑，不需要 Apple SDK。
-- 覆盖：`platform/macos/ns.rs`（objc2 调 NSWindow / NSScreen / NSEvent 的全部 AppKit 调用）、`services/autostart.rs`（auto-launch 的 LaunchAgent）、
-  `services/single_instance/unix_socket.rs`、`services/tray/mac_icon.rs`（tray-icon / image）——即对 objc2 / objc2-app-kit / tray-icon / auto-launch
-  的 API 用法。
+- 是什么：不属于 workspace 的小 crate（有自己的 `Cargo.lock`），`src/lib.rs` 用 `#[path]` 把 app 里**不依赖 GPUI** 的 mac 源文件与 core 的叶子模块
+  `services/fence_fs/mac.rs` 原样编进来，做类型检查 + clippy。Linux 与 Windows 上都能跑，不需要 Apple SDK。
+- 覆盖：`platform/macos/ns.rs`（objc2 调 NSWindow / NSScreen / NSEvent 的全部 AppKit 调用，含收纳箱的 `make_desktop_layer`、`CGWindowLevelForKey`、
+  取色面板 `NSColorPanel`）、`services/autostart.rs`（auto-launch 的 LaunchAgent）、`services/single_instance/unix_socket.rs`、
+  `services/tray/mac_icon.rs`（tray-icon / image）、core `services/fence_fs/mac.rs`（`renamex_np`、`chflags` 标志、`setiopolicy_np`、NSFileManager、
+  NSWorkspace 图标 / 打开 / 定位、NSURL 资源属性）——即对 objc2 / objc2-foundation / objc2-app-kit / block2 / libc / tray-icon / auto-launch 的 API 用法。
+  `mac.rs` 按 core 的 edition 2021 写、在这里按 2024 编译，两边都要过。
 - 不覆盖：GPUI 胶水（`platform/macos/mod.rs`、`platform/mod.rs` 与 `windows/mod.rs` 的 mac 分支、`lib.rs` 的 `cfg(target_os = "macos")` 几行、
-  `services/{tray,single_instance,notify,logging,scheduler}.rs` 的 mac `imp` / 函数）；也不链接、不运行、不跑测试。这些只有 §7.2。
+  `services/{tray,single_instance,notify,logging,scheduler,fences}.rs` 与 `platform/fence_win.rs` 的 mac `imp` / 函数）、core 里 `mac.rs` 以外的 mac
+  分支（`fence_fs/{ops,open,icon,folder,location,watch}.rs` 的 `cfg(target_os = "macos")`）；也不链接、不运行、不跑测试。这些只有 §7.2。
 - 已在 §2 里检查的 mac 代码：全平台编译的 `platform/mac_geometry.rs`（Linux 上跑单测）、`services/mac_menu.rs`（Linux clippy 检查它对 GPUI API 的用法）、
   `unix_socket.rs`（Linux 单测）；`theme.rs` / `settings/appearance.rs` / `settings/data.rs` 用 `cfg!(target_os = "macos")`，两个分支在所有平台都参与编译。
-- 维护：新增不依赖 GPUI 的 mac 源文件就在 `mac-check/src/lib.rs` 加一行 `#[path]` 模块；`mac-check/Cargo.toml` 的依赖版本与特性必须和
-  `crates/app/Cargo.toml` 的 mac 依赖**逐项一致**（版本钉成 `pc-gpui/Cargo.lock` 里的），否则这里能过、app 里不一定能过。
+- 维护：新增不依赖 GPUI 的 mac 源文件就在 `mac-check/src/lib.rs` 加一行 `#[path]` 模块；`mac-check/Cargo.toml` 的依赖版本与特性必须是
+  `crates/app/Cargo.toml` 与 `crates/core/Cargo.toml` 的 mac 依赖的**并集、逐项一致**（版本钉成 `pc-gpui/Cargo.lock` 里的），否则这里能过、
+  app / core 里不一定能过。新开特性时 mac-check 的 `Cargo.lock` 可能要在本机去掉 `--locked` 重新生成。
 - 何时必跑：改了上面收录的文件或 mac 依赖。推分支前先跑，省一轮 CI。
 
 ### 7.2 CI：`pc-gpui-e2e-macos.yml`（mac 代码唯一的编译门与运行时反馈）
@@ -178,11 +183,16 @@ cargo clippy --manifest-path scripts/mac-check/Cargo.toml --target aarch64-apple
 - 触发：`workflow_dispatch`，以及推送到 `claude/**` 分支且改动 `pc-gpui/**` 或本 workflow 时。runner `macos-15`（arm64，Apple Paravirtual GPU /
   Metal；已登录的图形会话；镜像给 `/bin/bash`、`osascript` 与 runner agent 预授权了屏幕录制、辅助功能、AppleEvents、PostEvent）。
 - 作业：
-  - `checks`：`cargo clippy --workspace --all-targets --locked -- -D warnings` + `cargo test --workspace --locked`（clippy 失败也照跑测试）
+  - `checks`：`cargo clippy --workspace --all-targets --locked -- -D warnings` + `cargo test --workspace --locked`（clippy 失败也照跑测试）；
+    只在 mac 上编译的单测（收纳箱的真实 `renamex_np` 移动往返 / 撞名不覆盖 / 已锁定 / iCloud 占位、真实图标提取、`UF_HIDDEN` 列举）在这里跑
   - `smoke`：debug 构建 + seed → `bundle.sh target/debug/mini-todo -` 包成单架构 `.app`（bundle id 才有效）→ `lsregister` 登记 →
     `set_display.py` 尝试把显示器调到 1920×1080（失败不致命，runner 默认 1024×768pt、1x）→ `run_e2e.py --suite smoke --strict-traffic-lights`：
     M01 主窗口（尺寸、截图有内容、OCR 认出待办标题、bundle id、红绿灯已隐藏）、M02 设置、M03 只读详情、M04 AppleScript quit、M05 ⌘Q、
-    M06 App 菜单、M07 菜单栏图标菜单（无收纳箱项）、M08 ⌘W 后 `open <app>` 唤起、M09 FAB 新建待办落库、M10 固定模式拖不动 / 改尺寸无效 / `is_fixed` 落库
+    M06 App 菜单、M07 菜单栏图标菜单（含收纳箱三项）、M08 ⌘W 后 `open <app>` 唤起、M09 FAB 新建待办落库、M10 固定模式拖不动 / 改尺寸无效 / `is_fixed` 落库；
+    收纳箱 MF01~MF10（全部在临时目录：`MINI_TODO_FENCES_ROOT` + `MINI_TODO_DESKTOP_DIR`，绝不碰真实桌面）：MF01 新建（层级 = 桌面图标层 + 1、在所有
+    普通窗口之后、位置与尺寸、库与文件夹、日志自报 collectionBehavior `0x251` / `canHide=false` / 非激活面板）、MF02 目录监听、MF03 `drag_source.py`
+    真实拖入与撞名不覆盖、MF04 移回、MF05 删除收纳箱（全部移回、`.DS_Store` 不搬到桌面）、MF06 ⌘H 与别的应用隐藏都不藏收纳箱、点收纳箱不激活应用、
+    MF07 有收纳箱时 Dock 唤起主窗口、MF08 键盘改名、MF09 拖标题栏落库、MF10 菜单栏图标三项与重启恢复
   - `release-smoke`：release 构建 → `.app` → `run_e2e.py --suite release --allow-real-profile`（一次性 VM，不隔离）：P01 真实数据库迁移到
     `LATEST_VERSION`、日志在 `~/Library/Logs/com.tauri-app.mini-todo/`、单实例 socket；P02 二次启动 5s 内退出码 0 且唤起已运行实例、`--autostart` 静默；
     P03 LaunchAgent plist（`Label` / `ProgramArguments`）；P04 ⌘Q 退出、socket 被删
@@ -225,6 +235,9 @@ gh api repos/<owner>/<repo>/check-runs/<job_id>/annotations --paginate    # 注�
 - 系统通知横幅与授权弹框（镜像卸载了通知中心 UI，授权要人点）：只能断言不崩溃、日志有记录；应用内通知窗口能测但目前没有 mac 用例
 - Gatekeeper 首次打开与放行流程、App Translocation；钥匙串弹窗（目前不用钥匙串）
 - Retina（runner 是 1x）、多显示器 / 混合缩放、Spaces / 全屏、真实 GPU 上的阴影 / 圆角 / 透明与深色主题观感
+- 收纳箱：Spaces / 台前调度 / 调度中心 /「显示桌面」/「点按墙纸显示桌面」下的表现（runner 只有一个桌面空间，collectionBehavior 只能由应用日志自报）、
+  非激活面板里的中文输入法、真实 `~/Desktop` / `~/Documents` / `~/Downloads` 的「文件与文件夹」授权流程（授权框没人点会永久阻塞，e2e 一律用临时目录）
+  与 ad-hoc 签名升级后的重新授权、iCloud「桌面与文稿」（提示与 dataless 文件下载）、跨卷移动、打开 / 在访达中显示（会拉起别的应用）、Finder 重启后的层级
 - 原生 Intel 机型（见 §7.2）；重启 / 重新登录后开机自启是否真的拉起；贴边隐藏（目前没有 mac 用例）
 - 从 2.5.0 mac 版覆盖升级的真实流程（数据目录、LaunchAgent 路径、通知授权沿用）——只能按代码与 2.5.0 实物推断
 

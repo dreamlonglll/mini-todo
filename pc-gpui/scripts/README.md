@@ -1,7 +1,8 @@
 # pc-gpui 验证工具
 
 在 Linux（Xvfb + mesa lavapipe）上运行**真实的** GPUI 应用并截图，用来和基线截图逐一对照。只覆盖 Linux 后端；
-Windows 专有行为（嵌入桌面、DirectComposition 透明、托盘……）需要在 Windows 上实机验收。
+Windows 专有行为（嵌入桌面、DirectComposition 透明、托盘、收纳箱的真实文件操作……）需要在 Windows 上实机验收；
+macOS 行为（含收纳箱的桌面层与文件操作）见文末，靠 CI 的 macOS runner。
 
 基线有两种：
 
@@ -125,7 +126,7 @@ pc-gpui/scripts/shot.sh --no-build --click 356,576 --sleep 1 --target 新建待�
 | `completed` | 已完成 |
 | `notification` / `notification:<todoId>` | 应用内通知（无 id 时用默认文案；有 id 时用该待办的标题与描述） |
 | `fence:<fenceId>` | 收纳箱窗口 |
-| `fence:new` | 走托盘「新增收纳箱」同一实现新建一个收纳箱（在光标所在显示器右上角找空位，建收纳文件夹）并打开 |
+| `fence:new` | 走托盘 / 菜单栏图标「新增收纳箱」同一实现新建一个收纳箱（在光标所在显示器右上角找空位，建收纳文件夹）并打开 |
 | `gallery` | 控件样例窗口（`ui/` 里的 Element Plus 风格控件，改控件后对照用） |
 | `toast:<success\|info\|warning\|error>:<文字>` | 在主窗口里弹一条 ElMessage（3s 后消失，截图用 `--wait 1`） |
 | `confirm:<标题>:<内容>` | 在主窗口里弹 ElMessageBox.confirm（`确定` / `取消`） |
@@ -146,7 +147,8 @@ GPUI 版新增的 debug 专用环境变量（release 一律忽略）：
 |---|---|
 | `MINI_TODO_DEBUG_DIALOG_PATH` | 非空时设置窗口的导出 / 导入文件对话框不弹出，直接返回该路径（导入导出冒烟测试） |
 | `MINI_TODO_DEBUG_WINDOWS_UI` | `1` 时 Linux 上也显示 Windows 专有的设置项（「固定模式时，嵌入桌面中」），与按 Windows 渲染的参考截图对照 |
-| `MINI_TODO_DEBUG_FENCE_STATE` | `onedrive`：收纳箱窗口打开即显示 OneDrive 提示面板；`drag-hover`：显示外部拖入悬停的虚线框（两者在 Linux 上无法真实触发） |
+| `MINI_TODO_DEBUG_FENCE_STATE` | `onedrive`：收纳箱窗口打开即显示云同步提示面板（Windows / Linux OneDrive 文案，macOS iCloud 文案）；`drag-hover`：显示外部拖入悬停的虚线框（两者在 Linux 上无法真实触发） |
+| `MINI_TODO_DESKTOP_DIR` | 非空时代替"用户桌面"（core `fence_fs::user_desktop_dir`：收纳箱移回的兜底目标、"不能收纳桌面本身"的保护、云同步提示的"来自桌面"判断）。mac e2e 用它让"移回桌面"落在临时目录：碰真实 `~/Desktop` 可能弹隐私授权框，runner 上没人点会一直卡住 |
 
 ## macOS：打包、e2e 与交叉检查
 
@@ -156,11 +158,11 @@ main / PR 上 `pc-gpui-ci.yml` 的 `macos` 作业另出 universal `.app` 产物�
 
 | 文件 | 作用 |
 |---|---|
-| `macos/bundle.sh` | `bundle.sh <arm64 或单架构二进制> <x86_64 二进制\|-> <输出目录>`：组装 `mini-todo.app`（Info.plist 身份沿用 2.5.0：bundle id `com.tauri-app.mini-todo`、`CFBundleExecutable` / `CFBundleName` = `mini-todo`、`LSMinimumSystemVersion` 11.0、不设 `LSUIElement`；版本号读 `pc-gpui/Cargo.toml`，`CFBundleShortVersionString` 去掉 `-pre` 等后缀）+ 图标 `crates/app/assets/icon.icns`（取自 2.5.0）+ 整包 ad-hoc 签名并校验。第二个参数给 x86_64 二进制时用 `lipo` 合并成 universal 并断言两个切片都在。路径按脚本位置解析，可从任何目录调用 |
+| `macos/bundle.sh` | `bundle.sh <arm64 或单架构二进制> <x86_64 二进制\|-> <输出目录>`：组装 `mini-todo.app`（Info.plist 身份沿用 2.5.0：bundle id `com.tauri-app.mini-todo`、`CFBundleExecutable` / `CFBundleName` = `mini-todo`、`LSMinimumSystemVersion` 11.0、不设 `LSUIElement`；另有收纳箱用的 `NS{Desktop,Documents,Downloads}FolderUsageDescription` 隐私用途说明（不是身份键）；版本号读 `pc-gpui/Cargo.toml`，`CFBundleShortVersionString` 去掉 `-pre` 等后缀）+ 图标 `crates/app/assets/icon.icns`（取自 2.5.0）+ 整包 ad-hoc 签名并校验。第二个参数给 x86_64 二进制时用 `lipo` 合并成 universal 并断言两个切片都在。路径按脚本位置解析，可从任何目录调用 |
 | `macos/make-dmg.sh` | `make-dmg.sh <app> <dmg>`：暂存目录（`.app` + `/Applications` 软链）→ `hdiutil create`（UDZO、HFS+、显式 `-size`，失败 detach / 尺寸翻倍 / 等 15s，最多 5 次）→ `hdiutil verify` → 挂载回读校验签名、架构、软链与可执行文件一致 |
 | `macos/gen-tray-icon.py` | 生成菜单栏模板图标 `crates/app/assets/tray-template.png`（36×36 = 18pt@2x，只用 alpha） |
-| `e2e-macos/` | macOS runner 上的 e2e（`run_e2e.py`）：`--suite smoke`（debug `.app` 隔离运行，M01~M10：各窗口截图与 Vision OCR、退出、App 菜单、菜单栏图标菜单、⌘W 与 Dock 唤起、新建待办落库、固定模式）与 `--suite release`（release `.app` 真实目录，P01~P04：迁移版本、日志位置、单实例、LaunchAgent、退出清理）；用例、输出与本地运行见 `e2e-macos/README.md` |
-| `mac-check/` | 不属于 workspace 的小 crate：用 `#[path]` 把 app 里**不依赖 GPUI** 的 mac 源文件（objc2 窗口代码、托盘、自启、单实例……）编进来，在 Linux / Windows 上 `cargo check` / `clippy --target aarch64-apple-darwin` 做类型检查（`rustup target add aarch64-apple-darwin`；命令见其 `Cargo.toml` 顶部）。依赖版本与特性必须和 `crates/app/Cargo.toml` 的 macOS 依赖一致；GPUI 胶水代码仍只有 CI 能编译 |
+| `e2e-macos/` | macOS runner 上的 e2e（`run_e2e.py`）：`--suite smoke`（debug `.app` 隔离运行，M01~M10：各窗口截图与 Vision OCR、退出、App 菜单、菜单栏图标菜单（含收纳箱三项）、⌘W 与 Dock 唤起、新建待办落库、固定模式；MF01~MF10 收纳箱：桌面层层级与自报属性、目录监听、`drag_source.py` 真实拖入与撞名不覆盖、移回、删除、⌘H、Dock 唤起、键盘改名、拖动落库、菜单栏三项与重启恢复，全部在临时目录里（`MINI_TODO_FENCES_ROOT` + `MINI_TODO_DESKTOP_DIR`））与 `--suite release`（release `.app` 真实目录，P01~P04：迁移版本、日志位置、单实例、LaunchAgent、退出清理）；用例、输出与本地运行见 `e2e-macos/README.md` |
+| `mac-check/` | 不属于 workspace 的小 crate：用 `#[path]` 把 app 里**不依赖 GPUI** 的 mac 源文件（objc2 窗口代码含收纳箱桌面层与取色面板、托盘、自启、单实例……）与 core 的收纳箱文件层 `services/fence_fs/mac.rs` 编进来，在 Linux / Windows 上 `cargo check` / `clippy --target aarch64-apple-darwin` 做类型检查（`rustup target add aarch64-apple-darwin`；命令见其 `Cargo.toml` 顶部）。依赖版本与特性必须是 `crates/app/Cargo.toml` 与 `crates/core/Cargo.toml` 的 macOS 依赖的并集、逐项一致；GPUI 胶水代码与 core 里 `mac.rs` 以外的 mac 分支仍只有 CI 能编译 |
 
 本地（在 Mac 上）打一个 universal 包：
 

@@ -1,7 +1,7 @@
 # Window Modes（主窗口：普通 / 经典固定 / 固定 + 嵌入桌面）
 
 > 主窗口 Win32 样式、owner、Z 序与几何锁定的契约。实现：`pc-gpui/crates/app/src/services/window_mode.rs`（模式切换、200ms 轮询、
-> 贴边隐藏、位置与屏幕配置记忆）+ `platform/embed.rs`（嵌入桌面层，主窗口与收纳箱共用）+ `platform/subclass.rs`（永远置底、
+> 贴边隐藏、位置与屏幕配置记忆）+ `platform/embed.rs`（嵌入桌面层，Windows 上主窗口与收纳箱共用）+ `platform/subclass.rs`（永远置底、
 > 几何锁定）+ `platform/windows.rs`（`Hwnd` 原始调用）；纯逻辑在 `pc-gpui/crates/core/src/window_logic.rs`。
 > macOS（预览，任务 `10-16-macos-package`）走同一套状态机与 200ms 轮询，Win32 部分换成 `platform/macos/`（AppKit），语义差异见「Scenario: macOS」。
 >
@@ -20,8 +20,9 @@
   `platform::embed::*`、`platform::subclass`（`FLAG_BOTTOM` / `FLAG_LOCK_GEOMETRY`）、`Hwnd::{set_tool_window, set_minimizable,
   set_topmost, set_geometry_locked, set_owner}`、core `window_logic` 的 `needs_reattach` / `lacks_tool_window_style` / 贴边状态机、
   settings 键 `is_fixed` / `fixed_embed_desktop` / `auto_hide_enabled` / `top_on_wake` 与 `screen_configs.is_fixed`。
-- `platform::embed` 是主窗口与所有收纳箱窗口共用的嵌入核心（收纳箱的登记与守护见 [desktop-fences.md](./desktop-fences.md) §3.1）：
-  改它要两边都回归。
+- `platform::embed` 是 Windows 上主窗口与所有收纳箱窗口共用的嵌入核心（收纳箱的登记与守护见 [desktop-fences.md](./desktop-fences.md) §3.1）：
+  改它要两边都回归。macOS 的收纳箱不经 `embed`（mac 上是空实现），而是桌面图标层之上的不激活面板（`Hwnd::make_desktop_layer`，
+  见 desktop-fences.md「场景：macOS 上的收纳箱」）。
 - 下面 §2 ~ §7 的 Win32 状态只在 Windows 上成立；macOS 的固定模式见「Scenario: macOS」；Linux 上 `platform::embed` / `subclass` 是安全的空实现、
   没有原生句柄（不跑 200ms 轮询），"嵌入"偏好在 mac / Linux 上都按经典固定处理（§4）。
 
@@ -240,17 +241,20 @@ SetWindowPos(h, HWND_TOP, …);
 - 改 style mask（`Resizable` / `Miniaturizable`）一律走 `ns.rs` 的 `update_style`：AppKit 可能重建标题栏（红绿灯重新出现）并换掉第一响应者
   （键盘输入不再进 GPUI 视图），`update_style` 改完会重新隐藏红绿灯、把第一响应者还回去。
 - `setMovable:NO` 只拦用户拖动，程序摆窗（`setFrame:` / `setFrameOrigin:`，贴边隐藏、重置位置、屏幕配置恢复）不受影响。
+- 主窗口的"置顶"是 `ns::set_floating`（`NSFloatingWindowLevel` ⇄ `NSNormalWindowLevel`）。它只用于主窗口等普通窗口：收纳箱窗口在桌面图标层之上一层，
+  对它调 `set_topmost`（不管 true / false）都会把层级改成 3 / 0，收纳箱会盖住或混进普通窗口，**禁止**（desktop-fences.md §M1）。
 
 ### 3. 200ms 轮询在 mac 上做什么
 
 | 项 | mac 行为 |
 |---|---|
 | 嵌入重挂 | 不会发生（`mode.desktop` 恒 false） |
-| 经典固定被最小化（⌘M、应用菜单「最小化」） | 下一个 tick `isMiniaturized` → `deminiaturize:` 还原（红绿灯已隐藏，⌘M 是唯一入口） |
+| 经典固定被最小化（⌘M、应用菜单「最小化」） | 下一个 tick `isMiniaturized` → `deminiaturize:` 还原（红绿灯已隐藏，⌘M 是唯一入口；活动窗口是收纳箱时 ⌘M 什么都不做） |
 | tool window 样式自愈 | 不做（`cfg!(windows) && lacks_tool_window_style(..)`，mac 的 `ex_style()` 恒 0，否则每个 tick 都会误判） |
 | 贴边隐藏 | 照常：`cursor_position_physical()` = `NSEvent.mouseLocation`（全局光标），显示器来自 `NSScreen.screens`；比 2.5.0 的"前端上报 mouseenter / mouseleave"准确。隐藏 / 唤起靠 `Hwnd::set_client_position`（`setFrameOrigin:`）。**AppKit 会把带标题栏样式的窗口约束在屏幕内（顶边不能高过菜单栏）**：mac 的 `set_client_position` 摆完读回实际位置，差超过 1 个统一系数单位就返回 false，`run_tick` 据此把贴边状态回滚成显示态——有菜单栏的屏幕上往顶边藏不进去 |
 
-- **贴边隐藏中被激活**：GPUI 只在"没有可见窗口"时回调 Dock 唤起（`on_reopen`），藏在屏幕边缘的窗口仍算可见。所以主窗口的激活回调里
+- **贴边隐藏中被激活**：GPUI 只在"没有可见窗口"时回调 Dock 唤起（`on_reopen`），藏在屏幕边缘的窗口仍算可见（收纳箱是 NSPanel，按 Apple 文档
+  不算，所以只有收纳箱可见时 `on_reopen` 照常回调，e2e MF07）。所以主窗口的激活回调里
   `cx.defer(window_mode::on_main_activated)`：mac 上若处于经典固定 + 贴边隐藏，就按托盘唤起处理（`bring_main_to_front`：拉回锚点、临时置顶）；
   Windows 上是空操作（经典固定没有任务栏 / Alt+Tab 入口）。点 Dock 图标、⌘Tab 切回来都走这条路。
 
@@ -318,4 +322,5 @@ Win+D 时随 Progman 一起被抬起。Option 1 在旧版 spike 中 DPI 退化�
 
 **Decision**: `platform::embed` 的函数都只接收 `Hwnd`、不碰任何模式状态，挂上的宿主与嵌入前的 MINIMIZEBOX 记在 embed 内部的登记表里；
 主窗口的模式状态在 `services::window_mode`，收纳箱的窗口登记在 `services::fences`（[desktop-fences.md](./desktop-fences.md) §3.1）。
-Explorer 重启判定共用纯函数 `window_logic::needs_reattach`。
+Explorer 重启判定共用纯函数 `window_logic::needs_reattach`。macOS 没有对应的宿主窗口：主窗口没有嵌入桌面，收纳箱另走
+`Hwnd::make_desktop_layer`（层级 + collectionBehavior，不按句柄登记、不需要重挂）。
