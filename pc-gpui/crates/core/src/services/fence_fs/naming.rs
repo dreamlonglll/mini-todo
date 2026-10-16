@@ -144,12 +144,35 @@ pub fn is_valid_folder_name(name: &str) -> bool {
 
 /// 是否是收纳文件夹内的合法项目名（单个路径段，防止 `..`、绝对路径、ADS `a:b` 逃逸）。
 ///
-/// 比文件夹名宽松：允许首尾空格 / 尾部点等 Windows 罕见但可能真实存在的名字，
-/// 只拦截会改变路径含义的写法。
+/// 比文件夹名宽松：允许首尾空格 / 尾部点等罕见但可能真实存在的名字，只拦截会改变路径含义的写法，按平台：
+/// * Windows：空、`.` / `..`、`<>:"/\|?*` 与控制字符（`\` / `/` 是分隔符、`C:` 是盘符、`a:b` 是 ADS）、超过 255 个 UTF-16 单元
+/// * 其他平台（macOS / Linux）：只拦空、`.` / `..`、`/`（唯一的分隔符）与 NUL。`:` `?` `*` `"` `<` `>` `|` `\` 与控制字符
+///   在这里都是合法文件名（访达允许 `? * " < > |`，`:` 在访达里显示成 `/`）：按 Windows 规则拦的话，收纳进来的这类项目
+///   打不开、取不到图标，隐藏 / 单独移回 / 移动到… 都报"文件名不合法"
+///
+/// 收纳文件夹名仍按 Windows 规则（[`is_valid_folder_name`]、[`sanitize_folder_name`]），保持可移植
 pub fn is_valid_item_name(name: &str) -> bool {
-    is_safe_segment(name)
+    is_valid_item_name_for(name, cfg!(windows))
 }
 
+/// 非 Windows 上项目名的长度上限（UTF-8 字节）：只是防御性的上限，真正的限制由文件系统把关
+/// （Linux 255 字节；APFS 按字符计，255 个字符最多约 1020 字节）
+const MAX_UNIX_ITEM_NAME_BYTES: usize = 1024;
+
+/// [`is_valid_item_name`] 的规则本体：`windows_rules` 为 true 时按 Windows 规则，否则按 Unix（macOS / Linux）规则。
+/// 两套规则都是纯函数，任何平台上都能单测
+fn is_valid_item_name_for(name: &str, windows_rules: bool) -> bool {
+    if windows_rules {
+        return is_safe_segment(name);
+    }
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains(['/', '\0'])
+        && name.len() <= MAX_UNIX_ITEM_NAME_BYTES
+}
+
+/// Windows 规则的单个路径段（文件夹名一律用它；项目名在 Windows 上用它）
 fn is_safe_segment(name: &str) -> bool {
     !name.is_empty()
         && name != "."
@@ -399,25 +422,90 @@ mod tests {
         ));
     }
 
+    /// 两个平台都接受的名字
+    const ITEM_NAMES_OK_EVERYWHERE: &[&str] = &[
+        "Chrome.lnk",
+        "a b.txt",
+        "文件夹",
+        ".env",
+        "trail.",
+        " lead",
+        "x (2).url",
+        "...",
+    ];
+    /// 两个平台都拒绝的名字（会改变路径含义）
+    const ITEM_NAMES_BAD_EVERYWHERE: &[&str] = &["", ".", "..", "a/b", "../x", "/abs", "a\0b"];
+    /// 只有 Windows 拒绝的名字：在 macOS / Linux 上是合法文件名（访达允许 `? * " < > |`，`:` 显示成 `/`）
+    const ITEM_NAMES_BAD_ON_WINDOWS_ONLY: &[&str] = &[
+        "a\\b",
+        "C:\\x",
+        "C:",
+        "a:stream",
+        "a?b",
+        "a*b",
+        "\"引号\"",
+        "<a>",
+        "a|b",
+        "a\u{1}b",
+        "Icon\r",
+    ];
+
     #[test]
-    fn item_name_validation() {
-        for ok in [
-            "Chrome.lnk",
-            "a b.txt",
-            "文件夹",
-            ".env",
-            "trail.",
-            "x (2).url",
-        ] {
-            assert!(is_valid_item_name(ok), "应接受 {ok:?}");
+    fn item_name_validation_windows_rules() {
+        for ok in ITEM_NAMES_OK_EVERYWHERE {
+            assert!(is_valid_item_name_for(ok, true), "应接受 {ok:?}");
         }
-        for bad in [
-            "", ".", "..", "a\\b", "a/b", "C:\\x", "a:stream", "a?b", "a\u{1}b",
-        ] {
-            assert!(!is_valid_item_name(bad), "应拒绝 {bad:?}");
+        for bad in ITEM_NAMES_BAD_EVERYWHERE
+            .iter()
+            .chain(ITEM_NAMES_BAD_ON_WINDOWS_ONLY)
+        {
+            assert!(!is_valid_item_name_for(bad, true), "应拒绝 {bad:?}");
         }
-        assert!(!is_valid_item_name(&"a".repeat(256)));
-        assert!(is_valid_item_name(&"a".repeat(255)));
+        // 255 个 UTF-16 单元
+        assert!(!is_valid_item_name_for(&"a".repeat(256), true));
+        assert!(is_valid_item_name_for(&"a".repeat(255), true));
+        assert!(is_valid_item_name_for(&"长".repeat(255), true));
+    }
+
+    #[test]
+    fn item_name_validation_unix_rules() {
+        for ok in ITEM_NAMES_OK_EVERYWHERE
+            .iter()
+            .chain(ITEM_NAMES_BAD_ON_WINDOWS_ONLY)
+        {
+            assert!(is_valid_item_name_for(ok, false), "应接受 {ok:?}");
+        }
+        for bad in ITEM_NAMES_BAD_EVERYWHERE {
+            assert!(!is_valid_item_name_for(bad, false), "应拒绝 {bad:?}");
+        }
+        // APFS 按字符计：255 个汉字（765 字节）、带 emoji 的长名字都可能真实存在
+        assert!(is_valid_item_name_for(&"长".repeat(255), false));
+        assert!(is_valid_item_name_for(&"😀".repeat(255), false));
+        assert!(!is_valid_item_name_for(
+            &"a".repeat(MAX_UNIX_ITEM_NAME_BYTES + 1),
+            false
+        ));
+    }
+
+    #[test]
+    fn item_name_validation_follows_the_platform() {
+        for name in ITEM_NAMES_OK_EVERYWHERE {
+            assert!(is_valid_item_name(name), "应接受 {name:?}");
+        }
+        for name in ITEM_NAMES_BAD_EVERYWHERE {
+            assert!(!is_valid_item_name(name), "应拒绝 {name:?}");
+        }
+        for name in ITEM_NAMES_BAD_ON_WINDOWS_ONLY {
+            if cfg!(windows) {
+                assert!(!is_valid_item_name(name), "Windows 应拒绝 {name:?}");
+            } else {
+                assert!(is_valid_item_name(name), "macOS / Linux 应接受 {name:?}");
+            }
+        }
+        // 文件夹名不分平台，一律按 Windows 规则（保持可移植）
+        for name in ITEM_NAMES_BAD_ON_WINDOWS_ONLY {
+            assert!(!is_valid_folder_name(name), "文件夹名应拒绝 {name:?}");
+        }
     }
 
     #[test]

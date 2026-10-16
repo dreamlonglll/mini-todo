@@ -108,7 +108,8 @@ pub fn user_desktop_dir() -> Option<PathBuf>;                // dirs::desktop_di
 pub const DESKTOP_DIR_ENV: &str = "MINI_TODO_DESKTOP_DIR";   // location.rs；FENCES_ROOT_ENV 同理
 pub fn is_ubiquitous_item(path: &Path) -> bool;             // macOS：移动前判定 iCloud 管理（NSURLIsUbiquitousItemKey）；其他平台恒 false
 pub fn path_starts_with_ci(path: &Path, prefix: &Path) -> bool;  pub fn same_path_ci(a: &Path, b: &Path) -> bool;
-pub fn is_valid_item_name(name: &str) -> bool;               // 单个路径段：拦 ..、绝对路径、ADS
+pub fn is_valid_item_name(name: &str) -> bool;               // 单个路径段：拦 ..、绝对路径、ADS。Windows 规则拦 <>:"/\|?* 与控制字符；
+                                                             // macOS / Linux 只拦空、. / ..、/ 与 NUL（其余字符在那里是合法文件名）
 pub fn is_auto_hidden_name(file_name: &str) -> bool;         // 以 . 开头 = 自动隐藏（纯函数，core / app 共用）
 impl FenceEntry { pub fn is_hidden(&self) -> bool }          // hidden || auto_hidden
 pub fn create_fence_folder(title: &str, taken: &[String]) -> Result<String, String>;
@@ -493,7 +494,7 @@ ALTER TABLE fences ADD COLUMN show_hidden INTEGER NOT NULL DEFAULT 0;      -- �
 - **打开**：Windows `launch_item` 用 `ShellExecuteExW`（`SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC`），目标失效的 `.lnk` 约 3 秒后才返回错误，
   界面在此期间显示"正在打开"；macOS 用 `NSWorkspace openURL:configuration:completionHandler:`（先拦下失效的替身 / 符号链接，错误取自回调，
   最多等 30 秒、超时按成功），定位用 `activateFileViewerSelectingURLs:`（先 lstat，它没有错误返回）。`items::open` / `reveal` / `icon` 先 `is_valid_item_name` 校验文件名
-  （防 `..`、绝对路径、ADS 逃逸出收纳文件夹）。
+  （防 `..`、绝对路径、ADS 逃逸出收纳文件夹；规则按平台，见 §4 错误矩阵）。
 - **图标**：界面请求 `ceil(icon_size × 缩放)`（`icon_request_px`），向上取整到档位 `[16, 24, 32, 48, 64, 96, 128, 256]`；
   Windows `SIIGBF_ICONONLY`（`.lnk` 不带箭头，图片 / 视频显示类型图标），macOS `NSWorkspace iconForFile:` 画进自建的 N×N 位图再由 AppKit
   编码 PNG（边长恰好是档位；替身 / 符号链接带访达同款小箭头；在调用方的后台线程上画，`autoreleasepool` 包裹）；缓存在 `<app_data_dir>\fence-icons\`，键
@@ -558,7 +559,7 @@ release 不编译。Windows e2e 的 P01 在 release 构建上验证忽略 `MINI_
 | 移动类操作：涉及的收纳箱正在删除 | `Err("收纳箱正在删除")` |
 | `items::move_to` 源 = 目标 | `Err("目标收纳箱与当前收纳箱相同")` |
 | `items::move_in` 的路径为空 | `Ok` 空结果 |
-| 文件名不合法（`..`、绝对路径、`a:b`） | `Err("文件名不合法: …")`（`is_valid_item_name` 按 Windows 规则拦 `<>:"/\|?*` 与控制字符：macOS 上这些字符合法的项目也会被拒，见 mac 场景 §M4） |
+| 文件名不合法（`..`、绝对路径；Windows 上还有 `a:b`） | `Err("文件名不合法: …")`。`is_valid_item_name` 按平台：Windows 拦空、`.` / `..`、`<>:"/\|?*` 与控制字符、超过 255 个 UTF-16 单元；macOS / Linux 只拦空、`.` / `..`、`/` 与 NUL（`:` `?` `*` `"` `<` `>` `\|` `\` 在那里是合法文件名，见 mac 场景 §M4）。收纳文件夹名不分平台一律按 Windows 规则 |
 | 项目不在文件夹里（移回 / 跨箱） | 逐项 `failed`（"收纳文件夹中找不到该项目"） |
 | `items::set_hidden`：收纳箱正在删除 / 不存在 / 文件夹里已没有该项 | `Err("收纳箱正在删除")` / `Err("收纳箱 #{id} 不存在")` / `Err("收纳文件夹中找不到该项目")`；界面"隐藏失败" / "取消隐藏失败"提示后补一次列举 |
 | 以 `.` 开头的项目 | 自动隐藏，右键「取消隐藏」禁用（"以 . 开头的项目自动隐藏"）；`set_hidden(.., false)` 只清标记，仍按名字隐藏 |
@@ -631,7 +632,7 @@ release 不编译。Windows e2e 的 P01 在 release 构建上验证忽略 `MINI_
 | | `package_folders_keep_their_extension_last` | 包扩展名判定（不区分大小写，`x.app.bak` / `.app` 不是包）；`Safari.app` → `Safari (2).app`、`a.b.framework` → `a.b (3).framework`，普通文件夹 `v1.2` → `v1.2 (2)`；移回时 `Safari (2).app` 与旧写法 `Safari.app (2)` 都恢复成 `Safari.app` |
 | | `protected_targets_outside_the_root_are_not_listed` | `Reserved::with_policy(root, false)`（macOS 规则）不列举收纳根目录以外的目标目录、只按本批预订去重；根目录内照常列举；`Reserved::new` 只有 macOS 不列举 |
 | | `default_desktop_is_the_system_desktop` | 不设 `MINI_TODO_DESKTOP_DIR` 时 `user_desktop_dir() == dirs::desktop_dir()` |
-| | 命名（`sanitize_*`、`folder_name_validation_rejects_traversal`、`item_name_validation`、`unique_file_name_adds_suffix_before_extension`、`restore_name_undoes_collision_suffix`）、图标（`bucket_rounds_up`、`cache_key_is_stable_and_case_insensitive`、`strips_shell_frame_around_small_icons`、`prune_cache`）、监听（`watcher_reports_debounced_folder_changes`）、`release_build_ignores_override`（release） | |
+| | 命名（`sanitize_*`、`folder_name_validation_rejects_traversal`、`item_name_validation_{windows_rules,unix_rules,follows_the_platform}`、`names_legal_on_unix_can_be_restored_and_moved_between_fences`（非 Windows）、`unique_file_name_adds_suffix_before_extension`、`restore_name_undoes_collision_suffix`）、图标（`bucket_rounds_up`、`cache_key_is_stable_and_case_insensitive`、`strips_shell_frame_around_small_icons`、`prune_cache`）、监听（`watcher_reports_debounced_folder_changes`）、`release_build_ignores_override`（release） | |
 | app `windows/fence/logic.rs` | `titles_follow_backend_rules` / `drag_threshold` / `geometry_gate_vectors` / `resize_vectors` / `icon_size_vectors` / `move_in_messages` / `delete_kept_messages` / `delete_hint_text` 等 | 测试向量来自旧前端 `fence.test.ts`：标题与后端同规则；闸门未 arm 的移动不算数、拖动中续期、超时 / `disarm` 后失效；缩放到最小尺寸不推动对边；图标档位与后端一致；提示文案 |
 | | `visible_items_follow_show_hidden` / `sorting_merges_hidden_items_back_in_place` / `empty_hint_text` / `move_in_mentions_auto_hidden_dot_files` | 按 `show_hidden` 过滤（用户隐藏 + 点文件）；排序后隐藏项留在原位、显示项按新顺序填回；空状态"N 个项目已隐藏"；点文件自动隐藏提示（按移入后的名字计数、开着显示隐藏时不提示、与其他提示合成一条） |
 | app `windows/fence/panels.rs` | `title_menu_width_follows_the_longest_label` | 「更多」菜单切换项文案与估算宽度（123 → 151 / 165） |
@@ -918,7 +919,7 @@ NSPanel + `NSWindowStyleMaskNonactivatingPanel`），再改成桌面层。Window
 | 隐私权限被拒（`EPERM`） | 逐项 `failed`，引导到「系统设置 → 隐私与安全性 → 文件与文件夹」 |
 | 只在 iCloud 的文件 | 先下载再移动（阻塞）；下载被禁止 / 超时 / macOS ≤ 13 的占位 → `failed` + "请先在访达中下载该文件" |
 | 跨卷移动 | NSFileManager 复制 + 删源；删源失败 → Moved + 附注（两边各一份） |
-| 名字含 `<>:"\|?*` 或控制字符（mac 上合法，`Icon\r` 是元数据除外） | 能收纳、能列举、能随删除收纳箱整体移回（这些路径不校验名字）；但打开 / 在访达中显示 / 图标（占位）/ 隐藏 / 单独移回 / 移动到… 报"文件名不合法"（`is_valid_item_name` 按 Windows 规则） |
+| 名字含 `<>:"\|?*`、`\` 或控制字符（mac 上合法，`Icon\r` 是元数据除外；`:` 在访达里显示成 `/`） | 与普通项目一样：能收纳、列举、打开、在访达中显示、取图标、隐藏、单独移回、移动到…、随删除收纳箱整体移回（`is_valid_item_name` 在非 Windows 上只拦空、`.` / `..`、`/` 与 NUL） |
 | 失效的替身 / 符号链接 | 打开报"替身指向的原身不存在…" / "符号链接指向的目标不存在…" |
 | `make_desktop_layer` 失败（窗口号找不到） | warn 日志，窗口留在 `PopUp` 默认层级（不会发生在正常路径上） |
 | 取色面板打不开 / 颜色不是 RGB | warn 日志 / 视为取消 |
@@ -1048,7 +1049,7 @@ Windows 的 `FOF_RENAMEONCOLLISION`）；只有跨卷 / 卷不支持时交给 NS
 - **macOS（预览，未经真机验收）**：只在 runner 上验证过（单屏 1x、一个桌面空间、临时目录）；其中键盘改名（MF08）在 runner 上没通过（§M1「改名」）。没验证过 Spaces / 台前调度 / 调度中心 /
   「显示桌面」/「点按墙纸显示桌面」下的表现、Retina 与多显示器、非激活面板里的中文输入法、真实 `~/Desktop` 的隐私授权流程（含 ad-hoc 签名
   升级后重新授权）、iCloud「桌面与文稿」、跨卷移动、Finder 重启后的层级、打开 / 在访达中显示；访达拖入时光标带"+"（GPUI 回报 Copy）但实际是移动；
-  取色面板会激活应用；名字含 Windows 非法字符的项目只能整体移回（§M4）。混合缩放下统一系数随显示器组合变化时"最近一次位置"可能按新系数解释
+  取色面板会激活应用。混合缩放下统一系数随显示器组合变化时"最近一次位置"可能按新系数解释
   （与主窗口同性质，见 CLAUDE.md 已知限制）。
 - **装回旧版本**（Windows 与 macOS 都是）：3.0.2-pre 及更早的 mac 版不恢复收纳箱（`restore_all` 在 mac 上直接返回）、菜单栏图标没有入口，
   2.5.0 mac 版完全不认这些表——收纳箱不显示，但文件都还在 `~/MiniTodo收纳箱/<名称>/` 里，可在访达里找回；再装回新版本后照常恢复。

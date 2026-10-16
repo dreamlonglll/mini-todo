@@ -1174,10 +1174,50 @@ mod tests {
         assert!(restore_item_at(root, &desktop, "..", "a", None, &exec).is_err());
         fs::create_dir_all(root.join("箱")).unwrap();
         assert!(restore_item_at(root, &desktop, "箱", "../x", None, &exec).is_err());
-        assert!(restore_item_at(root, &desktop, "箱", "a\\x", None, &exec).is_err());
+        // `\` 只在 Windows 上是分隔符；macOS / Linux 上 `a\x` 是普通文件名（找不到 → 逐项 Failed，不是 Err）
+        assert_eq!(
+            restore_item_at(root, &desktop, "箱", "a\\x", None, &exec).is_err(),
+            cfg!(windows)
+        );
         assert!(move_between_at(root, "箱", "a", "箱", &exec).is_err());
         assert!(move_between_at(root, "箱", "a", "../x", &exec).is_err());
         assert!(move_into_at(root, &[], &[desktop.join("a")], "a/b", &exec).is_err());
+    }
+
+    /// macOS / Linux：名字里带 Windows 非法字符（`:` `?` `*` `"` `<` `>` `|` `\`）的项目是合法文件名，
+    /// 收纳进来之后照样能单独移回、跨箱移动（以前按 Windows 规则报"文件名不合法"）
+    #[cfg(not(windows))]
+    #[test]
+    fn names_legal_on_unix_can_be_restored_and_moved_between_fences() {
+        let tmp = TempDir::new("unix-names");
+        let root = tmp.path().join("root");
+        let desktop = tmp.path().join("desktop");
+        let exec = fake_exec(&[], &[]);
+        let odd = r#"报告:草稿?*"<>|\.txt"#;
+        touch(&desktop.join(odd));
+        touch(&desktop.join("b|c.txt"));
+
+        let results = move_into_at(
+            &root,
+            &[],
+            &[desktop.join(odd), desktop.join("b|c.txt")],
+            "箱",
+            &exec,
+        )
+        .unwrap();
+        assert!(
+            results.iter().all(|r| r.status == ItemOpStatus::Moved),
+            "{results:#?}"
+        );
+
+        let original = desktop.join(odd).to_string_lossy().into_owned();
+        let r = restore_item_at(&root, &desktop, "箱", odd, Some(&original), &exec).unwrap();
+        assert_eq!(r.status, ItemOpStatus::Moved, "{r:#?}");
+        assert!(desktop.join(odd).is_file());
+
+        let r = move_between_at(&root, "箱", "b|c.txt", "另一个箱", &exec).unwrap();
+        assert_eq!(r.status, ItemOpStatus::Moved, "{r:#?}");
+        assert!(root.join("另一个箱").join("b|c.txt").is_file());
     }
 
     #[test]

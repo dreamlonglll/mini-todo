@@ -1347,7 +1347,7 @@ mod tests {
     fn set_hidden_checks_the_name_and_the_fence_before_touching_files() {
         let id = 987_658;
         let db = db_with_fences(&[id]);
-        assert!(set_hidden(&db, id, r"..\x", true)
+        assert!(set_hidden(&db, id, "../x", true)
             .unwrap_err()
             .contains("文件名不合法"));
         assert_eq!(
