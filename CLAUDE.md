@@ -42,7 +42,7 @@ mini-todo/
 │   └── 开发文档/                            # 开发相关文档
 ├── pc-gpui/                                # PC 端（Cargo workspace；详见各 crate README）
 │   ├── Cargo.toml                          # [workspace] members = crates/core、crates/app；[workspace.package] version 是
-│   │                                       # 版本号唯一来源（当前 3.0.2-pre）；release thin LTO + strip
+│   │                                       # 版本号唯一来源（当前 3.0.3-pre）；release thin LTO + strip
 │   ├── Cargo.lock                          # 提交；CI 一律 --locked
 │   ├── crates/
 │   │   ├── core/                           # mini-todo-core：业务核心（不依赖 GPUI / Tauri / tokio，全部阻塞函数）
@@ -288,7 +288,7 @@ mini-todo/
   - 这个目录同时是 Windows 安装包的默认安装目录（与旧 Tauri 版一致）；安装器卸载只删自己装的程序文件，绝不递归删除该目录
   - 日志：`%LOCALAPPDATA%\com.tauri-app.mini-todo\logs\mini-todo.log`；macOS `~/Library/Logs/com.tauri-app.mini-todo/mini-todo.log`
     （没有 `logs` 子目录）（app `services::logging`，2MB 轮转；目录名 / 位置都为兼容旧版沿用）
-  - 收纳箱文件：`%USERPROFILE%\MiniTodo收纳箱\<收纳箱文件夹>\`；macOS `~/MiniTodo收纳箱/<收纳箱文件夹>/`（3.0.2-pre 之后新增，2.5.0 mac 版没有）
+  - 收纳箱文件：`%USERPROFILE%\MiniTodo收纳箱\<收纳箱文件夹>\`；macOS `~/MiniTodo收纳箱/<收纳箱文件夹>/`（3.0.3-pre 起，2.5.0 mac 版没有）
     （用户可见的真实文件夹，有收纳箱后才创建；不在数据目录里，卸载 / 删库都不会丢文件）
 - **迁移版本**：当前 v1~v30，通过 `pc-gpui/crates/core/src/db/migrations.rs` 的迁移表管理（`LATEST_VERSION`）；有待执行迁移时先备份，
   迁移期间关闭外键、提交前 `foreign_key_check`；库版本比程序新时只记警告、按现状继续运行（没有降级）
@@ -580,7 +580,7 @@ WebDAV 服务端差异（实测，见 `.trellis/spec/backend/sync-protocol.md`�
    - 只有 ad-hoc 签名、不公证：首次打开要放行（`xattr -cr` 或「隐私与安全性 → 仍要打开」），每次升级都要重新放行
    - 系统通知拿不到投递结果（授权被拒也视为已投递），`cargo run` 的裸二进制收不到通知；runner 上测不了通知横幅与授权
    - 主窗口没有嵌入桌面，固定模式没有"不进 Dock / ⌘Tab"；固定模式在 Spaces / 全屏下的行为（`collectionBehavior`）没有处理
-   - 收纳箱（3.0.2-pre 之后新增）只在 runner 上跑过 e2e（MF 组：桌面层层级、监听、真实拖入、移回、删除、⌘H、Dock 唤起、改名、拖动落库、菜单栏三项、
+   - 收纳箱（3.0.3-pre 起）只在 runner 上跑过 e2e（MF 组：桌面层层级、监听、真实拖入、移回、删除、⌘H、Dock 唤起、改名、拖动落库、菜单栏三项、
      重启恢复），全部在临时目录里、没碰过真实 `~/Desktop`。改名（MF08）在 runner 上用粘贴 + 回车验证（系统输入流的 ⌘V / 回车；runner 上逐字注入的
      Unicode 按键本来就进不了 GPUI 输入框，普通窗口也一样）。没验证过：真实桌面的隐私授权（TCC）流程、iCloud「桌面与文稿」、跨卷移动、
      Spaces / 台前调度 / 调度中心 /「显示桌面」/「点按墙纸显示桌面」下的表现、Retina / 多显示器、收纳箱改名时的中文输入法、
@@ -723,7 +723,7 @@ debug 专用环境变量（**只在 debug 构建读取，release 一律忽略**�
 - `pc-gpui-e2e-macos.yml`：macOS 编译门 + e2e（`checks` clippy / test、`smoke` debug `.app` 的 M 组与收纳箱 MF 组、`release-smoke` release `.app` 不隔离的 P 组）；
   触发条件同 Windows e2e。mac 代码没有别的编译门，改了就推分支看它
 - `cloud-ci.yml`：fmt / clippy / test + Skill 单测
-- **版本号只有一处**：`pc-gpui/Cargo.toml` 的 `[workspace.package] version`（改完 `Cargo.lock` 同步），当前 `3.0.2-pre`。cloud 版本在
+- **版本号只有一处**：`pc-gpui/Cargo.toml` 的 `[workspace.package] version`（改完 `Cargo.lock` 同步），当前 `3.0.3-pre`。cloud 版本在
   `cloud/Cargo.toml`，与 tag 无关。发布步骤与安装器契约见 `.trellis/spec/pc-gpui/release.md`
 
 ## 注意事项
