@@ -34,6 +34,7 @@ GA_ROOT = 2
 WS_MINIMIZEBOX = 0x00020000
 WS_MAXIMIZEBOX = 0x00010000
 WS_THICKFRAME = 0x00040000
+WS_SYSMENU = 0x00080000
 WS_EX_TOPMOST = 0x00000008
 WS_EX_TOOLWINDOW = 0x00000080
 WS_EX_APPWINDOW = 0x00040000
@@ -43,6 +44,7 @@ WS_EX_NOREDIRECTIONBITMAP = 0x00200000
 
 WM_CLOSE = 0x0010
 WM_NCHITTEST = 0x0084
+DWMWA_CAPTION_BUTTON_BOUNDS = 5
 SW_MINIMIZE = 6
 SW_RESTORE = 9
 
@@ -70,6 +72,7 @@ if IS_WIN:
     user32 = ctypes.WinDLL("user32", use_last_error=True)
     shell32 = ctypes.WinDLL("shell32", use_last_error=True)
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    dwmapi = ctypes.WinDLL("dwmapi", use_last_error=True)
     LONG_PTR = ctypes.c_ssize_t
     ULONG_PTR = ctypes.c_size_t
     WNDENUMPROC = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
@@ -113,6 +116,7 @@ if IS_WIN:
     _proto(user32.GetClassNameW, ctypes.c_int, wt.HWND, wt.LPWSTR, ctypes.c_int)
     _proto(user32.IsWindowVisible, wt.BOOL, wt.HWND)
     _proto(user32.IsIconic, wt.BOOL, wt.HWND)
+    _proto(user32.IsZoomed, wt.BOOL, wt.HWND)
     _proto(user32.IsWindow, wt.BOOL, wt.HWND)
     _proto(user32.GetWindow, wt.HWND, wt.HWND, wt.UINT)
     _proto(user32.GetWindowLongPtrW, LONG_PTR, wt.HWND, ctypes.c_int)
@@ -143,6 +147,7 @@ if IS_WIN:
            wt.UINT)
     _proto(shell32.Shell_NotifyIconGetRect, ctypes.c_long, ctypes.POINTER(NOTIFYICONIDENTIFIER),
            ctypes.POINTER(wt.RECT))
+    _proto(dwmapi.DwmGetWindowAttribute, ctypes.c_long, wt.HWND, wt.DWORD, ctypes.c_void_p, wt.DWORD)
 
 
 def set_dpi_aware() -> bool:
@@ -267,6 +272,10 @@ class Win:
         return bool(user32.IsIconic(_h(self.hwnd)))
 
     @property
+    def zoomed(self) -> bool:
+        return bool(user32.IsZoomed(_h(self.hwnd)))
+
+    @property
     def style(self) -> int:
         return user32.GetWindowLongPtrW(_h(self.hwnd), GWL_STYLE) & 0xFFFFFFFF
 
@@ -317,7 +326,18 @@ class Win:
             "noActivate": bool(ex & WS_EX_NOACTIVATE),
             "minimizeBox": bool(st & WS_MINIMIZEBOX),
             "thickFrame": bool(st & WS_THICKFRAME),
+            "sysMenu": bool(st & WS_SYSMENU),
         }
+
+    def caption_buttons(self) -> tuple[int, int, int, int] | None:
+        """DWM 布置的标题栏按钮区（DWMWA_CAPTION_BUTTON_BOUNDS，窗口坐标）：(l, t, r, b)；调用失败 None。
+        没有 WS_SYSMENU 时 DWM 不布置任何按钮，宽度为 0"""
+        r = wt.RECT()
+        hr = dwmapi.DwmGetWindowAttribute(_h(self.hwnd), DWMWA_CAPTION_BUTTON_BOUNDS, ctypes.byref(r),
+                                          ctypes.sizeof(r))
+        if hr != 0:
+            return None
+        return r.left, r.top, r.right, r.bottom
 
     def state(self) -> dict:
         shell = shell_window()
@@ -330,6 +350,7 @@ class Win:
             "client": self.client(),
             "visible": self.visible,
             "iconic": self.iconic,
+            "zoomed": self.zoomed,
             "owner": f"0x{owner:X}",
             "ownerIsShell": bool(owner) and owner == shell,
             "shell": f"0x{shell:X}",
@@ -337,6 +358,7 @@ class Win:
             "dpi": self.dpi,
             "style": f"0x{self.style:08X}",
             "exstyle": f"0x{self.exstyle:08X}",
+            "captionButtons": self.caption_buttons(),
         }
         d.update(self.flags())
         return d

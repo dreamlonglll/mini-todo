@@ -15,6 +15,7 @@ GPUI 窗口没有 DOM / CDP，按钮位置按布局常量（逻辑像素，见 `
 | `probe-window.ps1` | 探针：普通应用窗口（WinForms），验证嵌入桌面的窗口在它之下 |
 | `drag-source.ps1` | OLE 拖放源窗口：`-Mode winforms`（.NET `DataObject` FileDrop）/ `-Mode shell`（`IShellFolder::GetUIObjectOf` 的数据对象） |
 | `uia-find.ps1` | UI Automation 找元素矩形（资源管理器窗口里的列表项等） |
+| `taskbar-button.ps1` | UI Automation 找应用的任务栏按钮矩形：Win11 XAML 任务栏（`Taskbar.TaskListButtonAutomationPeer`，名字 `mini-todo - 1 个运行窗口` / AutomationId `Appid: <AUMID>`）与 Win10 / Server 经典任务栏（`MSTaskListWClass` 下、名字为窗口标题），不匹配通知区托盘图标；文件带 UTF-8 BOM（Windows PowerShell 5.1 按 ANSI 代码页读无 BOM 脚本，中文注释可能吞掉换行） |
 | `dav_server.py` | 本地 WebDAV（wsgidav + cheroot，Basic 认证，JSONL 访问日志） |
 | `emit_annotations.py` | 把失败详情与 `<out>/emit/*.png` 截图作为 GitHub 注解输出（见下文「取回结果」） |
 | `uia-dump.ps1`、`emit-image.ps1` | 诊断：打印窗口的 UIA 树 / 把图片以 base64 打进日志 |
@@ -23,12 +24,12 @@ GPUI 窗口没有 DOM / CDP，按钮位置按布局常量（逻辑像素，见 `
 
 | 组 | 内容 | 隔离 |
 |---|---|---|
-| W01–W12 | `MINI_TODO_DEBUG_OPEN` 打开 main / editor:1:view / editor:1:edit / editor:new / subtask:101:view / settings 五个页 / completed / notification:1：窗口存在、类名 `Zed::Window`、逻辑尺寸、已渲染、截图；主窗口四角透出桌面（DirectComposition 透明） | 是 |
-| S01–S07 | 普通模式（APPWINDOW、无 owner、`HTCAPTION` / `HTLEFT`、拖动标题栏移动且落库）→ 点锁按钮经典固定（TOOLWINDOW、`WM_NCHITTEST` 不再是拖动 / 缩放区、真实拖动不动、`is_fixed` 落库）→ `fixed_embed_desktop=true` 重启恢复为嵌入桌面（owner=桌面宿主、TOOLWINDOW、无 MINIMIZEBOX）→ 探针窗口验证 Z 序 → Win+D → 重启 Explorer 自动重挂 → 点锁按钮回普通模式 | 是 |
-| N01–N02 | 3 条应用内通知：TOOLWINDOW\|TOPMOST、不抢焦点、右对齐、自下而上叠放（间距 10）；N02 单独检查客户区距工作区底边正好 20 | 是 |
+| W01–W12 | `MINI_TODO_DEBUG_OPEN` 打开 main / editor:1:view / editor:1:edit / editor:new / subtask:101:view / settings 五个页 / completed / notification:1：窗口存在、类名 `Zed::Window`、无 `WS_SYSMENU` 且 DWM 标题栏按钮区（`DWMWA_CAPTION_BUTTON_BOUNDS`）宽度为 0、逻辑尺寸、已渲染、截图；主窗口四角透出桌面（DirectComposition 透明） | 是 |
+| S01–S08 | 普通模式（APPWINDOW、无 owner、`HTCAPTION` / `HTLEFT`、拖动标题栏移动且落库；真实双击标题栏最大化、再双击还原且几何与落库复原）→ 点锁按钮经典固定（TOOLWINDOW、`WM_NCHITTEST` 不再是拖动 / 缩放区、真实拖动不动、`is_fixed` 落库）→ `fixed_embed_desktop=true` 重启恢复为嵌入桌面（owner=桌面宿主、TOOLWINDOW、无 MINIMIZEBOX）→ 探针窗口验证 Z 序 → Win+D → 重启 Explorer 自动重挂 → 点锁按钮回普通模式 → 单击任务栏按钮（`taskbar-button.ps1` 找按钮、真实点击）最小化、再单击还原到前台（找不到按钮 / 按钮合并了多个窗口时 SKIP）。S01 / S02 / S03 / S07 / S08 每次切换后都断言无 `WS_SYSMENU`、标题栏按钮区宽度为 0 | 是 |
+| N01–N02 | 3 条应用内通知：TOOLWINDOW\|TOPMOST、无 `WS_SYSMENU` 且标题栏按钮区宽度为 0、不抢焦点、右对齐、自下而上叠放（间距 10）；N02 单独检查客户区距工作区底边正好 20 | 是 |
 | I00–I08 | FAB 新建 → 输入 → Ctrl+Enter 落库、主窗口刷新；点行 → 只读详情 → 编辑 → 改标题保存；悬停操作条完成 / 删除（确认框）；设置切深色主题（落库、主窗口变半透明深色并透出桌面色）；设置开机自启开 / 关（`HKCU\…\Run\mini-todo`）；托盘图标（`Shell_NotifyIconGetRect`）；系统通知（到期提醒 notified=1、日志无发送失败） | 是 |
 | D00–D04 | 本地 WebDAV（Basic 认证）：测试连接（服务器收到带认证的 PROPFIND）、保存配置（`webdav_password` 为 `dpapi:` 密文、库文件无明文）、立即同步（服务器出现 `mini-todo/sync-data.json.gz`、`webdav_last_sync_at` 更新）、标题栏同步 | 是 |
-| F01–F11 | `fence:new`：嵌入桌面、收纳文件夹建在 `MINI_TODO_FENCES_ROOT` 下；放文件 → 监听刷新出图标；新实例第一次 OLE 拖入；双击标题改名 → 文件夹同步改名；改名后 / 单击标题后紧接着的拖入；Shell 数据对象拖入；从资源管理器窗口真实拖入；可见区域 = 数据库几何；Win+D 后可见；Explorer 重启后重挂 | 是 |
+| F01–F11 | `fence:new`：嵌入桌面（含无 `WS_SYSMENU`、标题栏按钮区宽度为 0）、收纳文件夹建在 `MINI_TODO_FENCES_ROOT` 下；放文件 → 监听刷新出图标；新实例第一次 OLE 拖入；双击标题改名 → 文件夹同步改名；改名后 / 单击标题后紧接着的拖入；Shell 数据对象拖入；从资源管理器窗口真实拖入；可见区域 = 数据库几何；Win+D 后可见；Explorer 重启后重挂 | 是 |
 | P01–P03 | **不隔离**：主窗口、日志在 `%LOCALAPPDATA%\com.tauri-app.mini-todo\logs\mini-todo.log`、库在 `%LOCALAPPDATA%\mini-todo`（release 另验证忽略 `MINI_TODO_DATA_DIR` / `MINI_TODO_DEBUG_OPEN`）；单实例（第二个进程退出、已运行实例被唤起到前台）；WM_CLOSE 关主窗口 → 进程退出 | 否 |
 
 release job 只跑 P 组（加上 release 构建本身：`build.rs` 用 fxc 预编译着色器）。
@@ -56,6 +57,11 @@ python scripts/e2e-windows/run_e2e.py --exe target/debug/mini-todo.exe --seed ta
   安装版冲突（单实例会把它唤起）。只在一次性虚拟机 / 没装正式版的机器上加。
 - S06 / F06 会 `taskkill explorer.exe` 再拉起；I06 会写入再删除 `HKCU\…\Run\mini-todo`（与安装版共用的值名；
   I 组开始前记下原值、收尾时恢复原样，已开启开机自启的机器上跑也不会丢；不想动它就 `--skip I06`）；F08 会打开一个资源管理器窗口。
+- S08 会真实点击任务栏按钮。安装版与开发版的 AppUserModelID 相同，安装版也开着普通模式的主窗口时两者合并成一个任务栏按钮
+  （`mini-todo - 2 个运行窗口`，单击弹缩略图而不是最小化），这时 S08 记 SKIP；任务栏自动隐藏、找不到按钮时同样 SKIP。
+- **安装版有收纳箱时先把它藏起来再跑 F 组**：测试收纳箱建在光标所在显示器右上角的空位，常与安装版的收纳箱重叠，外部拖入会落进
+  安装版的收纳箱（测试文件被移进真实的 `%USERPROFILE%\MiniTodo收纳箱\`），F04 / F08 / F09 / F11 / F05 随之失败。做法见
+  `.trellis/spec/guides/desktop-window-e2e-guide.md`「开发版与安装版并存」第 7 条。
 - `--only S` 只跑某几组；`--skip I06,F08` 按用例 ID 跳过（记 SKIP）；`--emit-shots F08,N01` 把这些用例的截图另存到
   `<out>/emit/`；截图、各实例日志在 `--out` 目录。
 - W01（主窗口四角透出桌面）、I05（深色半透明透出桌面色）拿启动前桌面取样的众数色做对照：桌面是照片壁纸时众数没有意义，

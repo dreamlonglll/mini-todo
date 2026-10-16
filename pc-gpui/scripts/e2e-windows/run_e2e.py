@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -36,6 +37,9 @@ APP_PRIMARY = (59, 130, 246)     # 应用主色 #3B82F6（FAB、设置页主按�
 SWITCH_OFF = (220, 223, 230)     # 开关关闭轨道 #DCDFE6
 PROBE_TITLE = "__mini_todo_e2e_probe"
 DRAG_TITLE = "__mini_todo_e2e_dragsrc"
+# 任务栏按钮的名字前缀（Win11：应用名 "mini-todo - 1 个运行窗口"；经典任务栏：窗口标题）与 AppUserModelID（app lib.rs 的 APP_IDENTIFIER）
+TASKBAR_PREFIXES = ("mini-todo", MAIN)
+APP_ID = "com.tauri-app.mini-todo"
 DAV_USER = "e2e"
 DAV_PASS = "Pw-e2e-7f3a9c"
 
@@ -264,6 +268,33 @@ def is_transparent_blend(c, desktop) -> bool:
     return all(0.12 <= r <= 0.92 for r in ratios) and max(ratios) - min(ratios) <= 0.25
 
 
+def check_no_caption_buttons(win: Win, c: Checks, what: str = "") -> None:
+    """open_window 建窗后去掉了 WS_SYSMENU：DWM 不再布置系统标题栏按钮（否则系统 × 会从半透明客户区透出来，激活时带红底）"""
+    label = f"{what}：" if what else ""
+    st = win.style
+    c.ok(not (st & W.WS_SYSMENU), f"{label}没有 WS_SYSMENU（style=0x{st:08X}）")
+    b = win.caption_buttons()
+    c.ok(b is not None and b[2] - b[0] <= 0, f"{label}DWM 标题栏按钮区宽度为 0（DWMWA_CAPTION_BUTTON_BOUNDS={b}）")
+
+
+def find_taskbar_buttons(timeout: int = 10) -> tuple[list[tuple[tuple[int, int, int, int], str, str]], str]:
+    """UIA 找本应用的任务栏按钮（taskbar-button.ps1）：([(屏幕矩形 x,y,w,h, 名字, 任务栏窗口类名)], 脚本原始输出)"""
+    prefixes = ",".join(f"'{p}'" for p in TASKBAR_PREFIXES)
+    out = W.run_ps(f"& '{HERE / 'taskbar-button.ps1'}' -Prefix {prefixes} -AppId '{APP_ID}' -TimeoutSec {timeout}",
+                   timeout=timeout + 90)
+    hits = []
+    for line in out.splitlines():
+        parts = line.split("|")
+        if len(parts) < 4 or parts[0].count(",") != 3:
+            continue
+        try:
+            rect = tuple(int(v) for v in parts[0].split(","))
+        except ValueError:
+            continue
+        hits.append((rect, parts[1], parts[3]))
+    return hits, out
+
+
 # ----------------------------------------------------------------------------- 环境
 
 def setup_env() -> None:
@@ -340,6 +371,7 @@ def group_windows(uia: bool) -> None:
             lw, lh = win.logical_size()
             c.ok(win.visible and not win.iconic, "窗口可见且未最小化")
             c.eq(win.cls, "Zed::Window", "窗口类名")
+            check_no_caption_buttons(win, c)
             c.near(round(lw), size[0], 2, "逻辑宽")
             c.near(round(lh), size[1], 2, "逻辑高")
             img = shot(win, f"{cid}-{title}")
@@ -409,6 +441,7 @@ def group_states() -> None:
         c.ok(not f["toolWindow"] and f["appWindow"], f"APPWINDOW 且非 TOOLWINDOW（{f}）")
         c.ok(f["minimizeBox"] and f["thickFrame"], "有最小化按钮与可缩放边框")
         c.ok(not f["topmost"], "不置顶")
+        check_no_caption_buttons(main, c, "普通模式")
         title_pt = main.pt(60, 47)
         ht = main.nchittest(*title_pt)
         c.eq(W.HT_NAMES.get(ht, ht), "HTCAPTION", "标题栏 WM_NCHITTEST")
@@ -430,6 +463,36 @@ def group_states() -> None:
         except W.Timeout as e:
             c.ok(False, f"{e}；screen_configs={app.q('SELECT config_id, window_x, window_y, window_width, window_height, is_fixed FROM screen_configs')}")
         shot(main, "S01-normal")
+        # 真实双击标题栏 → 最大化 → 再双击 → 还原（去掉 WS_SYSMENU 后系统的 HTCAPTION 双击仍然生效）。放在拖动落库之后，
+        # 还原后再等一次落库，后面的用例（S03 重启恢复位置）不受影响
+        restored = main.client()
+        W.dblclick(*main.pt(60, 47))
+        W.park_cursor()
+        try:
+            W.wait_until(lambda: main.zoomed, 5, "双击标题栏后最大化（IsZoomed）")
+            c.ok(True, f"双击标题栏最大化（客户区 {main.client()}）")
+        except W.Timeout as e:
+            c.ok(False, f"{e}；state={main.state()}")
+        if main.zoomed:
+            time.sleep(0.5)
+            W.dblclick(*main.pt(60, 47))
+            W.park_cursor()
+            try:
+                W.wait_until(lambda: not main.zoomed, 5, "再双击标题栏后还原")
+                c.ok(True, "再双击标题栏还原")
+            except W.Timeout as e:
+                c.ok(False, str(e))
+                main.show(W.SW_RESTORE)  # 不让后面的用例在最大化状态下跑
+        time.sleep(0.8)
+        now = main.client()
+        c.ok(all(abs(a - b) <= 2 for a, b in zip(now, restored)), f"还原后几何复原 {restored} → {now}")
+        try:
+            W.wait_until(lambda: (lambda r: r and abs(r[0] - now[0]) <= 2 and abs(r[1] - now[1]) <= 2)(
+                (app.q("SELECT window_x, window_y FROM screen_configs ORDER BY updated_at DESC LIMIT 1") or [None])[0]),
+                6, "还原后 screen_configs 仍是还原后的位置")
+            c.ok(True, "还原后 screen_configs 仍是还原后的位置")
+        except W.Timeout as e:
+            c.ok(False, f"{e}；screen_configs={app.q('SELECT window_x, window_y, window_width, window_height FROM screen_configs')}")
         return c.done(f"normal: {f}")
 
     def s02():
@@ -447,6 +510,7 @@ def group_states() -> None:
         print(f"    state={main.state()}")
         c.ok(f["toolWindow"] and not f["appWindow"], f"TOOLWINDOW 且非 APPWINDOW（{f}）")
         c.eq(main.owner, 0, "owner")
+        check_no_caption_buttons(main, c, "经典固定")
         c.eq(app.q1("SELECT is_fixed FROM screen_configs ORDER BY updated_at DESC LIMIT 1"), 1, "screen_configs.is_fixed")
         c.eq(app.setting("is_fixed"), "true", "settings.is_fixed")
         title_pt = main.pt(60, 47)
@@ -486,6 +550,7 @@ def group_states() -> None:
         c.ok(state["ownerIsShell"], f"owner 是桌面宿主（owner={state['owner']} shell={state['shell']} {W.class_name(W.shell_window())}）")
         c.ok(f["toolWindow"] and not f["appWindow"], f"TOOLWINDOW 且非 APPWINDOW（{f}）")
         c.ok(not f["minimizeBox"], "没有 WS_MINIMIZEBOX")
+        check_no_caption_buttons(main, c, "嵌入桌面")
         c.ok("已嵌入桌面" in app.log_text(), "日志记录了嵌入桌面")
         shot(main, "S03-embedded")
         return c.done(f"embedded: owner={state['owner']} z={state['zIndex']}")
@@ -569,20 +634,90 @@ def group_states() -> None:
         c.eq(main.owner, 0, "owner 清除")
         c.ok(f["appWindow"] and not f["toolWindow"], f"APPWINDOW（{f}）")
         c.ok(f["minimizeBox"], "最小化按钮恢复")
+        check_no_caption_buttons(main, c, "回到普通模式")
         c.eq(app.q1("SELECT is_fixed FROM screen_configs ORDER BY updated_at DESC LIMIT 1"), 0, "screen_configs.is_fixed")
         ht = main.nchittest(*main.pt(60, 47))
         c.eq(W.HT_NAMES.get(ht, ht), "HTCAPTION", "标题栏又能拖动")
         W.park_cursor()
         return c.done()
 
+    def s08():
+        main = need_main()
+        if not C.explorer:
+            raise Skip("没有 Explorer（没有任务栏）")
+        f = main.flags()
+        if main.owner or f["toolWindow"] or not f["appWindow"]:
+            raise Skip(f"主窗口不在普通模式（owner=0x{main.owner:X} {f}），没有任务栏按钮")
+        if main.iconic:
+            main.show(W.SW_RESTORE)
+            time.sleep(0.5)
+        hits, out = find_taskbar_buttons()
+        print(f"    taskbar-button.ps1: {' / '.join(out.splitlines())[:600]}")
+        if not hits:
+            if "notfound" not in out.splitlines():
+                # 脚本本身出错（不是"没找到"）：记 FAIL，不要用 SKIP 盖住
+                raise AssertionError(f"taskbar-button.ps1 运行失败：{' / '.join(out.splitlines()[-4:])[:600]}")
+            raise Skip(f"任务栏上找不到主窗口的按钮（前缀 {TASKBAR_PREFIXES} / Appid {APP_ID}；UIA：{' / '.join(out.splitlines()[-2:])[:400]}）")
+        # 多显示器且"在所有任务栏上显示按钮"时每条任务栏各有一个：用主任务栏上的
+        primary = [h for h in hits if h[2] == "Shell_TrayWnd"] or hits
+        if len(primary) > 1:
+            raise Skip(f"同一条任务栏上有 {len(primary)} 个匹配的按钮，无法确定哪个是被测窗口（{[h[1] for h in primary]}）")
+        rect, name, bar = primary[0]
+        grouped = re.search(r"\s-\s(\d+)\s", name)
+        if grouped and int(grouped.group(1)) > 1:
+            raise Skip(f"任务栏按钮合并了 {grouped.group(1)} 个窗口（{name}：有安装版或其它实例的窗口在任务栏上？单击会弹出缩略图而不是最小化）")
+        bx, by, bw, bh = rect
+        px, py = bx + bw // 2, by + bh // 2
+        if not any(l <= px < r and t <= py < b for l, t, r, b in (m["rect"] for m in W.monitors())):
+            raise Skip(f"任务栏按钮不在屏幕上（{rect}；任务栏自动隐藏？）")
+        # 任务栏只在按钮对应的窗口处于前台时把单击当作最小化：找到按钮之后、紧挨着单击之前点标题栏空白处激活主窗口
+        if W.foreground_window() != main.hwnd:
+            W.click(*main.pt(60, 47))
+            W.park_cursor()
+        try:
+            W.wait_until(lambda: W.foreground_window() == main.hwnd, 5, "主窗口成为前台窗口")
+        except W.Timeout as e:
+            raise AssertionError(f"{e}（前台={W.describe_hwnd(W.foreground_window())}）")
+        before = main.client()
+        c = Checks()
+        W.click(px, py)
+        W.park_cursor()
+        try:
+            W.wait_until(lambda: main.iconic, 5, "单击任务栏按钮后主窗口最小化（IsIconic）")
+            c.ok(True, "单击任务栏按钮：最小化")
+        except W.Timeout as e:
+            c.ok(False, f"{e}（前台={W.describe_hwnd(W.foreground_window())}；state={main.state()}）")
+        if main.iconic:
+            time.sleep(0.6)
+            W.click(px, py)
+            W.park_cursor()
+            try:
+                W.wait_until(lambda: not main.iconic and main.visible, 5, "再单击任务栏按钮后还原")
+                c.ok(True, "再单击任务栏按钮：还原")
+            except W.Timeout as e:
+                c.ok(False, str(e))
+            try:
+                W.wait_until(lambda: W.foreground_window() == main.hwnd, 3, "还原后在前台")
+                c.ok(True, "还原后是前台窗口")
+            except W.Timeout as e:
+                c.ok(False, f"{e}（前台={W.describe_hwnd(W.foreground_window())}）")
+            time.sleep(0.5)
+            after = main.client()
+            c.ok(all(abs(a - b) <= 2 for a, b in zip(after, before)), f"还原后几何不变 {before} → {after}")
+        if main.iconic:
+            main.show(W.SW_RESTORE)
+        check_no_caption_buttons(main, c, "最小化 / 还原之后")
+        return c.done(f"{name}（{bar} {rect}）")
+
     try:
-        C.report.case("S01", "普通模式：APPWINDOW / 无 owner / 可拖动可缩放 / 位置落库", s01)
+        C.report.case("S01", "普通模式：APPWINDOW / 无 owner / 无 WS_SYSMENU / 可拖动可缩放 / 位置落库 / 双击标题栏最大化还原", s01)
         C.report.case("S02", "经典固定：点锁按钮 → TOOLWINDOW / 不可拖动缩放 / 落库", s02)
         C.report.case("S03", "固定 + 嵌入桌面（重启恢复）：owner=桌面宿主 / TOOLWINDOW / 无最小化", s03)
         C.report.case("S04", "嵌入桌面的 Z 序：在普通应用窗口之下（探针窗口）", s04)
         C.report.case("S05", "嵌入桌面：Win+D 后仍可见", s05)
         C.report.case("S06", "嵌入桌面：Explorer 重启后自动重挂 owner", s06)
         C.report.case("S07", "嵌入桌面 → 点锁按钮回到普通模式", s07)
+        C.report.case("S08", "普通模式：单击任务栏按钮最小化 → 再单击还原到前台", s08)
     finally:
         stop_proc(probe)
         app.stop()
@@ -614,6 +749,7 @@ def group_notifications() -> None:
                 ys.append((y, x, w, h))
                 c.ok(f["toolWindow"] and f["topmost"], f"通知 0x{n.hwnd:X} TOOLWINDOW|TOPMOST（{f}）")
                 c.ok(n.hwnd != fg, f"通知 0x{n.hwnd:X} 不抢焦点")
+                check_no_caption_buttons(n, c, f"通知 0x{n.hwnd:X}")
             ys.sort(reverse=True)
             s = wins[0].scale
             y0, x0, w0, h0 = ys[0]
@@ -651,7 +787,7 @@ def group_notifications() -> None:
                 "按逻辑坐标建的窗口客户区整体比请求位置高 height_offset/2（96 DPI 下 4px）")
         return f"下边距 20px（{geo['desc']}）"
 
-    C.report.case("N01", "应用内通知：TOOLWINDOW|TOPMOST、不抢焦点、右对齐、自下而上叠放（间距 10）", n01)
+    C.report.case("N01", "应用内通知：TOOLWINDOW|TOPMOST、无 WS_SYSMENU、不抢焦点、右对齐、自下而上叠放（间距 10）", n01)
     C.report.case("N02", "应用内通知：客户区距工作区底边正好 20px", n02)
 
 
@@ -1137,6 +1273,7 @@ def group_fences() -> None:
         c.ok(state["ownerIsShell"], f"owner 是桌面宿主（{state['owner']} / {state['shell']}）")
         c.ok(f["toolWindow"] and not f["appWindow"], f"TOOLWINDOW 且非 APPWINDOW（{f}）")
         c.ok(not f["minimizeBox"], "没有最小化按钮")
+        check_no_caption_buttons(fence, c)
         rows = app.q("SELECT id, title, folder_name FROM fences")
         c.ok(len(rows) == 1, f"fences 表 1 条（{rows}）")
         if rows:
@@ -1377,7 +1514,7 @@ def group_fences() -> None:
         return c.done(f"explorer back in {secs:.1f}s")
 
     try:
-        C.report.case("F01", "新增收纳箱：窗口嵌入桌面（owner=桌面宿主 / TOOLWINDOW）、收纳文件夹已创建", f01)
+        C.report.case("F01", "新增收纳箱：窗口嵌入桌面（owner=桌面宿主 / TOOLWINDOW / 无 WS_SYSMENU）、收纳文件夹已创建", f01)
         C.report.case("F02", "往收纳文件夹放文件 → 监听刷新出图标", f02)
         C.report.case("F04", "真实 OLE 拖放（.NET DataObject）：新实例里第一次拖入收纳箱即生效", f04)
         C.report.case("F03", "双击标题改名 → 收纳文件夹同步改名", f03)

@@ -35,6 +35,11 @@
 4. **不隔离的 P 组**（真实数据目录、日志位置、单实例唤起）只在一次性虚拟机 / 没装正式版的机器上加 `--allow-real-profile` 跑。
 5. **Explorer 重启**（S06 / F06 会 `taskkill explorer.exe` 再拉起）每次先征得用户授权，结束后确认 Explorer 已恢复。
 6. 结束前清理测试数据目录、测试收纳根目录和桌面上的测试文件。
+7. **安装版的收纳箱会和测试收纳箱重叠**：F 组新建的收纳箱在光标所在显示器右上角找空位，测试库里没有用户的收纳箱，常常正好建在
+   用户收纳箱的位置。两者都在桌面层，外部拖入会落进**安装版**的收纳箱，把测试文件移进用户真实的收纳文件夹（2026-10-16 实测：
+   F04 / F08 / F09 / F11 拖入"失败"，文件其实进了 `%USERPROFILE%\MiniTodo收纳箱\`；F05 的 Win+D 命中了安装版收纳箱）。
+   跑 F 组前先临时隐藏安装版的收纳箱窗口（按安装版 PID 找 `Zed::Window` / `收纳箱`，`ShowWindow(SW_HIDE)`，跑完 `SW_SHOWNOACTIVATE`；
+   隐藏期间稳妥起见跳过会重启 Explorer 的 F06——安装版守护重挂时会不会把它重新显示没验证过），或请用户把它挪开；跑完检查真实收纳根目录里有没有 `e2e-` 前缀的文件。
 
 ## 输入安全
 
@@ -49,7 +54,8 @@
 ## Checklist
 
 1. **Assert the Win32 state, not the UI** — owner、ex style（TOOLWINDOW / APPWINDOW / TOPMOST / NOACTIVATE）、`WS_MINIMIZEBOX`、
-   Z 序、客户区几何、`WM_NCHITTEST` 结果；逐字段对照 `.trellis/spec/backend/window-modes.md` §3 的模式表与 `desktop-fences.md` §3.1 的状态表。
+   `WS_SYSMENU`（所有窗口都没有，`DWMWA_CAPTION_BUTTON_BOUNDS` 宽度为 0）、Z 序、客户区几何、`WM_NCHITTEST` 结果；
+   逐字段对照 `.trellis/spec/backend/window-modes.md` §3 的模式表与 `desktop-fences.md` §3.1 的状态表。
 2. **Show Desktop**（Win+D）**/ Minimize All**（Win+M）：嵌入的窗口从不最小化、不隐藏、几何不变；经典固定被最小化后一个 tick 内还原。
 3. **Something must be able to cover it** — 普通顶层窗口（`probe-window.ps1` 探针）盖在上面时必须赢 `WindowFromPoint`。
 4. **Real input** — 编辑类窗口从主窗口打开后第一次点击就拿到前台并接受按键；固定模式下拖标题栏 / 边框不动。
