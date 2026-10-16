@@ -519,4 +519,7 @@ pub mod raw {
     pub fn set_foreground(h: Hwnd) -> bool {
         unsafe { SetForegroundWindow(to_hwnd(h)) }.as_bool()
     }
+
+    /// macOS 专用（隐藏红绿灯）；Windows 的系统标题栏按钮由 [`set_system_menu`]`(false)` 去掉：no-op
+    pub fn prepare_after_open(_h: Hwnd) {}
 }

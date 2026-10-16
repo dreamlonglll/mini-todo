@@ -12,6 +12,10 @@
 //! 写的排队重申不再需要：切换时同步设置一次即可（`research/backend-port.md` §5.3）；200ms 轮询只保留
 //! Explorer 重启重挂、经典固定的最小化守护、贴边隐藏，以及廉价的样式自愈（防御）。
 //!
+//! macOS 走同一套状态机与 200ms 轮询（`platform::Hwnd` 是 NSWindow 窗口号）：几何锁定 = `setMovable:NO` + 去掉可缩放，
+//! 置顶 = `NSFloatingWindowLevel`，`ToolWindow` 是 no-op（程序坞 / ⌘Tab 是整个应用的），没有嵌入桌面；被最小化即还原、
+//! 托盘唤起临时置顶、贴边隐藏照常（`NSEvent.mouseLocation` 给全局光标，比 2.5.0 只按鼠标移入移出更准）。
+//!
 //! **线程 / 借用约束**：所有 Win32 写操作都在 `cx.spawn` 的 async 块里、`cx.update` 闭包之外执行
 //! （`platform::Hwnd` 原始调用会同步给 GPUI 窗口过程发消息，App 被借用时 GPUI 处理不了）。
 
@@ -38,7 +42,7 @@ pub const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 /// 主窗口的窗口模式运行时状态（旧版 `IS_FIXED_MODE` / `IS_DESKTOP_MODE` / `DESKTOP_OWNER` /
 /// `AUTO_HIDE_STATE` / `TOP_ON_WAKE` / `DESIRED_TOPMOST` / `PENDING_AUTO_HIDE_RELEASE`）
 pub struct WindowMode {
-    /// 主窗口句柄（只有 Windows 有）
+    /// 主窗口句柄（Windows HWND / macOS 窗口号；Linux 没有）
     pub main_hwnd: Option<Hwnd>,
     /// 经典固定模式
     pub classic_fixed: bool,
@@ -321,7 +325,7 @@ pub fn on_embed_preference_changed(cx: &mut App, enabled: bool) {
 }
 
 // ----------------------------------------------------------------------
-// 200ms 轮询（Windows）：嵌入重挂 / 经典固定守护 / 贴边隐藏
+// 200ms 轮询（Windows / macOS）：嵌入重挂（仅 Windows）/ 经典固定守护 / 贴边隐藏
 // ----------------------------------------------------------------------
 
 fn start_tick(cx: &mut App) {
@@ -370,7 +374,8 @@ fn plan_tick(cx: &mut App) -> Option<TickPlan> {
             // 固定模式没有任务栏入口：被 Win+D / Win+M 最小化后立刻还原
             ops.push(Op::Restore);
         }
-        if window_logic::lacks_tool_window_style(hwnd.ex_style()) {
+        // macOS 没有逐窗口的任务栏样式（ex_style 恒 0）：不自愈
+        if cfg!(windows) && window_logic::lacks_tool_window_style(hwnd.ex_style()) {
             ops.push(Op::ToolWindow(true));
         }
         if mode.pending_release {
@@ -504,6 +509,10 @@ fn monitor_for_rect(monitors: &[MonitorInfo], rect: PhysRect) -> Option<MonitorI
 /// 显示并激活主窗口（托盘左键、单实例唤起；旧 `bring_main_window_to_front`）：嵌入桌面只显示 + 聚焦；
 /// 其它模式：贴边隐藏开着时给 3s 宽限并拉回 → 还原 → 临时置顶 600ms（贴边唤起态需要保持置顶时不撤）→ 激活
 pub fn bring_main_to_front(cx: &mut App) {
+    // macOS：从菜单栏图标 / 单实例 / Dock / 应用菜单唤起时本应用多半不在前台，先切到前台，否则窗口会落在当前前台应用的
+    // 窗口之后（重复调用无害）。Windows 由窗口自己 SetForegroundWindow
+    #[cfg(target_os = "macos")]
+    cx.activate(true);
     let Some(main) = WindowManager::main(cx) else {
         crate::windows::main_window::open(cx);
         return;

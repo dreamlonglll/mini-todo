@@ -3,6 +3,8 @@
 //! - Windows：`rfd`（系统 `IFileSaveDialog` / `IFileOpenDialog`），父窗口为打开它的 GPUI 窗口；对话框是模态的，
 //!   在**独立线程**里运行（不阻塞 GPUI 主线程的消息循环；跨线程的父窗口照样会被系统禁用）。
 //! - 其它平台：GPUI 的 `prompt_for_new_path` / `prompt_for_paths`（没有过滤器与标题；Linux 需要 xdg 桌面门户）。
+//!   macOS 上是原生 `NSSavePanel` / `NSOpenPanel`（非模态、不阻塞主线程）；不用 rfd：它的同步接口在 mac 上会把面板
+//!   同步派到主队列 `runModal`，对话框期间 GPUI 的前台任务全部停摆。
 //! - debug 构建：环境变量 `MINI_TODO_DEBUG_DIALOG_PATH` 非空时两种对话框都直接返回该路径（Xvfb 冒烟测试用，release 忽略）。
 //!
 //! 结果：`None` = 用户取消（或对话框打不开，已记日志）。

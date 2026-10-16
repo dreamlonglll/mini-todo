@@ -28,6 +28,30 @@ tray-icon = { version = "=0.21.3", default-features = false }
 auto-launch = "=0.5.0"
 # 菜单栏模板图标解码（services/tray/mac_icon.rs）；特性与 app 一致
 image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+# 窗口平台层的 AppKit 调用（platform/macos/ns.rs）；版本与特性与 app 的 macOS 依赖逐项一致
+objc2 = "=0.6.5"
+objc2-foundation = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "objc2-core-foundation",
+    "NSArray",
+    "NSDictionary",
+    "NSGeometry",
+    "NSString",
+    "NSValue",
+] }
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "objc2-core-foundation",
+    "NSApplication",
+    "NSButton",
+    "NSControl",
+    "NSEvent",
+    "NSGraphics",
+    "NSResponder",
+    "NSScreen",
+    "NSView",
+    "NSWindow",
+] }
 
 # 不属于任何 workspace
 [workspace]

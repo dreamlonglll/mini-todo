@@ -10,3 +10,7 @@ mod autostart;
 mod single_instance_unix_socket;
 #[path = "../../../crates/app/src/services/tray/mac_icon.rs"]
 mod tray_mac_icon;
+
+// 窗口平台层：NSWindow / NSScreen / NSEvent 的原始调用
+#[path = "../../../crates/app/src/platform/macos/ns.rs"]
+mod platform_macos_ns;

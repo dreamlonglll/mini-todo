@@ -577,6 +577,14 @@ impl SettingsWindow {
                             ),
                     ),
             )
+            // macOS 没有 DPAPI：密码与旧 2.5.0 mac 版一样明文存在本机数据库里（钥匙串要开发者签名，暂不做）
+            .when(cfg!(target_os = "macos"), |this| {
+                this.child(card_hint(
+                    EpIcon::InfoFilled,
+                    "macOS 上 WebDAV 密码以明文保存在本机数据库中",
+                    false,
+                ))
+            })
             .child(
                 div()
                     .flex()

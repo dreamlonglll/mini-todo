@@ -12,9 +12,15 @@ use crate::ui::ep_slider::EpSlider;
 
 impl SettingsWindow {
     pub(super) fn load_system_fonts(&mut self, cx: &mut Context<Self>) {
-        let task = cx
-            .background_executor()
-            .spawn(async { mini_todo_core::settings::system_fonts() });
+        let task = if cfg!(target_os = "macos") {
+            // macOS：core 的 DirectWrite 枚举只有 Windows 有；用 GPUI 的 CoreText 枚举（已排序去重）
+            let text_system = cx.text_system().clone();
+            cx.background_executor()
+                .spawn(async move { Ok(visible_font_names(text_system.all_font_names())) })
+        } else {
+            cx.background_executor()
+                .spawn(async { mini_todo_core::settings::system_fonts() })
+        };
         let select = self.font_select.clone();
         cx.spawn(async move |_, cx| {
             let fonts = task.await.unwrap_or_else(|e| {
@@ -118,5 +124,29 @@ impl SettingsWindow {
                     .text_size(px(size as f32))
                     .child("待办事项预览 Todo Preview 1234"),
             )
+    }
+}
+
+/// 去掉 `.` 开头的系统私有字体族（`.AppleSystemUIFont` 等：不能按名字选用，列出来也没意义）
+fn visible_font_names(names: Vec<String>) -> Vec<String> {
+    names
+        .into_iter()
+        .filter(|name| !name.is_empty() && !name.starts_with('.'))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hidden_system_fonts_are_not_listed() {
+        let names = vec![
+            ".AppleSystemUIFont".to_string(),
+            "Menlo".to_string(),
+            String::new(),
+            "PingFang SC".to_string(),
+        ];
+        assert_eq!(visible_font_names(names), vec!["Menlo", "PingFang SC"]);
     }
 }

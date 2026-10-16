@@ -417,11 +417,14 @@ pub const EP_HEIGHT_SMALL: Pixels = px(24.);
 pub const TOOLTIP_HIDE_AFTER: Duration = Duration::from_millis(200);
 
 /// 界面字体族：Windows `Segoe UI`（拉丁）+ `Microsoft YaHei`（中文回退），与 CSS
-/// `'Segoe UI', 'Microsoft YaHei', sans-serif` 一致。Linux（只用于 CI 与截图）用度量最接近的
+/// `'Segoe UI', 'Microsoft YaHei', sans-serif` 一致。macOS 用系统界面字体（GPUI 的 `.SystemUIFont` 别名 = San Francisco）
+/// 加 `PingFang SC`，与旧版 CSS 的 `-apple-system` 在 mac 上命中的字体相同。Linux（只用于 CI 与截图）用度量最接近的
 /// `Liberation Sans` + `Noto Sans CJK SC`（与参考截图 harness 的替身字体相同）。
 pub fn font_family() -> SharedString {
     if cfg!(windows) {
         "Segoe UI".into()
+    } else if cfg!(target_os = "macos") {
+        ".SystemUIFont".into()
     } else {
         "Liberation Sans".into()
     }
@@ -431,8 +434,20 @@ pub fn font_family() -> SharedString {
 pub fn font_fallbacks() -> FontFallbacks {
     if cfg!(windows) {
         FontFallbacks::from_fonts(vec!["Microsoft YaHei".into(), "Microsoft YaHei UI".into()])
+    } else if cfg!(target_os = "macos") {
+        FontFallbacks::from_fonts(vec!["PingFang SC".into()])
     } else {
         FontFallbacks::from_fonts(vec!["Noto Sans CJK SC".into()])
+    }
+}
+
+/// 界面字体族作为**回退项**时的名字：GPUI 只在主字体族上认 `.SystemUIFont` 这个别名（换成 `.AppleSystemUIFont`），
+/// 回退列表原样交给 CoreText，要写系统字体的真实族名
+fn font_family_as_fallback() -> String {
+    if cfg!(target_os = "macos") {
+        ".AppleSystemUIFont".to_string()
+    } else {
+        font_family().to_string()
     }
 }
 
@@ -454,7 +469,7 @@ pub fn todo_font(family: &str) -> Font {
     if family.is_empty() {
         return ui_font();
     }
-    let mut fallbacks = vec![font_family().to_string()];
+    let mut fallbacks = vec![font_family_as_fallback()];
     fallbacks.extend(font_fallbacks().fallback_list().iter().cloned());
     Font {
         family: family.to_string().into(),
@@ -864,7 +879,7 @@ mod tests {
         let font = todo_font("SimHei");
         assert_eq!(font.family.as_ref(), "SimHei");
         let fallbacks = font.fallbacks.unwrap();
-        assert_eq!(fallbacks.fallback_list()[0], font_family().to_string());
+        assert_eq!(fallbacks.fallback_list()[0], font_family_as_fallback());
         assert_eq!(todo_font("  ").family, font_family());
     }
 }
@@ -956,13 +971,16 @@ pub mod editor_theme {
     /// 分隔线外边距 1em（14px）
     pub const MD_HR_MARGIN: f32 = 14.;
 
-    /// 等宽字体：Windows Consolas（Milkdown 等宽栈在 Windows 上先命中它）；Linux 用 Liberation Mono（截图替身）
+    /// 等宽字体：Windows Consolas（Milkdown 等宽栈在 Windows 上先命中它）；macOS Menlo（系统自带，SF Mono 不对普通应用
+    /// 开放）；Linux 用 Liberation Mono（截图替身）
     pub fn mono_font() -> Font {
         let (family, fallbacks): (&str, Vec<String>) = if cfg!(windows) {
             (
                 "Consolas",
                 vec!["Courier New".into(), "Microsoft YaHei".into()],
             )
+        } else if cfg!(target_os = "macos") {
+            ("Menlo", vec!["Monaco".into(), "PingFang SC".into()])
         } else {
             ("Liberation Mono", vec!["Noto Sans CJK SC".into()])
         };
@@ -975,10 +993,15 @@ pub mod editor_theme {
         }
     }
 
-    /// 衬线字体（引用块 `ui-serif, Georgia, Cambria, "Times New Roman", serif`；中文在 Windows 上回落宋体）
+    /// 衬线字体（引用块 `ui-serif, Georgia, Cambria, "Times New Roman", serif`；中文在 Windows 上回落宋体，macOS 上宋体-简）
     pub fn serif_font() -> Font {
         let (family, fallbacks): (&str, Vec<String>) = if cfg!(windows) {
             ("Georgia", vec!["Cambria".into(), "SimSun".into()])
+        } else if cfg!(target_os = "macos") {
+            (
+                "Georgia",
+                vec!["Times New Roman".into(), "Songti SC".into()],
+            )
         } else {
             ("Liberation Serif", vec!["Noto Serif CJK SC".into()])
         };

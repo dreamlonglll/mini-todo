@@ -35,10 +35,13 @@ auto-launch = "0.5"
 reqwest = { version = "0.12", features = ["json", "blocking"] }
 # Markdown 解析（与 gpui-base 同一版本，只在块级排版用；行内交给 gpui-base TextView）
 markdown = "1"
-# 系统通知（Windows Toast，AppUserModelID 与 set_app_identity 一致；与旧版 tauri-plugin-notification 底层同一库）
-notify-rust = "4"
 # 读图片尺寸（Markdown 图片按原始宽高比缩放）与图片预览旋转；gpui 已启用这些格式，不会多编一份
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+# 系统通知（Windows Toast，AppUserModelID 与 set_app_identity 一致；与旧版 tauri-plugin-notification 底层同一库）。
+# macOS 走 GPUI 的 `show_system_notification`（services/notify.rs），不编 notify-rust（省掉 mac-notification-sys 的 ObjC 编译）
+notify-rust = "4"
 
 [target.'cfg(windows)'.dependencies]
 # 与 gpui-pre-windows 同一版本（0.62），避免再编一份 windows crate
@@ -63,6 +66,34 @@ rfd = { version = "0.16", default-features = false }
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 # 托盘 / 菜单栏图标：tray-icon 自带 muda 菜单；Windows 与 macOS 编译（Linux 只用于 CI 与截图）
 tray-icon = { version = "0.21", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# GPUI 没有的窗口能力（摆窗、显示 / 隐藏、置顶、几何锁定、隐藏红绿灯、显示器枚举、光标；`platform/macos/ns.rs`）。
+# 与 gpui-pre-macos 同一版本（objc2 0.6 / objc2-foundation 0.3.2 / objc2-app-kit 0.3.2），不多编一份。
+# 改这里的版本或特性时同步改 `pc-gpui/scripts/mac-check/Cargo.toml`（本地交叉检查 ns.rs 用）
+objc2 = "0.6"
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "objc2-core-foundation",
+    "NSArray",
+    "NSDictionary",
+    "NSGeometry",
+    "NSString",
+    "NSValue",
+] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "objc2-core-foundation",
+    "NSApplication",
+    "NSButton",
+    "NSControl",
+    "NSEvent",
+    "NSGraphics",
+    "NSResponder",
+    "NSScreen",
+    "NSView",
+    "NSWindow",
+] }
 
 [build-dependencies]
 embed-resource = "3"

@@ -1,7 +1,8 @@
 //! GPUI 没有的窗口能力（位置、显示 / 隐藏、置顶、ex style、owner、圆角、显示器物理信息、拖动窗口……）。
 //!
 //! - Windows：`windows.rs` 直接调 Win32（HWND 来自 `raw_window_handle`）。
-//! - 其它平台（只用于 CI 与截图）：`fallback.rs` 用 GPUI 自带能力近似，做不到的是 no-op。
+//! - macOS：`macos/`（AppKit，见文末「macOS」一节）。
+//! - 其它平台（Linux，只用于 CI 与截图）：`fallback.rs` 用 GPUI 自带能力近似，做不到的是 no-op。
 //!
 //! ## 重要：会给窗口同步发消息的 Win32 调用要**延后**到 App 借用之外
 //!
@@ -47,6 +48,27 @@
 //! - 代价是没有系统菜单（Alt+Space、标题栏右键菜单），自绘标题栏的窗口本来就不该有；单击任务栏按钮最小化 / 还原、标题栏双击
 //!   最大化 / 还原、Win+↑ / Win+↓、拖到屏幕顶边贴靠、Alt+F4 实测不受影响（Windows e2e S08 / S01 用真实输入断言前两项）；
 //! - GPUI 运行期不改写 `WS_SYSMENU`（只有本项目不用的全屏切换会整体重写样式），所以不需要守护；运行时改样式也不要把它加回来。
+//!
+//! ## macOS
+//!
+//! gpui-pre-macos 0.3.9 能建窗（位置 / 显示器 / 置顶层级 / 可缩放都只在建窗时给）、拖动（`start_window_move`）、缩放
+//! （`zoom_window`）、激活，但没有运行时摆窗、改层级、显示 / 隐藏单个窗口、改 style mask；这些在 `macos/ns.rs` 里用 objc2
+//! 直接调 NSWindow / NSScreen / NSEvent：
+//!
+//! - **[`Hwnd`] 是 NSWindow 的窗口号**（`windowNumber`），每次调用都在 `NSApp.windows` 里重新找，从不解引用存下来的指针
+//!   （关窗后对象可能已释放）；
+//! - **只在主线程调用**（AppKit 要求；GPUI 在 macOS 上的前台就是主线程），不在主线程时返回 `None` / `false`；
+//! - **同样要延后**：`setFrame:` / `orderOut:` / 改 style mask 会同步触发 GPUI 的 `windowDidMove:` / `windowDidResize:` 等回调，
+//!   与 Win32 一样遵守上面「延后」的规则（接收 `&Window` 的写操作已自动延后）；
+//! - **坐标**：GPUI 的逻辑像素 = 点，窗口与建窗参数是**显示器本地**坐标；本模块的物理像素 = 全局点坐标（左上原点）× 统一系数
+//!   （所有屏 `backingScaleFactor` 的最大值），单屏 / 同缩放多屏时与旧 Tauri 版逐像素一致。细节与理由见 `mac_geometry` 模块文档。
+//!   建窗时 [`creation_bounds`] 把全局逻辑坐标换成 GPUI 要的显示器本地坐标；窗口 frame = 客户区（`FullSizeContentView`），
+//!   没有 Windows 那样的不可见边框；
+//! - **红绿灯**：所有窗口都带 `TitlebarOptions { appears_transparent: true }`，AppKit 会在左上角画系统的关闭 / 最小化 / 缩放按钮，
+//!   压在自绘标题栏上。[`crate::windows::open_window`] 建窗后立即 [`Hwnd::prepare_after_open`] 把它们隐藏（改 style mask 后
+//!   `ns` 会再隐藏一次），同时让 NSPanel（通知用的 `PopUp`）在应用失活时不自动隐藏；
+//! - **no-op 项**：`set_tool_window`（程序坞 / ⌘Tab 是整个应用的）、`set_owner`（mac 子窗口会跟着父窗口移动，语义不同）、
+//!   `set_round_corners`、`set_system_menu`、`ex_style`（恒 0）、`owner` / `class_name`（`None`）、嵌入桌面（`embed`）。
 
 use gpui_kit::{App, Bounds, DisplayId, Pixels, Window, point, px, size};
 
@@ -55,10 +77,19 @@ mod windows;
 #[cfg(windows)]
 use self::windows as imp;
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+use self::macos as imp;
+
+#[cfg(not(any(windows, target_os = "macos")))]
 mod fallback;
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 use self::fallback as imp;
+
+/// macOS 坐标换算：全平台编译，单测在 Linux 上也跑
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod mac_geometry;
 
 pub mod embed;
 pub mod fence_win;
@@ -66,7 +97,7 @@ pub mod file_dialog;
 #[cfg(windows)]
 mod subclass;
 
-/// 原生窗口句柄（Windows 上是 HWND 的整数值；其它平台不会出现）
+/// 原生窗口句柄（Windows 上是 HWND 的整数值；macOS 上是 NSWindow 的窗口号 `windowNumber`；其它平台不会出现）
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Hwnd(pub isize);
 
@@ -186,7 +217,7 @@ impl MonitorInfo {
     }
 }
 
-/// 窗口的原生句柄（只有 Windows 有）
+/// 窗口的原生句柄（Windows / macOS 有）
 pub fn hwnd(window: &Window) -> Option<Hwnd> {
     imp::hwnd(window)
 }
@@ -213,8 +244,9 @@ pub fn window_rect_physical(window: &Window) -> Option<PhysRect> {
     imp::window_rect_physical(window)
 }
 
-/// 按客户区（= 可见区域）一次性设置位置与尺寸（物理像素；换算成外框后 `SetWindowPos(SWP_NOZORDER | SWP_NOACTIVATE)`，
-/// 跨 DPI 时再校正；延后执行）。其它平台 no-op（GPUI 在 Linux 上不能移动窗口，需要改尺寸时调用方自己 `window.resize`）
+/// 按客户区（= 可见区域）一次性设置位置与尺寸（物理像素；Windows 换算成外框后 `SetWindowPos(SWP_NOZORDER | SWP_NOACTIVATE)`，
+/// 跨 DPI 时再校正；macOS `setFrame:display:`；延后执行）。Linux no-op（GPUI 在 Linux 上不能移动窗口，需要改尺寸时调用方自己
+/// `window.resize`）
 pub fn set_client_rect_physical(window: &Window, cx: &App, rect: PhysRect) {
     imp::set_client_rect_physical(window, cx, rect)
 }
@@ -224,7 +256,8 @@ pub fn set_client_position_physical(window: &Window, cx: &App, x: i32, y: i32) {
     imp::set_client_position_physical(window, cx, x, y)
 }
 
-/// 全部显示器（Windows：`EnumDisplayMonitors` 顺序；其它平台：GPUI 显示器，缩放按 1）
+/// 全部显示器（Windows：`EnumDisplayMonitors` 顺序；macOS：`NSScreen.screens` 顺序（主屏在前），`scale` 是统一系数；
+/// Linux：GPUI 显示器，缩放按 1）
 pub fn monitors(cx: &App) -> Vec<MonitorInfo> {
     imp::monitors(cx)
 }
@@ -251,13 +284,20 @@ pub fn monitor_at_cursor(cx: &App) -> Option<MonitorInfo> {
         .or_else(|| primary_monitor(cx))
 }
 
-/// 系统光标位置（物理像素；其它平台 `None`）
+/// 系统光标位置（物理像素；Linux `None`）
 pub fn cursor_position_physical() -> Option<(i32, i32)> {
     imp::cursor_position_physical()
 }
 
-/// 当前屏幕组合 ID（`"{n}_{W}x{H}@{scale%}_…"`；debug 下 `MINI_TODO_SCREEN_ID_FILE` 可覆盖）
+/// 当前屏幕组合 ID（`"{n}_{W}x{H}@{scale%}_…"`；debug 下 `MINI_TODO_SCREEN_ID_FILE` 可覆盖）。
+/// macOS 按各屏自己的缩放算（`MonitorInfo.scale` 是统一系数，见模块文档），与旧 Tauri 版一致
 pub fn screen_config_id(cx: &App) -> String {
+    #[cfg(target_os = "macos")]
+    let list = {
+        let _ = cx;
+        imp::screen_config_inputs()
+    };
+    #[cfg(not(target_os = "macos"))]
     let list: Vec<(u32, u32, f64)> = monitors(cx)
         .iter()
         .map(|m| {
@@ -269,6 +309,38 @@ pub fn screen_config_id(cx: &App) -> String {
         })
         .collect();
     mini_todo_core::settings::screen_config_id(&list)
+}
+
+/// 建窗参数：`WindowSpec.bounds`（全局逻辑坐标）→ 交给 GPUI 的 `window_bounds` 与 `display_id`。
+/// macOS 的 GPUI 要显示器本地坐标（以目标显示器左上角为原点），这里换算并补上目标显示器；Windows / Linux 原样返回
+pub fn creation_bounds(
+    cx: &App,
+    bounds: Bounds<Pixels>,
+    display_id: Option<DisplayId>,
+) -> (Bounds<Pixels>, Option<DisplayId>) {
+    #[cfg(target_os = "macos")]
+    {
+        mac_geometry::display_local_bounds(&monitors(cx), bounds, display_id)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = cx;
+        (bounds, display_id)
+    }
+}
+
+/// 窗口的逻辑 → 物理像素换算系数（本模块的"物理像素"口径）。Windows / Linux = GPUI `scale_factor()`；
+/// macOS = 统一系数（与窗口所在屏的 `backingScaleFactor` 不一定相同，见模块文档）
+pub fn physical_scale(window: &Window) -> f64 {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = window;
+        imp::physical_scale()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        f64::from(window.scale_factor())
+    }
 }
 
 /// 置顶 / 取消置顶（不激活；延后执行）
@@ -286,7 +358,7 @@ pub fn hide_window(window: &Window, cx: &App) {
     imp::hide_window(window, cx)
 }
 
-/// 是否可见（`IsWindowVisible`；其它平台恒 true）
+/// 是否可见（Windows `IsWindowVisible`、macOS `isVisible`；Linux 恒 true）
 pub fn is_window_visible(window: &Window) -> bool {
     imp::is_window_visible(window)
 }
@@ -309,7 +381,7 @@ pub fn set_resizable_frame(window: &Window, cx: &App, resizable: bool) {
     imp::set_resizable_frame(window, cx, resizable)
 }
 
-/// Win11 DWM 圆角（`DWMWCP_ROUND` / `DWMWCP_DONOTROUND`；不发窗口消息，立即执行；Win10 无效果）
+/// Win11 DWM 圆角（`DWMWCP_ROUND` / `DWMWCP_DONOTROUND`；不发窗口消息，立即执行；Win10 / macOS / Linux 无效果）
 pub fn set_round_corners(window: &Window, round: bool) {
     imp::set_round_corners(window, round)
 }
@@ -330,7 +402,7 @@ pub fn bring_to_front(window: &Window, cx: &App) {
     imp::bring_to_front(window, cx)
 }
 
-/// 立即执行的原始调用（Windows 实现；其它平台全部 no-op / `None`）。
+/// 立即执行的原始调用（Windows / macOS 实现；Linux 全部 no-op / `None`）。
 ///
 /// **只在 App 未被借用时调用**（`cx.spawn` 的 async 块里、`update` 闭包外）。
 impl Hwnd {
@@ -383,6 +455,11 @@ impl Hwnd {
     pub fn set_system_menu(self, on: bool) {
         imp::raw::set_system_menu(self, on)
     }
+    /// macOS：隐藏系统红绿灯、让 NSPanel 在应用失活时不自动隐藏（不触发 GPUI 回调，建窗后由
+    /// [`crate::windows::open_window`] 立即调用，免得建窗时就显示的窗口闪一下红绿灯）。Windows / Linux no-op
+    pub fn prepare_after_open(self) {
+        imp::raw::prepare_after_open(self)
+    }
     pub fn set_owner(self, owner: Option<Hwnd>) {
         imp::raw::set_owner(self, owner)
     }
@@ -406,14 +483,15 @@ impl Hwnd {
 ///
 /// GPUI 窗口（可缩放与否都一样）在左 / 右 / 下有系统不可见的边框，`GetWindowRect` 比界面大一圈（见模块文档）；
 /// 旧版 Tauri 无边框窗口的外框就是客户区，库里存的位置 / 尺寸也是客户区——主窗口的保存、恢复与贴边计算、收纳箱的
-/// 几何落库都用它。其它平台 = `window_rect_physical`
+/// 几何落库都用它。macOS / Linux = `window_rect_physical`（没有不可见边框）
 pub fn client_rect_physical(window: &Window) -> Option<PhysRect> {
     imp::client_rect_physical(window)
 }
 
 /// 固定模式的几何锁定：边框缩放热区、标题栏拖动区、系统菜单 / 键盘的移动与缩放一律不响应
 /// （Windows 子类化 `WM_NCHITTEST` / `WM_SYSCOMMAND`；GPUI 的缩放热区按建窗时的 `is_resizable`，没有运行时开关）。
-/// 延后执行；其它平台 no-op（拖动区由界面自己不渲染）
+/// 延后执行；macOS `setMovable:NO` + 去掉可缩放（AppKit 按 style mask 处理缩放，运行时改了就生效）；Linux no-op
+/// （拖动区由界面自己不渲染）
 pub fn set_geometry_locked(window: &Window, cx: &App, locked: bool) {
     imp::set_geometry_locked(window, cx, locked)
 }
@@ -438,7 +516,8 @@ impl Hwnd {
     pub fn set_geometry_locked(self, locked: bool) {
         imp::raw::set_geometry_locked(self, locked)
     }
-    /// 激活并带到前台（`SetForegroundWindow`；被前台锁限制时只会闪任务栏，调用方再配合 `activate_window`）
+    /// 激活并带到前台（Windows `SetForegroundWindow`，被前台锁限制时只会闪任务栏，调用方再配合 `activate_window`；
+    /// macOS 应用切到前台 + `makeKeyAndOrderFront:`）
     pub fn set_foreground(self) -> bool {
         imp::raw::set_foreground(self)
     }

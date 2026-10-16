@@ -97,7 +97,8 @@ impl NotificationWindow {
             reminder::fit_to_actual_size(self.area, self.slot, self.placed_for, actual)
         {
             self.placed_for = actual;
-            let scale = f64::from(window.scale_factor());
+            // 逻辑 → 本 crate 的物理像素口径（Windows / Linux = scale_factor；macOS 是统一系数，见 platform 模块文档）
+            let scale = platform::physical_scale(window);
             platform::set_client_position_physical(
                 window,
                 cx,

@@ -62,9 +62,10 @@ src/
 │   └── gallery.rs    控件样例（仅调试）
 ├── ui/               Element Plus 风格共享控件（见 §4.4，每种控件只有一个实现）
 ├── services/         进程级服务（见 §4.2）
-└── platform/         GPUI 没有的窗口能力（见 §4.5）：mod.rs 跨平台接口、windows.rs（Win32）、fallback.rs（Linux）、
-                      embed.rs（嵌入桌面层）、subclass.rs（窗口子类过程）、fence_win.rs（系统取色对话框）、
-                      file_dialog.rs（带过滤器的打开 / 保存对话框）
+└── platform/         GPUI 没有的窗口能力（见 §4.5）：mod.rs 跨平台接口、windows.rs（Win32）、
+                      macos/（mod.rs GPUI 胶水 + ns.rs AppKit 原始调用，objc2）、mac_geometry.rs（macOS 坐标换算，
+                      全平台编译带单测）、fallback.rs（Linux）、embed.rs（嵌入桌面层）、subclass.rs（窗口子类过程）、
+                      fence_win.rs（系统取色对话框）、file_dialog.rs（带过滤器的打开 / 保存对话框）
 ```
 
 ### 2.1 维护规则
@@ -75,7 +76,7 @@ src/
 | 新颜色 / 尺寸 | 加到 `theme.rs` 对应窗口的分节里，数值照抄 UI 规格；界面代码不写字面量颜色 |
 | 跨窗口共享状态 | 放 `AppState`（注明由谁维护）；只属于某个窗口的状态放在该窗口的视图实体里 |
 | 新窗口种类 | `WindowKind` + 窗口模块的 `open()`（走 `WindowManager::open_child`）；需要截图时在 `DebugOpen` / `parse_debug_open` / `open_debug` 加一项并更新 `scripts/README.md` |
-| 新平台能力 | 加在 `platform/`（Windows 实现 + `fallback.rs` 的 no-op / 近似），不要在窗口代码里直接调 Win32 |
+| 新平台能力 | 加在 `platform/`（Windows 实现 + macOS 实现 + `fallback.rs` 的 no-op / 近似），不要在窗口代码里直接调 Win32 / AppKit。macOS 的 objc2 调用写进 `platform/macos/ns.rs`（不依赖 GPUI，`scripts/mac-check` 能在 Linux 上交叉检查），坐标换算写进 `mac_geometry.rs`（Linux 上跑单测），`macos/mod.rs` 只做胶水 |
 | 新依赖 | 加在 `Cargo.toml` 并注明用途；`windows` crate 缺 feature 时追加到列表末尾（与 gpui 同为 0.62，不要再引入一份） |
 | 新 debug 开关 | 只在 `cfg(debug_assertions)` 下读取（release 一律忽略），写进 §5 与 `scripts/README.md` |
 | 改动可见界面 | 跑 `scripts/regress.py`（相关场景 `--only`），对照图逐张看过再提交 |
@@ -83,8 +84,8 @@ src/
 ## 3. 约定（必读）
 
 1. **颜色 / 尺寸只从 `theme.rs` 取**；文案逐字照抄规格。日志一律 `log::*`（落盘），不要 `println!`。
-2. **字体**：每个窗口根元素 `.font(theme::ui_font())`（Windows `Segoe UI` + `Microsoft YaHei` 回退；Linux `Liberation Sans` +
-   `Noto Sans CJK SC`）、`.text_size(theme::FONT_SIZE)`、`.line_height(relative(theme::LINE_HEIGHT))`。待办标题等用户字体用
+2. **字体**：每个窗口根元素 `.font(theme::ui_font())`（Windows `Segoe UI` + `Microsoft YaHei` 回退；macOS 系统界面字体
+   `.SystemUIFont` + `PingFang SC`；Linux `Liberation Sans` + `Noto Sans CJK SC`）、`.text_size(theme::FONT_SIZE)`、`.line_height(relative(theme::LINE_HEIGHT))`。待办标题等用户字体用
    `theme::todo_font(&state.todo_font_family)`。CSS `font-weight: 600` → `theme::WEIGHT_SEMIBOLD`，`500` → Regular。
 3. **窗口外观**：全部无系统标题栏（`WindowSpec::options()` 已处理）；主窗口 / 通知 / 收纳箱 `spec.transparent = true`
    （Root 背景自动覆盖为透明，界面自己画圆角底色）；其它窗口不透明白底。
@@ -98,12 +99,15 @@ src/
 6. **拖动窗口**：普通标题栏用 `ui::title_bar::drag_region()`（放第一个子元素，Windows 上走系统 `HTCAPTION`：贴边分屏、
    可缩放窗口双击最大化）；拖动区之上的可交互元素必须 `.occlude()`（`EpButton` 已是），文字不用。需要"移动 3px 才拖"时
    自己在 `on_mouse_move` 里调 `platform::begin_window_drag(window, cx)`。Windows 上 `window.start_window_move()` 是空操作。
+   macOS 上标题栏同样是自绘的：系统红绿灯建窗后由 `open_window` 隐藏，`WindowSpec` 设了 `app_owns_titlebar_drag`（AppKit 不再从
+   顶部标题栏区域拖窗、不延迟标题栏上的点击），拖动走 `start_window_move`。
 7. **GPUI 没有 z-index**：后绘制者在上；浮层用 `deferred(anchored()…)`（弹层统一走 `ui::ep_popper::popper`）。消息 / 确认框由
    `UiLayer` 插件画在 Root 之上，窗口视图不用管。圆角容器裁不掉子元素背景（内容遮罩只有矩形）。
 8. **SVG 图标必须设颜色**才会绘制（`ui::icon::icon(source, size, color)` 已处理）。本地图片用 `img(PathBuf)`（`&str` 会被当成 URI）。
 9. **QuitMode::Explicit**：进程何时退出由应用自己决定 —— Windows 上主窗口关闭后若已没有别的窗口就 `cx.quit()`
    （收纳箱 / 编辑等窗口还开着时进程继续，托盘可再唤起主窗口；见 `windows/main_window.rs`），托盘「退出」直接退出；
-   Linux 没有托盘，最后一个窗口关闭时退出（`lib.rs`）。
+   macOS 关掉窗口（含主窗口、⌘W）都不退出，菜单栏图标常驻，点 Dock 图标（`mac_menu::on_reopen`）或菜单栏图标再唤起主窗口，
+   ⌘Q / 应用菜单 / 菜单栏图标「退出」退出；Linux 没有托盘，最后一个窗口关闭时退出（`lib.rs`）。
 10. **键盘**：键绑定的 action 先于 `on_key_down` 派发；编辑类窗口的 Esc / Ctrl+Enter 是 action，弹层打开时由窗口自己先收起弹层
     （`any_popup_open` / `close_popups`），控件自身的 Esc 处理只在没有绑定的窗口里生效。
 
@@ -162,7 +166,8 @@ cx.subscribe_in(&state, window, |_, _, e: &AppStateEvent, window, cx| …)  // �
 | `tray` | 托盘 / 菜单栏图标（Windows、macOS）：添加待办 / 设置 / 固定模式勾选 / 开机自启勾选 / 收纳箱三个入口（仅 Windows）/ 重置位置 / 退出；左键单击唤起（300ms 去抖）。图标：Windows exe 资源；macOS 模板图标 `assets/tray-template.png`（36×36，`scripts/macos/gen-tray-icon.py` 生成）。Linux 为 no-op |
 | `scheduler` | 提醒调度：启动 5s 后补发错过的重复提醒，此后对齐整分钟 `run_due`；系统通知走 `notify`（macOS 经通道交给前台、交出即视为已投递），应用内通知经通道交给前台建窗（建窗失败不推进、下一分钟重试） |
 | `notify` | 系统通知：Windows Toast（AppUserModelID 与旧版一致；notify-rust）；macOS GPUI `show_system_notification`（`UNUserNotificationCenter`，归属 bundle id `com.tauri-app.mini-todo`，需从 ad-hoc 签名的 `.app` 启动，拿不到投递结果） |
-| `window_mode` | 主窗口普通 / 经典固定 / 固定 + 嵌入桌面、贴边隐藏与唤起、位置 / 尺寸与屏幕配置记忆（防抖保存）、托盘唤起 / 重置位置、200ms 轮询（Explorer 重启重挂、样式自愈） |
+| `window_mode` | 主窗口普通 / 经典固定 / 固定 + 嵌入桌面、贴边隐藏与唤起、位置 / 尺寸与屏幕配置记忆（防抖保存）、托盘唤起 / 重置位置、200ms 轮询（Explorer 重启重挂、样式自愈）。macOS 同一套（固定 = `setMovable:NO` + 不可缩放，置顶 = 浮动层级，无嵌入桌面）；唤起前先 `cx.activate(true)` |
+| `mac_menu` | macOS 应用菜单：Mini Todo（关于 / 设置… ⌘, / 服务 / 隐藏 ⌘H / 隐藏其他 ⌥⌘H / 全部显示 / 退出 ⌘Q）、编辑（撤销 / 重做 / 剪切 / 拷贝 / 粘贴 / 全选，动作是输入框的 `input::*`，剪切等映射系统选择器）、窗口（最小化 ⌘M / 关闭窗口 ⌘W）；`on_reopen`（Dock / Finder 唤起主窗口）。全平台编译，只在 macOS 上由 `lib.rs` 调用 |
 | `update_check` | GitHub 最新 release：`check_for_updates(cx)`（启动，失败静默）、`check(cx) -> Task<Result<UpdateInfo, String>>`（设置「关于 → 检查更新」）、`releases_url(cx)`；结果写进 `AppState.has_update / latest_version / release_url` |
 | `fences` | 桌面收纳箱生命周期：建窗 + 嵌入、启动恢复、新增 / 显示隐藏 / 重置位置、目录监听 → 前台刷新、200ms 嵌入守护、约 2 秒一次的屏幕组合检测 |
 
@@ -239,13 +244,14 @@ editor::open(cx, Some(parent), None, EditorMode::Edit);
 
 | 函数（`&Window` 版写操作自动延后执行） | 说明 |
 |---|---|
-| `hwnd(window) -> Option<Hwnd>` | 只有 Windows 有 |
-| `begin_window_drag(window, cx)` / `toggle_maximize(window, cx)` | 程序化拖动（Windows：延后 `ReleaseCapture` + `WM_NCLBUTTONDOWN/HTCAPTION`；Linux：`start_window_move`） |
-| `client_rect_physical(window)` / `set_client_rect_physical(window, cx, rect)` / `set_client_position_physical(window, cx, x, y)`、`window_rect_physical(window)`、`set_geometry_locked(window, cx, b)` | 物理像素几何，**一律按客户区（= 可见区域）**：GPUI 窗口在左 / 右 / 下有不可见边框（96 DPI 各 8px，可缩放与否都有），外框只用于换算；设置时换算成外框 `SetWindowPos(NOZORDER\|NOACTIVATE)`，跨 DPI 按新边框再校正（Linux 无法移动窗口，no-op）；固定模式锁定位置与尺寸 |
-| `monitors(cx)` / `primary_monitor` / `monitor_of_window(window, cx)` / `monitor_at_cursor(cx)` | `MonitorInfo { display_id, rect, work, scale, primary }`（物理像素；`logical_rect()` / `logical_work()`）；Linux 缩放按 1 |
-| `cursor_position_physical()`、`screen_config_id(cx)` | 光标（Linux `None`）、屏幕组合 ID（debug 下 `MINI_TODO_SCREEN_ID_FILE` 可覆盖） |
-| `set_topmost` / `show_window`（不激活）/ `hide_window` / `is_window_visible` / `set_tool_window` / `set_minimizable` / `set_resizable_frame` / `set_owner` / `restore_if_minimized` / `bring_to_front` / `set_round_corners` | 窗口样式与显隐；`set_resizable_frame` 只改系统样式，缩放热区由 `subclass` 锁定 |
-| `Hwnd::{rect, set_rect, set_position, client_rect, set_client_rect, set_client_position, set_topmost, show, hide, is_visible, is_minimized, restore, is_alive, ex_style, set_tool_window, set_minimizable, set_resizable_frame, set_system_menu, set_geometry_locked, set_owner, owner, set_foreground, set_round_corners, class_name}` | 立即执行的原始调用（只在 App 未借用时）；`set_system_menu` 只有 `open_window` 建窗后用（去掉 `WS_SYSMENU`，所有 GPUI 窗口都不带它） |
+| `hwnd(window) -> Option<Hwnd>` | Windows HWND；macOS NSWindow 的窗口号（每次调用都在 `NSApp.windows` 里重新找，不存对象指针）；Linux `None` |
+| `begin_window_drag(window, cx)` / `toggle_maximize(window, cx)` | 程序化拖动（Windows：延后 `ReleaseCapture` + `WM_NCLBUTTONDOWN/HTCAPTION`；macOS / Linux：`start_window_move`） |
+| `client_rect_physical(window)` / `set_client_rect_physical(window, cx, rect)` / `set_client_position_physical(window, cx, x, y)`、`window_rect_physical(window)`、`set_geometry_locked(window, cx, b)` | 物理像素几何，**一律按客户区（= 可见区域）**：GPUI 窗口在左 / 右 / 下有不可见边框（96 DPI 各 8px，可缩放与否都有），外框只用于换算；设置时换算成外框 `SetWindowPos(NOZORDER\|NOACTIVATE)`，跨 DPI 按新边框再校正；macOS `setFrame:display:`（frame = 客户区）；Linux 无法移动窗口，no-op；固定模式锁定位置与尺寸（macOS `setMovable:NO` + 去掉可缩放） |
+| `monitors(cx)` / `primary_monitor` / `monitor_of_window(window, cx)` / `monitor_at_cursor(cx)` | `MonitorInfo { display_id, rect, work, scale, primary }`（物理像素；`logical_rect()` / `logical_work()`）；macOS `NSScreen.screens`（主屏在前），物理像素 = 全局点坐标 × 统一系数（所有屏 `backingScaleFactor` 的最大值，单屏 / 同缩放时与 2.5.0 逐像素一致，见 `mac_geometry` 模块文档），`scale` 恒为统一系数；Linux 缩放按 1 |
+| `cursor_position_physical()`、`screen_config_id(cx)` | 光标（macOS `NSEvent.mouseLocation`；Linux `None`）、屏幕组合 ID（macOS 按各屏自己的缩放，与 2.5.0 一致；debug 下 `MINI_TODO_SCREEN_ID_FILE` 可覆盖） |
+| `creation_bounds(cx, bounds, display_id)` / `physical_scale(window)` | 建窗参数换算（macOS 的 GPUI 按显示器本地坐标建窗，`open_window` 已处理；其它平台原样）/ 逻辑 → 物理像素的系数（Windows / Linux = `scale_factor()`，macOS = 统一系数） |
+| `set_topmost` / `show_window`（不激活）/ `hide_window` / `is_window_visible` / `set_tool_window` / `set_minimizable` / `set_resizable_frame` / `set_owner` / `restore_if_minimized` / `bring_to_front` / `set_round_corners` | 窗口样式与显隐；`set_resizable_frame` 只改系统样式，缩放热区由 `subclass` 锁定。macOS：置顶 = `NSFloatingWindowLevel`，显示 `orderFrontRegardless` / 隐藏 `orderOut:`，可缩放 / 可最小化改 style mask（运行时生效）；`set_tool_window` / `set_owner` / `set_round_corners` 是 no-op |
+| `Hwnd::{rect, set_rect, set_position, client_rect, set_client_rect, set_client_position, set_topmost, show, hide, is_visible, is_minimized, restore, is_alive, ex_style, set_tool_window, set_minimizable, set_resizable_frame, set_system_menu, set_geometry_locked, set_owner, owner, set_foreground, set_round_corners, class_name}` | 立即执行的原始调用（只在 App 未借用时）；`set_system_menu` 只有 `open_window` 建窗后用（去掉 `WS_SYSMENU`，所有 GPUI 窗口都不带它）；`prepare_after_open` 同样只有 `open_window` 用（macOS：隐藏红绿灯、NSPanel 不随应用失活隐藏；其它平台 no-op） |
 | `embed::{desktop_host, attach_to_desktop, detach_from_desktop, set_always_on_bottom, needs_reattach}` | 嵌入桌面层：owner = Progman + 永远置底（`subclass::FLAG_BOTTOM`）+ `WS_EX_TOOLWINDOW`；主窗口与收纳箱共用；非 Windows 为安全空实现 |
 | `subclass::set_flag(hwnd, FLAG_BOTTOM \| FLAG_LOCK_GEOMETRY, on)` | `SetWindowSubclass` 子类过程：置底（`WM_WINDOWPOSCHANGING`）、固定模式锁定位置与尺寸（`WM_NCHITTEST` / `WM_SYSCOMMAND`） |
 | `fence_win::choose_color(cx, owner, initial) -> Task<Option<(u8, u8, u8)>>` | 收纳箱「自定义颜色」：Windows `ChooseColorW`（独立线程）；其它平台 `None` |
@@ -268,8 +274,12 @@ editor::open(cx, Some(parent), None, EditorMode::Edit);
 
 - Windows 行为（DirectComposition 透明、owner、DWM 圆角、HTCAPTION 拖动、嵌入桌面与收纳箱、单实例、托盘、Toast、DPAPI、
   开机自启）在 Linux 上只做了交叉 `clippy`，需要实机验收。
+- macOS 的 GPUI 胶水（`platform/macos/mod.rs`、`lib.rs` 里 `cfg(target_os = "macos")` 的几行）只有 CI 的 macOS 作业能编译；
+  `platform/macos/ns.rs` 可在 Linux 上用 `scripts/mac-check` 交叉检查，`mac_geometry.rs` / `services/mac_menu.rs` 全平台编译。
+  真机行为（红绿灯是否全部隐藏、Retina / 多屏摆窗、固定模式、通知面板在应用失活时是否显示）只能靠 CI 截图与用户反馈。
 - debug 构建的 Windows exe 在运行时从构建机 cargo registry 编译着色器，只能在构建它的机器上运行；release 必须在装了
   Windows SDK（`fxc.exe`）的 Windows 上构建。
 - Xvfb 下透明窗口的透明像素截图为黑色（无合成器）；GPUI 在光标离开窗口后不清除悬停（回归脚本会把光标停在空白处）。
 - Linux 上没有系统字体枚举（core `settings::system_fonts` 只在 Windows 实现，与旧版相同），设置里的字体下拉显示 `No data`。
+  macOS 用 GPUI 的 CoreText 枚举（`text_system().all_font_names()`，去掉 `.` 开头的私有字体）。
 - Markdown 编辑是"源码 + 预览"（旧版 Milkdown 所见即所得无法 1:1 还原，PRD D7）。

@@ -20,7 +20,8 @@
 //! （打开方 `cx.observe_global::<WindowManager>` 重绘），并执行打开时登记的关闭回调（刷新数据等）。
 //!
 //! Windows 上子窗口以打开方为 owner（始终在打开方之上、不单独占任务栏按钮），与旧版 Tauri `parent` 一致；
-//! 托盘「添加待办项」打开的编辑窗口仍以主窗口为模态打开方，但没有 owner（[`ChildOf::unowned`]）。
+//! 托盘「添加待办项」打开的编辑窗口仍以主窗口为模态打开方，但没有 owner（[`ChildOf::unowned`]）。macOS 上没有 owner
+//! 关系（`platform::set_owner` 是 no-op），模态语义只靠遮罩与 [`WindowManager::forward_activation`]。
 
 pub mod completed;
 pub mod editor;
@@ -150,7 +151,7 @@ pub fn centered_bounds(
 pub struct WindowSpec {
     /// 系统窗口标题（任务栏 / Alt+Tab）
     pub title: SharedString,
-    /// 客户区（= 可见区域）的逻辑矩形，`display_id` 显示器上的逻辑坐标
+    /// 客户区（= 可见区域）的逻辑矩形（全局逻辑坐标；macOS 上由 [`open_window`] 换成 GPUI 要的显示器本地坐标）
     pub bounds: Bounds<Pixels>,
     /// 客户区的精确物理矩形（主窗口按屏幕配置恢复、收纳箱按库里的几何）。`None` 时取 `bounds` × 目标显示器缩放。
     /// 建窗后 [`open_window`] 按它校正一次（GPUI 按 `bounds` 建出的客户区会偏，见 `platform` 模块文档）
@@ -196,6 +197,9 @@ impl WindowSpec {
             show: self.show,
             kind: self.kind.clone(),
             is_movable: true,
+            // 只对 macOS 生效：标题栏都是自绘的（非 Windows 按下时 `start_window_move`），整个内容区由应用处理，
+            // AppKit 不再从顶部那条标题栏区域拖窗、也不为区分双击而延迟标题栏上的点击
+            app_owns_titlebar_drag: true,
             is_resizable: self.resizable,
             is_minimizable: self.minimizable,
             display_id: self.display_id,
@@ -219,7 +223,14 @@ pub fn open_window<V: Render>(
     build: impl FnOnce(&mut Window, &mut App) -> Entity<V>,
 ) -> gpui_kit::Result<WindowHandle<Root>> {
     let transparent = spec.transparent;
-    let handle = cx.open_window(spec.options(), move |window, cx| {
+    let mut options = spec.options();
+    if let Some(WindowBounds::Windowed(bounds)) = options.window_bounds {
+        // macOS 的 GPUI 按显示器本地坐标建窗；Windows / Linux 原样
+        let (bounds, display_id) = platform::creation_bounds(cx, bounds, options.display_id);
+        options.window_bounds = Some(WindowBounds::Windowed(bounds));
+        options.display_id = display_id;
+    }
+    let handle = cx.open_window(options, move |window, cx| {
         let view = build(window, cx);
         cx.new(|cx| {
             let root = Root::new(view, window, cx);
@@ -255,7 +266,10 @@ fn client_target(spec: &WindowSpec, monitors: &[MonitorInfo]) -> PhysRect {
 /// 这个前台任务在 `open_window` 返回前就已排队，窗口代码之后排的 Win32 操作（通知按真实尺寸再摆、主窗口切模式、
 /// 收纳箱嵌入桌面后再显示）都在它后面执行——所以隐藏建窗的窗口（收纳箱）显示时已经没有标题栏按钮。
 /// 建窗时就显示的窗口（`spec.show`，GPUI 在建窗过程中就已显示）从显示到这个任务执行之间仍带着 `WS_SYSMENU`。
-/// 其它平台没有 HWND，不做
+///
+/// macOS：建好后**立即**隐藏系统红绿灯（[`Hwnd::prepare_after_open`]，不触发 GPUI 回调，建窗时就显示的窗口也不会闪一下）；
+/// 上面两件事里第 1 件是 no-op，第 2 件按物理像素校正（GPUI 按显示器本地坐标建窗时已经摆对，通常不再移动）。
+/// Linux 没有原生句柄，不做
 fn adjust_native_window(cx: &mut App, handle: AnyWindowHandle, spec: &WindowSpec) {
     let Some(hwnd) = cx
         .update_window(handle, |_, window, _| platform::hwnd(window))
@@ -264,11 +278,18 @@ fn adjust_native_window(cx: &mut App, handle: AnyWindowHandle, spec: &WindowSpec
     else {
         return;
     };
+    hwnd.prepare_after_open();
     let target = client_target(spec, &platform::monitors(cx));
+    // macOS：NSPanel（通知用的 `PopUp`）建窗时还带着默认的 hidesOnDeactivate，应用不在前台时可能刚显示就被藏起来；
+    // prepare_after_open 已关掉这个行为，这里对本该显示的窗口补一次显示。Windows / Linux 不做
+    let reshow = spec.show && cfg!(target_os = "macos");
     cx.spawn(async move |_| {
         // 先改样式再摆窗：SWP_FRAMECHANGED 之后量到的边框才是最终的（WS_SYSMENU 本身不改边框厚度）
         hwnd.set_system_menu(false);
         hwnd.set_client_rect(target);
+        if reshow && !hwnd.is_visible() {
+            hwnd.show();
+        }
     })
     .detach();
 }

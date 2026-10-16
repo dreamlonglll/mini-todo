@@ -1,5 +1,5 @@
-//! 非 Windows（Linux：CI 与 Xvfb 截图）：用 GPUI 自带能力近似，做不到的是 no-op。
-//! 缩放按 GPUI 的 `scale_factor` / 1.0（截图脚本设 `GPUI_X11_SCALE_FACTOR=1`）。
+//! Linux（及其它非 Windows / macOS 平台；只用于 CI 与 Xvfb 截图）：用 GPUI 自带能力近似，做不到的是 no-op。
+//! 缩放按 GPUI 的 `scale_factor` / 1.0（截图脚本设 `GPUI_X11_SCALE_FACTOR=1`）。macOS 有自己的实现（`macos/`）。
 
 use gpui_kit::{App, Window};
 
@@ -149,4 +149,5 @@ pub mod raw {
     pub fn set_foreground(_hwnd: Hwnd) -> bool {
         false
     }
+    pub fn prepare_after_open(_hwnd: Hwnd) {}
 }

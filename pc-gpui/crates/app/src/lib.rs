@@ -2,9 +2,9 @@
 //!
 //! 模块都是 `pub` 的：基础框架提供的接口在各窗口实现之前还没有调用方，作为库导出不会被当成死代码。
 //!
-//! 启动顺序：日志 → 单实例 → 数据库（失败弹原生消息框后退出）→ `Application`（`QuitMode::Explicit`，托盘常驻）
-//! → `gpui_kit::init` → 主题 → 浮层插件 → 全局状态 → 单实例唤起监听 → 主窗口 → 加载设置与待办
-//! →（debug）`MINI_TODO_DEBUG_OPEN` 指定的窗口。
+//! 启动顺序：日志 → 单实例 → 数据库（失败弹原生消息框后退出）→ `Application`（`QuitMode::Explicit`，托盘常驻；
+//! macOS 另注册 Dock 唤起）→ `gpui_kit::init` → 主题 →（macOS）应用菜单 → 浮层插件 → 全局状态 → 单实例唤起监听 → 主窗口
+//! → 加载设置与待办 →（debug）`MINI_TODO_DEBUG_OPEN` 指定的窗口。
 //!
 //! 托盘、提醒调度、自动同步、200ms 窗口守护等后台服务由各窗口实现者接到 `services/` 与对应窗口里。
 
@@ -49,54 +49,61 @@ pub fn run() {
     let database = Arc::new(open_database_or_exit());
     let debug_open = debug_open_items();
 
-    gpui_kit::application()
+    let app = gpui_kit::application()
         .with_assets(AppAssets)
-        .with_quit_mode(QuitMode::Explicit)
-        .run(move |cx| {
-            gpui_kit::init(cx);
-            cx.set_app_identity(APP_IDENTIFIER, APP_NAME);
-            gpui_kit::component::set_locale("zh-CN");
-            theme::init(cx);
-            ui::layers::UiLayer::register(cx);
-            db::Db::init(cx, database);
-            windows::WindowManager::init(cx);
-            let state = AppState::init(cx);
+        .with_quit_mode(QuitMode::Explicit);
+    // macOS：点 Dock 图标 / 在 Finder 里再次打开已运行的应用（没有可见窗口时）唤起主窗口
+    #[cfg(target_os = "macos")]
+    app.on_reopen(services::mac_menu::on_reopen);
+    app.run(move |cx| {
+        gpui_kit::init(cx);
+        cx.set_app_identity(APP_IDENTIFIER, APP_NAME);
+        gpui_kit::component::set_locale("zh-CN");
+        theme::init(cx);
+        // macOS：应用菜单（⌘Q / ⌘, / ⌘W、编辑菜单）。GPUI 不会自动建，没有它就没有 ⌘Q
+        #[cfg(target_os = "macos")]
+        services::mac_menu::init(cx);
+        ui::layers::UiLayer::register(cx);
+        db::Db::init(cx, database);
+        windows::WindowManager::init(cx);
+        let state = AppState::init(cx);
 
-            services::single_instance::listen(cx, windows::main_window::show_and_activate);
+        services::single_instance::listen(cx, windows::main_window::show_and_activate);
 
-            // 非 Windows 没有托盘：最后一个窗口关掉就退出
-            #[cfg(not(target_os = "windows"))]
-            cx.on_window_closed(|cx, _| {
-                if cx.windows().is_empty() {
-                    cx.quit();
-                }
-            })
-            .detach();
-
-            windows::main_window::open(cx);
-
-            // 后台服务：托盘（Windows）、自动同步定时器、提醒调度、恢复收纳箱窗口（Windows）
-            services::tray::start(cx);
-            services::auto_sync::start(cx);
-            services::scheduler::start(cx);
-            windows::fence::restore_all(cx);
-
-            // 开机自启自愈：已开启时把注册表里的路径刷新为当前 exe（开发隔离时跳过，自启项与安装版共用）
-            if paths::dev_data_dir_override().is_none() {
-                cx.background_executor()
-                    .spawn(async { services::autostart::refresh_if_enabled() })
-                    .detach();
+        // Linux（只用于 CI 与截图）没有托盘：最后一个窗口关掉就退出。Windows / macOS 由托盘（菜单栏图标）常驻，
+        // 主窗口关掉后从托盘 / Dock 再唤起
+        #[cfg(target_os = "linux")]
+        cx.on_window_closed(|cx, _| {
+            if cx.windows().is_empty() {
+                cx.quit();
             }
+        })
+        .detach();
 
-            let load = state.update(cx, |state, cx| state.load_initial(cx));
-            cx.spawn(async move |cx| {
-                load.await;
-                if !debug_open.is_empty() {
-                    cx.update(|cx| windows::open_debug(cx, &debug_open));
-                }
-            })
-            .detach();
-        });
+        windows::main_window::open(cx);
+
+        // 后台服务：托盘（Windows / macOS）、自动同步定时器、提醒调度、恢复收纳箱窗口（Windows）
+        services::tray::start(cx);
+        services::auto_sync::start(cx);
+        services::scheduler::start(cx);
+        windows::fence::restore_all(cx);
+
+        // 开机自启自愈：已开启时把注册表里的路径刷新为当前 exe（开发隔离时跳过，自启项与安装版共用）
+        if paths::dev_data_dir_override().is_none() {
+            cx.background_executor()
+                .spawn(async { services::autostart::refresh_if_enabled() })
+                .detach();
+        }
+
+        let load = state.update(cx, |state, cx| state.load_initial(cx));
+        cx.spawn(async move |cx| {
+            load.await;
+            if !debug_open.is_empty() {
+                cx.update(|cx| windows::open_debug(cx, &debug_open));
+            }
+        })
+        .detach();
+    });
 }
 
 /// `MINI_TODO_DEBUG_OPEN`（仅 debug 构建读取）：启动后额外打开的窗口，格式见 `pc-gpui/scripts/README.md`

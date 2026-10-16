@@ -13,6 +13,7 @@
 //! | [`window_mode`] | 主窗口固定 / 嵌入桌面 / 贴边隐藏、位置与屏幕配置记忆、托盘唤起、重置位置、200ms 轮询 |
 //! | [`update_check`] | GitHub 版本检查（启动检查 + 设置「关于 → 检查更新」共用） |
 //! | [`fences`] | 桌面收纳箱生命周期：恢复 / 新建 / 显示隐藏 / 重置位置、目录监听、嵌入守护、屏幕组合检测 |
+//! | [`mac_menu`] | macOS 应用菜单（⌘Q / ⌘, / ⌘H / ⌘W / ⌘M、编辑菜单）与 Dock 唤起（全平台编译，只在 macOS 上调用） |
 //!
 //! 启动顺序见 `lib.rs::run`：`tray::start` → `auto_sync::start` → `scheduler::start` → `fences` 恢复。
 
@@ -20,6 +21,7 @@ pub mod auto_sync;
 pub mod autostart;
 pub mod fences;
 pub mod logging;
+pub mod mac_menu;
 pub mod notify;
 pub mod scheduler;
 pub mod single_instance;
