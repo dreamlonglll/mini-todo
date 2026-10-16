@@ -2,6 +2,9 @@
 //! `路径|修改时间|档位` 只请求一次）、单选与双击打开、自绘深色右键菜单（主页 / 「移动到…」页）、箱内拖动排序、
 //! Ctrl+滚轮调图标大小（40ms 节流、400ms 防抖落库）。
 //!
+//! 隐藏项（用户右键「隐藏」+ 以 `.` 开头的自动隐藏）：`items` 是全部项目，网格只排 [`FenceWindow::display_items`]——
+//! 没开「显示隐藏的图标」时去掉隐藏项，开了时隐藏项半透明显示；拖动排序只排显示项，松手后把隐藏项按原位置并回完整顺序。
+//!
 //! 布局：单元宽 = 图标 + 40，从左上排起、右侧空白不拉伸，行间 2px、列间 0（CSS `grid auto-fill` 的等价物：
 //! 固定宽度单元的 flex-wrap，同一行等高）。默认 368 宽的收纳箱内容区 350 < 4 × 88，与旧版实际渲染一样排 3 列。
 
@@ -27,6 +30,9 @@ use crate::services::fences as runtime;
 use crate::theme::{self, fence_tokens};
 use crate::ui::icon::{icon, spinning};
 use crate::ui::message;
+
+/// 右键菜单里点文件「取消隐藏」禁用时的说明
+const AUTO_HIDDEN_NOTE: &str = "以 . 开头的项目自动隐藏";
 
 /// 图标状态
 #[derive(Debug, Clone, PartialEq)]
@@ -127,7 +133,7 @@ pub(crate) fn break_all(text: &str) -> String {
 }
 
 /// 带 1px 下移阴影的文字（CSS `text-shadow` 的近似：GPUI 没有文字阴影）
-fn shadowed_name(text: SharedString) -> impl IntoElement {
+fn shadowed_name(text: SharedString) -> gpui_kit::Div {
     let text: SharedString = break_all(&text).into();
     let t = fence_tokens();
     let base = || {
@@ -153,7 +159,7 @@ fn shadowed_name(text: SharedString) -> impl IntoElement {
         .child(base().relative().child(text))
 }
 
-/// 单元内容（图标框 + 名称）
+/// 单元内容（图标框 + 名称）。隐藏项（只在「显示隐藏的图标」打开时出现）的图标与名字整体半透明
 fn render_cell_body(
     entry: &FenceEntry,
     icon_path: Option<&PathBuf>,
@@ -162,6 +168,8 @@ fn render_cell_body(
     icon_size: f32,
 ) -> gpui_kit::Div {
     let t = fence_tokens();
+    // 半透明加在图标框与名字上，不加在返回的外层元素上：调用方（拖动克隆体）会给外层设自己的不透明度
+    let dimmed = entry.is_hidden();
     let glyph: AnyElement = match icon_path {
         Some(path) => img(ImageSource::from(path.clone()))
             .size_full()
@@ -187,6 +195,9 @@ fn render_cell_body(
                 .flex()
                 .items_center()
                 .justify_center()
+                .when(dimmed, |this| {
+                    this.opacity(theme::FENCE_HIDDEN_ITEM_OPACITY)
+                })
                 .child(
                     div()
                         .size_full()
@@ -211,7 +222,11 @@ fn render_cell_body(
                     )
                 }),
         )
-        .child(shadowed_name(entry.display_name.clone().into()))
+        .child(
+            shadowed_name(entry.display_name.clone().into()).when(dimmed, |this| {
+                this.opacity(theme::FENCE_HIDDEN_ITEM_OPACITY)
+            }),
+        )
 }
 
 /// 图标加载失败的占位：文件夹 `Folder`、其他 `Document`，字号 = 图标 × 0.72
@@ -259,9 +274,12 @@ fn report_result(
 }
 
 impl FenceWindow {
-    /// 渲染用的列表（拖动排序期间是本地顺序）
-    pub(super) fn display_items(&self) -> &[FenceEntry] {
-        self.sorting.as_deref().unwrap_or(&self.items)
+    /// 渲染用的列表：拖动排序期间是本地顺序（只含显示项），否则是按「显示隐藏的图标」过滤后的全部项目
+    pub(super) fn display_items(&self) -> Vec<&FenceEntry> {
+        match &self.sorting {
+            Some(list) => list.iter().collect(),
+            None => logic::visible_items(&self.items, self.show_hidden()),
+        }
     }
 
     fn icon_size(&self) -> i32 {
@@ -275,17 +293,18 @@ impl FenceWindow {
             )
     }
 
-    /// 列表变化后：选中项 / 右键菜单对应项已不在列表 → 取消
+    /// 列表或「显示隐藏的图标」变化后：选中项 / 右键菜单对应项已不在列表、或被隐藏不再显示 → 取消选中 / 关闭菜单
     pub(super) fn on_items_changed(&mut self, cx: &mut Context<Self>) {
-        if let Some(selected) = &self.selected
-            && !self.items.iter().any(|i| &i.file_name == selected)
-        {
-            self.selected = None;
-        }
+        let shown = logic::visible_items(&self.items, self.show_hidden());
+        let is_shown = |name: &str| shown.iter().any(|i| i.file_name == name);
+        let selected_gone = self.selected.as_deref().is_some_and(|s| !is_shown(s));
         let menu_gone = self
             .item_menu
             .as_ref()
-            .is_some_and(|m| !self.items.iter().any(|i| i.file_name == m.item.file_name));
+            .is_some_and(|m| !is_shown(&m.item.file_name));
+        if selected_gone {
+            self.selected = None;
+        }
         if menu_gone {
             self.item_menu = None;
             self.reasons.remove(&ExpandReason::ItemMenu);
@@ -325,8 +344,10 @@ impl FenceWindow {
         }
         let dpr = f64::from(window.scale_factor());
         let bucket = logic::icon_bucket(logic::icon_request_px(f64::from(self.icon_size()), dpr));
-        let range = self.visible_range(self.display_items().len());
-        let wanted: Vec<IconRequest> = self.display_items()[range]
+        // 只请求显示中的项目（没开「显示隐藏的图标」时隐藏项不请求）
+        let shown = self.display_items();
+        let range = self.visible_range(shown.len());
+        let wanted: Vec<IconRequest> = shown[range]
             .iter()
             .map(|entry| IconRequest {
                 key: icon_key(entry, bucket),
@@ -450,6 +471,37 @@ impl FenceWindow {
         .detach();
     }
 
+    /// 右键「隐藏」/「取消隐藏」：后台只写隐藏标记（不改文件属性），用返回的完整列表刷新；
+    /// 被隐藏的项在没开「显示隐藏的图标」时随之消失并取消选中
+    fn set_item_hidden(
+        &mut self,
+        entry: FenceEntry,
+        hidden: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_item_menu(window, cx);
+        let id = self.fence_id;
+        let file_name = entry.file_name.clone();
+        let task = spawn_db(cx, move |db| items::set_hidden(db, id, &file_name, hidden));
+        let fail = if hidden {
+            "隐藏失败"
+        } else {
+            "取消隐藏失败"
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| match result {
+                Ok(refresh) => this.set_items(refresh.items, cx),
+                Err(e) => {
+                    message::error_with(window, cx, fail, &e);
+                    this.refresh_items(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
     /// 从本地列表去掉（不等目录监听事件），再补一次列举
     fn drop_locally(&mut self, file_name: &str, cx: &mut Context<Self>) {
         let list: Vec<FenceEntry> = self
@@ -537,7 +589,9 @@ impl FenceWindow {
     fn begin_sort(&mut self, file_name: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.close_item_menu(window, cx);
         if self.sorting.is_none() {
-            self.sorting = Some(self.items.clone());
+            // 只排显示中的项目；隐藏项在松手时按原位置并回（finish_sort）
+            let shown: Vec<FenceEntry> = self.display_items().into_iter().cloned().collect();
+            self.sorting = Some(shown);
         }
         self.dragging_item = Some(file_name.to_string());
         cx.notify();
@@ -562,16 +616,19 @@ impl FenceWindow {
         cx.notify();
     }
 
-    /// 松手：顺序变了就采用并保存（失败提示「保存排序失败」），然后补一次列举（期间被跳过的推送）
+    /// 松手：把排好的显示项并回完整顺序（隐藏项留在原位），顺序变了就采用并保存（失败提示「保存排序失败」），
+    /// 然后补一次列举（期间被跳过的推送，例如排序中途返回的「隐藏」结果；顺序没变时同样要补）
     pub(super) fn finish_sort(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.dragging_item = None;
-        let Some(list) = self.sorting.take() else {
+        let Some(sorted) = self.sorting.take() else {
             return;
         };
+        let list = logic::merge_sorted(&self.items, &sorted, |i: &FenceEntry| i.file_name.as_str());
         let names: Vec<String> = list.iter().map(|i| i.file_name.clone()).collect();
         let unchanged = names.iter().eq(self.items.iter().map(|i| &i.file_name));
         cx.notify();
         if unchanged {
+            self.refresh_items(cx);
             return;
         }
         self.items = list;
@@ -678,7 +735,7 @@ impl FenceWindow {
         let size = self.icon_size() as f32;
         let dpr = f64::from(window.scale_factor());
         let bucket = logic::icon_bucket(logic::icon_request_px(f64::from(size), dpr));
-        let entries: Vec<FenceEntry> = self.display_items().to_vec();
+        let entries: Vec<FenceEntry> = self.display_items().into_iter().cloned().collect();
         // 右键菜单打开时不挂项目 tooltip：菜单就开在指针处，gpui 的 tooltip 不看遮挡，会盖在菜单上
         let menu_open = self.item_menu.is_some();
         let cells: Vec<AnyElement> = entries
@@ -852,6 +909,36 @@ impl FenceWindow {
             MenuPage::Main => {
                 let (open_entry, reveal_entry, restore_entry) =
                     (entry.clone(), entry.clone(), entry.clone());
+                // 「隐藏」/「取消隐藏」：以 . 开头的项目按名字自动隐藏，「取消隐藏」禁用并说明（同「移动到…」无目标时的写法）
+                let hide_row = if entry.auto_hidden {
+                    row("menu-hide".into())
+                        .opacity(0.5)
+                        .tooltip(crate::ui::tooltip::native(AUTO_HIDDEN_NOTE))
+                        .child(icon(EpIcon::View, 12., t.menu_text))
+                        .child("取消隐藏")
+                        .child(
+                            div()
+                                .ml_auto()
+                                .text_size(px(11.))
+                                .text_color(t.menu_note)
+                                .child(AUTO_HIDDEN_NOTE),
+                        )
+                } else {
+                    let hidden = entry.hidden;
+                    let hide_entry = entry.clone();
+                    row("menu-hide".into())
+                        .cursor_pointer()
+                        .hover(move |s| s.bg(t.menu_hover))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.set_item_hidden(hide_entry.clone(), !hidden, window, cx)
+                        }))
+                        .child(icon(
+                            if hidden { EpIcon::View } else { EpIcon::Hide },
+                            12.,
+                            t.menu_text,
+                        ))
+                        .child(if hidden { "取消隐藏" } else { "隐藏" })
+                };
                 vec![
                     row("menu-open".into())
                         .cursor_pointer()
@@ -871,6 +958,7 @@ impl FenceWindow {
                         .child(icon(EpIcon::FolderOpened, 12., t.menu_text))
                         .child("打开所在位置")
                         .into_any_element(),
+                    hide_row.into_any_element(),
                     row("menu-restore".into())
                         .cursor_pointer()
                         .hover(move |s| s.bg(t.menu_hover))

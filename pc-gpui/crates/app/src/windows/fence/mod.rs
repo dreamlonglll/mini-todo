@@ -7,8 +7,8 @@
 //! |---|---|
 //! | `mod.rs` | 视图状态、标题栏（超过 3px 才拖动、双击改名、折叠 / 固定 / 更多）、折叠与临时展开状态机、几何落库、缩放手柄、外部拖入 |
 //! | `panels.rs` | 外观 / 删除确认 / OneDrive 提示面板，「更多」下拉菜单 |
-//! | `grid.rs` | 项目网格：图标懒加载、选中 / 打开、自绘右键菜单（含「移动到…」）、箱内拖动排序、Ctrl+滚轮调图标大小 |
-//! | `logic.rs` | 纯函数（标题规范化、拖动阈值、几何闸门、缩放矩形、图标档位、结果提示文案） |
+//! | `grid.rs` | 项目网格：图标懒加载、选中 / 打开、自绘右键菜单（含「隐藏」/「取消隐藏」「移动到…」）、隐藏项过滤与半透明、箱内拖动排序、Ctrl+滚轮调图标大小 |
+//! | `logic.rs` | 纯函数（标题规范化、拖动阈值、几何闸门、缩放矩形、图标档位、隐藏项过滤与排序合并、结果提示文案） |
 //!
 //! 几何一律物理像素的**客户区**（= 可见区域，与旧版 Tauri 无边框窗口的外框相同；GPUI 窗口另有不可见边框）：
 //! `mini_todo_core::fence::fence_view` + `platform::set_client_rect_physical` 摆窗，`platform::client_rect_physical` 读几何。
@@ -98,6 +98,7 @@ pub struct FenceWindow {
     fence_id: i64,
     fence: Option<Fence>,
     load_error: Option<SharedString>,
+    /// 全部项目（含隐藏项；网格按「显示隐藏的图标」过滤，见 `grid::display_items`）
     items: Vec<FenceEntry>,
     items_seq: u64,
     reasons: BTreeSet<ExpandReason>,
@@ -136,7 +137,7 @@ pub struct FenceWindow {
     icons: HashMap<String, grid::IconState>,
     icon_queue: VecDeque<grid::IconRequest>,
     icons_in_flight: usize,
-    /// 拖动排序中的本地顺序（期间不跟随推送）
+    /// 拖动排序中的本地顺序（只含显示项；期间不跟随推送）
     sorting: Option<Vec<FenceEntry>>,
     dragging_item: Option<String>,
     grid_scroll: ScrollHandle,
@@ -280,7 +281,8 @@ impl FenceWindow {
         .detach();
     }
 
-    /// 旧 `applyFence`：图标大小还在防抖未落库时保留本地值
+    /// 旧 `applyFence`：图标大小还在防抖未落库时保留本地值。「显示隐藏的图标」可能随之变化：
+    /// 不再显示的选中项 / 右键菜单随之取消
     fn apply_fence(&mut self, mut next: Fence, cx: &mut Context<Self>) {
         if self.icon_size_pending
             && let Some(current) = &self.fence
@@ -288,6 +290,7 @@ impl FenceWindow {
             next.icon_size = current.icon_size;
         }
         self.fence = Some(next);
+        self.on_items_changed(cx);
         cx.notify();
     }
 
@@ -336,6 +339,11 @@ impl FenceWindow {
 
     fn locked(&self) -> bool {
         self.fence.as_ref().is_some_and(|f| f.locked)
+    }
+
+    /// 「显示隐藏的图标」
+    fn show_hidden(&self) -> bool {
+        self.fence.as_ref().is_some_and(|f| f.show_hidden)
     }
 
     /// 窗口是否显示完整高度
@@ -447,6 +455,20 @@ impl FenceWindow {
         );
     }
 
+    /// 「更多」→「显示隐藏的图标」/「不显示隐藏的图标」（每个收纳箱独立记住）
+    fn toggle_show_hidden(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let show_hidden = !self.show_hidden();
+        self.patch_fence(
+            UpdateFenceRequest {
+                show_hidden: Some(show_hidden),
+                ..Default::default()
+            },
+            "切换显示隐藏的图标失败",
+            window,
+            cx,
+        );
+    }
+
     /// 旧 `patchFence`：先落库待落的拖动 → 写库 → 采用返回值；失败 `notifyError`
     pub(crate) fn patch_fence(
         &mut self,
@@ -455,7 +477,7 @@ impl FenceWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // 本地先改，窗口形态立即跟上（失败时用库里的值覆盖回去）
+        // 本地先改，窗口形态 / 网格立即跟上（失败时用库里的值覆盖回去）
         if let Some(fence) = &mut self.fence {
             if let Some(v) = patch.collapsed {
                 fence.collapsed = v;
@@ -463,6 +485,12 @@ impl FenceWindow {
             if let Some(v) = patch.locked {
                 fence.locked = v;
             }
+            if let Some(v) = patch.show_hidden {
+                fence.show_hidden = v;
+            }
+        }
+        if patch.show_hidden.is_some() {
+            self.on_items_changed(cx);
         }
         self.sync_view(window, cx);
         cx.notify();
@@ -888,7 +916,8 @@ impl FenceWindow {
         self.move_in(paths, window, cx);
     }
 
-    /// 旧 `moveIn`：后台移入（带 owner HWND，系统对话框以本窗口为父）→ 汇总提示（5 秒）→ OneDrive 一次性提示 → 刷新
+    /// 旧 `moveIn`：后台移入（带 owner HWND，系统对话框以本窗口为父）→ 汇总提示（5 秒；没开「显示隐藏的图标」时
+    /// 说明以 . 开头的项目已自动隐藏）→ OneDrive 一次性提示 → 刷新
     fn move_in(&mut self, paths: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
         if paths.is_empty() {
             return;
@@ -902,7 +931,9 @@ impl FenceWindow {
                 match result {
                     Ok((moved, refreshes)) => {
                         let summary = logic::summarize_op_results(&moved.results);
-                        if let Some((kind, text)) = logic::describe_move_in(&summary) {
+                        if let Some((kind, text)) =
+                            logic::describe_move_in(&summary, this.show_hidden())
+                        {
                             message::show_for(
                                 window,
                                 cx,
@@ -1127,6 +1158,8 @@ impl FenceWindow {
         let content = if self.fence.is_none() {
             div().into_any_element()
         } else if self.display_items().is_empty() {
+            // 真的没有项目时引导拖入；有项目但全部隐藏（没开「显示隐藏的图标」）时说明隐藏了几个
+            let all_hidden = !self.items.is_empty();
             div()
                 .size_full()
                 .flex()
@@ -1135,8 +1168,16 @@ impl FenceWindow {
                 .justify_center()
                 .gap(px(8.))
                 .text_color(t.empty)
-                .child(icon(EpIcon::FolderOpened, 28., t.empty))
-                .child("把桌面图标拖到这里")
+                .child(icon(
+                    if all_hidden {
+                        EpIcon::Hide
+                    } else {
+                        EpIcon::FolderOpened
+                    },
+                    28.,
+                    t.empty,
+                ))
+                .child(logic::empty_hint(self.items.len()))
                 .into_any_element()
         } else {
             self.render_grid(window, cx).into_any_element()

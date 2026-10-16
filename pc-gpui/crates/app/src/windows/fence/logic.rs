@@ -1,9 +1,10 @@
 //! 收纳箱窗口用到的纯函数（旧 Tauri 版前端 `utils/fence.ts` 的 1:1 移植，测试向量照抄 `fence.test.ts` / 规格 §5；
 //! 旧前端已删除，见 git 历史）。
 
+use std::collections::HashSet;
 use std::time::Instant;
 
-use mini_todo_core::fence::items::{ItemOpResult, ItemOpStatus};
+use mini_todo_core::fence::items::{FenceEntry, ItemOpResult, ItemOpStatus, is_auto_hidden_name};
 use mini_todo_core::fence::{
     DeleteFenceResult, MAX_ICON_SIZE, MAX_TITLE_CHARS, MIN_ICON_SIZE, PxRect,
 };
@@ -246,6 +247,52 @@ pub fn parent_dir(path: &str) -> String {
     }
 }
 
+// ----------------------------------------------------------------------
+// 隐藏项
+// ----------------------------------------------------------------------
+
+/// 网格里显示的项目（保持原顺序）：开了「显示隐藏的图标」时全部显示，否则去掉隐藏项（用户隐藏 + 以 `.` 开头的自动隐藏）
+pub fn visible_items(items: &[FenceEntry], show_hidden: bool) -> Vec<&FenceEntry> {
+    items
+        .iter()
+        .filter(|item| show_hidden || !item.is_hidden())
+        .collect()
+}
+
+/// 箱内拖动排序只排显示中的项目：把排好的显示顺序 `sorted_visible` 并回完整顺序 `full`。
+///
+/// 隐藏项留在原来的位置（相对顺序与所在位置都不变），显示项按新顺序依次填回显示项原来的位置。
+/// `sorted_visible` 里有 `full` 没有的项（不应发生）时接在末尾，不丢项
+pub fn merge_sorted<T: Clone>(
+    full: &[T],
+    sorted_visible: &[T],
+    key: impl Fn(&T) -> &str,
+) -> Vec<T> {
+    let visible: HashSet<&str> = sorted_visible.iter().map(&key).collect();
+    let mut sorted = sorted_visible.iter();
+    let mut merged = Vec::with_capacity(full.len().max(sorted_visible.len()));
+    for item in full {
+        if visible.contains(key(item)) {
+            if let Some(next) = sorted.next() {
+                merged.push(next.clone());
+            }
+        } else {
+            merged.push(item.clone());
+        }
+    }
+    merged.extend(sorted.cloned());
+    merged
+}
+
+/// 网格为空时的提示：真的没有项目时引导拖入；全部项目都被隐藏时说明隐藏了几个
+pub fn empty_hint(total_items: usize) -> String {
+    if total_items == 0 {
+        "把桌面图标拖到这里".into()
+    } else {
+        format!("{total_items} 个项目已隐藏")
+    }
+}
+
 /// 逐项结果汇总
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct OpSummary {
@@ -253,6 +300,8 @@ pub struct OpSummary {
     pub cancelled: usize,
     pub failed: Vec<(String, String)>,
     pub notes: Vec<(String, String)>,
+    /// 移入后以 `.` 开头、会被自动隐藏的项数
+    pub auto_hidden: usize,
 }
 
 pub fn summarize_op_results(results: &[ItemOpResult]) -> OpSummary {
@@ -263,6 +312,11 @@ pub fn summarize_op_results(results: &[ItemOpResult]) -> OpSummary {
         match result.status {
             ItemOpStatus::Moved => {
                 summary.moved += 1;
+                // 按收纳文件夹里的新名字判断（重名加的后缀不改变开头）；取不到新名字时按原名
+                let moved_name = result.file_name.as_deref().unwrap_or(&name);
+                if is_auto_hidden_name(moved_name) {
+                    summary.auto_hidden += 1;
+                }
                 if let Some(note) = error {
                     summary.notes.push((name, note));
                 }
@@ -279,8 +333,17 @@ pub fn summarize_op_results(results: &[ItemOpResult]) -> OpSummary {
 
 const MAX_LISTED_ITEMS: usize = 2;
 
-/// 拖入结果提示；`None` = 不提示
-pub fn describe_move_in(s: &OpSummary) -> Option<(MessageKind, String)> {
+/// 拖入结果提示；`None` = 不提示。
+///
+/// `show_hidden`：收纳箱是否开着「显示隐藏的图标」。没开时，移入后以 `.` 开头的项目会自动隐藏、拖进来就看不到，
+/// 补一句说明（全部成功时单独作为一条信息提示；有其他提示时接在后面合成一条，不连弹两条互相覆盖的消息）
+pub fn describe_move_in(s: &OpSummary, show_hidden: bool) -> Option<(MessageKind, String)> {
+    let hidden_note = (!show_hidden && s.auto_hidden > 0).then(|| {
+        format!(
+            "{} 个以 . 开头的项目已自动隐藏，可在「更多」中显示隐藏的图标",
+            s.auto_hidden
+        )
+    });
     let mut parts: Vec<String> = Vec::new();
     if !s.failed.is_empty() {
         let listed = s.failed[..s.failed.len().min(MAX_LISTED_ITEMS)]
@@ -302,11 +365,12 @@ pub fn describe_move_in(s: &OpSummary) -> Option<(MessageKind, String)> {
         parts.push(format!("{n}：{note}"));
     }
     if parts.is_empty() {
-        return None;
+        return hidden_note.map(|note| (MessageKind::Info, note));
     }
     if s.moved > 0 {
         parts.insert(0, format!("已收纳 {} 项", s.moved));
     }
+    parts.extend(hidden_note);
     let kind = if !s.failed.is_empty() {
         if s.moved > 0 {
             MessageKind::Warning
@@ -501,11 +565,11 @@ mod tests {
                 ..Default::default()
             }
         );
-        assert_eq!(describe_move_in(&s), None);
+        assert_eq!(describe_move_in(&s, false), None);
 
         let s = summarize_op_results(&[op(r"C:\d\a.lnk", ItemOpStatus::Cancelled, None)]);
         assert_eq!(
-            describe_move_in(&s),
+            describe_move_in(&s, false),
             Some((MessageKind::Info, "已取消 1 项".into()))
         );
 
@@ -519,7 +583,7 @@ mod tests {
             op(r"C:\d\c.lnk", ItemOpStatus::Failed, None),
         ]);
         assert_eq!(
-            describe_move_in(&s),
+            describe_move_in(&s, false),
             Some((
                 MessageKind::Error,
                 "3 项未能收纳：a.lnk（正被其他程序占用）、b.lnk（不存在） 等".into()
@@ -532,7 +596,7 @@ mod tests {
             op(r"C:\d\c.lnk", ItemOpStatus::Failed, Some("没有权限")),
         ]);
         assert_eq!(
-            describe_move_in(&s),
+            describe_move_in(&s, false),
             Some((
                 MessageKind::Warning,
                 "已收纳 1 项；1 项未能收纳：c.lnk（没有权限）；已取消 1 项".into()
@@ -545,12 +609,144 @@ mod tests {
             Some("源文件未能删除"),
         )]);
         assert_eq!(
-            describe_move_in(&s),
+            describe_move_in(&s, false),
             Some((
                 MessageKind::Warning,
                 "已收纳 1 项；a.lnk：源文件未能删除".into()
             ))
         );
+    }
+
+    fn moved(source: &str, file_name: Option<&str>) -> ItemOpResult {
+        ItemOpResult {
+            file_name: file_name.map(Into::into),
+            ..op(source, ItemOpStatus::Moved, None)
+        }
+    }
+
+    #[test]
+    fn move_in_mentions_auto_hidden_dot_files() {
+        let results = [
+            moved(r"C:\d\a.lnk", Some("a.lnk")),
+            moved(r"C:\d\.env", Some(".env (2)")),
+            moved(r"C:\d\.gitkeep", None),
+            op(
+                r"C:\d\.npmrc",
+                ItemOpStatus::Skipped,
+                Some("隐藏或系统文件不收纳"),
+            ),
+        ];
+        let s = summarize_op_results(&results);
+        assert_eq!(
+            (s.moved, s.auto_hidden),
+            (3, 2),
+            "按移入后的名字判断，跳过的不算"
+        );
+        assert_eq!(
+            describe_move_in(&s, false),
+            Some((
+                MessageKind::Info,
+                "2 个以 . 开头的项目已自动隐藏，可在「更多」中显示隐藏的图标".into()
+            ))
+        );
+        assert_eq!(
+            describe_move_in(&s, true),
+            None,
+            "开着显示隐藏的图标时看得到，不提示"
+        );
+
+        // 有其他提示时合成一条，不连弹两条
+        let s = summarize_op_results(&[
+            moved(r"C:\d\.env", Some(".env")),
+            op(r"C:\d\b.lnk", ItemOpStatus::Cancelled, None),
+        ]);
+        assert_eq!(
+            describe_move_in(&s, false),
+            Some((
+                MessageKind::Info,
+                "已收纳 1 项；已取消 1 项；1 个以 . 开头的项目已自动隐藏，可在「更多」中显示隐藏的图标"
+                    .into()
+            ))
+        );
+        assert_eq!(
+            describe_move_in(&s, true),
+            Some((MessageKind::Info, "已收纳 1 项；已取消 1 项".into()))
+        );
+
+        // 普通项目不受影响
+        let s = summarize_op_results(&[moved(r"C:\d\a.env", Some("a.env"))]);
+        assert_eq!(s.auto_hidden, 0);
+        assert_eq!(describe_move_in(&s, false), None);
+    }
+
+    fn entry(name: &str, hidden: bool) -> FenceEntry {
+        FenceEntry {
+            file_name: name.into(),
+            display_name: name.into(),
+            path: format!(r"C:\root\箱\{name}"),
+            is_dir: false,
+            is_shortcut: false,
+            modified_ms: None,
+            hidden,
+            auto_hidden: is_auto_hidden_name(name),
+        }
+    }
+
+    #[test]
+    fn visible_items_follow_show_hidden() {
+        let items = [
+            entry("a.lnk", false),
+            entry(".gitkeep", false),
+            entry("b.txt", true),
+            entry("c.url", false),
+        ];
+        let names = |show_hidden| -> Vec<&str> {
+            visible_items(&items, show_hidden)
+                .iter()
+                .map(|i| i.file_name.as_str())
+                .collect()
+        };
+        assert_eq!(names(false), ["a.lnk", "c.url"]);
+        assert_eq!(names(true), ["a.lnk", ".gitkeep", "b.txt", "c.url"]);
+        assert!(visible_items(&items[1..3], false).is_empty());
+    }
+
+    #[test]
+    fn sorting_merges_hidden_items_back_in_place() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        // 完整顺序 a [h1] b c [h2] d，只显示 a b c d，拖成 d a c b
+        let full = s(&["a", "h1", "b", "c", "h2", "d"]);
+        assert_eq!(
+            merge_sorted(&full, &s(&["d", "a", "c", "b"]), String::as_str),
+            s(&["d", "h1", "a", "c", "h2", "b"]),
+            "隐藏项留在原位，显示项按新顺序填回"
+        );
+        // 顺序没变：原样
+        assert_eq!(
+            merge_sorted(&full, &s(&["a", "b", "c", "d"]), String::as_str),
+            full
+        );
+        // 显示全部（没有隐藏项）：就是新顺序
+        assert_eq!(
+            merge_sorted(&s(&["a", "b"]), &s(&["b", "a"]), String::as_str),
+            s(&["b", "a"])
+        );
+        // 隐藏项在两端
+        assert_eq!(
+            merge_sorted(&s(&["h1", "a", "b", "h2"]), &s(&["b", "a"]), String::as_str),
+            s(&["h1", "b", "a", "h2"])
+        );
+        // 防御：排序列表里多出完整顺序没有的项，接在末尾、不丢
+        assert_eq!(
+            merge_sorted(&s(&["a", "h"]), &s(&["x", "a"]), String::as_str),
+            s(&["x", "h", "a"])
+        );
+    }
+
+    #[test]
+    fn empty_hint_text() {
+        assert_eq!(empty_hint(0), "把桌面图标拖到这里");
+        assert_eq!(empty_hint(3), "3 个项目已隐藏");
     }
 
     #[test]

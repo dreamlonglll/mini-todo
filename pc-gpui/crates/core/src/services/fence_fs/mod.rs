@@ -56,7 +56,7 @@ pub use location::{
     desktop_is_onedrive_redirected, fence_root_dir, icon_cache_dir, path_starts_with_ci,
     same_path_ci, user_desktop_dir,
 };
-pub use naming::is_valid_item_name;
+pub use naming::{is_auto_hidden_name, is_valid_item_name};
 pub use open::{launch_item, reveal_in_explorer};
 pub use ops::{
     move_between_fences, move_into_fence, restore_all, restore_item, ItemOpResult, ItemOpStatus,

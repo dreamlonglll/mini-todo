@@ -218,6 +218,14 @@ pub fn is_shell_metadata_file(file_name: &str) -> bool {
     SHELL_METADATA_FILES.contains(&lower.as_str())
 }
 
+/// 是否按名字自动隐藏：以 `.` 开头的文件 / 文件夹（`.gitkeep`、`.env`、`.DS_Store`……），所有平台一样。
+///
+/// 只影响收纳箱的显示（"显示隐藏的图标"打开时半透明显示），不改文件属性；不能单独取消隐藏。
+/// 与 Windows 隐藏 / 系统属性无关：带这两个属性的文件列举时直接跳过，永不显示
+pub fn is_auto_hidden_name(file_name: &str) -> bool {
+    file_name.starts_with('.')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,5 +454,15 @@ mod tests {
         assert!(is_shell_metadata_file("Desktop.INI"));
         assert!(is_shell_metadata_file("Thumbs.db"));
         assert!(!is_shell_metadata_file("desktop.ini.bak"));
+    }
+
+    #[test]
+    fn dot_names_are_auto_hidden() {
+        for hidden in [".gitkeep", ".env", ".DS_Store", ".config", ".env (2)", "."] {
+            assert!(is_auto_hidden_name(hidden), "{hidden:?}");
+        }
+        for visible in ["a.env", "Chrome.lnk", "文件夹", " .env", "", "x."] {
+            assert!(!is_auto_hidden_name(visible), "{visible:?}");
+        }
     }
 }

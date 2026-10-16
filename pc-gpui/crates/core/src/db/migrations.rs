@@ -124,10 +124,11 @@ const MIGRATIONS: &[(i32, MigrationFn)] = &[
     (27, migration_v27),
     (28, migration_v28),
     (29, migration_v29),
+    (30, migration_v30),
 ];
 
 /// 最新迁移版本号（启动时可与 [`current_version`] 比较，判断是否有待执行迁移，例如迁移前备份）
-pub const LATEST_VERSION: i32 = 29;
+pub const LATEST_VERSION: i32 = 30;
 
 fn ensure_migrations_table(conn: &Connection) -> Result<()> {
     conn.execute(
@@ -164,6 +165,21 @@ pub(crate) fn run_migrations_to(conn: &Connection, target: i32) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// 迁移 v30：收纳箱隐藏图标（10-16 fence-hidden-items）。
+///
+/// - `fence_items.hidden`：右键「隐藏」的标记。只影响收纳箱的显示，不改文件属性、不移动文件；以 `.` 开头的
+///   项目按名字自动隐藏（`fence_fs::is_auto_hidden_name`），不存标记
+/// - `fences.show_hidden`：每个收纳箱「显示隐藏的图标」的开关（开启时隐藏项半透明显示）
+///
+/// 两列都有默认值 0：升级后已有项目全部可见、开关关闭。旧版本（3.0.0 等）按显式列名读写这两张表，新列不影响它们，
+/// 只是回退后看不到隐藏效果。与 v29 一样是设备本地数据：不接 `local_seq` 触发器与墓碑，不导出、不同步
+fn migration_v30(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "ALTER TABLE fence_items ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;
+         ALTER TABLE fences ADD COLUMN show_hidden INTEGER NOT NULL DEFAULT 0;",
+    )
 }
 
 /// 迁移 v29：桌面收纳箱（10-15 desktop-fence）。
@@ -1112,7 +1128,7 @@ mod tests {
         run_migrations(&conn).expect("全新库迁移失败");
 
         assert_eq!(max_version(&conn), LATEST_VERSION);
-        assert_eq!(LATEST_VERSION, 29);
+        assert_eq!(LATEST_VERSION, 30);
         assert_eq!(
             MIGRATIONS.last().map(|(v, _)| *v),
             Some(LATEST_VERSION),
@@ -1430,5 +1446,75 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM tombstones", [], |r| r.get(0))
             .unwrap();
         assert_eq!(tombstones, 0);
+    }
+
+    fn fence_hidden_flags(conn: &Connection) -> (i64, Vec<(String, i64)>) {
+        let show_hidden: i64 = conn
+            .query_row("SELECT show_hidden FROM fences WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let items = conn
+            .prepare("SELECT file_name, hidden FROM fence_items WHERE fence_id = 1 ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_>>()
+            .unwrap();
+        (show_hidden, items)
+    }
+
+    /// v30：旧库（v29）升级后已有收纳箱 / 项目全部可见、「显示隐藏的图标」关闭；新行同样默认 0。
+    #[test]
+    fn v30_adds_hidden_columns_defaulting_to_visible() {
+        let conn = fresh_conn();
+        run_migrations_to(&conn, 29).expect("迁移到 v29 失败");
+        insert_fence(&conn, 1, "收纳箱");
+        conn.execute(
+            "INSERT INTO fence_items (fence_id, file_name, original_path, sort_order) VALUES (1, 'a.lnk', NULL, 0)",
+            [],
+        )
+        .unwrap();
+
+        migrate(&conn).expect("升级到 v30 失败");
+        assert_eq!(max_version(&conn), 30);
+        assert_eq!(
+            fence_hidden_flags(&conn),
+            (0, vec![("a.lnk".to_string(), 0)]),
+            "已有数据升级后全部可见、开关关闭"
+        );
+
+        // 旧版本的显式列写法照常可用，新列取默认值
+        conn.execute(
+            "INSERT INTO fence_items (fence_id, file_name, original_path, sort_order) VALUES (1, '.env', NULL, 1)",
+            [],
+        )
+        .unwrap();
+        assert_eq!(fence_hidden_flags(&conn).1[1], (".env".to_string(), 0));
+    }
+
+    /// v30：新增的两列和收纳箱表一样是设备本地数据，写它们不计入同步的变更计数。
+    #[test]
+    fn v30_hidden_flags_do_not_count_as_sync_changes() {
+        let conn = fresh_conn();
+        run_migrations(&conn).expect("迁移失败");
+        insert_fence(&conn, 1, "a");
+        conn.execute(
+            "INSERT INTO fence_items (fence_id, file_name) VALUES (1, 'x.lnk')",
+            [],
+        )
+        .unwrap();
+        let base = meta(&conn, "local_seq");
+
+        conn.execute("UPDATE fence_items SET hidden = 1 WHERE fence_id = 1", [])
+            .unwrap();
+        conn.execute("UPDATE fences SET show_hidden = 1 WHERE id = 1", [])
+            .unwrap();
+
+        assert_eq!(
+            fence_hidden_flags(&conn),
+            (1, vec![("x.lnk".to_string(), 1)])
+        );
+        assert_eq!(meta(&conn, "local_seq"), base);
     }
 }

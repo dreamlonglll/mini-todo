@@ -6,8 +6,11 @@
 //!   `fence_items.sort_order` 排序返回
 //! - 对账在**数据库锁内**列举文件夹：与移入 / 移回 / 改名后的写库串行，不会用一份过期的列举结果
 //!   删掉刚 upsert 的行（例如监听回调在移入完成前列举、移入写库后才对账）
-//! - 移入 / 跨箱写库一律 upsert（`ON CONFLICT(fence_id, file_name) DO UPDATE SET original_path = …`）：
-//!   监听回调触发的对账可能已经先补了一行 `original_path = NULL`
+//! - 移入 / 跨箱写库一律 upsert（`ON CONFLICT(fence_id, file_name) DO UPDATE SET original_path = …, hidden = 0`）：
+//!   监听回调触发的对账可能已经先补了一行 `original_path = NULL`；移进来的项一律可见（跨箱不携带隐藏标记）
+//! - 隐藏（v30）：`fence_items.hidden` 是用户右键「隐藏」的标记，以 `.` 开头的项目按名字自动隐藏（不存标记）。
+//!   只影响显示，不改文件属性；[`get_items`] / [`FenceRefresh`] 仍返回**全部**项目（含隐藏），由 app 按
+//!   `fences.show_hidden` 过滤显示
 //!
 //! 线程：这里的函数都是阻塞的，app 放后台线程执行。带 `owner_hwnd` 的移动**绝不在 UI 主线程**调用
 //! （系统"需要管理员权限"对话框以收纳箱窗口为父窗口，会同步给主线程发消息，主线程等结果时会死锁）：
@@ -22,7 +25,7 @@
 
 use crate::db::{settings_kv, Database, Fence, FenceItem};
 use crate::services::fence_fs::{self, FenceChange, FenceWatcher};
-pub use crate::services::fence_fs::{FenceEntry, ItemOpResult, ItemOpStatus};
+pub use crate::services::fence_fs::{is_auto_hidden_name, FenceEntry, ItemOpResult, ItemOpStatus};
 use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -139,7 +142,7 @@ pub(crate) fn is_moving(id: i64) -> bool {
 
 fn load_item_rows(conn: &Connection, fence_id: i64) -> rusqlite::Result<Vec<FenceItem>> {
     let mut stmt = conn.prepare(
-        "SELECT id, fence_id, file_name, original_path, sort_order FROM fence_items
+        "SELECT id, fence_id, file_name, original_path, sort_order, hidden FROM fence_items
          WHERE fence_id = ?1 ORDER BY sort_order, id",
     )?;
     let rows = stmt.query_map([fence_id], |r| {
@@ -149,6 +152,7 @@ fn load_item_rows(conn: &Connection, fence_id: i64) -> rusqlite::Result<Vec<Fenc
             file_name: r.get(2)?,
             original_path: r.get(3)?,
             sort_order: r.get(4)?,
+            hidden: r.get::<_, i32>(5)? != 0,
         })
     })?;
     rows.collect()
@@ -181,7 +185,8 @@ pub(crate) fn fence_originals(
         .collect())
 }
 
-/// 移入 / 跨箱后写一行：新行排在末尾；已有同名行（监听对账先补的 NULL 行）只更新原始路径、保留排序
+/// 移入 / 跨箱后写一行：新行排在末尾；已有同名行（监听对账先补的 NULL 行）只更新原始路径、保留排序。
+/// 刚移进来的项一律可见：已有行的隐藏标记清零（跨箱不携带隐藏标记，也不继承同名旧行的标记）
 fn upsert_item(
     conn: &Connection,
     fence_id: i64,
@@ -191,9 +196,26 @@ fn upsert_item(
     conn.execute(
         "INSERT INTO fence_items (fence_id, file_name, original_path, sort_order)
          VALUES (?1, ?2, ?3, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM fence_items WHERE fence_id = ?1))
-         ON CONFLICT(fence_id, file_name) DO UPDATE SET original_path = excluded.original_path",
+         ON CONFLICT(fence_id, file_name) DO UPDATE SET original_path = excluded.original_path, hidden = 0",
         rusqlite::params![fence_id, file_name, original_path],
     )?;
+    Ok(())
+}
+
+/// 跨箱搬运后记账：删来源收纳箱的行，在目标收纳箱 upsert（搬运原始路径，**不**搬运隐藏标记）。
+/// `to_name` 为 `None`（已移动但取不到新文件名）时只删旧行，交给下一次对账补行
+fn record_cross_move(
+    conn: &Connection,
+    from_id: i64,
+    from_name: &str,
+    to_id: i64,
+    to_name: Option<&str>,
+    original_path: Option<&str>,
+) -> rusqlite::Result<()> {
+    delete_item(conn, from_id, from_name)?;
+    if let Some(to_name) = to_name {
+        upsert_item(conn, to_id, to_name, original_path)?;
+    }
     Ok(())
 }
 
@@ -222,12 +244,12 @@ fn reorder_rows(conn: &Connection, fence_id: i64, file_names: &[String]) -> rusq
     Ok(())
 }
 
-/// 按文件夹实际内容对账 `fence_items`，返回按 `sort_order` 排好的项目。
+/// 按文件夹实际内容对账 `fence_items`，返回按 `sort_order` 排好的项目（`hidden` 取自对应行）。
 ///
-/// - 名字先精确匹配，剩下的再不区分大小写匹配（资源管理器里只改大小写的重命名保留原始路径与排序，
+/// - 名字先精确匹配，剩下的再不区分大小写匹配（资源管理器里只改大小写的重命名保留原始路径、排序与隐藏标记，
 ///   并把行里的名字改成新写法）
-/// - 文件夹有、表里没有 → 补行（`original_path = NULL`），按列举顺序（文件名）排在末尾
-/// - 表里有、文件夹没有 → 删行
+/// - 文件夹有、表里没有 → 补行（`original_path = NULL`、可见），按列举顺序（文件名）排在末尾
+/// - 表里有、文件夹没有 → 删行（改成别的名字 = 新项目，隐藏标记随旧行一起丢掉）
 fn reconcile_rows(
     conn: &Connection,
     fence_id: i64,
@@ -273,7 +295,8 @@ fn reconcile_rows(
 
     let mut next = rows.iter().map(|r| r.sort_order).max().map_or(0, |m| m + 1);
     let mut keyed: Vec<(i32, String, FenceEntry)> = Vec::with_capacity(entries.len());
-    for (e, entry) in entries.into_iter().enumerate() {
+    for (e, mut entry) in entries.into_iter().enumerate() {
+        entry.hidden = row_of[e].is_some_and(|r| rows[r].hidden);
         let order = match row_of[e] {
             Some(r) => rows[r].sort_order,
             None => {
@@ -311,41 +334,74 @@ fn claim_onedrive_notice(conn: &Connection) -> rusqlite::Result<bool> {
 /// "正在删除"在数据库锁内检查：`delete_fence` 先登记再读库，登记之前已拿到锁的对账会在它读库前做完，
 /// 之后的对账一定看得到登记，不会在还原途中按原名把刚删掉的文件夹重建出来。
 pub fn reconcile(db: &Database, fence_id: i64) -> Result<Option<Vec<FenceEntry>>, String> {
-    db.with_transaction(
-        |tx| -> rusqlite::Result<Result<Option<Vec<FenceEntry>>, String>> {
-            if is_deleting(fence_id) {
-                return Ok(Ok(None));
-            }
-            let folder: Option<String> = tx
-                .query_row(
-                    "SELECT folder_name FROM fences WHERE id = ?1",
-                    [fence_id],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            let Some(folder) = folder else {
-                return Ok(Ok(None));
-            };
-            let entries = match fence_fs::list_fence_items(&folder) {
-                Ok(entries) => entries,
-                Err(first) => {
-                    let retried = fence_fs::ensure_fence_folder(&folder)
-                        .and_then(|_| fence_fs::list_fence_items(&folder));
-                    match retried {
-                        Ok(entries) => {
-                            log::warn!(
-                                "[fence] 收纳文件夹「{folder}」不存在，已按原名重建（{first}）"
-                            );
-                            entries
-                        }
-                        Err(e) => return Ok(Err(e)),
-                    }
+    db.with_transaction(|tx| reconcile_locked(tx, fence_id))
+        .map_err(|e| format!("读取收纳箱内容失败: {e}"))?
+}
+
+/// [`reconcile`] 的主体，在调用方的事务里（持有数据库锁）执行：检查"删除中"→ 读 `folder_name` → 列举 → 写行。
+/// 外层 `Err` 是数据库错误，内层 `Err` 是文件夹不可用等面向用户的错误
+fn reconcile_locked(
+    tx: &Connection,
+    fence_id: i64,
+) -> rusqlite::Result<Result<Option<Vec<FenceEntry>>, String>> {
+    if is_deleting(fence_id) {
+        return Ok(Ok(None));
+    }
+    let folder: Option<String> = tx
+        .query_row(
+            "SELECT folder_name FROM fences WHERE id = ?1",
+            [fence_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(folder) = folder else {
+        return Ok(Ok(None));
+    };
+    let entries = match fence_fs::list_fence_items(&folder) {
+        Ok(entries) => entries,
+        Err(first) => {
+            let retried = fence_fs::ensure_fence_folder(&folder)
+                .and_then(|_| fence_fs::list_fence_items(&folder));
+            match retried {
+                Ok(entries) => {
+                    log::warn!("[fence] 收纳文件夹「{folder}」不存在，已按原名重建（{first}）");
+                    entries
                 }
-            };
-            Ok(Ok(Some(reconcile_rows(tx, fence_id, entries)?)))
-        },
-    )
-    .map_err(|e| format!("读取收纳箱内容失败: {e}"))?
+                Err(e) => return Ok(Err(e)),
+            }
+        }
+    };
+    Ok(Ok(Some(reconcile_rows(tx, fence_id, entries)?)))
+}
+
+/// 在对账后的列表里找到 `file_name`（先精确、再不区分大小写），写它的隐藏标记并同步到列表里。
+/// 列表里没有这一项（文件夹里已经没有它）时返回 `None`，什么都不写
+fn apply_hidden(
+    conn: &Connection,
+    fence_id: i64,
+    file_name: &str,
+    hidden: bool,
+    mut items: Vec<FenceEntry>,
+) -> rusqlite::Result<Option<Vec<FenceEntry>>> {
+    let lower = file_name.to_lowercase();
+    let Some(index) = items
+        .iter()
+        .position(|i| i.file_name == file_name)
+        .or_else(|| {
+            items
+                .iter()
+                .position(|i| i.file_name.to_lowercase() == lower)
+        })
+    else {
+        return Ok(None);
+    };
+    // 对账之后行名与列举出的文件名一致，按实际文件名精确更新
+    conn.execute(
+        "UPDATE fence_items SET hidden = ?1 WHERE fence_id = ?2 AND file_name = ?3",
+        rusqlite::params![hidden, fence_id, items[index].file_name],
+    )?;
+    items[index].hidden = hidden;
+    Ok(Some(items))
 }
 
 /// 对账，得到要发给收纳箱窗口的刷新（原 `reconcile_and_notify`）；收纳箱不存在 / 正在删除 / 对账失败
@@ -570,10 +626,14 @@ pub fn move_in(
                 continue; // 罕见：已移动但取不到新文件名，交给下一次对账补行
             };
             match carried.get(&index) {
-                Some(c) => {
-                    delete_item(tx, c.from_id, &c.file_name)?;
-                    upsert_item(tx, id, name, c.original_path.as_deref())?;
-                }
+                Some(c) => record_cross_move(
+                    tx,
+                    c.from_id,
+                    &c.file_name,
+                    id,
+                    Some(name),
+                    c.original_path.as_deref(),
+                )?,
                 None => {
                     upsert_item(tx, id, name, Some(&result.source))?;
                     moved_from_desktop |= desktop.as_deref().is_some_and(|d| {
@@ -656,8 +716,8 @@ pub fn restore(
     Ok(result)
 }
 
-/// 右键「移动到…」（`fence_move_item`）：移到另一个收纳箱，搬运原始路径；重名加后缀。
-/// 移动成功时返回目标收纳箱的刷新（app 交给目标窗口）。**阻塞，不能在 UI 主线程调用**
+/// 右键「移动到…」（`fence_move_item`）：移到另一个收纳箱，搬运原始路径（不搬运隐藏标记，目标收纳箱里可见）；
+/// 重名加后缀。移动成功时返回目标收纳箱的刷新（app 交给目标窗口）。**阻塞，不能在 UI 主线程调用**
 pub fn move_to(
     db: &Database,
     id: i64,
@@ -679,12 +739,15 @@ pub fn move_to(
     let mut target_refresh = None;
     if result.status == ItemOpStatus::Moved {
         // 文件已经移过去：记账失败只记日志（下一次对账会补行，只是丢了原始路径），不把成功的移动报成失败
-        let saved = db.with_transaction(|tx| -> rusqlite::Result<()> {
-            delete_item(tx, id, file_name)?;
-            if let Some(new_name) = result.file_name.as_deref() {
-                upsert_item(tx, target_id, new_name, original.as_deref())?;
-            }
-            Ok(())
+        let saved = db.with_transaction(|tx| {
+            record_cross_move(
+                tx,
+                id,
+                file_name,
+                target_id,
+                result.file_name.as_deref(),
+                original.as_deref(),
+            )
         });
         if let Err(e) = saved {
             log::warn!("[fence] 保存跨箱移动的项目记录失败（下次对账会补行）: {e}");
@@ -731,10 +794,54 @@ pub fn icon(db: &Database, id: i64, file_name: &str, size_px: u32) -> Result<Pat
     fence_fs::icon_png(&path, size_px)
 }
 
-/// 保存箱内拖动排序（`reorder_fence_items`，`file_names` 为新的完整顺序）
+/// 保存箱内拖动排序（`reorder_fence_items`，`file_names` 为新的完整顺序，含隐藏项）
 pub fn reorder(db: &Database, id: i64, file_names: &[String]) -> Result<(), String> {
     db.with_transaction(|tx| reorder_rows(tx, id, file_names))
         .map_err(|e: rusqlite::Error| format!("保存排序失败: {e}"))
+}
+
+/// 右键「隐藏」/「取消隐藏」：只写 `fence_items.hidden`，不改文件属性、不移动文件。阻塞。
+///
+/// 在一个事务（数据库锁）里先对账（行不存在——例如监听还没来得及补行、或资源管理器里只改了大小写——也能写上），
+/// 再按文件名不区分大小写匹配写标记，返回写入后的完整列表（app 交给窗口 `set_items`）。
+/// 以 `.` 开头的项目是按名字自动隐藏的，清掉标记也仍然隐藏（界面上不提供「取消隐藏」）。
+///
+/// 错误：文件名不合法 → `Err("文件名不合法: …")`；收纳箱正在删除 → `Err("收纳箱正在删除")`；不存在 →
+/// `Err("收纳箱 #{id} 不存在")`；文件夹里已经没有这一项 → `Err("收纳文件夹中找不到该项目")`
+pub fn set_hidden(
+    db: &Database,
+    id: i64,
+    file_name: &str,
+    hidden: bool,
+) -> Result<FenceRefresh, String> {
+    if !fence_fs::is_valid_item_name(file_name) {
+        return Err(format!("文件名不合法: {file_name:?}"));
+    }
+    db.with_transaction(|tx| -> rusqlite::Result<Result<FenceRefresh, String>> {
+        // 锁顺序：数据库锁 → 登记锁（is_deleting 只短暂拿登记锁）
+        if is_deleting(id) {
+            return Ok(Err("收纳箱正在删除".to_string()));
+        }
+        let items = match reconcile_locked(tx, id)? {
+            Ok(Some(items)) => items,
+            Ok(None) => return Ok(Err(format!("收纳箱 #{id} 不存在"))),
+            Err(e) => return Ok(Err(e)),
+        };
+        Ok(match apply_hidden(tx, id, file_name, hidden, items)? {
+            Some(items) => {
+                log::info!(
+                    "[fence] 收纳箱 #{id} {} {file_name:?}",
+                    if hidden { "隐藏" } else { "取消隐藏" }
+                );
+                Ok(FenceRefresh {
+                    fence_id: id,
+                    items,
+                })
+            }
+            None => Err("收纳文件夹中找不到该项目".to_string()),
+        })
+    })
+    .map_err(|e| format!("保存隐藏状态失败: {e}"))?
 }
 
 #[cfg(test)]
@@ -749,7 +856,38 @@ mod tests {
             is_dir: false,
             is_shortcut: name.ends_with(".lnk"),
             modified_ms: None,
+            hidden: false,
+            auto_hidden: is_auto_hidden_name(name),
         }
+    }
+
+    /// 对账后的 (文件名, 用户隐藏, 自动隐藏)
+    fn reconciled_flags(db: &Database, fence_id: i64, names: &[&str]) -> Vec<(String, bool, bool)> {
+        let entries = names.iter().map(|n| entry(n)).collect();
+        db.with_transaction(|tx| reconcile_rows(tx, fence_id, entries))
+            .unwrap()
+            .into_iter()
+            .map(|i| (i.file_name, i.hidden, i.auto_hidden))
+            .collect()
+    }
+
+    fn hidden_rows(db: &Database, fence_id: i64) -> Vec<(String, bool)> {
+        db.with_connection(|conn| load_item_rows(conn, fence_id))
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.file_name, r.hidden))
+            .collect()
+    }
+
+    fn set_row_hidden(db: &Database, fence_id: i64, name: &str, hidden: bool, listed: &[&str]) {
+        let entries = listed.iter().map(|n| entry(n)).collect();
+        let applied = db
+            .with_transaction(|tx| {
+                let items = reconcile_rows(tx, fence_id, entries)?;
+                apply_hidden(tx, fence_id, name, hidden, items)
+            })
+            .unwrap();
+        assert!(applied.is_some(), "{name} 应在列表里");
     }
 
     fn names(items: &[FenceEntry]) -> Vec<&str> {
@@ -1055,6 +1193,158 @@ mod tests {
         );
         assert!(!is_moving(b), "没开始的移动不留登记");
         drop(deleting);
+    }
+
+    #[test]
+    fn hidden_flag_is_set_and_cleared_case_insensitively() {
+        let db = db_with_fences(&[1, 2]);
+        reconcile(&db, 2, &["a.lnk"]);
+        let listed = ["a.lnk", "B.txt", ".gitkeep"];
+
+        let items = db
+            .with_transaction(|tx| {
+                let items = reconcile_rows(tx, 1, listed.iter().map(|n| entry(n)).collect())?;
+                apply_hidden(tx, 1, "b.TXT", true, items)
+            })
+            .unwrap()
+            .expect("不区分大小写匹配到 B.txt");
+        let flags: Vec<(&str, bool, bool)> = items
+            .iter()
+            .map(|i| (i.file_name.as_str(), i.hidden, i.is_hidden()))
+            .collect();
+        assert_eq!(
+            flags,
+            vec![
+                ("a.lnk", false, false),
+                ("B.txt", true, true),
+                (".gitkeep", false, true)
+            ],
+            "返回的列表里同步了标记；点文件自动隐藏但没有标记"
+        );
+        assert_eq!(
+            hidden_rows(&db, 1),
+            vec![
+                ("a.lnk".into(), false),
+                ("B.txt".into(), true),
+                (".gitkeep".into(), false)
+            ]
+        );
+        assert_eq!(
+            hidden_rows(&db, 2),
+            vec![("a.lnk".into(), false)],
+            "另一个收纳箱的同名项不受影响"
+        );
+
+        // 重启后（重新对账）仍隐藏；清除后恢复可见
+        assert_eq!(
+            reconciled_flags(&db, 1, &listed)[1],
+            ("B.txt".into(), true, false)
+        );
+        set_row_hidden(&db, 1, "B.txt", false, &listed);
+        assert_eq!(
+            reconciled_flags(&db, 1, &listed)[1],
+            ("B.txt".into(), false, false)
+        );
+
+        // 文件夹里已经没有的项：什么都不写
+        let missing = db
+            .with_transaction(|tx| {
+                let items = reconcile_rows(tx, 1, listed.iter().map(|n| entry(n)).collect())?;
+                apply_hidden(tx, 1, "ghost.lnk", true, items)
+            })
+            .unwrap();
+        assert!(missing.is_none());
+        assert!(hidden_rows(&db, 1).iter().all(|(_, hidden)| !hidden));
+    }
+
+    #[test]
+    fn reconcile_keeps_hidden_flags_through_case_only_renames() {
+        let db = db_with_fences(&[1]);
+        let listed = ["a.lnk", "chrome.lnk", "c.txt"];
+        set_row_hidden(&db, 1, "chrome.lnk", true, &listed);
+
+        // 资源管理器里只改大小写：保留标记；改成别的名字 = 新项目，标记丢失
+        assert_eq!(
+            reconciled_flags(&db, 1, &["a.lnk", "Chrome.lnk", "c.txt"]),
+            vec![
+                ("a.lnk".into(), false, false),
+                ("Chrome.lnk".into(), true, false),
+                ("c.txt".into(), false, false)
+            ]
+        );
+        set_row_hidden(&db, 1, "c.txt", true, &["a.lnk", "Chrome.lnk", "c.txt"]);
+        assert_eq!(
+            reconciled_flags(&db, 1, &["a.lnk", "Chrome.lnk", "d.txt"]),
+            vec![
+                ("a.lnk".into(), false, false),
+                ("Chrome.lnk".into(), true, false),
+                ("d.txt".into(), false, false)
+            ]
+        );
+        assert_eq!(
+            hidden_rows(&db, 1),
+            vec![
+                ("a.lnk".into(), false),
+                ("Chrome.lnk".into(), true),
+                ("d.txt".into(), false)
+            ]
+        );
+    }
+
+    #[test]
+    fn moving_to_another_fence_does_not_carry_the_hidden_flag() {
+        let db = db_with_fences(&[1, 2]);
+        db.with_connection(|conn| upsert_item(conn, 1, "a.lnk", Some(r"C:\d\a.lnk")))
+            .unwrap();
+        set_row_hidden(&db, 1, "a.lnk", true, &["a.lnk"]);
+        // 目标收纳箱里已有同名行（监听先补的、或是带着旧标记的残留行）
+        reconcile(&db, 2, &["a.lnk"]);
+        set_row_hidden(&db, 2, "a.lnk", true, &["a.lnk"]);
+
+        db.with_transaction(|tx| {
+            record_cross_move(tx, 1, "A.LNK", 2, Some("a.lnk"), Some(r"C:\d\a.lnk"))
+        })
+        .unwrap();
+        assert!(rows(&db, 1).is_empty(), "来源的行删掉");
+        assert_eq!(
+            db.with_connection(|conn| load_item_rows(conn, 2)).unwrap()[0],
+            FenceItem {
+                id: 2,
+                fence_id: 2,
+                file_name: "a.lnk".into(),
+                original_path: Some(r"C:\d\a.lnk".into()),
+                sort_order: 0,
+                hidden: false,
+            },
+            "搬运原始路径、不搬运隐藏标记，目标收纳箱里可见"
+        );
+
+        // 新行同样可见
+        set_row_hidden(&db, 2, "a.lnk", true, &["a.lnk"]);
+        db.with_transaction(|tx| record_cross_move(tx, 2, "a.lnk", 1, Some("a (2).lnk"), None))
+            .unwrap();
+        assert_eq!(hidden_rows(&db, 1), vec![("a (2).lnk".into(), false)]);
+        assert!(rows(&db, 2).is_empty());
+    }
+
+    #[test]
+    fn set_hidden_checks_the_name_and_the_fence_before_touching_files() {
+        let id = 987_658;
+        let db = db_with_fences(&[id]);
+        assert!(set_hidden(&db, id, r"..\x", true)
+            .unwrap_err()
+            .contains("文件名不合法"));
+        assert_eq!(
+            set_hidden(&db, 987_659, "a.lnk", true).unwrap_err(),
+            "收纳箱 #987659 不存在"
+        );
+        let guard = begin_deleting(id).unwrap();
+        assert_eq!(
+            set_hidden(&db, id, "a.lnk", true).unwrap_err(),
+            "收纳箱正在删除"
+        );
+        drop(guard);
+        assert!(rows(&db, id).is_empty(), "没有对账、没有写行");
     }
 
     #[test]

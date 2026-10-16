@@ -823,6 +823,10 @@ pub fn fence_tokens() -> &'static FenceTokens {
 /// 收纳箱字号 13px（`.fence-window`）
 pub const FENCE_FONT_SIZE: Pixels = px(13.);
 
+/// 「显示隐藏的图标」打开时，隐藏项（用户隐藏 + 以 `.` 开头的自动隐藏）的图标与名字整体不透明度
+/// （同资源管理器里隐藏文件的半透明观感）
+pub const FENCE_HIDDEN_ITEM_OPACITY: f32 = 0.5;
+
 #[cfg(test)]
 mod tests {
     use super::*;
