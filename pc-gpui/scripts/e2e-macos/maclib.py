@@ -24,7 +24,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Callable
 
-from PIL import Image
+from PIL import Image, ImageChops
 
 try:
     import Quartz  # type: ignore
@@ -130,11 +130,16 @@ def _num(v, default=0.0) -> float:
         return default
 
 
-def list_windows() -> list[WinInfo]:
-    """屏幕上的全部窗口（不含桌面元素），按前后顺序（最前在前）。坐标是全局逻辑点、主屏左上为原点"""
+def list_windows(include_desktop: bool = False) -> list[WinInfo]:
+    """屏幕上的全部窗口，按前后顺序（最前在前）。坐标是全局逻辑点、主屏左上为原点。
+
+    默认带 `kCGWindowListExcludeDesktopElements`（不含壁纸 / 桌面图标等桌面元素）；`include_desktop=True` 时不带它——
+    收纳箱在桌面图标层之上一层（负的 kCGWindowLayer），Apple 没写这个选项按什么判定"桌面元素"，收纳箱用例一律不带"""
     if Quartz is None:
         raise AssertionError(f"pyobjc Quartz 不可用：{QUARTZ_ERR!r}")
-    opts = Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements
+    opts = Quartz.kCGWindowListOptionOnScreenOnly
+    if not include_desktop:
+        opts |= Quartz.kCGWindowListExcludeDesktopElements
     arr = Quartz.CGWindowListCopyWindowInfo(opts, Quartz.kCGNullWindowID) or []
     out = []
     for d in arr:
@@ -153,22 +158,48 @@ def list_windows() -> list[WinInfo]:
     return out
 
 
-def windows_of(pid: int, layer: int | None = 0) -> list[WinInfo]:
-    return [w for w in list_windows() if w.pid == pid and (layer is None or w.layer == layer) and w.w > 1 and w.h > 1]
+def windows_of(pid: int, layer: int | None = 0, include_desktop: bool = False) -> list[WinInfo]:
+    return [w for w in list_windows(include_desktop) if w.pid == pid and (layer is None or w.layer == layer)
+            and w.w > 1 and w.h > 1]
 
 
-def dump_windows(label: str, pid: int | None = None) -> None:
-    """打印窗口列表（本进程的窗口前面标 *）：layer 0 = 普通窗口，25 = 菜单栏状态项，24 = 菜单栏"""
+def dump_windows(label: str, pid: int | None = None, include_desktop: bool = False) -> None:
+    """打印窗口列表（本进程的窗口前面标 *）：layer 0 = 普通窗口，25 = 菜单栏状态项，24 = 菜单栏，
+    负数 = 桌面层（壁纸、Finder 桌面图标、收纳箱；`include_desktop=True` 才列出桌面元素）"""
     try:
-        ws = list_windows()
+        ws = list_windows(include_desktop)
     except Exception as e:  # noqa: BLE001
         print(f"  [windows] {label}: 枚举失败 {e}")
         return
     mine = [w for w in ws if pid and w.pid == pid]
-    print(f"  [windows] {label}: 共 {len(ws)} 个屏幕上的窗口，本进程 {len(mine)} 个", flush=True)
+    print(f"  [windows] {label}: 共 {len(ws)} 个屏幕上的窗口{'（含桌面元素）' if include_desktop else ''}，"
+          f"本进程 {len(mine)} 个", flush=True)
     for w in ws:
         mark = "*" if pid and w.pid == pid else " "
         print(f"   {mark} {w.describe()}")
+
+
+def desktop_icon_level() -> int:
+    """Finder 画桌面图标的窗口层级（`CGWindowLevelForKey(kCGDesktopIconWindowLevelKey)`，通常 -2147483603）。
+    收纳箱在它之上一层（app `platform/macos/ns.rs` 的 `desktop_layer_level`）"""
+    fallback = -2147483603
+    if Quartz is None:
+        return fallback
+    fn = getattr(Quartz, "CGWindowLevelForKey", None)
+    key = getattr(Quartz, "kCGDesktopIconWindowLevelKey", 18)
+    if fn is None:
+        return fallback
+    try:
+        return int(fn(key))
+    except Exception as e:  # noqa: BLE001
+        print(f"  (CGWindowLevelForKey 失败: {e}，按 {fallback})")
+        return fallback
+
+
+def overlaps(a: WinInfo, b: WinInfo, margin: float = 0) -> bool:
+    """两个窗口（全局点坐标）是否重叠（各自外扩 margin）"""
+    return (a.x - margin < b.x + b.w and b.x - margin < a.x + a.w
+            and a.y - margin < b.y + b.h and b.y - margin < a.y + a.h)
 
 
 def main_display_points() -> tuple[float, float]:
@@ -219,6 +250,17 @@ def expected_size(spec: tuple[float, float], screen: ScreenInfo | None = None) -
     if s.vis_w <= 0 or s.vis_h <= 0:
         return spec
     return (min(spec[0], s.vis_w), min(spec[1], s.vis_h))
+
+
+def unit_scale() -> float:
+    """本 app 的"物理像素"统一系数：所有屏 backingScaleFactor 的最大值（app `platform/mac_geometry.rs`）。
+    库里的收纳箱几何 = 全局点坐标 × 这个系数"""
+    if AppKit is not None:
+        try:
+            return max(float(s.backingScaleFactor()) for s in AppKit.NSScreen.screens()) or 1.0
+        except Exception as e:  # noqa: BLE001
+            print(f"  (读 backingScaleFactor 失败: {e})")
+    return 1.0
 
 
 def screen_capture_preflight() -> str:
@@ -279,6 +321,16 @@ def content_stats(img: Image.Image) -> dict:
     }
 
 
+def diff_ratio(a: Image.Image, b: Image.Image, threshold: int = 24) -> float:
+    """两张截图有多少像素明显不同（任一通道差 > threshold）的占比；尺寸不同时把 b 缩放到 a 的尺寸"""
+    ra, rb = flatten(a, (0, 0, 0)), flatten(b, (0, 0, 0))
+    if rb.size != ra.size:
+        rb = rb.resize(ra.size, Image.NEAREST)
+    diff = ImageChops.difference(ra, rb).convert("L").point(lambda v: 255 if v > threshold else 0)
+    changed = diff.histogram()[255]
+    return changed / (ra.width * ra.height) if ra.width and ra.height else 0.0
+
+
 def has_content(stats: dict) -> bool:
     """纯色壁纸 / 空白截图：1~2 种颜色、非主色 0%。真实窗口哪怕大片白底，文字与图标的抗锯齿也有几十上百种颜色。
     界面上"有没有字"由 OCR 断言，这里只挡掉明显的假截图"""
@@ -332,11 +384,12 @@ def vision_languages() -> str:
         return f"<查询失败 {e}>"
 
 
-def ocr(img: Image.Image, work_path: Path) -> list[OcrLine]:
-    """Vision 文字识别（accurate、zh-Hans + en-US）。小图先放大 2 倍：1x 显示器上 13~14px 的中文识别率明显更高"""
+def ocr(img: Image.Image, work_path: Path, bg: tuple[int, int, int] = (255, 255, 255)) -> list[OcrLine]:
+    """Vision 文字识别（accurate、zh-Hans + en-US）。小图先放大 2 倍：1x 显示器上 13~14px 的中文识别率明显更高。
+    `bg`：透明像素铺的底色（收纳箱是半透明黑底白字，铺黑色；白底会让白字几乎看不见）"""
     if Vision is None:
         raise AssertionError(f"Vision OCR 不可用：{VISION_ERR!r}")
-    im = flatten(img)
+    im = flatten(img, bg)
     factor = 2 if im.width < 1600 else 1
     if factor != 1:
         im = im.resize((im.width * factor, im.height * factor), Image.LANCZOS)
@@ -521,7 +574,7 @@ def traffic_light_pixels(img: Image.Image, scale: float) -> dict:
 # 坐标一律是全局逻辑点、主屏左上为原点（与 CGWindowList 的 kCGWindowBounds 相同）。CGEventPost(kCGHIDEventTap) 等同真实输入：
 # 发给光标下 / 前台的应用，所以键盘事件发之前先 bring_to_front() 并确认前台进程是被测应用。
 
-KEY_Q, KEY_W, KEY_A, KEY_V = 12, 13, 0, 9      # kVK_ANSI_*
+KEY_Q, KEY_W, KEY_A, KEY_V, KEY_H = 12, 13, 0, 9, 4      # kVK_ANSI_*
 KEY_RETURN, KEY_ESCAPE = 36, 53
 
 
@@ -567,6 +620,23 @@ def post_key_hid(keycode: int, flags: int = 0) -> str:
     return "CGEventPost(HID)"
 
 
+def type_text_to_pid(pid: int, text: str, delay: float = 0.04) -> None:
+    """同 type_text，但直接投递到该进程（CGEventPostToPid；诊断用：系统输入流的按键没进目标窗口时，看进程本身收不收得到）"""
+    Q = _quartz()
+    post = getattr(Q, "CGEventPostToPid", None)
+    if post is None:
+        raise AssertionError("pyobjc 没有 CGEventPostToPid")
+    src = _src()
+    for ch in text:
+        n = len(ch.encode("utf-16-le")) // 2
+        for down in (True, False):
+            ev = Q.CGEventCreateKeyboardEvent(src, 0, down)
+            Q.CGEventKeyboardSetUnicodeString(ev, n, ch)
+            post(pid, ev)
+            time.sleep(0.01)
+        time.sleep(delay)
+
+
 def type_text(text: str, delay: float = 0.04) -> None:
     """逐字符输入（CGEventKeyboardSetUnicodeString，不经输入法；GPUI 按事件自带的字符 insertText）"""
     Q = _quartz()
@@ -608,6 +678,46 @@ def click(x: float, y: float, button: str = "left") -> None:
     time.sleep(0.08)
     _mouse("up", x, y, button)
     time.sleep(0.2)
+
+
+def double_click(x: float, y: float) -> None:
+    """左键双击（第二次按下 / 抬起的 kCGMouseEventClickState = 2：AppKit 的 clickCount 取自这个字段）"""
+    print(f"    double_click @ ({x:.0f},{y:.0f})")
+    _mouse("move", x, y)
+    time.sleep(0.15)
+    for n in (1, 2):
+        _mouse("down", x, y, clicks=n)
+        time.sleep(0.05)
+        _mouse("up", x, y, clicks=n)
+        time.sleep(0.08)
+    time.sleep(0.2)
+
+
+def drag_and_drop(x0: float, y0: float, x1: float, y1: float, steps: int = 40, hover: float = 0.8) -> None:
+    """拖放（文件拖入用）：比 drag() 慢——按下后先小步挪动让拖放会话开始，再分步滑到目标，在目标上停留并轻微晃动
+    （目标窗口靠 draggingUpdated 认出悬停），最后抬起"""
+    print(f"    drag_and_drop ({x0:.0f},{y0:.0f}) → ({x1:.0f},{y1:.0f})")
+    _mouse("move", x0, y0)
+    time.sleep(0.3)
+    _mouse("down", x0, y0)
+    time.sleep(0.4)
+    for i in range(1, 7):
+        _mouse("drag", x0 + 2 * i, y0 + i)
+        time.sleep(0.05)
+    sx, sy = x0 + 12, y0 + 6
+    for i in range(1, steps + 1):
+        _mouse("drag", sx + (x1 - sx) * i / steps, sy + (y1 - sy) * i / steps)
+        time.sleep(0.03)
+    deadline = time.time() + hover
+    k = 0
+    while time.time() < deadline:
+        k += 1
+        _mouse("drag", x1 + (k % 2) * 3, y1 + ((k // 2) % 2) * 3)
+        time.sleep(0.08)
+    _mouse("drag", x1, y1)
+    time.sleep(0.25)
+    _mouse("up", x1, y1)
+    time.sleep(0.6)
 
 
 def drag(x0: float, y0: float, x1: float, y1: float, steps: int = 15) -> None:
@@ -920,10 +1030,13 @@ class App:
     `data_dir` = 开发专用数据隔离（MINI_TODO_DATA_DIR，仅 debug 构建生效；日志在 <dir>/logs/）"""
 
     def __init__(self, app_path: Path, *, data_dir: Path | None, debug_open: str | None = None,
-                 tag: str = "app", out_dir: Path, work_dir: Path, env: dict | None = None):
+                 tag: str = "app", out_dir: Path, work_dir: Path, env: dict | None = None,
+                 fences_root: Path | None = None):
         self.app_path = Path(app_path)
         self.exe = self.app_path / "Contents" / "MacOS" / "mini-todo"
         self.data_dir = Path(data_dir) if data_dir else None
+        # 收纳根目录（MINI_TODO_FENCES_ROOT，仅 debug 构建、隔离运行时设置）；默认 <work>/<tag>-fences
+        self.fences_root = Path(fences_root) if fences_root else Path(work_dir) / f"{tag}-fences"
         self.debug_open = debug_open
         self.tag = tag
         self.out_dir = out_dir
@@ -954,15 +1067,16 @@ class App:
         env = {k: v for k, v in os.environ.items() if not k.startswith("MINI_TODO_")}
         if self.data_dir:
             env["MINI_TODO_DATA_DIR"] = str(self.data_dir)
-            env["MINI_TODO_FENCES_ROOT"] = str(self.work_dir / f"{self.tag}-fences")
+            env["MINI_TODO_FENCES_ROOT"] = str(self.fences_root)
         if self.debug_open:
             env["MINI_TODO_DEBUG_OPEN"] = self.debug_open
         env.setdefault("RUST_BACKTRACE", "1")
         env.update(self.extra_env)
         self.stdout_path.parent.mkdir(parents=True, exist_ok=True)
         self._stdout = open(self.stdout_path, "ab")
+        extra = "".join(f" {k}={v}" for k, v in self.extra_env.items())
         print(f"    启动 {self.exe}（tag={self.tag} MINI_TODO_DATA_DIR={self.data_dir} "
-              f"MINI_TODO_DEBUG_OPEN={self.debug_open}）", flush=True)
+              f"MINI_TODO_DEBUG_OPEN={self.debug_open}{extra}）", flush=True)
         self.proc = subprocess.Popen([str(self.exe)], env=env, cwd=str(self.work_dir), stdout=self._stdout,
                                      stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
         ALL_PROCS.append(self.proc)
@@ -1091,6 +1205,26 @@ class App:
             return False
         ra = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(self.pid)
         return bool(ra.terminate()) if ra is not None else False
+
+    def _running(self):
+        if AppKit is None:
+            return None
+        return AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(self.pid)
+
+    def hide_via_appkit(self) -> bool:
+        """`NSRunningApplication.hide()`：等同别的应用发起的「隐藏」（例如别的应用的「隐藏其他」）"""
+        ra = self._running()
+        return bool(ra.hide()) if ra is not None else False
+
+    def unhide_via_appkit(self) -> bool:
+        ra = self._running()
+        return bool(ra.unhide()) if ra is not None else False
+
+    def is_hidden(self) -> bool | None:
+        """系统认为本应用是否处于隐藏状态（查不到时 None；NSRunningApplication 的属性靠通知更新，先转一下 run loop）"""
+        _spin_runloop()
+        ra = self._running()
+        return bool(ra.isHidden()) if ra is not None else None
 
 
 def seed(seed_exe: Path, data_dir: Path, sample: Path) -> None:
