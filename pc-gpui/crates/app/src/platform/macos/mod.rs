@@ -328,4 +328,9 @@ pub mod raw {
     pub fn describe_layer(h: Hwnd) -> Option<String> {
         ns::describe_window(h.0)
     }
+
+    /// 应用是否在前台、key 窗口是谁（日志用，只读）
+    pub fn describe_focus(h: Hwnd) -> Option<String> {
+        ns::describe_focus(h.0)
+    }
 }

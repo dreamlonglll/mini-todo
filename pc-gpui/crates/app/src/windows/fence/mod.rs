@@ -14,14 +14,20 @@
 //! `mini_todo_core::fence::fence_view` + `platform::set_client_rect_physical` 摆窗，`platform::client_rect_physical` 读几何。
 //! 只有用户拖动 / 缩放结束才落库（`commit_geometry`），折叠 / 展开、启动夹回、系统挪窗都不落库。
 //!
-//! macOS：窗口是不激活应用的面板（`services::fences` 模块文档），单击不一定会让它成为 key 窗口（没有真机验证）——鼠标操作
-//! 不受影响，只有改名要键盘，所以 [`FenceWindow::start_rename`] 先 `activate_window()`（面板成为 key、应用仍不激活）。
+//! macOS：窗口是不激活应用的面板（`services::fences` 模块文档）：单击、拖动、缩放、外部拖入、双击打开项目都不激活应用
+//! （菜单栏不切换）。只有改名要键盘，而这种面板单击不一定成为 key 窗口，所以 [`FenceWindow::start_rename`] 在 macOS 上
+//! **会激活应用**（菜单栏切到 mini-todo，主窗口可能一起到前面）再让面板成为 key。应用被激活时 AppKit 会把 key 还给上次的
+//! key 窗口（主窗口），面板随即失去 key——CI 的 MF08 里键盘输入因此进了主窗口、改名被当成"点到别处"提交了原标题。所以
+//! 改名开始后的宽限期（`MAC_RENAME_GRACE`）内失去 key 不提交，而是重新让面板成为 key，并在几个时间点复查
+//! （`MAC_RENAME_KEY_CHECKS`），过程写进日志（`[fence] 改名…`）；宽限期过后失去 key（点到别的应用 / 桌面）照常提交。
+//! 没有真机验证（中文输入法、台前调度下的表现未知）。
 
 mod grid;
 pub mod logic;
 mod panels;
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::time::{Duration, Instant};
 
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::{
@@ -51,6 +57,23 @@ use crate::ui::message;
 /// 窗口登记用的 key（与旧版 label 相同：`fence-{id}`）
 pub fn fence_key(fence_id: i64) -> String {
     core_fence::fence_label(fence_id)
+}
+
+/// macOS 改名：开始后这么久之内窗口失去 key 不算"点到别处"（不提交，重新让面板成为 key）。应用被激活时 AppKit 把 key
+/// 还给主窗口发生在开始后几十毫秒内；用户真要点开，宽限期过后失去 key 照常提交
+const MAC_RENAME_GRACE: Duration = Duration::from_millis(1200);
+/// macOS 改名：开始后这几个时间点（毫秒，升序，都在宽限期内）复查面板是否是 key，不是就重新让它成为 key
+const MAC_RENAME_KEY_CHECKS: [u64; 3] = [150, 500, 1000];
+
+/// macOS 改名的焦点诊断（日志用）：GPUI 看到的窗口激活态 + AppKit 的应用前台 / key 窗口
+fn focus_report(window: &Window) -> String {
+    let hwnd = platform::hwnd(window);
+    let appkit = hwnd.and_then(|h| h.describe_focus()).unwrap_or_default();
+    format!(
+        "窗口 #{} windowActive={} {appkit}",
+        hwnd.map_or(0, |h| h.0),
+        window.is_window_active()
+    )
 }
 
 /// 窗口临时展开的原因（任一存在即展开，不改持久化的折叠态）
@@ -109,6 +132,8 @@ pub struct FenceWindow {
     reasons: BTreeSet<ExpandReason>,
     panel: Panel,
     editing_title: bool,
+    /// macOS：本次改名开始的时刻（宽限期判断、识别过期的复查任务）；其他平台恒为 `None`
+    rename_started_at: Option<Instant>,
     title_input: Entity<InputState>,
     drag_hover: bool,
     drag_epoch: u64,
@@ -170,7 +195,18 @@ impl FenceWindow {
                 window,
                 |this, _, event: &InputEvent, window, cx| match event {
                     InputEvent::PressEnter { .. } => this.finish_rename(true, window, cx),
-                    InputEvent::Blur => this.finish_rename(true, window, cx),
+                    InputEvent::Blur => {
+                        // macOS：窗口失去 key 也会让输入框 Blur。改名刚开始时那是激活应用的副作用，交给
+                        // observe_window_activation 重新让面板成为 key，这里不提交
+                        if this.in_mac_rename_grace() && !window.is_window_active() {
+                            log::info!(
+                                "[fence] 改名：收纳箱 #{} 的输入框随窗口失去 key 而失焦，宽限期内不提交",
+                                this.fence_id
+                            );
+                            return;
+                        }
+                        this.finish_rename(true, window, cx)
+                    }
                     _ => {}
                 },
             ),
@@ -178,12 +214,32 @@ impl FenceWindow {
                 this.on_geometry_event(window, cx)
             }),
             cx.observe_window_activation(window, |this, window, cx| {
-                if !window.is_window_active() {
-                    // 窗口失焦（例如点到桌面）：提交改名、关掉菜单
-                    this.finish_rename(true, window, cx);
-                    this.close_item_menu(window, cx);
-                    this.close_title_menu(window, cx);
+                if window.is_window_active() {
+                    if cfg!(target_os = "macos") && this.editing_title {
+                        log::info!(
+                            "[fence] 改名：收纳箱 #{} 面板成为 key（{}）",
+                            this.fence_id,
+                            focus_report(window)
+                        );
+                    }
+                    return;
                 }
+                if this.in_mac_rename_grace() {
+                    // macOS 改名刚开始：多半是激活应用时 AppKit 把 key 还给了主窗口，不算点到别处
+                    this.reassert_rename_key("改名刚开始面板就失去了 key", window, cx);
+                } else {
+                    // 窗口失焦（例如点到桌面）：提交改名
+                    if cfg!(target_os = "macos") && this.editing_title {
+                        log::info!(
+                            "[fence] 改名：收纳箱 #{} 面板失去 key，提交改名（{}）",
+                            this.fence_id,
+                            focus_report(window)
+                        );
+                    }
+                    this.finish_rename(true, window, cx);
+                }
+                this.close_item_menu(window, cx);
+                this.close_title_menu(window, cx);
             }),
         ];
         let fence_id = fence.id;
@@ -196,6 +252,7 @@ impl FenceWindow {
             reasons: BTreeSet::new(),
             panel: Panel::None,
             editing_title: false,
+            rename_started_at: None,
             title_input,
             drag_hover: false,
             drag_epoch: 0,
@@ -676,11 +733,6 @@ impl FenceWindow {
             return;
         };
         let title = fence.title.clone();
-        // macOS：不激活应用的面板单击不一定成为 key 窗口，那样键盘输入进不来：先让它成为 key（makeKeyAndOrderFront:，
-        // GPUI 延后执行；应用仍不激活）。失去 key 时（点到别的应用）照常经 observe_window_activation 提交改名
-        if cfg!(target_os = "macos") {
-            window.activate_window();
-        }
         self.editing_title = true;
         self.press_point = None;
         self.title_input.update(cx, |s, cx| {
@@ -688,7 +740,78 @@ impl FenceWindow {
             s.focus(window, cx);
             s.select_all(window, cx);
         });
+        if cfg!(target_os = "macos") {
+            self.begin_mac_rename_focus(window, cx);
+        }
         cx.notify();
+    }
+
+    /// macOS：让键盘进得了改名输入框（见模块文档）。先把应用切到前台（`cx.activate(true)`），再让面板成为 key
+    /// （`activate_window()` = `makeKeyAndOrderFront:`，GPUI 延后到 App 借用之外执行），然后在 [`MAC_RENAME_KEY_CHECKS`]
+    /// 的时间点复查：面板不是 key 就重新来一次。宽限期内的失去 key 由 `observe_window_activation` 处理
+    fn begin_mac_rename_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let started = Instant::now();
+        self.rename_started_at = Some(started);
+        log::info!(
+            "[fence] 改名开始：收纳箱 #{}，激活应用并让面板成为 key（{}）",
+            self.fence_id,
+            focus_report(window)
+        );
+        cx.activate(true);
+        window.activate_window();
+        cx.spawn_in(window, async move |this, cx| {
+            let mut waited = 0;
+            for at in MAC_RENAME_KEY_CHECKS {
+                cx.background_executor()
+                    .timer(Duration::from_millis(at.saturating_sub(waited)))
+                    .await;
+                waited = at;
+                let still_renaming = this.update_in(cx, |this, window, cx| {
+                    if this.rename_started_at != Some(started) || !this.editing_title {
+                        return false;
+                    }
+                    if window.is_window_active() {
+                        log::info!(
+                            "[fence] 改名 {at}ms：收纳箱 #{} 面板是 key（{}）",
+                            this.fence_id,
+                            focus_report(window)
+                        );
+                    } else {
+                        this.reassert_rename_key(
+                            &format!("改名 {at}ms 时面板不是 key"),
+                            window,
+                            cx,
+                        );
+                    }
+                    true
+                });
+                if !matches!(still_renaming, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// macOS 改名中：重新激活应用、让面板成为 key（GPUI 延后执行），焦点放回输入框（不重新全选：可能已经输入了一部分）
+    fn reassert_rename_key(&mut self, why: &str, window: &mut Window, cx: &mut Context<Self>) {
+        log::info!(
+            "[fence] 改名：收纳箱 #{} {why}，重新激活应用并让面板成为 key（{}）",
+            self.fence_id,
+            focus_report(window)
+        );
+        cx.activate(true);
+        window.activate_window();
+        self.title_input.update(cx, |s, cx| s.focus(window, cx));
+    }
+
+    /// macOS 改名开始后的宽限期内（[`MAC_RENAME_GRACE`]）；其他平台恒 false
+    fn in_mac_rename_grace(&self) -> bool {
+        cfg!(target_os = "macos")
+            && self.editing_title
+            && self
+                .rename_started_at
+                .is_some_and(|t| t.elapsed() < MAC_RENAME_GRACE)
     }
 
     fn finish_rename(&mut self, commit: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -696,6 +819,7 @@ impl FenceWindow {
             return;
         }
         self.editing_title = false;
+        self.rename_started_at = None;
         self.focus.focus(window, cx);
         cx.notify();
         if !commit {

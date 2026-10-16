@@ -475,6 +475,11 @@ impl Hwnd {
     pub fn describe_layer(self) -> Option<String> {
         imp::raw::describe_layer(self)
     }
+    /// macOS：本应用是否在前台、当前 key 窗口的窗口号、这个窗口是不是 key（写日志诊断键盘焦点；只读，随时可调）；
+    /// Windows / Linux `None`
+    pub fn describe_focus(self) -> Option<String> {
+        imp::raw::describe_focus(self)
+    }
     pub fn set_owner(self, owner: Option<Hwnd>) {
         imp::raw::set_owner(self, owner)
     }

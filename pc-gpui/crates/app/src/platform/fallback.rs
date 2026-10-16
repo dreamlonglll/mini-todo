@@ -156,4 +156,7 @@ pub mod raw {
     pub fn describe_layer(_hwnd: Hwnd) -> Option<String> {
         None
     }
+    pub fn describe_focus(_hwnd: Hwnd) -> Option<String> {
+        None
+    }
 }

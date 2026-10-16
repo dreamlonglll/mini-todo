@@ -275,6 +275,21 @@ pub fn make_key_and_order_front(number: isize) -> bool {
     with_window(number, |window| window.makeKeyAndOrderFront(None)).is_some()
 }
 
+/// 键盘焦点的现状（诊断日志用）：本应用是否在前台、当前 key 窗口的窗口号、窗口 `number` 是不是 key 窗口。
+/// 只读，不触发 GPUI 回调，随时可调
+pub fn describe_focus(number: isize) -> Option<String> {
+    let mtm = main_thread()?;
+    let app = NSApplication::sharedApplication(mtm);
+    let key_window = app
+        .keyWindow()
+        .map_or_else(|| "无".to_string(), |w| format!("#{}", w.windowNumber()));
+    let this_key = find(mtm, number).is_some_and(|w| w.isKeyWindow());
+    Some(format!(
+        "appActive={} keyWindow={key_window} thisKey={this_key}",
+        app.isActive()
+    ))
+}
+
 /// 把本应用切到前台（`activateIgnoringOtherApps:`，与 GPUI `cx.activate(true)` 相同）
 pub fn activate_app() -> bool {
     let Some(mtm) = main_thread() else {

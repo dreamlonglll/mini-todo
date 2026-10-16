@@ -531,4 +531,9 @@ pub mod raw {
     pub fn describe_layer(_h: Hwnd) -> Option<String> {
         None
     }
+
+    /// macOS 专用（改名时的焦点诊断）：None
+    pub fn describe_focus(_h: Hwnd) -> Option<String> {
+        None
+    }
 }
