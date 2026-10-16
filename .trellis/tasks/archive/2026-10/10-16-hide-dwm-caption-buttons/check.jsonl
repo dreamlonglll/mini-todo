@@ -1,0 +1,6 @@
+{"file": ".trellis/spec/pc-gpui/index.md", "reason": "pc-gpui spec 索引与开发前检查清单"}
+{"file": ".trellis/spec/pc-gpui/gpui-conventions.md", "reason": "GPUI 约定：Win32 写操作延后到 App 借用之外、外框与客户区、platform 接口写法；本任务要在这里加 WS_SYSMENU 约定"}
+{"file": ".trellis/spec/pc-gpui/verification.md", "reason": "验证门槛：fmt / clippy / test / e2e"}
+{"file": ".trellis/spec/backend/window-modes.md", "reason": "主窗口三种模式的样式契约（不得破坏）"}
+{"file": ".trellis/spec/backend/desktop-fences.md", "reason": "收纳箱建窗顺序与样式契约（隐藏建窗→定位→嵌入→显示）"}
+{"file": ".trellis/spec/guides/desktop-window-e2e-guide.md", "reason": "Windows 窗口 e2e 的做法与本机并存安全规则"}
