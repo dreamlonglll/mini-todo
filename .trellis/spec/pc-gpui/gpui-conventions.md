@@ -87,8 +87,23 @@
 - 拖动区之上的**可交互元素必须 `.occlude()`**（`EpButton` 已是），否则 Windows 上点它变成拖窗口；纯文字不用。
 - 不可拖动的状态（主窗口固定模式）不放拖动区即可（`WindowSpec` 不暴露 GPUI 的 `is_movable`，保持默认 `true`；
   设成 `false` 会让 Drag 区整体失效）。
-- 需要"移动超过 3px 才拖"（收纳箱标题栏）：不用 `drag_region`，在 `on_mouse_move` 里调 `platform::begin_window_drag(window, cx)`
-  （Windows：延后执行 `ReleaseCapture` + `WM_NCLBUTTONDOWN/HTCAPTION`）。
+- `platform::begin_window_drag(window, cx)`（Windows：延后执行 `ReleaseCapture` + `WM_NCLBUTTONDOWN/HTCAPTION`；macOS / Linux
+  `start_window_move`）进的是**系统**拖动循环，到松手前改不了位置、拿不到中间状态（macOS 没有任何钩子）。目前没有调用方。
+- 拖动中要改位置（吸附对齐）、或要"移动超过 3px 才拖"（收纳箱标题栏：双击改名）：**自绘拖动**，与缩放手柄同一套——
+  按下记光标（`platform::cursor_position_physical()`，屏幕物理坐标；Linux 取不到时用窗口坐标 + 窗口原点 × 系数）与客户区起点（有阈值的
+  移动在超过阈值、开始移动时才读起点）；
+  `on_drag(Marker, |_, _, _, cx| cx.new(|_| EmptyView))` + `on_drag_move::<Marker>`（捕获阶段、不看悬停；Windows 上 GPUI 按下时已
+  `SetCapture`，macOS 的 mouseDragged 一直发给按下的窗口，光标出了窗口也收得到）；每次移动算目标几何，`cx.on_next_frame` 每帧最多摆一次
+  （`platform::set_client_position_physical` / `set_client_rect_physical`，已延后）；松手（`on_mouse_up` + `on_mouse_up_out` 都挂）后等最后一帧
+  落地（16ms）再读客户区。注意 GPUI 拖动的副作用：
+  - 拖动在移动超过 2px 时开始，之后这次按下**不再算单击**（拖完不会误触发 `on_click`）。阈值比 2px 大的手势（收纳箱"超过 3px 才拖"）
+    里的双击不能靠 `on_click`——第二下手抖 2~3px 就收不到：在 `on_mouse_down` 记下 `click_count`，松手时自己按距离判断（`on_title_mouse_up`）。
+  - 拖动期间所有元素都**不算悬停**（`on_hover(false)`，松手后再报 `true`）：要保持悬停外观 / 悬停状态机的，在 `on_hover` 里
+    `cx.has_active_drag()` 且是自己的拖动手势时压下这次"离开"，松手后再按光标核对一次（收纳箱的 `on_hover_changed` / `resync_hover_after_drag`）。
+  - `active_drag` 是全应用的，只在 MouseUp 时清掉（任何窗口的松手都会清）：没收到松手时（捕获被拿走）要在之后不带左键的 `on_drag_move` 里
+    自己 `cx.stop_active_drag(window)`，被别处清掉时在根元素的 `on_mouse_move` 里收尾。
+
+  实现：`windows/fence/mod.rs`（`on_title_drag_move` / `resize_move`），契约见 [backend/desktop-fences.md](../backend/desktop-fences.md)「移动」「吸附」。
 
 ### 2.4 窗口外观、透明与 Root
 
@@ -264,7 +279,9 @@ gpui-pre-macos 能建窗（位置 / 显示器 / 置顶层级 / 可缩放都只�
   `hidesOnDeactivate`、对本该显示的窗口补一次显示。**改 style mask 后 AppKit 可能重建标题栏、红绿灯重新出现，还会换掉第一响应者**（键盘输入
   不再进 GPUI 视图）：所有改 mask 的代码都走 `ns.rs` 的 `update_style`（改完重新隐藏按钮、把第一响应者还回去），不要直接 `setStyleMask`。
 - **`app_owns_titlebar_drag: true`**（`WindowSpec::options()`，只对 mac 生效）不要去掉：否则 AppKit 从顶部那条标题栏区域拖窗、为区分双击而
-  延迟标题栏上的点击。拖窗走 `start_window_move`（`ui::title_bar::drag_region` 的非 Windows 分支，必须在鼠标按下 / 移动的事件处理里同步调用）。
+  延迟标题栏上的点击。拖窗走 `start_window_move`（`ui::title_bar::drag_region` 的非 Windows 分支，必须在鼠标按下 / 移动的事件处理里同步调用）；
+  收纳箱是自绘拖动（§2.3），不走它。GPUI mac 在左键按住时每 16ms 重放上一次 mouseDragged（`synthetic_drag`，位置与修饰键都是旧的）：
+  自绘拖动按全局光标重算位置，重放是无副作用的重复。
 - **激活**：点菜单栏图标 / 菜单项、单实例转交、Dock 唤起时本应用多半不在前台，新开或唤起的窗口会落在前台应用的窗口之后——先 `cx.activate(true)`
   （`tray::activate_app`、`window_mode::bring_main_to_front`、单实例接收端已处理）。`on_reopen` 只在没有可见窗口时回调：移到屏幕边缘（贴边隐藏）
   的窗口仍算可见，这类状态要在窗口自己的激活回调里处理（主窗口的 `window_mode::on_main_activated`）。
@@ -329,7 +346,9 @@ gpui-pre-macos 能建窗（位置 / 显示器 / 置顶层级 / 可缩放都只�
    `WindowKind::PopUp` 的样式映射；`calculate_window_rect` 的边框对半分（客户区偏高）与 `WM_NCCALCSIZE` 只去顶边是否还在
    （`windows::open_window` 的客户区校正、`platform::FrameInsets` 的单测依赖它）；建窗样式是否仍带 `WS_SYSMENU`、运行期是否开始
    改写 `GWL_STYLE`（`open_window` 建窗后去掉 `WS_SYSMENU` 依赖它）；文件拖放是否仍不改输入模态、`on_drop` 是否仍要求
-   `is_hovered`（`ui::external_drop` 依赖它）；透明窗口（DirectComposition）实现；`QuitMode` 默认值；`Root` / `RootPlugin` 接口
+   `is_hovered`（`ui::external_drop` 依赖它）；自绘拖动（§2.3，收纳箱移动 / 缩放）依赖的：Windows 鼠标按下时 `SetCapture`、`on_drag_move`
+   是捕获阶段且不看悬停、`on_drag` 的 2px 阈值与开始后抑制 click、拖动期间 `on_hover` 报 `false`、`active_drag` 只在 MouseUp 后清掉、
+   `MouseDownEvent.click_count`（收纳箱双击改名）；透明窗口（DirectComposition）实现；`QuitMode` 默认值；`Root` / `RootPlugin` 接口
    （`UiLayer` 依赖）；`gpui_kit::base::TextView::markdown(..).image_source(..)`；`img(&str)` 的 URI 判定；换行器规则；
    Windows release 构建的 `fxc.exe` 着色器预编译（`gpui-pre-windows/build.rs`）。
    macOS（§2.15，gpui-pre-macos / gpui-pre-apple）：gpui-kit 是否仍给 `gpui_platform` 开 `font-kit`（漏开时 mac 上退回 `NoopTextSystem`，
@@ -340,7 +359,8 @@ gpui-pre-macos 能建窗（位置 / 显示器 / 置顶层级 / 可缩放都只�
    `did_finish_launching` 是否仍重设激活策略、`on_reopen` 的回调条件；`set_menus` / `MenuItem::os_action`；`setReleasedWhenClosed:NO`。
    收纳箱（desktop-fences.md「场景：macOS 上的收纳箱」）：`PopUp` 是否仍是带 `NonactivatingPanel` 的 NSPanel、层级 / collectionBehavior 是否仍只在
    `MacWindow::open` 里设（运行期不重设）、`PopUp` 是否仍有 `ActiveAlways` 跟踪区；所有窗口是否仍 `registerForDraggedTypes:` 文件类型、外部拖入回报的
-   拖放操作；`start_window_move` 是否仍是 `performWindowDragWithEvent:`；`acceptsFirstMouse` / `canBecomeKeyWindow`。
+   拖放操作；`start_window_move` 是否仍是 `performWindowDragWithEvent:`（主窗口的 `drag_region`）；收纳箱的自绘拖动：mouseDragged 是否仍只发给按下的面板、
+   `synthetic_drag` 是否仍在松开左键后停止；`acceptsFirstMouse` / `canBecomeKeyWindow`。
 2. 对齐 app 的 `windows` crate 版本与 gpui-pre-windows 一致；mac 的 `objc2` / `objc2-foundation` / `objc2-app-kit` 与 gpui-pre-macos 一致
    （同步改 `scripts/mac-check/Cargo.toml`）。
 3. 若开启 `gpui-kit/test-support`：旧 lock 会出现 `cocoa` / `unicode-properties` 版本冲突，删掉 lock 重新生成（见 gpui-api.md §C1）。

@@ -57,10 +57,10 @@ src/
 │   ├── notification.rs  应用内通知（透明、置顶、不抢焦点；core 槽位与叠放算法）
 │   ├── settings/     设置：mod（窗口、菜单、加载）、general、appearance、data（导入导出 / WebDAV / 强制同步）、
 │   │                 screen（屏幕配置）、about（版本 / 检查更新）
-│   ├── fence/        桌面收纳箱：mod（窗口、标题栏、拖动 / 缩放 / 折叠 / 改名、拖入）、grid（项目网格、图标懒加载、
+│   ├── fence/        桌面收纳箱：mod（窗口、标题栏、拖动 / 缩放（自绘拖动 + 吸附高亮）/ 折叠 / 改名、拖入）、grid（项目网格、图标懒加载、
 │   │                 右键菜单（含隐藏 / 取消隐藏；macOS「在访达中显示」）、隐藏项过滤与半透明、箱内排序、Ctrl+滚轮
 │   │                 （macOS 另认 ⌘+滚轮））、panels（外观 / 删除确认 / 云同步提示（Windows OneDrive、macOS iCloud）、
-│   │                 「更多」菜单（含显示隐藏的图标））、logic（纯函数）
+│   │                 「更多」菜单（含显示隐藏的图标））、logic（纯函数）、snap（吸附对齐纯函数）
 │   └── gallery.rs    控件样例（仅调试）
 ├── ui/               Element Plus 风格共享控件（见 §4.4，每种控件只有一个实现）
 ├── services/         进程级服务（见 §4.2）
@@ -100,8 +100,10 @@ src/
    同理，**任何模态的系统调用**（同步 `SendMessage` 拖窗、同步对话框）都不能在事件处理里直接调；会移动用户文件的
    收纳箱操作（带 owner HWND）绝不在 UI 主线程调用（见 `../core/README.md`）。
 6. **拖动窗口**：普通标题栏用 `ui::title_bar::drag_region()`（放第一个子元素，Windows 上走系统 `HTCAPTION`：贴边分屏、
-   可缩放窗口双击最大化）；拖动区之上的可交互元素必须 `.occlude()`（`EpButton` 已是），文字不用。需要"移动 3px 才拖"时
-   自己在 `on_mouse_move` 里调 `platform::begin_window_drag(window, cx)`。Windows 上 `window.start_window_move()` 是空操作。
+   可缩放窗口双击最大化）；拖动区之上的可交互元素必须 `.occlude()`（`EpButton` 已是），文字不用。Windows 上
+   `window.start_window_move()` 是空操作。要"移动 3px 才拖"、拖动中还要改位置（收纳箱的吸附对齐）时不进系统拖动循环
+   （`platform::begin_window_drag` 中途改不了位置），用自绘拖动：`on_drag` + `on_drag_move`（捕获阶段、不看悬停）+ 屏幕物理坐标的光标 +
+   `on_next_frame` 每帧摆一次窗，松手后再读客户区（`windows/fence/mod.rs`，约定见 spec gpui-conventions §2.3）。
    macOS 上标题栏同样是自绘的：系统红绿灯建窗后由 `open_window` 隐藏，`WindowSpec` 设了 `app_owns_titlebar_drag`（AppKit 不再从
    顶部标题栏区域拖窗、不延迟标题栏上的点击），拖动走 `start_window_move`。
 7. **GPUI 没有 z-index**：后绘制者在上；浮层用 `deferred(anchored()…)`（弹层统一走 `ui::ep_popper::popper`）。消息 / 确认框由
@@ -172,7 +174,7 @@ cx.subscribe_in(&state, window, |_, _, e: &AppStateEvent, window, cx| …)  // �
 | `window_mode` | 主窗口普通 / 经典固定 / 固定 + 嵌入桌面、贴边隐藏与唤起、位置 / 尺寸与屏幕配置记忆（防抖保存）、托盘唤起 / 重置位置、200ms 轮询（Explorer 重启重挂、样式自愈）。macOS 同一套（固定 = `setMovable:NO` + 不可缩放，置顶 = 浮动层级，无嵌入桌面）；唤起前先 `cx.activate(true)` |
 | `mac_menu` | macOS 应用菜单：Mini Todo（关于 / 设置… ⌘, / 服务 / 隐藏 ⌘H / 隐藏其他 ⌥⌘H / 全部显示 / 退出 ⌘Q）、编辑（撤销 / 重做 / 剪切 / 拷贝 / 粘贴 / 全选，动作是输入框的 `input::*`，剪切等映射系统选择器）、窗口（最小化 ⌘M / 关闭窗口 ⌘W；收纳箱是活动窗口时两者都不做）；`on_reopen`（Dock / Finder 唤起主窗口）。全平台编译，只在 macOS 上由 `lib.rs` 调用 |
 | `update_check` | GitHub 最新 release：`check_for_updates(cx)`（启动，失败静默）、`check(cx) -> Task<Result<UpdateInfo, String>>`（设置「关于 → 检查更新」）、`releases_url(cx)`；结果写进 `AppState.has_update / latest_version / release_url` |
-| `fences` | 桌面收纳箱生命周期：建窗 + 嵌入（Windows）/ 桌面层（macOS：`PopUp` 面板 → `Hwnd::make_desktop_layer` → 显示，日志自报层级与行为）、启动恢复（Windows / macOS）、新增 / 显示隐藏 / 重置位置、目录监听 → 前台刷新、200ms 嵌入守护（Windows）、约 2 秒一次的屏幕组合检测 |
+| `fences` | 桌面收纳箱生命周期：建窗 + 嵌入（Windows）/ 桌面层（macOS：`PopUp` 面板 → `Hwnd::make_desktop_layer` → 显示，日志自报层级与行为）、启动恢复（Windows / macOS）、新增 / 显示隐藏 / 重置位置、目录监听 → 前台刷新、200ms 嵌入守护（Windows）、约 2 秒一次的屏幕组合检测；吸附对齐的跨窗口部分：`snap_scene`（拖动开始时快照其它收纳箱的可见矩形）、`set_snap_guides` / `clear_snap_guides` / `snap_edges`（目标收纳箱的高亮边，只通知变了的窗口，窗口关闭时清掉） |
 
 ### 4.3 `windows`：WindowManager 与各窗口入口
 
@@ -248,7 +250,7 @@ editor::open(cx, Some(parent), None, EditorMode::Edit);
 | 函数（`&Window` 版写操作自动延后执行） | 说明 |
 |---|---|
 | `hwnd(window) -> Option<Hwnd>` | Windows HWND；macOS NSWindow 的窗口号（每次调用都在 `NSApp.windows` 里重新找，不存对象指针）；Linux `None` |
-| `begin_window_drag(window, cx)` / `toggle_maximize(window, cx)` | 程序化拖动（Windows：延后 `ReleaseCapture` + `WM_NCLBUTTONDOWN/HTCAPTION`；macOS / Linux：`start_window_move`） |
+| `begin_window_drag(window, cx)` / `toggle_maximize(window, cx)` | 程序化发起**系统**拖动（Windows：延后 `ReleaseCapture` + `WM_NCLBUTTONDOWN/HTCAPTION`；macOS / Linux：`start_window_move`；到松手前改不了位置，目前没有调用方——收纳箱是自绘拖动） |
 | `client_rect_physical(window)` / `set_client_rect_physical(window, cx, rect)` / `set_client_position_physical(window, cx, x, y)`、`window_rect_physical(window)`、`set_geometry_locked(window, cx, b)` | 物理像素几何，**一律按客户区（= 可见区域）**：GPUI 窗口在左 / 右 / 下有不可见边框（96 DPI 各 8px，可缩放与否都有），外框只用于换算；设置时换算成外框 `SetWindowPos(NOZORDER\|NOACTIVATE)`，跨 DPI 按新边框再校正；macOS `setFrame:display:`（frame = 客户区）；Linux 无法移动窗口，no-op；固定模式锁定位置与尺寸（macOS `setMovable:NO` + 去掉可缩放） |
 | `monitors(cx)` / `primary_monitor` / `monitor_of_window(window, cx)` / `monitor_at_cursor(cx)` | `MonitorInfo { display_id, rect, work, scale, primary }`（物理像素；`logical_rect()` / `logical_work()`）；macOS `NSScreen.screens`（主屏在前），物理像素 = 全局点坐标 × 统一系数（所有屏 `backingScaleFactor` 的最大值，单屏 / 同缩放时与 2.5.0 逐像素一致，见 `mac_geometry` 模块文档），`scale` 恒为统一系数；Linux 缩放按 1 |
 | `cursor_position_physical()`、`screen_config_id(cx)` | 光标（macOS `NSEvent.mouseLocation`；Linux `None`）、屏幕组合 ID（macOS 按各屏自己的缩放，与 2.5.0 一致；debug 下 `MINI_TODO_SCREEN_ID_FILE` 可覆盖） |
