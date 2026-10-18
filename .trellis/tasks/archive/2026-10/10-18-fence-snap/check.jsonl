@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/pc-gpui/gpui-conventions.md", "reason": "检查 App 借用期间的平台调用、theme token、控件复用、跨窗口状态约定"}
+{"file": ".trellis/spec/backend/desktop-fences.md", "reason": "检查移动 / 缩放 / 落库契约与吸附规则是否一致、spec 是否已更新"}
+{"file": ".trellis/spec/pc-gpui/verification.md", "reason": "验证门槛与命令"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "吸附 / 拖动逻辑与现有缩放机制复用，避免重复实现"}

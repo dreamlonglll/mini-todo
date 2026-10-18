@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/pc-gpui/index.md", "reason": "pc-gpui 规格索引"}
+{"file": ".trellis/spec/pc-gpui/gpui-conventions.md", "reason": "app crate 约定：后台执行、App 借用期间不同步调 Win32/AppKit（platform 延后）、§2.3 拖动窗口、theme token 唯一来源、跨窗口状态、macOS §2.15"}
+{"file": ".trellis/spec/backend/desktop-fences.md", "reason": "收纳箱契约：移动 / 缩放 / 几何落库 / 折叠与临时展开 / macOS 面板不激活应用；本任务要改移动机制并新增吸附"}
+{"file": ".trellis/spec/pc-gpui/verification.md", "reason": "验证门槛：fmt / clippy / test、Windows/mac 交叉检查、mac 改动走 CI"}
+{"file": ".trellis/spec/guides/desktop-window-e2e-guide.md", "reason": "收纳箱拖动 / 缩放的 e2e 断言要点（几何落库、DPI）"}
