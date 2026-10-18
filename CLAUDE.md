@@ -42,7 +42,7 @@ mini-todo/
 │   └── 开发文档/                            # 开发相关文档
 ├── pc-gpui/                                # PC 端（Cargo workspace；详见各 crate README）
 │   ├── Cargo.toml                          # [workspace] members = crates/core、crates/app；[workspace.package] version 是
-│   │                                       # 版本号唯一来源（当前 3.0.3-pre）；release thin LTO + strip
+│   │                                       # 版本号唯一来源（当前 3.0.4）；release thin LTO + strip
 │   ├── Cargo.lock                          # 提交；CI 一律 --locked
 │   ├── crates/
 │   │   ├── core/                           # mini-todo-core：业务核心（不依赖 GPUI / Tauri / tokio，全部阻塞函数）
@@ -729,7 +729,7 @@ debug 专用环境变量（**只在 debug 构建读取，release 一律忽略**�
 - `pc-gpui-e2e-macos.yml`：macOS 编译门 + e2e（`checks` clippy / test、`smoke` debug `.app` 的 M 组与收纳箱 MF 组、`release-smoke` release `.app` 不隔离的 P 组）；
   触发条件同 Windows e2e。mac 代码没有别的编译门，改了就推分支看它
 - `cloud-ci.yml`：fmt / clippy / test + Skill 单测
-- **版本号只有一处**：`pc-gpui/Cargo.toml` 的 `[workspace.package] version`（改完 `Cargo.lock` 同步），当前 `3.0.3-pre`。cloud 版本在
+- **版本号只有一处**：`pc-gpui/Cargo.toml` 的 `[workspace.package] version`（改完 `Cargo.lock` 同步），当前 `3.0.4`。cloud 版本在
   `cloud/Cargo.toml`，与 tag 无关。发布步骤与安装器契约见 `.trellis/spec/pc-gpui/release.md`
 
 ## 注意事项
