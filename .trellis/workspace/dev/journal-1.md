@@ -994,3 +994,39 @@ PC 前端（D1 正确性 / 安全 / 同步 UI、D2 性能 / 清理 / 测试）�
 ### Next Steps
 
 - None - task complete
+
+
+## Session 27: 收纳箱拖动 / 缩放吸附对齐与 v3.0.4 正式版
+
+**Date**: 2026-10-18
+**Task**: 收纳箱拖动 / 缩放吸附对齐与 v3.0.4 正式版
+**Branch**: `claude/fence-snap`
+
+### Summary
+
+收纳箱新增吸附对齐：新增 windows/fence/snap.rs 纯逻辑（移动时同名边对齐；缩放时被拖的边对齐同名边或宽高吸成与其它收纳箱一致；阈值 round(10×系数)、横纵独立取最近、只取同一显示器上显示中的收纳箱、折叠目标按标题栏、锁定的可作目标），按住 Alt / Option 临时不吸附，被对齐的收纳箱在对应边画 #409EFF 高亮（状态在 FenceRuntime，只 notify 变化的目标）。收纳箱移动由系统拖动（WM_NCLBUTTONDOWN/performWindowDrag，中途改不了位置）改为与缩放相同的 GPUI on_drag 自绘拖动：超过 3px 才开始、只改位置、每帧最多摆一次窗、松手直接 commit_geometry；删除 observe_window_bounds 闸门防抖落库；修掉自绘拖动带来的回归（拖动中按钮变暗、折叠收纳箱松手自行展开、拖动中弹提示、丢 mouse up 卡住），双击改名改为松手时判断（3px 内仍算双击）并修复拖动后单击误判双击改名。单测 18 个；本机 Windows e2e 收纳箱组 F12–F15 新用例全过，F03/F10 因本机中文输入法（kbd=0x0804）未能验证（README 已记的环境问题）；mac 吸附与自绘拖动未经 e2e。规范（desktop-fences、gpui-conventions、e2e 指南）、CLAUDE.md、README 同步。版本号改为 3.0.4（3.0 的第一个正式版），新增 v3.0.4 发布说明（面向 2.5.0 用户写全 3.0 变化），用户选择不等 e2e CI 直接发布。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `e655ba7` | (see git log) |
+| `920e8c2` | (see git log) |
+| `ecc3fb4` | (see git log) |
+| `7368ee4` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
