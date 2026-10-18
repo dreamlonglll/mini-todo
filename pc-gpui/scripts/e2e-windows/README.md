@@ -30,6 +30,7 @@ GPUI 窗口没有 DOM / CDP，按钮位置按布局常量（逻辑像素，见 `
 | I00–I08 | FAB 新建 → 输入 → Ctrl+Enter 落库、主窗口刷新；点行 → 只读详情 → 编辑 → 改标题保存；悬停操作条完成 / 删除（确认框）；设置切深色主题（落库、主窗口变半透明深色并透出桌面色）；设置开机自启开 / 关（`HKCU\…\Run\mini-todo`）；托盘图标（`Shell_NotifyIconGetRect`）；系统通知（到期提醒 notified=1、日志无发送失败） | 是 |
 | D00–D04 | 本地 WebDAV（Basic 认证）：测试连接（服务器收到带认证的 PROPFIND）、保存配置（`webdav_password` 为 `dpapi:` 密文、库文件无明文）、立即同步（服务器出现 `mini-todo/sync-data.json.gz`、`webdav_last_sync_at` 更新）、标题栏同步 | 是 |
 | F01–F11 | `fence:new`：嵌入桌面（含无 `WS_SYSMENU`、标题栏按钮区宽度为 0）、收纳文件夹建在 `MINI_TODO_FENCES_ROOT` 下；放文件 → 监听刷新出图标；新实例第一次 OLE 拖入；双击标题改名 → 文件夹同步改名；改名后 / 单击标题后紧接着的拖入；Shell 数据对象拖入；从资源管理器窗口真实拖入；可见区域 = 数据库几何；Win+D 后可见；Explorer 重启后重挂 | 是 |
+| F12–F15 | 另起一个实例，库里预置两个收纳箱 A / B（主显示器工作区右侧，主窗口最小化免得挡住）：F12 拖 B 的标题栏（自绘拖动）→ 窗口跟手、松手后 `fences` 与当前组合的 `fence_layouts` = 客户区；F13 让 B.top 落在 A.top + 6（逻辑像素）→ 吸到 A.top，拖动中 A 的上边截图有 `#409EFF` 高亮、松手后消失；F14 拖到一半按住 Alt → 不吸附、不高亮，松开后照常吸附；F15 拖 B 的下边让高度接近 A → 等高、上边不动，A 的左右两边高亮 | 是 |
 | P01–P03 | **不隔离**：主窗口、日志在 `%LOCALAPPDATA%\com.tauri-app.mini-todo\logs\mini-todo.log`、库在 `%LOCALAPPDATA%\mini-todo`（release 另验证忽略 `MINI_TODO_DATA_DIR` / `MINI_TODO_DEBUG_OPEN`）；单实例（第二个进程退出、已运行实例被唤起到前台）；WM_CLOSE 关主窗口 → 进程退出 | 否 |
 
 release job 只跑 P 组（加上 release 构建本身：`build.rs` 用 fxc 预编译着色器）。

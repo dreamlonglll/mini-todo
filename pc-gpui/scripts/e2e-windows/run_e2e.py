@@ -1532,6 +1532,202 @@ def group_fences() -> None:
         app.stop()
 
 
+def group_fence_geometry() -> None:
+    """收纳箱移动 / 缩放（自绘拖动）与吸附对齐：库里预置两个收纳箱 A（目标）、B（被拖），重启恢复出两个窗口。
+    几何一律是客户区的物理像素；阈值 = round(10 × 缩放)"""
+    data = fresh_data("fg-data")
+    froot = C.work / "fences-geometry"
+    shutil.rmtree(froot, ignore_errors=True)
+    froot.mkdir(parents=True)
+    app = App(C.exe, data_dir=data, fences_root=froot, tag="FG", out_dir=C.out)
+    st: dict = {}
+    # 主显示器工作区右侧：A 在右上，B 在 A 左下方（两个方向上都离 A 的边很远，不会误吸）
+    l, t, r, b = W.primary_monitor()["work"]
+    a_rect = (r - 40 - 420, t + 80, 420, 320)
+    b_rect = (a_rect[0] - 400, a_rect[1] + 400, 320, 260)
+    for title, (x, y, w, h), order in (("Snap A", a_rect, 0), ("Snap B", b_rect, 1)):
+        app.write("INSERT INTO fences (title, folder_name, x, y, width, height, sort_order, created_at, updated_at) "
+                  "VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'), datetime('now', 'localtime'))",
+                  (title, title, x, y, w, h, order))
+        (froot / title).mkdir(parents=True, exist_ok=True)
+
+    def need() -> tuple[Win, Win]:
+        if "a" not in st:
+            raise Skip("收纳箱窗口没有起来")
+        return st["a"], st["b"]
+
+    def b_row() -> tuple:
+        return app.q("SELECT x, y, width, height FROM fences WHERE title = 'Snap B'")[0]
+
+    def b_layouts() -> list[tuple]:
+        return app.q("SELECT l.x, l.y, l.width, l.height FROM fence_layouts l JOIN fences f ON f.id = l.fence_id "
+                     "WHERE f.title = 'Snap B'")
+
+    def wait_committed(fence: Win, c: Checks, what: str) -> None:
+        """松手后 fences 与当前组合的 fence_layouts 都 = 窗口客户区"""
+        want = fence.client()
+        try:
+            W.wait_until(lambda: b_row() == want and want in b_layouts(), 6, f"{what}落库 = 客户区 {want}")
+            c.ok(True, f"{what}落库：fences = fence_layouts = {want}")
+        except W.Timeout as e:
+            c.ok(False, f"{e}；fences={b_row()} fence_layouts={b_layouts()}")
+
+    def held_drag(p0: tuple[int, int], p1: tuple[int, int], *, alt_midway: bool = False, while_held=None,
+                  steps: int = 24) -> object:
+        """左键按下 → 分步拖到 p1（alt_midway：过半时按下 Alt，松开鼠标后再松 Alt）→ 停住时调 while_held → 抬起"""
+        W.mouse_move(*p0)
+        time.sleep(0.15)
+        W._send(W._mouse_input(W.MOUSEEVENTF_LEFTDOWN))
+        time.sleep(0.15)
+        alt_down = False
+        held = None
+        try:
+            for i in range(1, steps + 1):
+                if alt_midway and not alt_down and i > steps // 2:
+                    W._send(W._key_input(W.VK["alt"], False))
+                    alt_down = True
+                    time.sleep(0.05)
+                W.mouse_move(round(p0[0] + (p1[0] - p0[0]) * i / steps), round(p0[1] + (p1[1] - p0[1]) * i / steps))
+                time.sleep(0.03)
+            time.sleep(0.4)
+            if while_held:
+                held = while_held()
+        finally:
+            W._send(W._mouse_input(W.MOUSEEVENTF_LEFTUP))
+            time.sleep(0.1)
+            if alt_down:
+                W._send(W._key_input(W.VK["alt"], True))
+            time.sleep(0.5)
+        return held
+
+    def edge_blue(fence: Win, edge: str) -> bool:
+        """收纳箱窗口内某条边上（中点附近、往里 3 个逻辑像素以内）有没有吸附高亮色 #409EFF"""
+        img = W.grab_client(fence)
+        depth = max(2, round(3 * fence.scale)) + 1
+        if edge in ("top", "bottom"):
+            x = img.width // 2
+            rows = range(depth) if edge == "top" else range(img.height - depth, img.height)
+            px = [W.rgb_at(img, x, y) for y in rows]
+        else:
+            y = img.height // 2
+            cols = range(depth) if edge == "left" else range(img.width - depth, img.width)
+            px = [W.rgb_at(img, x, y) for x in cols]
+        return any(W.color_dist(p, EP_PRIMARY) <= 48 for p in px)
+
+    def f12():
+        app.start()
+        main = app.main(60)
+        a = app.wait_window("Snap A", 30)
+        b = app.wait_window("Snap B", 30)
+        st["a"], st["b"] = a, b
+        # 主窗口（普通窗口）盖在桌面层的收纳箱之上，真实输入可能点到它：先最小化
+        main.show(W.SW_MINIMIZE)
+        W.wait_until(lambda: a.owner and a.owner == W.shell_window() and b.owner == a.owner, 10, "两个收纳箱都已嵌入桌面")
+        W.park_cursor()
+        time.sleep(1.5)
+        c = Checks()
+        for name, win, rect in (("A", a, a_rect), ("B", b, b_rect)):
+            got = win.client()
+            c.ok(all(abs(g - w) <= 1 for g, w in zip(got, rect)), f"{name} 按库里的几何恢复（{got}，库 {rect}）")
+        before = b.client()
+        p0 = b.pt(40, 16)
+        dx, dy = -100, -60
+        held_drag(p0, (p0[0] + dx, p0[1] + dy))
+        W.park_cursor()
+        after = b.client()
+        # 离 A 的边都远：不吸附，位移 = 光标位移，尺寸不变
+        c.eq(after, (before[0] + dx, before[1] + dy, before[2], before[3]), f"拖标题栏：窗口跟手移动 {before[:2]} → {after[:2]}")
+        wait_committed(b, c, "拖动结束")
+        shot(b, "F12-moved")
+        return c.done(f"B {before} → {after}")
+
+    def f13():
+        a, b = need()
+        c = Checks()
+        ax, ay, aw, ah = a.client()
+        bx, by, _, _ = b.client()
+        s = b.scale
+        threshold = int(10 * s + 0.5)
+        off = round(6 * s)
+        # 只改纵向：让 B.top 落在 A.top + 6（逻辑像素）——在阈值内；横向离 A 的左右边都远
+        p0 = b.pt(40, 16)
+        target_y = ay + off
+        held = held_drag(p0, (p0[0], p0[1] + (target_y - by)),
+                         while_held=lambda: (edge_blue(a, "top"), edge_blue(a, "left"), b.client()))
+        top_lit, left_lit, during = held
+        after = b.client()
+        print(f"    阈值 {threshold}px；A={a.client()} B 拖动中={during} 松手后={after}")
+        c.eq(during[1], ay, f"拖动中 B.top 吸到 A.top（跟手应为 {target_y}）")
+        c.eq(after[1], ay, "松手后 B.top = A.top")
+        c.eq(after[0], bx, "横向没有吸附（x 不变）")
+        c.ok(top_lit, "拖动中 A 的上边画出高亮线 #409EFF")
+        c.ok(not left_lit, "A 没对齐的边（左边）不高亮")
+        time.sleep(0.3)
+        c.ok(not edge_blue(a, "top"), "松手后高亮消失")
+        wait_committed(b, c, "吸附后的位置")
+        shot(a, "F13-target")
+        return c.done(f"B.top {by} → {after[1]}（A.top {ay}）")
+
+    def f14():
+        a, b = need()
+        c = Checks()
+        _, ay, _, _ = a.client()
+        bx, by, _, _ = b.client()
+        off = round(8 * b.scale)
+        # 拖到一半按住 Alt：B.top 落在 A.top + 8（逻辑像素），本该吸附的位置不吸附、不高亮。顺带横向挪 40px（离 A 的
+        # 左右边仍远），手势够长：GPUI 的拖动在移动超过 2px 后才开始、窗口超过 3px 才动
+        p0 = b.pt(40, 16)
+        lit = held_drag(p0, (p0[0] - 40, p0[1] + (ay + off - by)), alt_midway=True,
+                        while_held=lambda: edge_blue(a, "top"))
+        after = b.client()
+        c.eq(after[:2], (bx - 40, ay + off), f"按住 Alt 不吸附：B.top = A.top + {off}")
+        c.ok(not lit, "按住 Alt 时 A 不高亮")
+        wait_committed(b, c, "按住 Alt 拖动的位置")
+        # 松开 Alt 后（单按 Alt 不会进系统菜单模式）照常能拖、照常吸附：往上 3 个逻辑像素，仍在阈值内
+        p0 = b.pt(40, 16)
+        held_drag(p0, (p0[0] + 40, p0[1] - round(3 * b.scale)))
+        c.eq(b.client()[:2], (bx, ay), "松开 Alt 后再拖：照常吸到 A.top")
+        wait_committed(b, c, "再次吸附的位置")
+        return c.done()
+
+    def f15():
+        a, b = need()
+        c = Checks()
+        ax, ay, aw, ah = a.client()
+        # B 先挪开到 A.top 下方 8 个逻辑像素（按住 Alt，不吸；横向 +40 让手势够长），再拖下边缩放
+        off = round(8 * b.scale)
+        y0 = b.client()[1]
+        p0 = b.pt(40, 16)
+        held_drag(p0, (p0[0] + 40, p0[1] + (ay + off - y0)), alt_midway=True)
+        bx, by, bw, bh = b.client()
+        c.eq(by, ay + off, "准备：B.top = A.top + 8（逻辑像素）")
+        # 下边手柄（底部 5 个逻辑像素）：高度拖到 A.height + 4（逻辑像素）→ 等高吸附成 A.height；
+        # 下边对齐 A.bottom 的候选差 12 个逻辑像素，超出阈值
+        lw, lh = b.logical_size()
+        p0 = b.pt(lw / 2, lh - 2.5)
+        grow = (ah + round(4 * b.scale)) - bh
+        lit = held_drag(p0, (p0[0], p0[1] + grow),
+                        while_held=lambda: (edge_blue(a, "left"), edge_blue(a, "right"), edge_blue(a, "top")))
+        after = b.client()
+        print(f"    A={a.client()} B 缩放前=({bx}, {by}, {bw}, {bh}) 后={after} 高亮(左, 右, 上)={lit}")
+        c.eq(after, (bx, by, bw, ah), "拖下边：高度吸成 A 的高度，上边与宽度不动")
+        c.ok(lit[0] and lit[1], "等高：A 的左、右两边高亮")
+        c.ok(not lit[2], "A 的上边不高亮")
+        wait_committed(b, c, "缩放结束")
+        shot(b, "F15-resized")
+        return c.done(f"B 高 {bh} → {after[3]}（A 高 {ah}）")
+
+    try:
+        C.report.case("F12", "拖标题栏移动收纳箱（自绘拖动）：窗口跟手、松手后 fences 与 fence_layouts 落库", f12)
+        C.report.case("F13", "移动吸附：B.top 落在 A.top ± 阈值内 → 吸到 A.top；拖动中 A 上边高亮、松手后消失", f13)
+        C.report.case("F14", "按住 Alt 拖动不吸附、不高亮；松开后照常吸附", f14)
+        C.report.case("F15", "缩放吸附：拖下边让高度接近 A → 等高、上边不动；A 的左右两边高亮", f15)
+    finally:
+        if app.alive():
+            dump_log_tail(app, 15)
+        app.stop()
+
+
 # ----------------------------------------------------------------------------- P：平台集成（不隔离）
 
 def group_platform(allow_real: bool) -> None:
@@ -1683,6 +1879,7 @@ def main() -> int:
                 group_webdav()
             if want("F"):
                 group_fences()
+                group_fence_geometry()
         if want("P"):
             group_platform(args.allow_real_profile)
     finally:

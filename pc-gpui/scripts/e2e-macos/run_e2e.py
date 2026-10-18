@@ -1923,7 +1923,7 @@ def drag_fence_title(app: App, fence: WinInfo, dx: float, dy: float) -> tuple[Wi
     fence = refresh_fence(app, fence)
     x0, y0 = at(fence, FENCE_TITLE_DRAG)
     M.drag(x0, y0, x0 + dx, y0 + dy, steps=20)
-    time.sleep(1.2)          # 停下 300ms 后落库
+    time.sleep(1.2)          # 松手后等最后一帧落地（约 16ms）再落库
     f2 = refresh_fence(app, fence)
     d = (f2.x - fence.x, f2.y - fence.y)
     print(f"    拖标题栏 ({dx:+.0f},{dy:+.0f}) → 收纳箱 {fence.x:.0f},{fence.y:.0f} → {f2.x:.0f},{f2.y:.0f}，"
@@ -1932,8 +1932,8 @@ def drag_fence_title(app: App, fence: WinInfo, dx: float, dy: float) -> tuple[Wi
 
 
 def mf09() -> str:
-    """拖标题栏（按下后移动超过 3pt 才 performWindowDragWithEvent:）→ 窗口移动 → 停下 300ms 后 fences 与当前屏幕组合的
-    fence_layouts 同时落库（= 窗口位置 × 统一系数）"""
+    """拖标题栏（自绘拖动：按下后移动超过 3pt 窗口才跟手，每帧 setFrameOrigin:；只有一个收纳箱，没有吸附目标）→ 窗口移动 →
+    松手后 fences 与当前屏幕组合的 fence_layouts 同时落库（= 窗口位置 × 统一系数）"""
     M.dump_windows("用例开始前")
     env = fence_start("MF09")
     app = env.app
