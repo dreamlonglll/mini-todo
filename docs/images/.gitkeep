@@ -1,3 +1,3 @@
-# 此目录用于存放 README 中的截图
-# - screenshot.png: 应用主界面截图
-# - fixed-mode.png: 固定模式截图
+# 此目录存放 README 用到的图片
+# - views.png / detail.png / desktop.png / settings.png：由 pc-gpui/scripts/intro-video 从真实应用生成（render.cjs --still），界面改版后重新生成
+# - icon.png：取自 pc-gpui/crates/app/assets/icon.ico 的 256×256 帧
