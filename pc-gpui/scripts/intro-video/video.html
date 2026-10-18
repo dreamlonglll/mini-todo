@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Mini Todo 功能介绍</title>
+<!--
+  介绍视频的合成页面：1920×1080 的舞台，按时间轴摆放真实应用的截图与录屏帧。
+  render.cjs 用 Playwright 逐帧调用 window.seek(t) 截图后交给 ffmpeg 编码；直接在浏览器里打开时加 ?t=秒 看某一帧
+  （需要 --allow-file-access-from-files，素材目录用 ?assets=路径 指定，缺省 ../../target/intro-video/assets）。
+-->
+<style>
+  :root {
+    --primary: #3B82F6;
+    --primary-soft: #DBEAFE;
+    --ink: #0F172A;
+    --ink-2: #334155;
+    --ink-3: #64748B;
+    --font: "Inter", "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+    --mono: "JetBrains Mono", "DejaVu Sans Mono", "Noto Sans Mono CJK SC", monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 1920px; height: 1080px; overflow: hidden; background: #0B1220; }
+  body { font-family: var(--font); color: var(--ink); -webkit-font-smoothing: antialiased; }
+  #stage { position: absolute; inset: 0; overflow: hidden; }
+  .scene { position: absolute; inset: 0; overflow: hidden; display: none; will-change: opacity; }
+  .abs { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+  .center-origin { transform-origin: 50% 50%; }
+
+  /* ---- 背景 ---- */
+  .bg { position: absolute; inset: 0; }
+  .bg-studio { background: linear-gradient(135deg, #F5F8FF 0%, #EEF3FC 45%, #F3F0FD 100%); }
+  .bg-studio::before, .bg-studio::after { content: ""; position: absolute; border-radius: 50%; filter: blur(90px); }
+  .bg-studio::before { width: 900px; height: 900px; right: -180px; top: -260px; background: rgba(59,130,246,.16); }
+  .bg-studio::after { width: 760px; height: 760px; right: 380px; bottom: -420px; background: rgba(139,92,246,.10); }
+  .bg-desk { background:
+      radial-gradient(1200px 700px at 78% 18%, rgba(56,189,248,.55), transparent 60%),
+      radial-gradient(900px 700px at 20% 85%, rgba(129,140,248,.55), transparent 60%),
+      radial-gradient(800px 600px at 60% 95%, rgba(45,212,191,.35), transparent 60%),
+      linear-gradient(160deg, #1E3A8A 0%, #1E40AF 35%, #312E81 100%); }
+  .bg-hero { background:
+      radial-gradient(900px 600px at 50% 30%, rgba(96,165,250,.45), transparent 65%),
+      linear-gradient(160deg, #0F2A6B 0%, #1D4ED8 55%, #3730A3 100%); }
+  .grain { position: absolute; inset: 0; opacity: .045; mix-blend-mode: overlay; pointer-events: none; }
+  .bg-ink { background:
+      radial-gradient(900px 700px at 80% 20%, rgba(59,130,246,.30), transparent 60%),
+      linear-gradient(160deg, #0B1220 0%, #111C33 100%); }
+
+  /* ---- 文字 ---- */
+  .copy { position: absolute; left: 120px; top: 0; width: 700px; height: 1080px; display: flex; flex-direction: column; justify-content: center; }
+  .copy.on-dark { color: #F8FAFC; }
+  .kicker { display: flex; align-items: center; gap: 14px; font-size: 24px; font-weight: 600; color: var(--primary); letter-spacing: .04em; margin-bottom: 22px; }
+  .kicker .num { display: inline-flex; align-items: center; justify-content: center; min-width: 46px; height: 32px; padding: 0 10px;
+                 border-radius: 16px; background: var(--primary); color: #fff; font-size: 18px; font-weight: 700; letter-spacing: 0; }
+  .on-dark .kicker { color: #93C5FD; }
+  .title { font-size: 64px; line-height: 1.22; font-weight: 700; letter-spacing: .01em; margin-bottom: 40px; }
+  .bullets { list-style: none; display: flex; flex-direction: column; gap: 22px; }
+  .bullets li { position: relative; padding-left: 34px; font-size: 30px; line-height: 1.45; color: var(--ink-2); }
+  .on-dark .bullets li { color: #CBD5E1; }
+  .bullets li::before { content: ""; position: absolute; left: 4px; top: 17px; width: 12px; height: 12px; border-radius: 50%; background: var(--primary); }
+  .on-dark .bullets li::before { background: #60A5FA; }
+  .bullets b { color: var(--ink); font-weight: 600; }
+  .on-dark .bullets b { color: #fff; }
+  .note { margin-top: 34px; font-size: 22px; color: var(--ink-3); }
+  .on-dark .note { color: #94A3B8; }
+
+  /* ---- 窗口 ---- */
+  .win { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+  .win > img, .win > .clip { display: block; }
+  .win.alpha > img, .win.alpha > .clip { filter: drop-shadow(0 24px 48px rgba(15,23,42,.28)) drop-shadow(0 4px 10px rgba(15,23,42,.12)); }
+  .win.opaque > img, .win.opaque > .clip { border-radius: 16px; box-shadow: 0 40px 90px rgba(15,23,42,.28), 0 6px 18px rgba(15,23,42,.12), 0 0 0 2px rgba(15,23,42,.06); }
+  .win.on-desk.alpha > img, .win.on-desk.alpha > .clip { filter: drop-shadow(0 24px 48px rgba(2,6,23,.45)); }
+  .clip { position: relative; overflow: hidden; }
+  .clip > img { position: absolute; left: 0; top: 0; }
+  .cursor { position: absolute; left: 0; top: 0; width: 34px; height: 50px; pointer-events: none; transform-origin: 0 0; }
+  .ripple { position: absolute; width: 90px; height: 90px; margin: -45px 0 0 -45px; border-radius: 50%;
+            border: 6px solid rgba(59,130,246,.85); background: rgba(59,130,246,.18); opacity: 0; }
+
+  /* ---- 标注 ---- */
+  .ring { position: absolute; border: 4px solid var(--primary); border-radius: 14px; box-shadow: 0 0 0 8px rgba(59,130,246,.18); }
+  .tag { position: absolute; padding: 10px 18px; border-radius: 12px; background: var(--ink); color: #fff; font-size: 22px; font-weight: 600; white-space: nowrap;
+         box-shadow: 0 12px 30px rgba(15,23,42,.25); }
+  .tag.blue { background: var(--primary); }
+  .snapline { position: absolute; background: #409EFF; box-shadow: 0 0 10px rgba(64,158,255,.9); }
+
+  /* ---- 字幕 ---- */
+  .caption-wrap { position: absolute; left: 0; bottom: 64px; width: 1920px; display: flex; justify-content: center; pointer-events: none; }
+  .caption { padding: 16px 36px; border-radius: 18px; background: rgba(15,23,42,.86); color: #fff; font-size: 34px; font-weight: 600; letter-spacing: .02em;
+             box-shadow: 0 18px 40px rgba(15,23,42,.3); }
+
+  /* ---- 片头片尾 ---- */
+  .hero { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #fff; text-align: center; }
+  .hero .icon { width: 200px; height: 200px; filter: drop-shadow(0 24px 40px rgba(2,6,23,.45)); }
+  .hero h1 { margin-top: 44px; font-size: 112px; font-weight: 800; letter-spacing: -.01em; }
+  .hero .tagline { margin-top: 10px; font-size: 44px; font-weight: 500; color: #DBEAFE; }
+  .chips { margin-top: 48px; display: flex; gap: 16px; flex-wrap: wrap; justify-content: center; max-width: 1500px; }
+  .chip { padding: 12px 26px; border-radius: 999px; background: rgba(255,255,255,.14); border: 1px solid rgba(255,255,255,.28); font-size: 26px; font-weight: 500; color: #fff; }
+  .hero .url { margin-top: 40px; font-size: 34px; font-weight: 600; color: #fff; padding: 16px 34px; border-radius: 16px; background: rgba(15,23,42,.35); border: 1px solid rgba(255,255,255,.25); }
+  .hero .small { margin-top: 26px; font-size: 26px; color: #BFDBFE; }
+
+  /* ---- 终端 / 代码面板 ---- */
+  .term { position: absolute; width: 940px; border-radius: 18px; background: #0B1020; border: 1px solid rgba(148,163,184,.25);
+          box-shadow: 0 40px 100px rgba(2,6,23,.6); overflow: hidden; font-family: var(--mono); }
+  .term .bar { height: 48px; display: flex; align-items: center; gap: 10px; padding: 0 20px; background: #151B2E; border-bottom: 1px solid rgba(148,163,184,.18); }
+  .term .dot { width: 14px; height: 14px; border-radius: 50%; }
+  .term .bar span { margin-left: 14px; font-family: var(--font); font-size: 18px; color: #94A3B8; }
+  .term .body { padding: 26px 30px 30px; font-size: 24px; line-height: 1.75; color: #E2E8F0; white-space: pre; }
+  .term .c { color: #64748B; }
+  .term .p { color: #34D399; }
+  .term .s { color: #FBBF24; }
+  .term .k { color: #60A5FA; }
+  .api { position: absolute; width: 940px; display: grid; grid-template-columns: 120px 1fr; row-gap: 12px; column-gap: 18px; font-size: 22px; }
+  .api .m { font-family: var(--mono); font-weight: 700; font-size: 20px; padding: 6px 0; text-align: center; border-radius: 8px; color: #fff; }
+  .api .u { font-family: var(--mono); color: #E2E8F0; padding: 6px 0; }
+  .api .u em { font-style: normal; color: #94A3B8; font-family: var(--font); margin-left: 14px; font-size: 20px; }
+
+  /* ---- 进度 ---- */
+  #progress { position: absolute; left: 0; bottom: 0; height: 6px; width: 1920px; background: var(--primary); transform-origin: 0 0; opacity: .85; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<div id="progress"></div>
+<script src="video.js"></script>
+</body>
+</html>

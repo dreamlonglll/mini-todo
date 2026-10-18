@@ -17,6 +17,7 @@ macOS 行为（含收纳箱的桌面层与文件操作）见文末，靠 CI 的 
 | `shot.sh` | 起 Xvfb → 建临时隔离数据目录并导入样例数据 → 以 `MINI_TODO_DATA_DIR` + `MINI_TODO_DEBUG_OPEN` 启动 debug 构建 → 可选 xdotool 交互 → 截图 |
 | `sample-data.json` | 样例数据（导出格式 4.0，内容与参考截图 harness 的 `fixtures.mjs` 一致；`settings` 是 harness 的 mock 形状，seed 会转换） |
 | `../crates/core/examples/seed.rs` | `cargo run -p mini-todo-core --example seed -- <data-dir> <json>`：把 JSON 导入到指定数据目录 |
+| `intro-video/` | 功能介绍视频 `docs/video/mini-todo-intro.mp4` 与 README 截图 `docs/images/*.png` 的生成脚本：复用本目录 `regress.py` 的场景以 2 倍缩放截带透明通道的窗口图、录真实交互，HTML 时间轴合成后 Playwright 逐帧渲染、ffmpeg 编码。界面改版后照其 README 重新生成 |
 
 macOS 相关的三个目录见文末「macOS：打包、e2e 与交叉检查」（`macos/`、`e2e-macos/`、`mac-check/`）。
 

@@ -39,7 +39,9 @@ git 历史取（删除前的最后一个提交是 `749405a`，例如 `git show 7
 ```
 mini-todo/
 ├── docs/                                   # 共享文档（跨平台）
-│   └── 开发文档/                            # 开发相关文档
+│   ├── 开发文档/                            # 开发相关文档
+│   ├── images/                             # README 截图（pc-gpui/scripts/intro-video 生成）
+│   └── video/                              # 功能介绍视频 mini-todo-intro.mp4（同上；README 内嵌的是它上传到 GitHub 后的附件链接）
 ├── pc-gpui/                                # PC 端（Cargo workspace；详见各 crate README）
 │   ├── Cargo.toml                          # [workspace] members = crates/core、crates/app；[workspace.package] version 是
 │   │                                       # 版本号唯一来源（当前 3.0.4）；release thin LTO + strip
@@ -85,6 +87,7 @@ mini-todo/
 │       ├── regress.py                      # Xvfb 一键回归：场景截图 + 并排对照图 + 端到端冒烟
 │       ├── shot.sh                         # 单个场景截图 / xdotool 交互
 │       ├── sample-data.json                # 样例数据（导出格式 4.0）
+│       ├── intro-video/                    # 功能介绍视频与 README 截图的生成（capture.py 真实应用截图 / 录屏 → video.html 时间轴 → render.cjs 逐帧渲染）
 │       ├── windows-installer.nsi           # NSIS 安装器（安装身份沿用旧 Tauri 版，见 .trellis/spec/pc-gpui/release.md）
 │       ├── macos/                          # bundle.sh（组装 mini-todo.app + 整包 ad-hoc 签名）、make-dmg.sh（拖放安装 dmg）、gen-tray-icon.py
 │       ├── mac-check/                      # 不属于 workspace 的小 crate：把不依赖 GPUI 的 mac 源文件（含 core 的 fence_fs/mac.rs）#[path] 进来，在 Linux / Windows 上
@@ -680,6 +683,7 @@ bash scripts/macos/bundle.sh target/aarch64-apple-darwin/release/mini-todo targe
 scripts/regress.py --before <改动前的输出> --out /tmp/regress  # Xvfb 视觉回归：场景截图 + 并排对照图（--only 'main-*' 只跑部分）
 scripts/regress.py --smoke --no-build                    # 跨窗口端到端冒烟（按数据库断言）
 scripts/shot.sh --name main-list --window "Mini Todo" /tmp/shots   # 单个场景截图 / xdotool 交互
+python3 scripts/intro-video/capture.py --no-build && node scripts/intro-video/render.cjs   # 重新生成介绍视频（README 截图加 --still，见其 README）
 
 # cloud（在 cloud/ 下）
 cargo test --locked        # 含 mock_dav 场景测试（Apache / nginx 语义）

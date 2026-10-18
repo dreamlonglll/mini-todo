@@ -14,7 +14,7 @@
 |---|---|
 | 任何改动 | §2 fmt / clippy / test（Linux） |
 | `cfg(windows)` 代码：`platform/`、`services/{tray,single_instance,autostart,notify,window_mode,fences}`、`build.rs`；core 的 `services/secret.rs`、`services/fence_fs/`、`settings::system_fonts` | + §3 Windows 交叉 clippy |
-| 可见界面（窗口布局、控件、`theme.rs`、文案、字体） | + §4 `regress.py`：相关场景 `--only`，逐张看 `compare/`；改共享控件 / `theme.rs` 时跑全部场景并看控件样例（`gallery`） |
+| 可见界面（窗口布局、控件、`theme.rs`、文案、字体） | + §4 `regress.py`：相关场景 `--only`，逐张看 `compare/`；改共享控件 / `theme.rs` 时跑全部场景并看控件样例（`gallery`）。界面明显改版（新视图、新窗口、主窗口 / 详情 / 收纳箱外观大改）时，按 `scripts/intro-video/README.md` 重新生成介绍视频与 README 截图，避免 README 展示过时界面 |
 | 跨窗口流程（新建 / 编辑 / 子任务 / 设置即时生效 / 导入导出 / 已完成 / 提醒 / 收纳箱新建改名） | + `regress.py --smoke` |
 | core 的同步、导入导出、迁移、提醒调度；单实例、日志 | + §5 Linux e2e（F / S / L 组；同步改动跑 S 组 Apache + nginx），并按 [data-compat.md](./data-compat.md) 确认 cloud 侧也改了 |
 | 版本号、`release.yml` / `cache-warm.yml`、NSIS 安装器、`scripts/macos/{bundle.sh,make-dmg.sh}` | 见 [release.md](./release.md)；改 mac 打包脚本另跑 §7.2 的 CI（`pc-gpui-ci.yml` 的 macos 作业或 mac e2e 会调用 `bundle.sh`） |
