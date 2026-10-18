@@ -1,0 +1,5 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python3 .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/spec/pc-gpui/verification.md", "reason": "截图回归 / 验证工具约定"}
+{"file": ".trellis/spec/pc-gpui/release.md", "reason": "安装包、平台与发布说明，README 安装节要与之一致"}
+{"file": ".trellis/spec/backend/desktop-fences.md", "reason": "收纳箱功能描述以此为准"}
+{"file": ".trellis/spec/backend/window-modes.md", "reason": "窗口模式描述以此为准"}
