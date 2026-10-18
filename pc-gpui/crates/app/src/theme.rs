@@ -799,6 +799,8 @@ pub struct FenceTokens {
     pub menu_divider: Hsla,
     pub menu_note: Hsla,
     pub menu_shadow: Hsla,
+    /// 拖动 / 缩放别的收纳箱吸附到本收纳箱时，被对齐的边上的高亮线 `#409EFF`（Element Plus 主色，不随自定义背景色变）
+    pub snap_guide: Hsla,
 }
 
 static FENCE_TOKENS: LazyLock<FenceTokens> = LazyLock::new(|| FenceTokens {
@@ -828,6 +830,7 @@ static FENCE_TOKENS: LazyLock<FenceTokens> = LazyLock::new(|| FenceTokens {
     menu_divider: rgba_css(255, 255, 255, 0.1),
     menu_note: rgba_css(255, 255, 255, 0.6),
     menu_shadow: rgba_css(0, 0, 0, 0.45),
+    snap_guide: hex(0x409EFF),
 });
 
 /// 收纳箱颜色
@@ -841,6 +844,9 @@ pub const FENCE_FONT_SIZE: Pixels = px(13.);
 /// 「显示隐藏的图标」打开时，隐藏项（用户隐藏 + 以 `.` 开头的自动隐藏）的图标与名字整体不透明度
 /// （同资源管理器里隐藏文件的半透明观感）
 pub const FENCE_HIDDEN_ITEM_OPACITY: f32 = 0.5;
+
+/// 吸附高亮线的宽度（逻辑像素，画在目标收纳箱窗口内的边缘，见 `fence_tokens().snap_guide`）
+pub const FENCE_SNAP_GUIDE_WIDTH: Pixels = px(2.);
 
 #[cfg(test)]
 mod tests {

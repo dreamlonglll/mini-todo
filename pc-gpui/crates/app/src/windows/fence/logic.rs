@@ -27,8 +27,8 @@ pub mod timing {
     pub const DRAG_COLLAPSE_DELAY: Duration = Duration::from_millis(300);
     /// 拖动闸门续期窗口
     pub const GEOMETRY_ARM_MS: f64 = 3000.;
-    /// 拖动停下多久后落库
-    pub const GEOMETRY_COMMIT_DEBOUNCE: Duration = Duration::from_millis(300);
+    /// 拖动 / 缩放松手后等多久读客户区落库（摆窗是延后执行的，等最后一帧落地）
+    pub const GEOMETRY_COMMIT_DELAY: Duration = Duration::from_millis(16);
     /// Ctrl+滚轮调图标大小后的落库防抖
     pub const ICON_SIZE_SAVE_DELAY: Duration = Duration::from_millis(400);
     /// 删除中止提示的显示时长
@@ -69,8 +69,11 @@ pub fn exceeds_drag_threshold(dx: f64, dy: f64, threshold: f64) -> bool {
     dx.abs() > threshold || dy.abs() > threshold
 }
 
-/// 判定"用户拖动 / 缩放结束"的闸门（时间单位 ms）：用户开始拖动时 `arm`，之后的移动 / 缩放事件在闸门
-/// 打开期间才算数（每次续期），停下后由调用方防抖落库；系统挪窗、程序调整一律忽略
+/// "用户正在拖动"的闸门（时间单位 ms，旧前端 `GeometryCommitGate` 的移植）：开始拖动时 `arm`，拖动中每次移动续期，
+/// 松手后落库完成再 `disarm`。闸门开着时悬停不展开也不收回。
+///
+/// 旧版（系统拖动循环）靠它识别"用户拖动"：`observe_window_bounds` 的变化在闸门打开期间才算数（`accept`），停下后防抖落库。
+/// 收纳箱改成自绘拖动后，移动结束直接落库，`accept` 只剩单测在用
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GeometryCommitGate {
     window_ms: f64,
@@ -132,16 +135,17 @@ impl ResizeDir {
         ResizeDir::SE,
     ];
 
-    fn has_n(self) -> bool {
+    /// 拖动的是否含上边（N / NW / NE）；`has_s` / `has_w` / `has_e` 同理
+    pub fn has_n(self) -> bool {
         matches!(self, ResizeDir::N | ResizeDir::NW | ResizeDir::NE)
     }
-    fn has_s(self) -> bool {
+    pub fn has_s(self) -> bool {
         matches!(self, ResizeDir::S | ResizeDir::SW | ResizeDir::SE)
     }
-    fn has_w(self) -> bool {
+    pub fn has_w(self) -> bool {
         matches!(self, ResizeDir::W | ResizeDir::NW | ResizeDir::SW)
     }
-    fn has_e(self) -> bool {
+    pub fn has_e(self) -> bool {
         matches!(self, ResizeDir::E | ResizeDir::NE | ResizeDir::SE)
     }
 

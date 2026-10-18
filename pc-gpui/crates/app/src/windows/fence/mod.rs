@@ -5,14 +5,22 @@
 //!
 //! | 文件 | 内容 |
 //! |---|---|
-//! | `mod.rs` | 视图状态、标题栏（超过 3px 才拖动、双击改名、折叠 / 固定 / 更多）、折叠与临时展开状态机、几何落库、缩放手柄、外部拖入 |
+//! | `mod.rs` | 视图状态、标题栏（超过 3px 才拖动、双击改名、折叠 / 固定 / 更多）、折叠与临时展开状态机、移动 / 缩放（自绘拖动 + 吸附高亮）与几何落库、缩放手柄、外部拖入 |
 //! | `panels.rs` | 外观 / 删除确认 / 云同步提示面板（Windows OneDrive、macOS iCloud），「更多」下拉菜单 |
 //! | `grid.rs` | 项目网格：图标懒加载、选中 / 打开、自绘右键菜单（含「隐藏」/「取消隐藏」「移动到…」）、隐藏项过滤与半透明、箱内拖动排序、Ctrl+滚轮（macOS 另认 ⌘+滚轮）调图标大小 |
 //! | `logic.rs` | 纯函数（标题规范化、拖动阈值、几何闸门、缩放矩形、图标档位、隐藏项过滤与排序合并、结果提示文案） |
+//! | `snap.rs` | 吸附对齐纯函数（移动 / 缩放吸附、高亮边、按显示器筛选目标） |
 //!
 //! 几何一律物理像素的**客户区**（= 可见区域，与旧版 Tauri 无边框窗口的外框相同；GPUI 窗口另有不可见边框）：
 //! `mini_todo_core::fence::fence_view` + `platform::set_client_rect_physical` 摆窗，`platform::client_rect_physical` 读几何。
 //! 只有用户拖动 / 缩放结束才落库（`commit_geometry`），折叠 / 展开、启动夹回、系统挪窗都不落库。
+//!
+//! 移动与缩放是同一套**自绘拖动**（不进系统的拖动循环：Windows `WM_NCLBUTTONDOWN(HTCAPTION)` / macOS
+//! `performWindowDragWithEvent:` 中途改不了位置，吸附做不了）：按下记下光标（屏幕物理坐标；移动在超过 3px、进入会话时才读客户区
+//! 起点，缩放在按下时读）→ GPUI `on_drag_move`（捕获阶段、不看悬停：Windows 上 GPUI 按下时已 `SetCapture`，macOS 的 mouseDragged
+//! 一直发给按下的窗口）→ 新几何 = 起点 + 光标位移 → 吸附（`snap.rs`，按住 Alt / Option 不吸附）→ 每帧最多摆一次窗，高亮画在
+//! 目标收纳箱上（`services::fences` 的跨窗口高亮）→ 松手等最后一帧落地后直接落库。GPUI 拖动的两个副作用另行处理：拖动期间
+//! 所有元素都不算悬停（`on_hover_changed` 压下这次"离开"），移动超过 2px 后这次按下不再算单击（双击改名在标题栏松手时自己判断）。
 //!
 //! macOS：窗口是不激活应用的面板（`services::fences` 模块文档）：单击、拖动、缩放、外部拖入、双击打开项目都不激活应用
 //! （菜单栏不切换）。只有改名要键盘，而这种面板单击不一定成为 key 窗口，所以 [`FenceWindow::start_rename`] 在 macOS 上
@@ -26,6 +34,7 @@
 mod grid;
 pub mod logic;
 mod panels;
+pub mod snap;
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
@@ -35,8 +44,8 @@ use gpui_kit::{
     AnyElement, AnyWindowHandle, App, AppContext as _, ClickEvent, Context, CursorStyle,
     DragMoveEvent, Empty, Entity, ExternalPaths, FileDropEvent, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, ParentElement as _, Pixels, Point, Render, ScrollHandle, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div,
+    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render, ScrollHandle,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div,
     prelude::FluentBuilder as _, px, relative,
 };
 use mini_todo_core::db::{Fence, UpdateFenceRequest};
@@ -44,6 +53,7 @@ use mini_todo_core::fence::items::{self, FenceEntry};
 use mini_todo_core::fence::{self as core_fence, PxRect};
 
 use self::logic::{GeometryCommitGate, ResizeDir, now_ms, timing};
+use self::snap::{SnapEdge, SnapEdges, SnapGuide, SnapScene};
 use crate::assets::EpIcon;
 use crate::db::spawn_db;
 use crate::platform;
@@ -68,6 +78,9 @@ const MAC_RENAME_KEY_CHECKS: [u64; 3] = [150, 500, 1000];
 /// macOS 改名：宽限期结束后的最后一次复查（毫秒）。这时面板还不是 key（宽限期内失去 key、没能拿回来），之后不会再有
 /// 失去 key 的通知来提交改名——按"点到别处"提交，不让收纳箱卡在改名状态
 const MAC_RENAME_FINAL_CHECK_MS: u64 = MAC_RENAME_GRACE.as_millis() as u64 + 50;
+
+/// 标题栏按下后移动超过这么多逻辑像素才算拖动（移动收纳箱）；不超过时双击的第二下照常改名
+const TITLE_DRAG_THRESHOLD: f64 = 3.;
 
 /// macOS 改名的焦点诊断（日志用）：GPUI 看到的窗口激活态 + AppKit 的应用前台 / key 窗口
 fn focus_report(window: &Window) -> String {
@@ -101,21 +114,155 @@ pub(crate) enum Panel {
     OneDrive,
 }
 
-/// 进行中的缩放
+/// 吸附目标（拖动 / 缩放开始时快照一次：拖动期间其它收纳箱不会动、显示器不会变）
+#[derive(Debug, Clone)]
+struct SnapSetup {
+    /// 其它显示中的收纳箱的可见矩形与各显示器
+    scene: SnapScene,
+}
+
+impl SnapSetup {
+    fn new(cx: &App, fence_id: i64) -> Self {
+        Self {
+            scene: runtime::snap_scene(cx, fence_id),
+        }
+    }
+
+    /// 光标所在显示器上的目标；按住 Alt（macOS Option）时完全不吸附（`None`），每次移动按当时的修饰键判断
+    fn targets(&self, alt: bool) -> Option<Vec<snap::SnapTarget>> {
+        (!alt).then(|| self.scene.targets_at(platform::cursor_position_physical()))
+    }
+}
+
+/// 标题栏按下（还没超过 3px，不一定是拖动：也可能是单击 / 双击改名）
 #[derive(Debug, Clone, Copy)]
+struct TitlePress {
+    /// 按下点（窗口逻辑坐标；判断阈值时窗口还没动）
+    position: Point<Pixels>,
+    /// 按下时的光标（[`cursor_point`]）
+    cursor: (f64, f64),
+    /// 是双击的第二下（系统的 `click_count >= 2`，且上一次按下没有拖动收纳箱）：松手时没移动超过 3px 就改名
+    double: bool,
+}
+
+impl TitlePress {
+    /// `position`（窗口逻辑坐标）离按下点超过了 [`TITLE_DRAG_THRESHOLD`]
+    fn moved_beyond_threshold(&self, position: Point<Pixels>) -> bool {
+        let dx = f64::from(f32::from(position.x - self.position.x));
+        let dy = f64::from(f32::from(position.y - self.position.y));
+        logic::exceeds_drag_threshold(dx, dy, TITLE_DRAG_THRESHOLD)
+    }
+}
+
+/// 进行中的移动（标题栏按下后移动超过 3px）
+#[derive(Debug, Clone)]
+struct MoveSession {
+    /// 按下时的光标（[`cursor_point`]）
+    start_cursor: (f64, f64),
+    /// 开始移动时的窗口客户区（物理像素）。按下到超过阈值之间窗口只可能被程序调整（折叠的收纳箱悬停展开、可能向上展开），
+    /// 所以取开始移动这一刻的，不取按下时的
+    start: PxRect,
+    /// 逻辑 → 物理像素的系数（`platform::physical_scale`）
+    scale: f64,
+    snap: SnapSetup,
+}
+
+/// 进行中的缩放
+#[derive(Debug, Clone)]
 struct ResizeSession {
     dir: ResizeDir,
-    /// 按下时的光标（Windows / macOS：屏幕物理像素；Linux：窗口逻辑坐标）
+    /// 按下时的光标（[`cursor_point`]）
     start_cursor: (f64, f64),
     /// 按下时的窗口客户区（物理像素）
     start: PxRect,
     /// 逻辑 → 物理像素的系数（`platform::physical_scale`：macOS 是统一系数，不是窗口所在屏的缩放）
     scale: f64,
+    snap: SnapSetup,
 }
+
+/// 下一帧要摆的窗
+#[derive(Debug, Clone, Copy)]
+enum PlacementTarget {
+    /// 移动：只改位置（物理像素的客户区左上角），尺寸保持窗口当前值
+    Position(i32, i32),
+    /// 缩放：整个客户区（物理像素）+ 目标显示器缩放（Linux 改尺寸用）
+    Rect(PxRect, f64),
+}
+
+/// 拖动 / 缩放中等着下一帧执行的摆窗与高亮（每帧最多一次，只保留最新的）
+#[derive(Debug, Clone)]
+struct PendingPlacement {
+    target: PlacementTarget,
+    guides: Vec<SnapGuide>,
+}
+
+/// 标题栏的拖动标记（移动）
+#[derive(Clone, Copy)]
+struct TitleDrag;
 
 /// 缩放手柄的拖动标记
 #[derive(Clone, Copy)]
 struct ResizeDrag(ResizeDir);
+
+/// 当前光标：Windows / macOS 用屏幕物理坐标（拖动时窗口跟着动，窗口坐标不可靠），第二项为 true；Linux 取不到，
+/// 用窗口逻辑坐标 + 窗口原点（第二项 false）
+fn cursor_point(position: Point<Pixels>, window: &Window) -> ((f64, f64), bool) {
+    match platform::cursor_position_physical() {
+        Some((x, y)) => ((f64::from(x), f64::from(y)), true),
+        None => {
+            let origin = window.bounds().origin;
+            (
+                (
+                    f64::from(f32::from(position.x + origin.x)),
+                    f64::from(f32::from(position.y + origin.y)),
+                ),
+                false,
+            )
+        }
+    }
+}
+
+/// 光标相对按下时（`start`，[`cursor_point`] 的结果）移动了多少物理像素：Linux 的窗口逻辑坐标乘系数换成物理像素
+fn cursor_delta(
+    start: (f64, f64),
+    scale: f64,
+    position: Point<Pixels>,
+    window: &Window,
+) -> (f64, f64) {
+    let ((x, y), physical) = cursor_point(position, window);
+    let factor = if physical { 1. } else { scale };
+    ((x - start.0) * factor, (y - start.1) * factor)
+}
+
+/// 光标现在是否在窗口（客户区）上：Windows / macOS 按屏幕物理坐标比（窗口刚被摆过，窗口坐标可能还是旧的）；
+/// Linux 取不到光标，用最后一次鼠标事件的窗口坐标
+fn pointer_inside(window: &Window) -> bool {
+    if let (Some((x, y)), Some(r)) = (
+        platform::cursor_position_physical(),
+        platform::client_rect_physical(window),
+    ) {
+        return x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height;
+    }
+    let p = window.mouse_position();
+    let size = window.viewport_size();
+    p.x >= px(0.) && p.y >= px(0.) && p.x < size.width && p.y < size.height
+}
+
+/// 吸附高亮：被对齐的边画一条主题色线，画在窗口内的边缘、跟着窗口圆角（折叠时就是标题栏的边）；没有命中区，不挡鼠标
+fn render_snap_guides(edges: SnapEdges) -> impl IntoElement {
+    let width = theme::FENCE_SNAP_GUIDE_WIDTH;
+    div()
+        .absolute()
+        .inset_0()
+        .rounded(theme::radius::MD)
+        .border_color(fence_tokens().snap_guide)
+        .when(edges.contains(SnapEdge::Top), |this| this.border_t(width))
+        .when(edges.contains(SnapEdge::Bottom), |this| {
+            this.border_b(width)
+        })
+        .when(edges.contains(SnapEdge::Left), |this| this.border_l(width))
+        .when(edges.contains(SnapEdge::Right), |this| this.border_r(width))
+}
 
 struct EmptyDragView;
 
@@ -145,18 +292,25 @@ pub struct FenceWindow {
     external_drop: ExternalDrop,
     hovered: bool,
     hover_epoch: u64,
+    /// 移动 / 缩放中压下了 GPUI 报的"离开"（见 `on_hover_changed`），松手后要核对光标是否真的还在窗口上
+    hover_suppressed: bool,
     alpha_preview: Option<f64>,
     delete_count: Option<usize>,
     deleting: bool,
     title_menu_open: bool,
     more_anchor: Anchor,
-    press_point: Option<Point<Pixels>>,
+    title_press: Option<TitlePress>,
+    /// 上一次标题栏按下拖动了收纳箱：拖完紧接着的单击系统会算成双击的第二下（窗口跟着光标走，按下点没变），不改名
+    last_press_dragged: bool,
+    /// 拖动中（开始时 arm、每次移动续期、松手后落库完成才 disarm）：期间悬停不展开也不收回
     gate: GeometryCommitGate,
     commit_epoch: u64,
+    /// 拖动 / 缩放已松手、等最后一帧落地后落库
     commit_pending: bool,
+    moving: Option<MoveSession>,
     resizing: Option<ResizeSession>,
-    resize_pending: Option<PxRect>,
-    resize_frame_scheduled: bool,
+    placement_pending: Option<PendingPlacement>,
+    placement_frame_scheduled: bool,
     icon_size_pending: bool,
     icon_save_epoch: u64,
     /// 窗口当前呈现的形态（`set_fence_view` 最近一次的目标）
@@ -214,9 +368,6 @@ impl FenceWindow {
                     _ => {}
                 },
             ),
-            cx.observe_window_bounds(window, |this, window, cx| {
-                this.on_geometry_event(window, cx)
-            }),
             cx.observe_window_activation(window, |this, window, cx| {
                 if window.is_window_active() {
                     if cfg!(target_os = "macos") && this.editing_title {
@@ -263,18 +414,21 @@ impl FenceWindow {
             external_drop: ExternalDrop::new(),
             hovered: false,
             hover_epoch: 0,
+            hover_suppressed: false,
             alpha_preview: None,
             delete_count: None,
             deleting: false,
             title_menu_open: false,
             more_anchor: Anchor::new(),
-            press_point: None,
+            title_press: None,
+            last_press_dragged: false,
             gate: GeometryCommitGate::new(timing::GEOMETRY_ARM_MS),
             commit_epoch: 0,
             commit_pending: false,
+            moving: None,
             resizing: None,
-            resize_pending: None,
-            resize_frame_scheduled: false,
+            placement_pending: None,
+            placement_frame_scheduled: false,
             icon_size_pending: false,
             icon_save_epoch: 0,
             applied_view: Some(expanded),
@@ -588,6 +742,14 @@ impl FenceWindow {
         if self.hovered == hovered {
             return;
         }
+        // GPUI 拖动期间所有元素都不算悬停：拖标题栏 / 缩放手柄一开始就会报"离开"，可光标还在窗口上（移动时窗口跟着光标走）。
+        // 不当作离开：标题栏按钮不变暗、悬停展开的不收回；松手后 GPUI 重新报"悬停"时也就不会被当成一次新的进入、
+        // 150ms 后把刚拖完的折叠收纳箱展开。光标真在窗口外时由 `resync_hover_after_drag` 在松手后补上离开
+        if !hovered && cx.has_active_drag() && self.pointer_session() {
+            self.hover_suppressed = true;
+            return;
+        }
+        self.hover_suppressed = false;
         self.hovered = hovered;
         self.hover_epoch += 1;
         let epoch = self.hover_epoch;
@@ -601,7 +763,7 @@ impl FenceWindow {
                     .timer(timing::HOVER_EXPAND_DELAY)
                     .await;
                 let _ = this.update_in(cx, |this, window, cx| {
-                    if this.hover_epoch == epoch && !this.gate.is_armed(now_ms()) {
+                    if this.hover_epoch == epoch && !this.geometry_busy() {
                         this.set_reason(ExpandReason::Hover, true, window, cx);
                     }
                 });
@@ -612,7 +774,7 @@ impl FenceWindow {
         }
     }
 
-    /// 离开 400ms 后收回；拖窗口期间（闸门开着）再等 400ms
+    /// 离开 400ms 后收回；拖窗口期间（含松手后落库完成前）再等 400ms
     fn schedule_hover_release(&mut self, epoch: u64, window: &mut Window, cx: &mut Context<Self>) {
         cx.spawn_in(window, async move |this, cx| {
             cx.background_executor()
@@ -622,7 +784,7 @@ impl FenceWindow {
                 if this.hover_epoch != epoch {
                     return;
                 }
-                if this.gate.is_armed(now_ms()) {
+                if this.geometry_busy() {
                     this.schedule_hover_release(epoch, window, cx);
                 } else {
                     this.set_reason(ExpandReason::Hover, false, window, cx);
@@ -632,62 +794,222 @@ impl FenceWindow {
         .detach();
     }
 
+    /// 移动 / 缩放结束：拖动中压下过"离开"时，等最后一帧落地后核对光标——还在窗口上，GPUI 自己会重新报悬停（这边已经是
+    /// 悬停，什么都不用做）；已在窗口外（缩放拖出了窗口、吸附让窗口离开了光标），GPUI 不会再报离开，这里补上
+    fn resync_hover_after_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !std::mem::take(&mut self.hover_suppressed) {
+            return;
+        }
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor()
+                .timer(timing::GEOMETRY_COMMIT_DELAY)
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.hovered && !this.pointer_session() && !pointer_inside(window) {
+                    this.on_hover_changed(false, window, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
     // ------------------------------------------------------------------
-    // 移动（超过 3px 才拖）与几何落库
+    // 移动（自绘拖动：超过 3px 才动，吸附对齐）与几何落库
     // ------------------------------------------------------------------
 
+    /// 能拖标题栏移动（锁定 / 改名中不能；锁定的收纳箱照样是别人的吸附目标）
+    fn can_move(&self) -> bool {
+        self.fence.is_some() && !self.locked() && !self.editing_title
+    }
+
+    /// 用户正在拖动 / 缩放收纳箱（含松手后落库完成前）：悬停不展开也不收回
+    fn geometry_busy(&self) -> bool {
+        self.moving.is_some() || self.resizing.is_some() || self.gate.is_armed(now_ms())
+    }
+
+    /// 标题栏按住中（含还没超过 3px 的那一小段）或正在缩放：自绘拖动的手势进行中
+    fn pointer_session(&self) -> bool {
+        self.title_press.is_some() || self.moving.is_some() || self.resizing.is_some()
+    }
+
+    /// 标题栏按下：只记下按下点与光标，不立即拖（双击改名要收得到两次单击）
     fn on_title_mouse_down(
         &mut self,
         event: &MouseDownEvent,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) {
-        if self.editing_title {
-            return;
-        }
-        self.press_point = Some(event.position);
+        let after_drag = std::mem::take(&mut self.last_press_dragged);
+        self.title_press = (!self.editing_title).then(|| TitlePress {
+            position: event.position,
+            cursor: cursor_point(event.position, window).0,
+            double: event.click_count >= 2 && !after_drag,
+        });
+        // 按住期间标题不挂 tooltip（render_title_bar）
+        cx.notify();
     }
 
-    fn on_title_mouse_move(
+    /// 标题栏松手（`over_title`：松手时光标在标题栏上）：结束移动；双击的第二下没移动超过 3px 就改名。
+    /// 不用 GPUI 的 `on_click`：标题栏挂了 `on_drag`，移动超过 2px 就开始拖动、这次按下不再算单击——双击第二下手抖 2~3px
+    /// 就改不了名（窗口要超过 3px 才动）
+    fn on_title_mouse_up(
+        &mut self,
+        event: &MouseUpEvent,
+        over_title: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let press = self.title_press.take();
+        self.end_move(window, cx);
+        cx.notify();
+        // 拖动过的按下在进入移动会话时已清掉（press 为 None）；锁定的收纳箱不进会话，靠这里的距离判断
+        if press
+            .is_some_and(|p| p.double && over_title && !p.moved_beyond_threshold(event.position))
+            && self.fence.is_some()
+            && !self.editing_title
+        {
+            self.start_rename(window, cx);
+        }
+    }
+
+    /// 标题栏拖动中的每次移动（GPUI `on_drag_move`：捕获阶段、不看悬停，光标出了窗口也收得到）
+    fn on_title_drag_move(
         &mut self,
         event: &MouseMoveEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(start) = self.press_point else {
+        if event.pressed_button != Some(MouseButton::Left) {
+            // 没收到松手（Windows 上鼠标捕获被别的窗口拿走、macOS 的菜单吞了 mouseUp）：按松手处理，并结束 GPUI 的拖动
+            self.title_press = None;
+            self.end_move(window, cx);
+            cx.stop_active_drag(window);
+            return;
+        }
+        if self.moving.is_none() && !self.begin_move_if_dragged(event, window, cx) {
+            return;
+        }
+        let Some(session) = &self.moving else {
             return;
         };
-        if event.pressed_button != Some(MouseButton::Left) {
-            self.press_point = None;
-            return;
-        }
-        let dx = f64::from(f32::from(event.position.x - start.x));
-        let dy = f64::from(f32::from(event.position.y - start.y));
-        if !logic::exceeds_drag_threshold(dx, dy, 3.) {
-            return;
-        }
-        self.press_point = None;
-        if self.locked() || self.editing_title {
-            return;
-        }
+        let (dx, dy) = cursor_delta(session.start_cursor, session.scale, event.position, window);
+        // 移动只改位置，尺寸取窗口当前值：混合 DPI 下跨屏时 WM_DPICHANGED 改了尺寸，不能用起点的尺寸算吸附、摆回去
+        let (width, height) = platform::client_rect_physical(window)
+            .map_or((session.start.width, session.start.height), |r| {
+                (r.width, r.height)
+            });
+        let raw = PxRect {
+            x: session.start.x + logic::js_round(dx),
+            y: session.start.y + logic::js_round(dy),
+            width,
+            height,
+        };
+        // 阈值按窗口当前的系数（混合 DPI 下拖到另一块屏上会变）
+        let threshold = snap::snap_threshold(platform::physical_scale(window));
+        let (rect, guides) = match session.snap.targets(event.modifiers.alt) {
+            Some(targets) => snap::snap_move(raw, &targets, threshold),
+            None => (raw, Vec::new()),
+        };
         self.gate.arm(now_ms());
-        platform::begin_window_drag(window, cx);
+        self.schedule_placement(
+            PlacementTarget::Position(rect.x, rect.y),
+            guides,
+            window,
+            cx,
+        );
     }
 
-    /// 窗口移动 / 尺寸变化：闸门开着（用户拖动中）才安排落库（停下 300ms 后）
-    fn on_geometry_event(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.gate.accept(now_ms()) {
-            return;
+    /// 按下后移动超过 3 逻辑像素（`exceeds_drag_threshold`，按窗口坐标判断，这时窗口还没动）才进入移动会话：
+    /// 快照吸附目标、打开闸门。返回是否进入了移动
+    fn begin_move_if_dragged(
+        &mut self,
+        event: &MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(press) = self.title_press else {
+            return false;
+        };
+        if !press.moved_beyond_threshold(event.position) {
+            return false;
         }
+        self.title_press = None;
+        if !self.can_move() {
+            return false;
+        }
+        let Some(start) = platform::client_rect_physical(window) else {
+            return false;
+        };
+        self.last_press_dragged = true;
+        // 上一次拖动刚松手、还没落库：先落库
+        self.flush_geometry(window, cx).detach();
+        self.moving = Some(MoveSession {
+            start_cursor: press.cursor,
+            start: runtime::to_px(start),
+            scale: platform::physical_scale(window),
+            snap: SnapSetup::new(cx, self.fence_id),
+        });
+        self.gate.arm(now_ms());
+        true
+    }
+
+    /// 松手（或确认没收到松手）：摆完最后一帧、清掉高亮，等它落地后直接落库（不经闸门防抖；系统挪窗不会走到这里）。
+    /// 没进入移动会话（没超过 3px）时只核对悬停
+    fn end_move(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.moving.take().is_some() {
+            self.flush_placement(window, cx);
+            runtime::clear_snap_guides(cx, self.fence_id);
+            self.commit_after_placement(window, cx);
+        }
+        self.resync_hover_after_drag(window, cx);
+    }
+
+    /// 拖动 / 缩放：每帧最多摆一次窗（`on_next_frame`，只保留最新的目标），目标收纳箱的高亮随同一帧更新
+    fn schedule_placement(
+        &mut self,
+        target: PlacementTarget,
+        guides: Vec<SnapGuide>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.placement_pending = Some(PendingPlacement { target, guides });
+        if !self.placement_frame_scheduled {
+            self.placement_frame_scheduled = true;
+            cx.on_next_frame(window, |this, window, cx| {
+                this.placement_frame_scheduled = false;
+                this.flush_placement(window, cx);
+            });
+        }
+    }
+
+    /// 执行待摆的窗（`platform` 的写操作已延后到 App 借用之外）并更新高亮
+    fn flush_placement(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pending) = self.placement_pending.take() else {
+            return;
+        };
+        match pending.target {
+            PlacementTarget::Position(x, y) => {
+                platform::set_client_position_physical(window, cx, x, y)
+            }
+            PlacementTarget::Rect(rect, scale) => {
+                runtime::apply_window_rect(window, cx, rect, scale)
+            }
+        }
+        runtime::set_snap_guides(cx, self.fence_id, &pending.guides);
+    }
+
+    /// 拖动 / 缩放结束：摆窗是延后执行的，等最后一帧落地（`GEOMETRY_COMMIT_DELAY`）再读客户区落库。等待期间有程序调整
+    /// （折叠 / 改外观 / 又开始拖…）时 `flush_geometry` 先把它落库
+    fn commit_after_placement(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.commit_pending = true;
         self.commit_epoch += 1;
         let epoch = self.commit_epoch;
         cx.spawn_in(window, async move |this, cx| {
             cx.background_executor()
-                .timer(timing::GEOMETRY_COMMIT_DEBOUNCE)
+                .timer(timing::GEOMETRY_COMMIT_DELAY)
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
-                if this.commit_epoch == epoch && this.commit_pending {
+                if this.commit_pending && this.commit_epoch == epoch {
                     this.commit_geometry(window, cx).detach();
                 }
             });
@@ -695,7 +1017,7 @@ impl FenceWindow {
         .detach();
     }
 
-    /// 读窗口当前客户区（= 可见区域）落库（折叠视图只落位置和宽度）。落库后不关闸门：按住不放停顿后继续拖仍然算数
+    /// 读窗口当前客户区（= 可见区域）落库（折叠视图只落位置和宽度）。落库完成后关闸门（又开始拖了就不关）
     fn commit_geometry(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Task<()> {
         self.commit_pending = false;
         self.commit_epoch += 1;
@@ -710,9 +1032,14 @@ impl FenceWindow {
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
-            let _ = this.update_in(cx, |this, window, cx| match result {
-                Ok(fence) => this.apply_fence(fence, cx),
-                Err(e) => message::error_with(window, cx, "保存收纳箱位置失败", &e),
+            let _ = this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(fence) => this.apply_fence(fence, cx),
+                    Err(e) => message::error_with(window, cx, "保存收纳箱位置失败", &e),
+                }
+                if this.moving.is_none() {
+                    this.gate.disarm();
+                }
             });
         })
     }
@@ -738,7 +1065,7 @@ impl FenceWindow {
         };
         let title = fence.title.clone();
         self.editing_title = true;
-        self.press_point = None;
+        self.title_press = None;
         self.title_input.update(cx, |s, cx| {
             s.set_value(title, window, cx);
             s.focus(window, cx);
@@ -875,22 +1202,8 @@ impl FenceWindow {
     }
 
     // ------------------------------------------------------------------
-    // 缩放（窗口内 8 个手柄）
+    // 缩放（窗口内 8 个手柄；与移动同一套自绘拖动 + 吸附）
     // ------------------------------------------------------------------
-
-    /// 当前光标：Windows / macOS 用屏幕物理坐标（拖左 / 上边时窗口在动，窗口坐标不可靠）；Linux 取不到，用窗口坐标
-    fn cursor_for_resize(&self, position: Point<Pixels>, window: &Window) -> (f64, f64) {
-        match platform::cursor_position_physical() {
-            Some((x, y)) => (f64::from(x), f64::from(y)),
-            None => {
-                let origin = window.bounds().origin;
-                (
-                    f64::from(f32::from(position.x + origin.x)),
-                    f64::from(f32::from(position.y + origin.y)),
-                )
-            }
-        }
-    }
 
     fn begin_resize(
         &mut self,
@@ -902,70 +1215,62 @@ impl FenceWindow {
         if !self.can_resize() || self.resizing.is_some() {
             return;
         }
+        // 上一次移动没收到松手（手柄的按下不冒泡到根元素的 on_any_mouse_down）：先收尾，下面的 flush_geometry 随即落库
+        self.title_press = None;
+        self.end_move(window, cx);
         self.flush_geometry(window, cx).detach();
         let Some(start) = platform::client_rect_physical(window) else {
             return;
         };
         self.resizing = Some(ResizeSession {
             dir,
-            start_cursor: self.cursor_for_resize(event.position, window),
+            start_cursor: cursor_point(event.position, window).0,
             start: runtime::to_px(start),
             scale: platform::physical_scale(window),
+            snap: SnapSetup::new(cx, self.fence_id),
         });
         cx.stop_propagation();
     }
 
-    fn resize_move(
-        &mut self,
-        position: Point<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(session) = self.resizing else {
+    fn resize_move(&mut self, event: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if event.pressed_button != Some(MouseButton::Left) {
+            // 没收到松手（见 on_title_drag_move）
+            self.end_resize(window, cx);
+            cx.stop_active_drag(window);
+            return;
+        }
+        let Some(session) = &self.resizing else {
             return;
         };
-        let (cx_now, cy_now) = self.cursor_for_resize(position, window);
-        let physical = platform::cursor_position_physical().is_some();
-        // Linux 的窗口坐标是逻辑像素，乘缩放换成物理像素
-        let factor = if physical { 1. } else { session.scale };
-        let dx = (cx_now - session.start_cursor.0) * factor;
-        let dy = (cy_now - session.start_cursor.1) * factor;
-        let min = logic::js_round(core_fence::MIN_WIDTH_DIP * session.scale) as f64;
-        let rect = logic::resize_rect(session.start, session.dir, dx, dy, min, min);
-        self.resize_pending = Some(rect);
-        if !self.resize_frame_scheduled {
-            // 每帧最多一次 SetWindowPos
-            self.resize_frame_scheduled = true;
-            cx.on_next_frame(window, |this, window, cx| {
-                this.resize_frame_scheduled = false;
-                this.flush_resize(window, cx);
-            });
-        }
-    }
-
-    fn flush_resize(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(rect) = self.resize_pending.take() {
-            let scale = self.resizing.map(|s| s.scale).unwrap_or(1.);
-            runtime::apply_window_rect(window, cx, rect, scale);
-        }
+        let (dx, dy) = cursor_delta(session.start_cursor, session.scale, event.position, window);
+        let min = logic::js_round(core_fence::MIN_WIDTH_DIP * session.scale);
+        let raw = logic::resize_rect(
+            session.start,
+            session.dir,
+            dx,
+            dy,
+            f64::from(min),
+            f64::from(min),
+        );
+        // 只调被拖的边、对边不动；吸附后不小于最小尺寸。阈值与最小尺寸同一个系数（缩放不跨屏）
+        let threshold = snap::snap_threshold(session.scale);
+        let (rect, guides) = match session.snap.targets(event.modifiers.alt) {
+            Some(targets) => snap::snap_resize(raw, session.dir, &targets, threshold, min, min),
+            None => (raw, Vec::new()),
+        };
+        let scale = session.scale;
+        self.schedule_placement(PlacementTarget::Rect(rect, scale), guides, window, cx);
     }
 
     fn end_resize(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.resizing.is_none() {
+        if self.resizing.take().is_none() {
             return;
         }
-        self.flush_resize(window, cx);
-        self.resizing = None;
-        // 摆窗是延后执行的：排在它之后再读外框落库（缩放结束直接落库，不经闸门）
-        cx.spawn_in(window, async move |this, cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(16))
-                .await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                this.commit_geometry(window, cx).detach();
-            });
-        })
-        .detach();
+        self.flush_placement(window, cx);
+        runtime::clear_snap_guides(cx, self.fence_id);
+        // 缩放结束直接落库（不经闸门）
+        self.commit_after_placement(window, cx);
+        self.resync_hover_after_drag(window, cx);
     }
 
     fn render_resize_handles(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -1007,7 +1312,7 @@ impl FenceWindow {
                         move |this, event: &DragMoveEvent<ResizeDrag>, window, cx| {
                             // 8 个手柄都会收到同一次拖动：只由按下的那个处理
                             if event.drag(cx).0 == dir {
-                                this.resize_move(event.event.position, window, cx)
+                                this.resize_move(&event.event, window, cx)
                             }
                         },
                     ))
@@ -1199,7 +1504,9 @@ impl FenceWindow {
                 .min_w_0()
                 .relative()
                 .font_weight(theme::WEIGHT_SEMIBOLD)
-                .when(has_fence, |this| {
+                // 按住标题栏 / 拖动 / 缩放期间不挂：GPUI 的 tooltip 不看拖动，光标在标题上停够 500ms 就会在拖动中弹出来
+                // （窗口跟着光标走，光标一直在标题上）
+                .when(has_fence && !self.pointer_session(), |this| {
                     this.tooltip(crate::ui::tooltip::native(title.clone()))
                 })
                 // text-shadow: 0 1px 2px rgba(0,0,0,.4)：先在下方 1px 画一遍阴影色，再画正文
@@ -1288,20 +1595,30 @@ impl FenceWindow {
                     this.on_title_mouse_down(event, window, cx)
                 }),
             )
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
-                this.on_title_mouse_move(event, window, cx)
-            }))
+            // 自绘拖动（移动）：GPUI 的拖动在按下后移动超过 2px 时开始，窗口要等超过 3px 才动；锁定 / 改名中不挂
+            // （改名输入框里拖选文字不受影响）
+            .when(self.can_move(), |this| {
+                this.on_drag(TitleDrag, |_, _, _, cx| cx.new(|_| EmptyDragView))
+                    .on_drag_move::<TitleDrag>(cx.listener(
+                        |this, event: &DragMoveEvent<TitleDrag>, window, cx| {
+                            this.on_title_drag_move(&event.event, window, cx)
+                        },
+                    ))
+            })
+            // 松手在标题栏上 / 外（窗口跟手有一帧延迟、吸附时窗口与光标有偏移，两种都要收）。双击改名也在这里判断
+            // （见 on_title_mouse_up：不用 on_click）
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _, _, _| this.press_point = None),
+                cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                    this.on_title_mouse_up(event, true, window, cx)
+                }),
             )
-            .when(has_fence, |this| {
-                this.on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
-                    if event.click_count() >= 2 && !this.editing_title {
-                        this.start_rename(window, cx);
-                    }
-                }))
-            })
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                    this.on_title_mouse_up(event, false, window, cx)
+                }),
+            )
             .child(title_el)
             .children(actions)
             .children(self.render_title_menu(window, cx))
@@ -1370,6 +1687,8 @@ impl Render for FenceWindow {
             .unwrap_or((0, 0, 0));
         let bg = theme::rgba_css(r, g, b, self.bg_alpha() as f32);
         let expanded = self.view_expanded();
+        // 别的收纳箱拖动 / 缩放时吸附到本收纳箱的边（自己拖动时不会有：目标不含自己）
+        let snap_edges = runtime::snap_edges(cx, self.fence_id);
         self.pump_icons(window, cx);
 
         let root = div()
@@ -1396,8 +1715,25 @@ impl Render for FenceWindow {
                 this.on_key_down(event, window, cx)
             }))
             .on_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                // 上一次拖动 / 缩放没收到松手（见 on_title_drag_move）：新的按下先把它收尾、落库。标题栏的按下先于这里
+                // 记下（子元素先收到），不受影响；缩放手柄的按下不冒泡到这里
+                this.end_move(window, cx);
+                this.end_resize(window, cx);
                 if !this.editing_title {
                     this.focus.focus(window, cx);
+                }
+            }))
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                // 同上，且 GPUI 的拖动已被别的窗口里的松手清掉（`active_drag` 是全应用的，不再有 on_drag_move）、
+                // 或标题栏按住后（没超过 3px）松手丢了：光标回到窗口上的第一次移动就收尾，不让手势卡着（卡着时悬停不展开 /
+                // 不收回、GPUI 报的"离开"被压下）
+                if event.pressed_button != Some(MouseButton::Left)
+                    && !cx.has_active_drag()
+                    && this.pointer_session()
+                {
+                    this.title_press = None;
+                    this.end_move(window, cx);
+                    this.end_resize(window, cx);
                 }
             }))
             // 整个窗口（含标题栏）都是外部拖入的放置区；锁定状态下照样可以拖入
@@ -1414,6 +1750,9 @@ impl Render for FenceWindow {
             }))
             .child(self.render_title_bar(window, cx))
             .when(expanded, |this| this.child(self.render_body(window, cx)))
+            .when(!snap_edges.is_empty(), |this| {
+                this.child(render_snap_guides(snap_edges))
+            })
             .children(self.render_resize_handles(cx))
             .children(self.render_item_menu(window, cx));
         // 松手 / 拖出不用 GPUI 的 on_drop / on_file_drop_exit：它们要求悬停命中，键盘模态下（例如刚改完名按了回车）

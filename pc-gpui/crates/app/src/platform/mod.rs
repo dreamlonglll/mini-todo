@@ -227,14 +227,15 @@ pub fn hwnd(window: &Window) -> Option<Hwnd> {
     imp::hwnd(window)
 }
 
-/// 程序化开始拖动窗口（例如收纳箱标题栏移动超过 3px 后才拖）。
+/// 程序化开始系统拖动窗口（进入系统的拖动循环，之后到松手前改不了位置）。
 ///
 /// Windows：延后到前台任务里 `ReleaseCapture` + `SendMessageW(WM_NCLBUTTONDOWN, HTCAPTION)`（与 tao
 /// `drag_window` 相同；不能在事件处理里同步做，模态移动循环期间 App 处于借用状态会让前台任务 panic）；
 /// 其它平台 `window.start_window_move()`。
 ///
 /// 普通的"按住标题栏拖动"请用 [`crate::ui::title_bar::drag_region`]（Windows 上走系统 `HTCAPTION`，
-/// 支持贴边分屏与双击最大化）。
+/// 支持贴边分屏与双击最大化）。目前没有调用方：收纳箱要在拖动中吸附对齐，改成了自绘拖动
+/// （`windows/fence/mod.rs` 模块文档）。
 pub fn begin_window_drag(window: &Window, cx: &App) {
     imp::begin_window_drag(window, cx)
 }

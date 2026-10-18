@@ -9,7 +9,8 @@
 //!
 //! 拖动区之上的**可交互元素必须 `occlude()`**（[`EpButton`](crate::ui::button::EpButton) 已经是），否则 Windows
 //! 上点它会变成拖窗口；纯文字（标题）不用处理，按在上面就是拖动。不可拖动的状态（主窗口固定模式）不放拖动区即可。
-//! 需要"移动超过 3px 才拖"（收纳箱）时不用它，自己在 `on_mouse_move` 里调 [`crate::platform::begin_window_drag`]。
+//! 收纳箱标题栏不用它：要"移动超过 3px 才拖"（双击改名）、拖动中还要吸附对齐，用的是自绘拖动（GPUI `on_drag_move` +
+//! 每帧摆窗，见 `windows/fence/mod.rs` 模块文档）。
 //!
 //! ## 通用标题栏 [`WindowTitleBar`]
 //!
