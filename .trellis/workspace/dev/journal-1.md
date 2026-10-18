@@ -1030,3 +1030,37 @@ PC 前端（D1 正确性 / 安全 / 同步 UI、D2 性能 / 清理 / 测试）�
 ### Next Steps
 
 - None - task complete
+
+
+## Session 28: 功能介绍视频与 README 重写
+
+**Date**: 2026-10-18
+**Task**: 功能介绍视频与 README 重写
+**Branch**: `claude/blissful-mccarthy-kytuip`
+
+### Summary
+
+新增 pc-gpui/scripts/intro-video（真实应用 2 倍缩放截图 / 录屏 → HTML 时间轴 → Playwright 逐帧渲染 → ffmpeg），生成 2 分 17 秒的 docs/video/mini-todo-intro.mp4（crf 26 约 9 MB，低于 GitHub 免费账户 10 MB 的视频附件上限）与 README 截图；README 面向用户重写，顶部用 GitHub 附件链接内嵌播放。踩坑：Xvfb 需 -noreset、xdotool type 不能以 - 开头、待办只能按颜色圆点拖动、Xvfb 下描述失焦不回渲染、8 位 H.264 渐变色带要加细颗粒 + aq-mode=3
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `dfd58f8` | (see git log) |
+| `535f245` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
