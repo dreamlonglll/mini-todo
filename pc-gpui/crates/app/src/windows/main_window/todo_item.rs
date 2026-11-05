@@ -3,7 +3,7 @@
 
 use gpui_kit::{
     Animation, AnimationExt as _, AnyElement, AppContext as _, Bounds, Context, CursorStyle,
-    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Point, Render,
+    InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Pixels, Point, Render,
     StatefulInteractiveElement as _, Styled as _, Window, canvas, div, ease_in_out,
     prelude::FluentBuilder as _, px, relative,
 };
@@ -332,6 +332,9 @@ impl MainWindow {
         div()
             .id(("todo-actions", id as u64))
             // 不 occlude：CSS 里悬停在子元素上父元素仍处于 :hover（遮挡会让行失去悬停、操作条闪烁消失）
+            // 但按下不能传给行：行记下按下后，按住期间的任何鼠标移动都会让 GPUI 报 on_hover(false)，
+            // 操作条随之卸载，松手时只剩行的 on_click，点「完成」变成打开详情。子元素先收到事件，按钮不受影响
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .absolute()
             .right(px(8.))
             .top(px(8.))
