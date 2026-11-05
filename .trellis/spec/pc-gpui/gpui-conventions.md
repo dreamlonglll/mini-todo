@@ -135,6 +135,28 @@
   记路径 + 窗口级 `MouseUp` / `FileDropEvent::Exited` 监听，命中检测用不看模态的 `should_handle_scroll`）。悬停反馈照常用
   `on_drag_move::<ExternalPaths>` / `drag_over`（它们不看模态）。
 
+### 2.5.2 悬停才挂载的操作条：按下不能传给带 `on_click` 的父元素
+
+- gpui-pre 0.3.9 的 `on_hover`：元素记着未结束的按下（有 `on_click` / `on_drag` 才会记）时，收到任何一条 `MouseMove` 都报 `false`
+  （`elements/div.rs:3170`），位移为 0 也算；按住不动则保持 `true`。
+- 所以"父行 `on_click` + `on_hover` 决定是否挂载子按钮"有坑：按下子按钮 → 按住时鼠标动一下 → 父行 `on_hover(false)` → 下一帧子按钮被卸载，
+  它的 MouseUp 监听也没了 → 松手只有父行的点击成立，子按钮 `on_click` 里的 `stop_propagation` 没有机会执行。现象是偶发点错：
+  移动后隔一帧以上才松手时触发（主窗口点「完成」却打开详情）。
+- 做法：在条件挂载的容器上拦下左键按下。鼠标监听在 Bubble 阶段倒序派发（子元素先于父元素，`window.rs:5958`），按钮仍能记下按下，
+  父元素不再记下，也就不会失去悬停：
+
+  ```rust
+  div()
+      .id(("todo-actions", id as u64))
+      .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+      .child(button)
+  ```
+
+- 不要用 `occlude()`：父元素会失去悬停，条件挂载的容器一悬停就消失、闪烁。
+- 拦下后的行为：点容器的空隙不再触发父元素的 `on_click`；按下按钮、滑到父元素上再松手，两边都不触发。
+- 不受影响的写法：按钮一直挂载、只调 `opacity`（`windows/completed.rs`），或父元素没有 `on_click`（`windows/editor/subtasks.rs`）。
+- 测试：e2e 的 `W.click` 按住期间不产生鼠标移动，测不出这个问题。要覆盖就在按下和松手之间发一条鼠标移动，隔一帧以上（≥ 16ms）再松手。
+
 ### 2.6 图片与图标
 
 - 本地图片用 `img(PathBuf)` / `&Path`。`img("C:\\a.png")` 这种 `&str` 会被当成 URI（`C:` 被解析成 scheme）。
@@ -348,7 +370,8 @@ gpui-pre-macos 能建窗（位置 / 显示器 / 置顶层级 / 可缩放都只�
    改写 `GWL_STYLE`（`open_window` 建窗后去掉 `WS_SYSMENU` 依赖它）；文件拖放是否仍不改输入模态、`on_drop` 是否仍要求
    `is_hovered`（`ui::external_drop` 依赖它）；自绘拖动（§2.3，收纳箱移动 / 缩放）依赖的：Windows 鼠标按下时 `SetCapture`、`on_drag_move`
    是捕获阶段且不看悬停、`on_drag` 的 2px 阈值与开始后抑制 click、拖动期间 `on_hover` 报 `false`、`active_drag` 只在 MouseUp 后清掉、
-   `MouseDownEvent.click_count`（收纳箱双击改名）；透明窗口（DirectComposition）实现；`QuitMode` 默认值；`Root` / `RootPlugin` 接口
+   `MouseDownEvent.click_count`（收纳箱双击改名）；`on_hover` 是否仍在元素记着按下时报 `false`、鼠标监听是否仍在 Bubble 阶段倒序派发
+   （§2.5.2，主窗口待办行的操作条依赖它）；透明窗口（DirectComposition）实现；`QuitMode` 默认值；`Root` / `RootPlugin` 接口
    （`UiLayer` 依赖）；`gpui_kit::base::TextView::markdown(..).image_source(..)`；`img(&str)` 的 URI 判定；换行器规则；
    Windows release 构建的 `fxc.exe` 着色器预编译（`gpui-pre-windows/build.rs`）。
    macOS（§2.15，gpui-pre-macos / gpui-pre-apple）：gpui-kit 是否仍给 `gpui_platform` 开 `font-kit`（漏开时 mac 上退回 `NoopTextSystem`，
