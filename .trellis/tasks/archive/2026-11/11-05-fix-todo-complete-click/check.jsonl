@@ -1,0 +1,3 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python3 .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/spec/pc-gpui/gpui-conventions.md", "reason": "GPUI 约定：事件、悬停、拖动的副作用"}
+{"file": ".trellis/spec/pc-gpui/verification.md", "reason": "改动后必须跑的验证（本任务不跑 e2e）"}
