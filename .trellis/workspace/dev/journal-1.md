@@ -1064,3 +1064,38 @@ PC 前端（D1 正确性 / 安全 / 同步 UI、D2 性能 / 清理 / 测试）�
 ### Next Steps
 
 - None - task complete
+
+
+## Session 29: 修复点待办完成按钮偶发打开详情，发布 v3.0.5
+
+**Date**: 2026-11-05
+**Task**: 修复点待办完成按钮偶发打开详情，发布 v3.0.5
+**Branch**: `main`
+
+### Summary
+
+用真实输入复现并定位：按住完成按钮时任意鼠标移动让 GPUI 报 on_hover(false)，操作条被卸载，松手只剩行的 on_click 打开详情。在操作条容器上拦下左键按下修复，用户手动测试通过；规范新增 gpui-conventions §2.5.2。v3.0.5 已发布，流水线全绿。未新增回归测试，mac 未实际点击验证。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `bbb6e37` | (see git log) |
+| `9bb754a` | (see git log) |
+| `e3fc083` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

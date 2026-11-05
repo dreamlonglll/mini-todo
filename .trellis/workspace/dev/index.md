@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 28
-- **Last Active**: 2026-10-18
+- **Total Sessions**: 29
+- **Last Active**: 2026-11-05
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~1066 | Active |
+| `journal-1.md` | ~1101 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 29 | 2026-11-05 | 修复点待办完成按钮偶发打开详情，发布 v3.0.5 | `bbb6e37`, `9bb754a`, `e3fc083` | `main` |
 | 28 | 2026-10-18 | 功能介绍视频与 README 重写 | `dfd58f8`, `535f245` | `claude/blissful-mccarthy-kytuip` |
 | 27 | 2026-10-18 | 收纳箱拖动 / 缩放吸附对齐与 v3.0.4 正式版 | `e655ba7`, `920e8c2`, `ecc3fb4`, `7368ee4` | `claude/fence-snap` |
 | 26 | 2026-10-16 | macOS 桌面收纳箱（预览）与 v3.0.3-pre 版本号 | `654f298`, `e1c3a4b`, `ddde4b4`, `ee45a1e`, `d64c005`, `0a58393`, `a9c9298`, `c06ec66` | `claude/serene-sagan-uuuz7r` |
