@@ -2,7 +2,8 @@
 //!
 //! Milkdown 的所见即所得在 GPUI 里无法 1:1 还原，这里改成"渲染 ⇄ 源码"原地切换：
 //! - 平时显示渲染结果（与只读排版同一套 [`MarkdownView`]，看起来与旧版编辑器一致）；
-//! - 单击（或拖入图片）切到 Markdown 源码编辑（等宽 13px / 行高 1.6），失焦后回到渲染结果；
+//! - 单击（或拖入图片）切到 Markdown 源码编辑（等宽 13px / 行高 1.6），失焦后回到渲染结果——鼠标按下引起的失焦
+//!   等松手再切：渲染结果通常比源码高，按下就切会把下方的控件挤走（这次单击落空），松手还可能落在渲染结果上；
 //!   Ctrl/Cmd+单击链接按白名单打开（与旧版编辑排版一致），单击图片打开预览（不切到源码）；
 //! - 渲染结果里悬停图片显示调整大小的手柄（[`MarkdownView::image_resize`]）：拖动时按实时尺寸显示，松手后把尺寸写进
 //!   这张图片的 alt 后缀（`![image.png|300](…)`，宽高比改变时 `|300x200`），双击手柄还原原始尺寸；改写源码与打字一样
@@ -26,8 +27,8 @@ use gpui_kit::component::input::{self, InputEvent, Textarea, TextareaState};
 use gpui_kit::{
     App, AppContext as _, Context, Entity, EventEmitter, ExternalPaths, Focusable as _,
     InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Pixels, Point, Render,
-    SharedString, Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px,
-    relative,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
+    prelude::FluentBuilder as _, px, relative,
 };
 
 use crate::platform::clipboard::{self, ClipboardContent, ClipboardImage};
@@ -491,8 +492,8 @@ pub struct MarkdownEditor {
     external_drop: ExternalDrop,
     /// 拖动手柄调整图片大小
     image_resizer: ImageResizer,
-    /// 按过图片手柄：这次松手不切到源码编辑（拖动结束的松手可能落在根元素上；下一次按下时清掉）
-    suppress_mouse_up: bool,
+    /// 源码编辑中按下了鼠标左键、还没松开：这期间的失焦先不切回渲染结果，松手时再看（[`Self::finish_press`]）
+    press_pending: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -524,7 +525,8 @@ impl MarkdownEditor {
                     cx.notify();
                 }
                 InputEvent::Blur => {
-                    if this.editing {
+                    // 鼠标按下引起的失焦等松手再切（见 `finish_press`）；键盘 / 程序移走焦点立即切
+                    if this.editing && !this.press_pending {
                         this.editing = false;
                         cx.notify();
                     }
@@ -543,7 +545,7 @@ impl MarkdownEditor {
             on_image_click: None,
             external_drop: ExternalDrop::new(),
             image_resizer: ImageResizer::default(),
-            suppress_mouse_up: false,
+            press_pending: false,
             _subscriptions: subscriptions,
         }
     }
@@ -562,6 +564,7 @@ impl MarkdownEditor {
         self.readonly = readonly;
         if readonly {
             self.editing = false;
+            self.press_pending = false;
             self.image_resizer.cancel();
         }
         cx.notify();
@@ -591,8 +594,26 @@ impl MarkdownEditor {
         }
         self.image_resizer.cancel();
         self.editing = true;
+        self.press_pending = false;
         self.source.update(cx, |state, cx| state.focus(window, cx));
         cx.notify();
+    }
+
+    /// 源码编辑中按下的左键松开了（框内框外都算）：焦点已经不在源码框（按下时被别处拿走）就切回渲染结果。
+    /// 在松手的捕获阶段执行，这次单击按的仍是当前这一帧的布局（点颜色 / 四象限照常生效），下一帧才换成渲染结果
+    fn finish_press(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !std::mem::take(&mut self.press_pending) || !self.editing {
+            return;
+        }
+        let focused = self
+            .source
+            .read(cx)
+            .focus_handle(cx)
+            .contains_focused(window, cx);
+        if !focused {
+            self.editing = false;
+            cx.notify();
+        }
     }
 
     fn handle_drop(&mut self, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
@@ -630,8 +651,7 @@ impl MarkdownEditor {
             ResizeOutcome::Ignored => {}
             ResizeOutcome::Redraw => cx.notify(),
             ResizeOutcome::Gesture { rewritten } => {
-                // 按下 / 松开手柄的这次松手不切到源码编辑
-                self.suppress_mouse_up = true;
+                // 手柄的按下拦住了冒泡，根元素收不到这次按下，松手落在渲染结果上也不算单击、不切到源码编辑
                 if rewritten {
                     cx.emit(MarkdownEditorEvent::Changed);
                 }
@@ -716,29 +736,39 @@ impl Render for MarkdownEditor {
             .flex_shrink_0()
             .flex()
             .flex_col()
+            // 渲染结果：单击（按下、松开都在根元素上）切到源码编辑。不能只看松手：从框外按下、源码切成更高的渲染结果后，
+            // 松手会落在渲染结果上，被当成单击又切回源码（点描述框下方的空白会闪一下又回到源码编辑）。
+            // 图片手柄的按下、图片的单击都拦住了冒泡，到不了这里
             .when(!self.readonly && !editing, |this| {
-                this.cursor_text()
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _: &gpui_kit::MouseDownEvent, _, _| {
-                            // 图片手柄的按下不冒泡到这里；别处的按下说明上一次手柄手势已结束
-                            this.suppress_mouse_up = false;
-                        }),
-                    )
-                    .on_mouse_up(
-                        MouseButton::Left,
-                        cx.listener(|this, event: &gpui_kit::MouseUpEvent, window, cx| {
-                            // 拖动图片手柄后的松手（GPUI 的拖动在松手派发完才清掉）
-                            if std::mem::take(&mut this.suppress_mouse_up) || cx.has_active_drag() {
-                                return;
-                            }
-                            // Ctrl/Cmd+单击留给链接
-                            if event.modifiers.control || event.modifiers.platform {
-                                return;
-                            }
-                            this.start_editing(window, cx);
-                        }),
-                    )
+                this.cursor_text().on_click(cx.listener(
+                    |this, event: &gpui_kit::ClickEvent, window, cx| {
+                        // Ctrl/Cmd+单击留给链接
+                        let modifiers = event.modifiers();
+                        if modifiers.control || modifiers.platform {
+                            return;
+                        }
+                        this.start_editing(window, cx);
+                    },
+                ))
+            })
+            // 源码编辑：记下左键按下（框内框外都算），失焦等松手再切回渲染结果（`finish_press`）
+            .when(editing, |this| {
+                let press = |this: &mut Self, event: &gpui_kit::MouseDownEvent| {
+                    if event.button == MouseButton::Left {
+                        this.press_pending = true;
+                    }
+                };
+                this.capture_any_mouse_down(
+                    cx.listener(move |this, event, _, _| press(this, event)),
+                )
+                .on_mouse_down_out(cx.listener(move |this, event, _, _| press(this, event)))
+                .capture_any_mouse_up(
+                    cx.listener(|this, _, window, cx| this.finish_press(window, cx)),
+                )
+                .on_mouse_up_out(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| this.finish_press(window, cx)),
+                )
             })
             .when(!self.readonly, |this| {
                 this.drag_over::<ExternalPaths>(|style, _, _, _| style)
