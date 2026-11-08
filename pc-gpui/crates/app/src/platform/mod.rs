@@ -96,6 +96,7 @@ use self::fallback as imp;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod mac_geometry;
 
+pub mod clipboard;
 pub mod embed;
 pub mod fence_win;
 pub mod file_dialog;

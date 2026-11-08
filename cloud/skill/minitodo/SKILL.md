@@ -225,6 +225,9 @@ body 是 JSON（`Content-Type: application/json`）。
 上传：`POST /images`（multipart `file` 字段）返回 `{name}`，在 Markdown 里写
 `![](minitodo-image://<name>)` 引用。
 
+alt 末尾可能带显示尺寸（PC 端拖动图片手柄写入，Obsidian 写法）：`![截图|300](...)` 显示宽 300、高按原图比例，
+`![截图|300x200](...)` 宽高都指定。改写描述时原样保留；要指定大小也可以照这个写法写。
+
 ### 健康状态 `/health`
 
 ```json

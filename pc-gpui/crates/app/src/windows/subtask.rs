@@ -265,13 +265,17 @@ impl SubtaskWindow {
                         return;
                     }
                     let viewer = cx.new(|cx| ImageViewer::new(paths, index, window, cx));
-                    this._subscriptions
-                        .push(cx.observe(&viewer, |this, viewer, cx| {
-                            if viewer.read(cx).is_closed() {
-                                this.image_viewer = None;
+                    this._subscriptions.push(cx.observe_in(
+                        &viewer,
+                        window,
+                        |this, viewer, window, cx| {
+                            // 预览自己关掉（关闭按钮）：焦点还给窗口（预览打开时拿走了焦点）
+                            if viewer.read(cx).is_closed() && this.image_viewer.take().is_some() {
+                                window.focus(&this.focus, cx);
                                 cx.notify();
                             }
-                        }));
+                        },
+                    ));
                     this.image_viewer = Some(viewer);
                     cx.notify();
                 });
@@ -330,6 +334,8 @@ impl SubtaskWindow {
         }
         if let Some(viewer) = self.image_viewer.take() {
             viewer.update(cx, |v, cx| v.close(cx));
+            // 预览打开时拿走了焦点：还给窗口，否则之后的 Esc / Ctrl+Enter 派发不到本窗口
+            window.focus(&self.focus, cx);
             cx.notify();
             return;
         }

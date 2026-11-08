@@ -1,11 +1,15 @@
 //! 描述放大编辑弹窗（§3.14，`el-dialog`）：左源码（等宽 13px / 行高 1.6、底 `#F8FAFC`）+ 1px 分隔 + 右预览
 //! （300ms 防抖）。宽 88%、距顶 5vh、圆角 12、遮罩 50% 黑（点遮罩不关）；「最大化」联动窗口最大化（记住进入前
-//! 窗口是否已最大化，关闭 / 还原时恢复）。确定写回描述，取消 / X / Esc 丢弃草稿。源码框不支持图片粘贴上传（与旧版一致）。
+//! 窗口是否已最大化，关闭 / 还原时恢复）。确定写回描述，取消 / X / Esc 丢弃草稿。源码框与描述框一样支持粘贴图片
+//! （`ui::markdown_editor::paste_images`：后台保存完插入光标处，预览随防抖刷新；旧版不支持）。
+//! 预览里的图片与描述框的渲染结果一样可以拖动手柄调整大小（`ui::markdown_editor::ImageResizer`，改写左边的源码草稿，
+//! 预览立刻按改写后的源码刷新、不等防抖）。
 
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui_kit::component::Sizable as _;
-use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
+use gpui_kit::component::input::{self, InputEvent, Textarea, TextareaState};
 use gpui_kit::{
     AppContext as _, ClickEvent, Context, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
@@ -18,8 +22,8 @@ use crate::platform;
 use crate::theme::{self, editor_theme, ep, hex, light};
 use crate::ui::button::EpButton;
 use crate::ui::icon::icon;
-use crate::ui::markdown::MarkdownView;
-use crate::ui::markdown_editor::TEXTAREA_INSET_X;
+use crate::ui::markdown::{ImageResizeEvent, MarkdownView};
+use crate::ui::markdown_editor::{ImageResizer, ResizeOutcome, TEXTAREA_INSET_X, paste_images};
 use crate::ui::tooltip::native;
 
 /// 预览防抖
@@ -27,7 +31,10 @@ const PREVIEW_DEBOUNCE: Duration = Duration::from_millis(300);
 
 pub(super) struct DescDialog {
     source: Entity<TextareaState>,
+    /// 预览所用的源码（防抖后的草稿）；拖动图片手柄时图片的源码位置按它算
     preview: SharedString,
+    /// 预览里拖动手柄调整图片大小
+    resizer: ImageResizer,
     maximized: bool,
     /// 进入最大化前窗口是否已最大化
     was_window_maximized: bool,
@@ -78,6 +85,7 @@ impl EditorWindow {
         self.desc_dialog = Some(DescDialog {
             source,
             preview: draft.into(),
+            resizer: ImageResizer::default(),
             maximized: false,
             was_window_maximized: false,
             _debounce: None,
@@ -108,6 +116,30 @@ impl EditorWindow {
         cx.notify();
     }
 
+    /// 预览里拖动图片手柄：改写左边的源码草稿；改写后预览立刻用新源码（等防抖的话松手后会闪回旧尺寸 300ms）
+    fn on_desc_image_resize(
+        &mut self,
+        event: ImageResizeEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(dialog) = self.desc_dialog.as_mut() else {
+            return;
+        };
+        let source = dialog.source.clone();
+        let rendered = dialog.preview.clone();
+        match dialog.resizer.handle(event, &source, &rendered, window, cx) {
+            ResizeOutcome::Ignored => {}
+            ResizeOutcome::Redraw => cx.notify(),
+            ResizeOutcome::Gesture { rewritten } => {
+                if rewritten {
+                    dialog.preview = source.read(cx).value();
+                }
+                cx.notify();
+            }
+        }
+    }
+
     fn toggle_desc_maximize(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(dialog) = self.desc_dialog.as_mut() else {
             return;
@@ -132,6 +164,14 @@ impl EditorWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let weak = cx.entity().downgrade();
+        let Some(resize) = self.desc_dialog.as_mut().map(|dialog| {
+            dialog.resizer.prepare(Rc::new(move |event, window, cx| {
+                let _ = weak.update(cx, |this, cx| this.on_desc_image_resize(event, window, cx));
+            }))
+        }) else {
+            return div().into_any_element();
+        };
         let Some(dialog) = self.desc_dialog.as_ref() else {
             return div().into_any_element();
         };
@@ -195,12 +235,14 @@ impl EditorWindow {
                     .group_hover("desc-dialog-close", |s| s.text_color(ep.primary)),
             );
 
+        // id 不能与描述框渲染结果的 `editor-desc-preview` 相同（同一个窗口里，TextView 状态与图片手柄的拖动归属都按它区分）
         let preview = MarkdownView::new(
-            "editor-desc-preview",
+            "editor-desc-dialog-preview",
             dialog.preview.clone(),
             self.images_dir.clone(),
         )
-        .readonly(true);
+        .readonly(true)
+        .image_resize(resize);
         let body = div()
             .w_full()
             .when(maximized, |this| this.flex_1().min_h_0())
@@ -225,16 +267,30 @@ impl EditorWindow {
                     .line_height(relative(1.6))
                     .text_color(hex(editor_theme::SLATE_700))
                     .child(
-                        div().h_full().mx(px(-TEXTAREA_INSET_X)).child(
-                            Textarea::new(&dialog.source)
-                                .appearance(false)
-                                .bordered(false)
-                                .xsmall()
-                                .text_size(px(13.))
-                                .line_height(relative(1.6))
-                                .h_full()
-                                .w_full(),
-                        ),
+                        div()
+                            .h_full()
+                            .mx(px(-TEXTAREA_INSET_X))
+                            // 粘贴图片：与描述框同一套（捕获阶段先于输入框，见 markdown_editor::paste_images）
+                            .capture_action(cx.listener(|this, _: &input::Paste, window, cx| {
+                                let Some(source) =
+                                    this.desc_dialog.as_ref().map(|d| d.source.clone())
+                                else {
+                                    return;
+                                };
+                                if paste_images(&source, window, cx) {
+                                    cx.stop_propagation();
+                                }
+                            }))
+                            .child(
+                                Textarea::new(&dialog.source)
+                                    .appearance(false)
+                                    .bordered(false)
+                                    .xsmall()
+                                    .text_size(px(13.))
+                                    .line_height(relative(1.6))
+                                    .h_full()
+                                    .w_full(),
+                            ),
                     ),
             )
             .child(div().flex_none().w(px(1.)).h_full().bg(palette.border))

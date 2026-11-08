@@ -59,6 +59,8 @@ windows = { version = "0.62", features = [
     "Win32_UI_WindowsAndMessaging",
     # 收纳箱「自定义颜色」的系统取色对话框 ChooseColorW
     "Win32_UI_Controls_Dialogs",
+    # Markdown 编辑器粘贴图片时直接读剪贴板（GlobalLock / GlobalSize，platform::clipboard）
+    "Win32_System_Memory",
 ] }
 # 带扩展名过滤器 / 标题的文件对话框（GPUI 自带的没有过滤器）；只在 Windows 编译
 rfd = { version = "0.16", default-features = false }

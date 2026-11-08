@@ -165,6 +165,22 @@
   （`ui::markdown` 已处理，基于 `gpui_kit::base::TextView::markdown(..).image_source(..)`）；文件名经 `is_safe_image_name` 校验。
   段落顶层的图片（独占段落、与文字同段）由 `ui::markdown` 自己排（原始尺寸、`max-width: 100%`、与文字垂直居中，同旧版
   `inline-block` + `vertical-align: middle`）：TextView 自己画的行内图片没有宽高属性时只有 0.75 行高、也不受容器宽度约束，不要交给它。
+  显示尺寸存在 alt 后缀里（`![alt|300](…)` / `![alt|300x200](…)`，Obsidian 写法，旧版本忽略后缀按原始尺寸显示）；
+  编辑排版的拖动手柄松手后由 `ui::markdown_editor::ImageResizer`（描述框渲染结果与放大编辑弹窗的预览共用）按 mdast 的字节位置
+  整段重写这张图片的源码（`markdown::image_source`；改写前核对输入框里那段文字与渲染时的一致——弹窗预览有 300ms 防抖），
+  引用式图片（`![alt][ref]`）与表格 / 链接里的图片没有手柄。图片单击打开预览时 `stop_propagation`，编辑器不会顺带切到源码。
+  `img` 放进定了宽高比的框里时，要给 `img` 自己显式设同样的 `aspect_ratio`（再 `ObjectFit::Fill`）：没设时 GPUI 用原图比例，taffy 按它
+  算出的自动最小高度会让图片撑出框外、压住下一段（`|300x100` 这种比原图更宽更矮的尺寸）。
+  拖动手柄时 `DragMoveEvent.bounds` 是**上一帧**排出来的大小，真实鼠标的移动比重绘快、两帧之间会来好几次：不能拿"最新请求的宽度 > 图片框的宽"
+  判断碰到了容器宽度（会把还没重绘的旧宽度当上限，一次拖动只能放大一点）。宽度上限取图片所在行的宽度（行也挂 `on_drag_move`，
+  `ImageResizeEvent::Container`，第一次移动就拿到）；隐藏桌面 e2e 用连发、不等重绘的移动复现。
+- 图片预览（`ImageViewer`）打开时拿走焦点：关闭它的每条路径（Esc 的 `on_close_action`、预览自己的关闭按钮触发的 observe）都要
+  `window.focus(&self.focus, cx)` 还给窗口，否则之后的 Esc / Ctrl+Enter 派发不到窗口的 key context（编辑 / 只读详情 / 子任务窗口）。
+- 粘贴图片：`ui::markdown_editor::paste_images`（描述框与放大编辑弹窗的源码框共用）在 `input::Paste` 的**捕获阶段**处理
+  （先于输入框；gpui-component 的 `on_paste` 钩子只在 GPUI 读出了剪贴板时才调用）；新的源码框要支持粘贴图片就在包住
+  `Textarea` 的元素上挂同样的 `capture_action`。Windows 上用 `platform::clipboard::read` 直接读剪贴板：gpui-pre-windows 0.3.9 只取枚举到的第一个
+  图片格式（截图工具先放 `CF_DIB`，拿到未压缩位图，4K 截图超过 20MB）、不认 `image/png` 等 MIME 名格式（整个剪贴板读成空、粘贴静默失败）。
+  位图在后台转成 PNG 再保存；复制的文件里有图片时只插入文件。
 - SVG 是单色蒙版，**必须设颜色才会绘制**：一律 `ui::icon::icon(EpIcon::X, size, color)`。新图标：SVG 放进
   `assets/icons/{ep,app}/`（EP 图标文件名与 `@element-plus/icons-vue` 的 kebab-case 一致），在 `assets.rs` 表里加一行。禁止 emoji。
 - 链接点击走 `util::file_link::handle_link_click`（协议白名单）；`cx.open_url` 本身不做任何校验。直接用 gpui-base `TextView` 渲染
@@ -370,7 +386,10 @@ gpui-pre-macos 能建窗（位置 / 显示器 / 置顶层级 / 可缩放都只�
    改写 `GWL_STYLE`（`open_window` 建窗后去掉 `WS_SYSMENU` 依赖它）；文件拖放是否仍不改输入模态、`on_drop` 是否仍要求
    `is_hovered`（`ui::external_drop` 依赖它）；自绘拖动（§2.3，收纳箱移动 / 缩放）依赖的：Windows 鼠标按下时 `SetCapture`、`on_drag_move`
    是捕获阶段且不看悬停、`on_drag` 的 2px 阈值与开始后抑制 click、拖动期间 `on_hover` 报 `false`、`active_drag` 只在 MouseUp 后清掉、
-   `MouseDownEvent.click_count`（收纳箱双击改名）；`on_hover` 是否仍在元素记着按下时报 `false`、鼠标监听是否仍在 Bubble 阶段倒序派发
+   `MouseDownEvent.click_count`（收纳箱双击改名）；Markdown 图片手柄依赖的：`active_drag` 在 MouseUp 派发完才清掉（编辑器根元素
+   用 `has_active_drag` 区分拖动结束的松手）、`DragMoveEvent.bounds` 是注册监听的元素的 hitbox（图片框的实际大小）、`on_click` 里
+   `stop_propagation` 能拦下父元素的 `on_mouse_up`；gpui-pre-windows 的 `read_from_clipboard` 是否仍只取第一个图片格式、不认 MIME 名
+   格式（`platform::clipboard` 存在的理由；修好了可以删掉它改回 GPUI 的结果）；`on_hover` 是否仍在元素记着按下时报 `false`、鼠标监听是否仍在 Bubble 阶段倒序派发
    （§2.5.2，主窗口待办行的操作条依赖它）；透明窗口（DirectComposition）实现；`QuitMode` 默认值；`Root` / `RootPlugin` 接口
    （`UiLayer` 依赖）；`gpui_kit::base::TextView::markdown(..).image_source(..)`；`img(&str)` 的 URI 判定；换行器规则；
    Windows release 构建的 `fxc.exe` 着色器预编译（`gpui-pre-windows/build.rs`）。

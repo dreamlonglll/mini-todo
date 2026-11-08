@@ -951,6 +951,15 @@ pub mod editor_theme {
     pub const MD_TD_ODD_BG: u32 = 0xF9FAFB;
     /// 任务项方框边
     pub const MD_TASK_BORDER: u32 = 0x94A3B8;
+    /// 编辑排版里调整图片大小：描边 / 手柄色（`--primary` `#3B82F6`）、拖动中的尺寸标签底（slate-900 75%，`hexa`）
+    pub const MD_IMAGE_HANDLE: u32 = 0x3B82F6;
+    pub const MD_IMAGE_BADGE_BG: u32 = 0x0F172ABF;
+    /// 手柄的命中区：右边 / 底边条的厚度、右下角方块的边长；边上指示条的长度
+    pub const MD_IMAGE_EDGE_HIT: f32 = 8.;
+    pub const MD_IMAGE_CORNER_HIT: f32 = 14.;
+    pub const MD_IMAGE_PILL: f32 = 24.;
+    /// 调整后图片的最小宽 / 高
+    pub const MD_IMAGE_MIN_SIZE: f32 = 24.;
 
     /// 段落 16px / 行高 1.6，上下外边距 0.4em
     pub const MD_P_SIZE: f32 = 16.;

@@ -8,8 +8,11 @@
 //!   内容由 mdast 重新序列化成"全标点转义"的 Markdown（与原文的分隔符规则等价，块语法不会被误识别），
 //!   保留文字选择 / 复制。
 //!
-//! 图片：`minitodo-image://<name>` 与旧 asset URL 映射到本机 images 目录（`util::image_ref`）；按原始尺寸显示
-//! （max-width 100%，超宽按宽高比缩小）、圆角 6、阴影，点击打开预览（[`MarkdownView::on_image_click`]）。
+//! 图片：`minitodo-image://<name>` 与旧 asset URL 映射到本机 images 目录（`util::image_ref`）；默认按原始尺寸显示
+//! （max-width 100%，超宽按宽高比缩小）、圆角 6、阴影，单击打开预览（[`MarkdownView::on_image_click`]，不再冒泡给编辑器）。
+//! 显示尺寸写在 alt 的后缀里（Obsidian 写法）：`![alt|300](url)` 宽 300、高按原图比例，`![alt|300x200](url)` 宽高都指定；
+//! 不认识这个后缀的旧版本只会忽略它（按原始尺寸显示）。编辑排版（[`MarkdownView::image_resize`]）在悬停的图片上显示
+//! 右边 / 底边 / 右下角三个手柄，拖动调整大小、双击还原原始尺寸，松手后由编辑器重写这张图片的源码（[`image_source`]）。
 //! 段落顶层的图片都由本模块排：只有图片的段落是 [`Block::Images`]；与文字同段的拆成"文字段 / 图片 / 文字段"
 //! （[`Block::Mixed`]），同一行里依次排开、放不下换行、垂直居中——旧版 img 是 `inline-block` + `vertical-align:
 //! middle`，行高被图片撑开（TextView 自己画行内图片时会把它缩成一行字高，不能交给它）。
@@ -21,6 +24,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -28,14 +32,16 @@ use std::sync::Arc;
 use gpui_kit::base::{TextView, TextViewStyle};
 use gpui_kit::component::StyledExt as _;
 use gpui_kit::{
-    AnyElement, App, BoxShadow, CursorStyle, FontWeight, HighlightStyle, Hsla, ImageSource,
-    InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce, SharedString, SharedUri,
-    StatefulInteractiveElement as _, StyleRefinement, Styled, StyledImage as _, Window, div, img,
-    prelude::FluentBuilder as _, px, relative, rems,
+    AnyElement, App, AppContext as _, BoxShadow, Context, CursorStyle, DragMoveEvent, Empty,
+    FontWeight, HighlightStyle, Hsla, ImageSource, InteractiveElement as _, IntoElement,
+    MouseButton, MouseDownEvent, ObjectFit, ParentElement as _, Pixels, Point, Render, RenderOnce,
+    SharedString, SharedUri, Size, StatefulInteractiveElement as _, StyleRefinement, Styled,
+    StyledImage as _, Window, div, img, prelude::FluentBuilder as _, px, relative, rems,
 };
 use markdown::mdast::{self, AlignKind, Node};
 
 use crate::theme::{self, editor_theme, hex};
+use crate::ui::tooltip::native;
 use crate::util::file_link;
 use crate::util::image_ref;
 
@@ -56,7 +62,27 @@ pub enum ColumnAlign {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockImage {
     pub url: String,
+    /// 去掉尺寸后缀（`|300` / `|300x200`）的 alt
     pub alt: String,
+    /// alt 后缀里的显示尺寸；`None` = 原始尺寸
+    pub size: Option<ImageSize>,
+    /// 内联图片 `![alt](url "title")` 在源码里的位置；引用式图片没有（不能在界面上调整大小）
+    pub span: Option<ImageSpan>,
+}
+
+/// 图片的显示尺寸（逻辑像素），存在 alt 的后缀里
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageSize {
+    pub width: u32,
+    /// `None`：按原图宽高比
+    pub height: Option<u32>,
+}
+
+/// 内联图片在源码里的字节范围与标题（调整大小时整段重写）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageSpan {
+    pub range: Range<usize>,
+    pub title: Option<String>,
 }
 
 /// 含图片又含文字的段落里的一段（见 [`Block::Mixed`]）
@@ -146,13 +172,15 @@ impl Block {
         }
     }
 
-    /// 首行行高（列表标记按它垂直居中）。图片所在的行被图片撑高（按原始高度估算；超宽被缩小的图片会偏高）
+    /// 首行行高（列表标记按它垂直居中）。图片所在的行被图片撑高（按显示高度估算；超宽被缩小的图片会偏高）
     fn first_line_height(&self, images_dir: &Path) -> f32 {
         let tallest = |images: &mut dyn Iterator<Item = &BlockImage>| {
             images
-                .filter_map(|image| image_ref::resolve_image_path(&image.url, images_dir))
-                .filter_map(|path| image_size(&path))
-                .map(|(_, h)| h as f32)
+                .filter_map(|image| {
+                    let natural = image_ref::resolve_image_path(&image.url, images_dir)
+                        .and_then(|path| image_size(&path));
+                    display_size(image.size, natural).and_then(|(_, h)| h)
+                })
                 .fold(editor_theme::MD_P_LINE, f32::max)
         };
         match self {
@@ -326,13 +354,26 @@ fn convert_paragraph(children: &[Node], defs: &Definitions) -> Block {
 /// 段落顶层的图片（引用式图片要有定义；没有定义的按文字显示）
 fn resolved_image(node: &Node, defs: &Definitions) -> Option<BlockImage> {
     match node {
-        Node::Image(image) => Some(BlockImage {
-            url: image.url.clone(),
-            alt: image.alt.clone(),
-        }),
-        Node::ImageReference(r) => defs.get(&r.identifier).map(|(url, _)| BlockImage {
-            url: url.clone(),
-            alt: r.alt.clone(),
+        Node::Image(image) => {
+            let (alt, size) = split_size_suffix(&image.alt);
+            Some(BlockImage {
+                url: image.url.clone(),
+                alt: alt.to_string(),
+                size,
+                span: image.position.as_ref().map(|p| ImageSpan {
+                    range: p.start.offset..p.end.offset,
+                    title: image.title.clone(),
+                }),
+            })
+        }
+        Node::ImageReference(r) => defs.get(&r.identifier).map(|(url, _)| {
+            let (alt, size) = split_size_suffix(&r.alt);
+            BlockImage {
+                url: url.clone(),
+                alt: alt.to_string(),
+                size,
+                span: None,
+            }
         }),
         _ => None,
     }
@@ -619,6 +660,193 @@ pub fn image_size(path: &Path) -> Option<(u32, u32)> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// 图片显示尺寸（alt 后缀 `|宽` / `|宽x高`）
+// ---------------------------------------------------------------------------
+
+/// 尺寸后缀里一个数的最大位数（99999px）
+const SIZE_DIGITS_MAX: usize = 5;
+
+/// 拆出 alt 末尾的尺寸后缀：`截图|300` → (`截图`, 宽 300)，`截图|300x200` → (`截图`, 300×200)。
+/// 不是合法后缀（非数字、0、位数太多）时原样返回、没有尺寸
+pub fn split_size_suffix(alt: &str) -> (&str, Option<ImageSize>) {
+    fn number(text: &str) -> Option<u32> {
+        let text = text.trim();
+        if text.is_empty()
+            || text.len() > SIZE_DIGITS_MAX
+            || !text.bytes().all(|b| b.is_ascii_digit())
+        {
+            return None;
+        }
+        text.parse().ok().filter(|v| *v > 0)
+    }
+    let Some((name, suffix)) = alt.rsplit_once('|') else {
+        return (alt, None);
+    };
+    let (width, height) = match suffix.split_once(['x', 'X', '×']) {
+        Some((w, h)) => (w, Some(h)),
+        None => (suffix, None),
+    };
+    let Some(width) = number(width) else {
+        return (alt, None);
+    };
+    let height = match height {
+        Some(h) => match number(h) {
+            Some(h) => Some(h),
+            None => return (alt, None),
+        },
+        None => None,
+    };
+    (name.trim_end(), Some(ImageSize { width, height }))
+}
+
+/// alt 文字的转义：只转义会改变解析结果的字符（方括号、反斜杠、强调 / 删除线 / 代码 / 尖括号 / 实体），
+/// 换行换成空格；`|` 不转义（表格里的图片不能调整大小，不会写到表格里）
+fn escape_alt(alt: &str) -> String {
+    let mut out = String::with_capacity(alt.len() + 4);
+    for c in alt.chars() {
+        match c {
+            '\\' | '[' | ']' | '*' | '_' | '`' | '<' | '>' | '&' | '~' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '\n' | '\r' => out.push(' '),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// 重新生成一张内联图片的源码（`size` 为 `None` 时去掉尺寸后缀，即原始尺寸）：调整 / 还原大小时整段替换
+/// [`ImageSpan::range`]。alt 里的格式（强调等）会丢掉，只保留文字
+pub fn image_source(image: &BlockImage, size: Option<ImageSize>) -> String {
+    let mut alt = image.alt.clone();
+    if let Some(size) = size {
+        alt.push('|');
+        alt.push_str(&size.width.to_string());
+        if let Some(height) = size.height {
+            alt.push('x');
+            alt.push_str(&height.to_string());
+        }
+    }
+    let title = image.span.as_ref().and_then(|span| span.title.clone());
+    format!(
+        "![{}]({}{})",
+        escape_alt(&alt),
+        link_destination(&image.url),
+        link_title(&title)
+    )
+}
+
+/// 显示尺寸（逻辑像素，尚未按容器宽度缩小）：(宽, 高)。有后缀按后缀（只给宽时高按原图宽高比；读不到原图时高未知），
+/// 否则按原图尺寸；都没有时 `None`
+pub fn display_size(
+    size: Option<ImageSize>,
+    natural: Option<(u32, u32)>,
+) -> Option<(f32, Option<f32>)> {
+    let natural = natural.filter(|(w, h)| *w > 0 && *h > 0);
+    match (size, natural) {
+        (
+            Some(ImageSize {
+                width,
+                height: Some(height),
+            }),
+            _,
+        ) => Some((width as f32, Some(height as f32))),
+        (
+            Some(ImageSize {
+                width,
+                height: None,
+            }),
+            natural,
+        ) => Some((
+            width as f32,
+            natural.map(|(w, h)| width as f32 * h as f32 / w as f32),
+        )),
+        (None, Some((w, h))) => Some((w as f32, Some(h as f32))),
+        (None, None) => None,
+    }
+}
+
+/// 调整大小的手柄
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResizeHandle {
+    /// 右下角：等比缩放（按住 Shift 时宽高各自跟随光标）
+    Corner,
+    /// 右边：只改宽
+    Right,
+    /// 底边：只改高
+    Bottom,
+}
+
+impl ResizeHandle {
+    const ALL: [ResizeHandle; 3] = [
+        ResizeHandle::Right,
+        ResizeHandle::Bottom,
+        ResizeHandle::Corner,
+    ];
+
+    fn key(self) -> &'static str {
+        match self {
+            ResizeHandle::Corner => "c",
+            ResizeHandle::Right => "r",
+            ResizeHandle::Bottom => "b",
+        }
+    }
+}
+
+/// 拖动手柄后的显示尺寸。`start` 是按下时图片框的实际大小，`delta` 是光标位移；不小于 [`editor_theme::MD_IMAGE_MIN_SIZE`]，
+/// 宽不超过 `max_width`（图片框被容器宽度限制时）
+pub fn resize_by(
+    handle: ResizeHandle,
+    start: (f32, f32),
+    delta: (f32, f32),
+    free: bool,
+    max_width: Option<f32>,
+) -> (f32, f32) {
+    let min = editor_theme::MD_IMAGE_MIN_SIZE;
+    let (sw, sh) = (start.0.max(1.), start.1.max(1.));
+    let (dx, dy) = delta;
+    let clamp_w = |w: f32, floor: f32| {
+        let w = w.max(floor);
+        match max_width {
+            Some(max) => w.min(max.max(floor)),
+            None => w,
+        }
+    };
+    match handle {
+        ResizeHandle::Right => (clamp_w(sw + dx, min), sh),
+        ResizeHandle::Bottom => (sw, (sh + dy).max(min)),
+        ResizeHandle::Corner if free => (clamp_w(sw + dx, min), (sh + dy).max(min)),
+        ResizeHandle::Corner => {
+            let aspect = sw / sh;
+            // 横向、纵向位移里变化大的那个决定新宽度
+            let width = if dx.abs() >= (dy * aspect).abs() {
+                sw + dx
+            } else {
+                (sh + dy) * aspect
+            };
+            let width = clamp_w(width, min.max(min * aspect));
+            (width, width / aspect)
+        }
+    }
+}
+
+/// 写回源码的尺寸：取整；与原图宽高比一致（取整误差不超过 1px）时只写宽
+pub fn committed_size(width: f32, height: f32, natural: Option<(u32, u32)>) -> ImageSize {
+    let width = width.round().max(1.) as u32;
+    let height = height.round().max(1.) as u32;
+    let proportional = natural.is_some_and(|(nw, nh)| {
+        nw > 0
+            && nh > 0
+            && (f64::from(width) * f64::from(nh) / f64::from(nw) - f64::from(height)).abs() <= 1.
+    });
+    ImageSize {
+        width,
+        height: (!proportional).then_some(height),
+    }
+}
+
 /// 文档里全部自己排版的图片（独占段落的与从文字段落里拆出来的；表格里的不算）的本机路径（按文档顺序；预览翻页用）
 pub fn block_image_paths(blocks: &[Block], images_dir: &Path) -> Vec<PathBuf> {
     fn walk(blocks: &[Block], dir: &Path, out: &mut Vec<PathBuf>) {
@@ -659,6 +887,50 @@ pub fn block_image_paths(blocks: &[Block], images_dir: &Path) -> Vec<PathBuf> {
 /// 点击图片：(文档里全部可预览的图片（[`block_image_paths`]）, 被点的下标)
 pub type ImageClickHandler = Rc<dyn Fn(Vec<PathBuf>, usize, &mut Window, &mut App)>;
 
+/// 调整图片大小的手势（一张图片用 `key` = [`ImageSpan::range`] 的起点标识）
+pub enum ImageResizeEvent {
+    /// 按下手柄
+    Start {
+        image: BlockImage,
+        handle: ResizeHandle,
+        position: Point<Pixels>,
+        /// 原图尺寸（读不到时 `None`）
+        natural: Option<(u32, u32)>,
+    },
+    /// 拖动中：`frame` 是图片框当前的实际大小（被容器宽度限制时比请求的小）；`free` = 按住 Shift
+    Move {
+        key: usize,
+        position: Point<Pixels>,
+        frame: Size<Pixels>,
+        free: bool,
+    },
+    /// 拖动中：图片所在行的宽度（图片 `max-width: 100%` 的基准，即能拉到的最大宽度）
+    Container { key: usize, width: f32 },
+    /// 松手（也可能来自没按下手柄的那几张图片：按 `key` 与当前会话核对）
+    End { key: usize },
+    /// 双击手柄：还原原始尺寸
+    Reset { image: BlockImage },
+}
+
+pub type ImageResizeHandler = Rc<dyn Fn(ImageResizeEvent, &mut Window, &mut App)>;
+
+/// 编辑排版里可调整图片大小
+#[derive(Clone)]
+pub struct ImageResize {
+    /// 正在调整的图片（`key`）与实时显示尺寸
+    pub active: Option<(usize, f32, f32)>,
+    pub handler: ImageResizeHandler,
+}
+
+/// 拖动手柄时显示在光标处的视图（什么都不画）
+struct EmptyDragView;
+
+impl Render for EmptyDragView {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
+
 /// 只读 Markdown 视图
 #[derive(IntoElement)]
 pub struct MarkdownView {
@@ -668,6 +940,7 @@ pub struct MarkdownView {
     readonly: bool,
     selectable: bool,
     on_image_click: Option<ImageClickHandler>,
+    image_resize: Option<ImageResize>,
     style: StyleRefinement,
 }
 
@@ -680,6 +953,7 @@ struct Ctx {
     selectable: bool,
     image_paths: Rc<Vec<PathBuf>>,
     on_image_click: Option<ImageClickHandler>,
+    image_resize: Option<ImageResize>,
 }
 
 impl MarkdownView {
@@ -696,6 +970,7 @@ impl MarkdownView {
             readonly: true,
             selectable: true,
             on_image_click: None,
+            image_resize: None,
             style: StyleRefinement::default(),
         }
     }
@@ -720,6 +995,12 @@ impl MarkdownView {
         self.on_image_click = Some(Rc::new(handler));
         self
     }
+
+    /// 编辑排版：内联图片悬停时显示调整大小的手柄（见 [`ImageResizeEvent`]）
+    pub fn image_resize(mut self, resize: ImageResize) -> Self {
+        self.image_resize = Some(resize);
+        self
+    }
 }
 
 impl Styled for MarkdownView {
@@ -738,6 +1019,7 @@ impl RenderOnce for MarkdownView {
             readonly: self.readonly,
             selectable: self.selectable,
             on_image_click: self.on_image_click,
+            image_resize: self.image_resize,
         };
         let mut image_counter = 0usize;
         div()
@@ -1122,8 +1404,10 @@ fn md_shadow() -> Vec<BoxShadow> {
     ]
 }
 
-/// 一张自己排版的图片：原始尺寸、最大宽度 100%（按宽高比缩小）、圆角 6、阴影；悬停变淡，点击打开预览。
-/// 本机图片按出现顺序编号（`image_counter`，与 [`block_image_paths`] 顺序一致）
+/// 一张自己排版的图片：显示尺寸（[`display_size`]）、最大宽度 100%（按宽高比缩小）、圆角 6、阴影；悬停变淡，
+/// 单击打开预览（不冒泡：编辑排版里点图片只打开预览、不切到源码）。编辑排版（`ctx.image_resize`）里内联图片悬停时
+/// 显示描边与调整大小的手柄（[`resize_decorations`]）。本机图片按出现顺序编号（`image_counter`，与
+/// [`block_image_paths`] 顺序一致）
 fn image_frame(image: &BlockImage, ctx: &Ctx, id: &str, image_counter: &mut usize) -> AnyElement {
     let local = image_ref::resolve_image_path(&image.url, &ctx.images_dir);
     let index = local.as_ref().map(|_| {
@@ -1135,10 +1419,30 @@ fn image_frame(image: &BlockImage, ctx: &Ctx, id: &str, image_counter: &mut usiz
         Some(path) => ImageSource::from(path.clone()),
         None => ImageSource::from(image.url.clone()),
     };
-    let size = local.as_deref().and_then(image_size);
+    let natural = local.as_deref().and_then(image_size);
+    let frame_id = format!("{}/{id}", ctx.base_id);
+    let resize = ctx
+        .image_resize
+        .clone()
+        .zip(image.span.as_ref().map(|span| span.range.start));
+    // 正在拖动手柄的这张图片按实时尺寸显示
+    let live = resize
+        .as_ref()
+        .and_then(|(resize, key)| resize.active.filter(|(k, _, _)| k == key))
+        .map(|(_, w, h)| (w, h));
+    let shown = live
+        .map(|(w, h)| (w, Some(h)))
+        .or_else(|| display_size(image.size, natural));
     let alt = SharedString::from(image.alt.clone());
+    // 图片铺满图片框、按框的宽高拉伸（`|宽x高` 与原图比例不同时就是要改变比例）。宽高比必须显式给：GPUI 的 img 没设时
+    // 用原图的比例，taffy 按它算出的自动最小高度会让图片撑出图片框、压住下一段（比原图更宽更矮的 `|300x100`）
     let picture = img(source)
         .size_full()
+        .object_fit(ObjectFit::Fill)
+        .map(|this| match shown {
+            Some((w, Some(h))) if w > 0. && h > 0. => this.aspect_ratio(w / h),
+            _ => this,
+        })
         .rounded(px(6.))
         .with_fallback(move || {
             div()
@@ -1147,8 +1451,8 @@ fn image_frame(image: &BlockImage, ctx: &Ctx, id: &str, image_counter: &mut usiz
                 .child(alt.clone())
                 .into_any_element()
         });
-    let frame = div()
-        .id(SharedString::from(format!("{}/{id}", ctx.base_id)))
+    let mut frame = div()
+        .id(SharedString::from(frame_id.clone()))
         .relative()
         .flex_none()
         .max_w_full()
@@ -1164,33 +1468,256 @@ fn image_frame(image: &BlockImage, ctx: &Ctx, id: &str, image_counter: &mut usiz
                 theme::rgba_css(0, 0, 0, 0.15),
             )])
         })
-        .map(|this| match size {
-            Some((w, h)) if w > 0 && h > 0 => {
-                this.w(px(w as f32)).aspect_ratio(w as f32 / h as f32)
-            }
+        .map(|this| match shown {
+            Some((w, Some(h))) if w > 0. && h > 0. => this.w(px(w)).aspect_ratio(w / h),
+            Some((w, None)) if w > 0. => this.w(px(w)),
             _ => this,
         })
         .child(picture);
+    if let Some((resize, key)) = resize {
+        let owner = ctx.base_id.clone();
+        let handler = resize.handler.clone();
+        let group = SharedString::from(format!("{frame_id}-g"));
+        frame = frame
+            .group(group.clone())
+            // 拖动手柄时每次移动都报给编辑器（捕获阶段、不看悬停；图片框的大小用来判断是否被容器宽度限制）
+            .on_drag_move::<ImageResizeDrag>(
+                move |event: &DragMoveEvent<ImageResizeDrag>, window, cx| {
+                    let drag = event.drag(cx);
+                    if drag.key != key || drag.owner != owner {
+                        return;
+                    }
+                    if event.event.pressed_button != Some(MouseButton::Left) {
+                        // 没收到松手（捕获被拿走）
+                        cx.stop_active_drag(window);
+                        handler(ImageResizeEvent::End { key }, window, cx);
+                        return;
+                    }
+                    handler(
+                        ImageResizeEvent::Move {
+                            key,
+                            position: event.event.position,
+                            frame: event.bounds.size,
+                            free: event.event.modifiers.shift,
+                        },
+                        window,
+                        cx,
+                    );
+                },
+            )
+            .children(resize_decorations(
+                image,
+                key,
+                natural,
+                ctx,
+                &resize.handler,
+                &group,
+                &frame_id,
+                live,
+            ));
+    }
     match (ctx.on_image_click.clone(), index) {
         (Some(handler), Some(index)) => {
             let paths = ctx.image_paths.clone();
             frame
-                .on_click(move |_, window, cx| handler(paths.to_vec(), index, window, cx))
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    handler(paths.to_vec(), index, window, cx)
+                })
                 .into_any_element()
         }
         _ => frame.into_any_element(),
     }
 }
 
+/// 拖动手柄时 GPUI 拖动的载荷：哪个 Markdown 视图（`base_id`）里的哪张图片
+#[derive(Clone)]
+struct ImageResizeDrag {
+    owner: SharedString,
+    key: usize,
+}
+
+/// 编辑排版里一张内联图片的描边、三个手柄（右边 / 底边 / 右下角）与拖动中的尺寸标签。
+/// 描边与手柄平时透明、悬停图片时显示，拖动中一直显示。手柄按下不冒泡（图片框不会把这次按下当成单击，
+/// 编辑器根元素也不会切到源码）；双击手柄还原原始尺寸
+#[allow(clippy::too_many_arguments)]
+fn resize_decorations(
+    image: &BlockImage,
+    key: usize,
+    natural: Option<(u32, u32)>,
+    ctx: &Ctx,
+    handler: &ImageResizeHandler,
+    group: &SharedString,
+    frame_id: &str,
+    live: Option<(f32, f32)>,
+) -> Vec<AnyElement> {
+    let accent = hex(editor_theme::MD_IMAGE_HANDLE);
+    let active = live.is_some();
+    let reveal = |this: gpui_kit::Div| {
+        this.when(!active, |this| {
+            this.opacity(0.)
+                .group_hover(group.clone(), |s| s.opacity(1.))
+        })
+    };
+    let mut out = Vec::with_capacity(5);
+    out.push(
+        reveal(
+            div()
+                .absolute()
+                .inset_0()
+                .rounded(px(6.))
+                .border(px(1.5))
+                .border_color(accent),
+        )
+        .into_any_element(),
+    );
+    let edge = editor_theme::MD_IMAGE_EDGE_HIT;
+    let corner = editor_theme::MD_IMAGE_CORNER_HIT;
+    for handle in ResizeHandle::ALL {
+        let base = div()
+            .id(SharedString::from(format!("{frame_id}-h{}", handle.key())))
+            .absolute()
+            .flex()
+            .items_center()
+            .justify_center();
+        let (base, mark, cursor) = match handle {
+            ResizeHandle::Right => (
+                base.top_0().bottom(px(corner)).right_0().w(px(edge)),
+                div()
+                    .w(px(4.))
+                    .h(px(editor_theme::MD_IMAGE_PILL))
+                    .max_h_full()
+                    .rounded_full()
+                    .bg(accent),
+                CursorStyle::ResizeLeftRight,
+            ),
+            ResizeHandle::Bottom => (
+                base.left_0().right(px(corner)).bottom_0().h(px(edge)),
+                div()
+                    .h(px(4.))
+                    .w(px(editor_theme::MD_IMAGE_PILL))
+                    .max_w_full()
+                    .rounded_full()
+                    .bg(accent),
+                CursorStyle::ResizeUpDown,
+            ),
+            ResizeHandle::Corner => (
+                base.right_0().bottom_0().size(px(corner)),
+                div()
+                    .size(px(10.))
+                    .rounded(px(2.))
+                    .border(px(1.5))
+                    .border_color(accent)
+                    .bg(hex(0xFFFFFF)),
+                CursorStyle::ResizeUpLeftDownRight,
+            ),
+        };
+        let down = handler.clone();
+        let up = handler.clone();
+        let up_out = handler.clone();
+        let pressed = image.clone();
+        out.push(
+            base.cursor(cursor)
+                .tooltip(native("拖动调整大小，双击恢复原始大小"))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    move |event: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        let event = if event.click_count >= 2 {
+                            ImageResizeEvent::Reset {
+                                image: pressed.clone(),
+                            }
+                        } else {
+                            ImageResizeEvent::Start {
+                                image: pressed.clone(),
+                                handle,
+                                position: event.position,
+                                natural,
+                            }
+                        };
+                        down(event, window, cx);
+                    },
+                )
+                .on_drag(
+                    ImageResizeDrag {
+                        owner: ctx.base_id.clone(),
+                        key,
+                    },
+                    |_, _, _, cx| cx.new(|_| EmptyDragView),
+                )
+                .on_mouse_up(MouseButton::Left, move |_, window, cx| {
+                    cx.stop_propagation();
+                    up(ImageResizeEvent::End { key }, window, cx);
+                })
+                .on_mouse_up_out(MouseButton::Left, move |_, window, cx| {
+                    up_out(ImageResizeEvent::End { key }, window, cx)
+                })
+                .child(reveal(mark))
+                .into_any_element(),
+        );
+    }
+    if let Some((w, h)) = live {
+        out.push(
+            div()
+                .absolute()
+                .top(px(6.))
+                .left(px(6.))
+                .px(px(6.))
+                .rounded(px(4.))
+                .bg(theme::hexa(editor_theme::MD_IMAGE_BADGE_BG))
+                .text_color(hex(0xFFFFFF))
+                .text_size(px(12.))
+                .line_height(px(18.))
+                .whitespace_nowrap()
+                .child(format!("{} × {}", w.round(), h.round()))
+                .into_any_element(),
+        );
+    }
+    out
+}
+
 /// 一行图片 / 文字：放不下时换行；各项垂直居中（旧版 img 是 `inline-block` + Tailwind preflight 的
-/// `vertical-align: middle`，行高被图片撑开、文字落在图片高度中间）
-fn inline_row(items: Vec<AnyElement>) -> gpui_kit::Div {
-    div()
+/// `vertical-align: middle`，行高被图片撑开、文字落在图片高度中间）。
+///
+/// 编辑排版里拖动这一行里某张图片（`keys` = 行内可调整图片的源码起点）的手柄时，把行宽报给编辑器
+/// （[`ImageResizeEvent::Container`]）：行宽就是图片 `max-width: 100%` 的基准、不随图片大小变化，拖动的第一次移动就能拿到
+fn inline_row(items: Vec<AnyElement>, ctx: &Ctx, keys: Vec<usize>) -> gpui_kit::Div {
+    let row = div()
         .w_full()
         .flex()
         .flex_wrap()
         .items_center()
-        .children(items)
+        .children(items);
+    match ctx.image_resize.as_ref() {
+        Some(resize) if !keys.is_empty() => {
+            let handler = resize.handler.clone();
+            let owner = ctx.base_id.clone();
+            row.on_drag_move::<ImageResizeDrag>(
+                move |event: &DragMoveEvent<ImageResizeDrag>, window, cx| {
+                    let drag = event.drag(cx);
+                    if drag.owner != owner || !keys.contains(&drag.key) {
+                        return;
+                    }
+                    let key = drag.key;
+                    handler(
+                        ImageResizeEvent::Container {
+                            key,
+                            width: f32::from(event.bounds.size.width),
+                        },
+                        window,
+                        cx,
+                    );
+                },
+            )
+        }
+        _ => row,
+    }
+}
+
+/// 一张图片能在界面上调整大小时的标识（源码起点）
+fn resize_key(image: &BlockImage, ctx: &Ctx) -> Option<usize> {
+    ctx.image_resize.as_ref()?;
+    image.span.as_ref().map(|span| span.range.start)
 }
 
 fn render_images(
@@ -1204,7 +1731,11 @@ fn render_images(
         .enumerate()
         .map(|(ix, image)| image_frame(image, ctx, &format!("{path}i{ix}"), image_counter))
         .collect();
-    inline_row(elements).into_any_element()
+    let keys = images
+        .iter()
+        .filter_map(|image| resize_key(image, ctx))
+        .collect();
+    inline_row(elements, ctx, keys).into_any_element()
 }
 
 /// 含图片又含文字的段落（[`Block::Mixed`]）：按顶层硬换行分行，每行里文字段（TextView，按内容宽度、放不下时
@@ -1219,20 +1750,23 @@ fn render_mixed(
     color: Hsla,
     image_counter: &mut usize,
 ) -> AnyElement {
-    let mut rows: Vec<Vec<AnyElement>> = vec![Vec::new()];
+    // 每行：(元素, 行内可调整图片的 key)
+    let mut rows: Vec<(Vec<AnyElement>, Vec<usize>)> = vec![(Vec::new(), Vec::new())];
     for (ix, part) in parts.iter().enumerate() {
         match part {
-            InlinePart::Break => rows.push(Vec::new()),
+            InlinePart::Break => rows.push((Vec::new(), Vec::new())),
             InlinePart::Text(markdown) => {
                 let text = div()
                     .min_w_0()
                     .child(inline_view(ctx, &format!("{path}s{ix}"), markdown, color))
                     .into_any_element();
-                rows.last_mut().expect("至少一行").push(text);
+                rows.last_mut().expect("至少一行").0.push(text);
             }
             InlinePart::Image(image) => {
                 let frame = image_frame(image, ctx, &format!("{path}i{ix}"), image_counter);
-                rows.last_mut().expect("至少一行").push(frame);
+                let row = rows.last_mut().expect("至少一行");
+                row.0.push(frame);
+                row.1.extend(resize_key(image, ctx));
             }
         }
     }
@@ -1244,8 +1778,9 @@ fn render_mixed(
         .line_height(px(editor_theme::MD_P_LINE))
         // 空行（连续硬换行）也有一行高
         .children(
-            rows.into_iter()
-                .map(|items| inline_row(items).min_h(px(editor_theme::MD_P_LINE))),
+            rows.into_iter().map(|(items, keys)| {
+                inline_row(items, ctx, keys).min_h(px(editor_theme::MD_P_LINE))
+            }),
         )
         .into_any_element()
 }
@@ -1311,6 +1846,8 @@ mod tests {
         BlockImage {
             url: format!("minitodo-image://{name}"),
             alt: alt.into(),
+            size: None,
+            span: None,
         }
     }
 
@@ -1318,9 +1855,63 @@ mod tests {
         InlinePart::Text(markdown.to_string())
     }
 
+    /// 去掉图片的源码位置（按内容比较块时用）
+    fn strip_spans(blocks: Vec<Block>) -> Vec<Block> {
+        fn image(mut image: BlockImage) -> BlockImage {
+            image.span = None;
+            image
+        }
+        blocks
+            .into_iter()
+            .map(|block| match block {
+                Block::Images(images) => Block::Images(images.into_iter().map(image).collect()),
+                Block::Mixed(parts) => Block::Mixed(
+                    parts
+                        .into_iter()
+                        .map(|part| match part {
+                            InlinePart::Image(i) => InlinePart::Image(image(i)),
+                            other => other,
+                        })
+                        .collect(),
+                ),
+                Block::Quote(children) => Block::Quote(strip_spans(children)),
+                Block::List(mut list) => {
+                    for item in &mut list.items {
+                        item.blocks = strip_spans(std::mem::take(&mut item.blocks));
+                    }
+                    Block::List(list)
+                }
+                other => other,
+            })
+            .collect()
+    }
+
+    fn parse(source: &str) -> Vec<Block> {
+        strip_spans(parse_blocks(source))
+    }
+
+    /// 第一张自己排版的图片
+    fn first_image(blocks: &[Block]) -> BlockImage {
+        for block in blocks {
+            match block {
+                Block::Images(images) => return images[0].clone(),
+                Block::Mixed(parts) => {
+                    if let Some(image) = parts.iter().find_map(|part| match part {
+                        InlinePart::Image(image) => Some(image.clone()),
+                        _ => None,
+                    }) {
+                        return image;
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("没有图片：{blocks:?}")
+    }
+
     #[test]
     fn standalone_images_and_br_lines_become_blocks() {
-        let blocks = parse_blocks(
+        let blocks = parse(
             "![指标截图](minitodo-image://sample-chart.png)\n\n<br />\n\n文字 ![a](minitodo-image://a.png)\n",
         );
         assert_eq!(
@@ -1347,7 +1938,7 @@ mod tests {
     #[test]
     fn images_next_to_text_are_split_out_of_the_paragraph() {
         // 与图片相邻的空白变成不换行空格；文字段按行内 Markdown 序列化
-        let blocks = parse_blocks("pic ![e](minitodo-image://e.png) **after** text\n");
+        let blocks = parse("pic ![e](minitodo-image://e.png) **after** text\n");
         assert_eq!(
             blocks[0],
             Block::Mixed(vec![
@@ -1357,7 +1948,7 @@ mod tests {
             ])
         );
         // 顶层硬换行另起一行；与图片之间没有空白时不加空格
-        let blocks = parse_blocks("第一行\\\n![e](minitodo-image://e.png)\\\n最后一行\n");
+        let blocks = parse("第一行\\\n![e](minitodo-image://e.png)\\\n最后一行\n");
         assert_eq!(
             blocks[0],
             Block::Mixed(vec![
@@ -1369,7 +1960,7 @@ mod tests {
             ])
         );
         // 两张图片之间的空格保留一个空格宽；引用式图片按定义解析；列表 / 引用里同样拆开
-        let blocks = parse_blocks(
+        let blocks = parse(
             "![a](minitodo-image://a.png) ![b][r] 尾巴\n\n- 项 ![c](minitodo-image://c.png)\n\n[r]: minitodo-image://b.png\n",
         );
         assert_eq!(
@@ -1398,6 +1989,197 @@ mod tests {
         // 链接里的图片、没有定义的引用式图片不拆（仍是普通段落）
         let blocks = parse_blocks("看 [![a](minitodo-image://a.png)](https://x.y) 与 ![b][nope]\n");
         assert!(matches!(blocks[0], Block::Paragraph(_)), "{blocks:?}");
+    }
+
+    #[test]
+    fn size_suffix_in_alt() {
+        let size = |width, height| Some(ImageSize { width, height });
+        assert_eq!(split_size_suffix("截图|300"), ("截图", size(300, None)));
+        assert_eq!(split_size_suffix("a |300x200"), ("a", size(300, Some(200))));
+        assert_eq!(split_size_suffix("a|300X200"), ("a", size(300, Some(200))));
+        assert_eq!(split_size_suffix("|64"), ("", size(64, None)));
+        // 只认最后一段；不是合法尺寸时 alt 原样保留
+        assert_eq!(split_size_suffix("a|b|12"), ("a|b", size(12, None)));
+        for alt in [
+            "a|b",
+            "a|0",
+            "a|300x",
+            "a|x200",
+            "a|123456",
+            "a|-3",
+            "a| ",
+            "无后缀",
+        ] {
+            assert_eq!(split_size_suffix(alt), (alt, None), "{alt}");
+        }
+    }
+
+    #[test]
+    fn inline_images_remember_where_they_are_in_the_source() {
+        let source = "前文 ![截图|300](minitodo-image://a.png \"标题\") 后\n\n![b|20x10][r]\n\n[r]: minitodo-image://b.png\n";
+        let blocks = parse_blocks(source);
+        let a = first_image(&blocks);
+        assert_eq!(a.alt, "截图");
+        assert_eq!(
+            a.size,
+            Some(ImageSize {
+                width: 300,
+                height: None
+            })
+        );
+        let span = a.span.clone().expect("内联图片有位置");
+        // 字节范围（前面有中文）
+        assert_eq!(
+            &source[span.range.clone()],
+            "![截图|300](minitodo-image://a.png \"标题\")"
+        );
+        assert_eq!(span.title.as_deref(), Some("标题"));
+        // 引用式图片照样认尺寸，但没有位置（不能在界面上调整）
+        let b = first_image(&blocks[1..]);
+        assert_eq!(
+            b.size,
+            Some(ImageSize {
+                width: 20,
+                height: Some(10)
+            })
+        );
+        assert_eq!(b.span, None);
+    }
+
+    #[test]
+    fn regenerated_image_source_parses_back_to_the_same_image() {
+        let source = "x ![a*b* [c]|10](<minitodo-image://a b.png> \"t \\\"q\\\"\") y";
+        let image = first_image(&parse_blocks(source));
+        assert_eq!(image.alt, "ab [c]");
+        for size in [
+            None,
+            Some(ImageSize {
+                width: 320,
+                height: None,
+            }),
+            Some(ImageSize {
+                width: 320,
+                height: Some(90),
+            }),
+        ] {
+            let text = image_source(&image, size);
+            let again = first_image(&parse_blocks(&text));
+            assert_eq!(again.alt, image.alt, "{text}");
+            assert_eq!(again.url, image.url, "{text}");
+            assert_eq!(again.size, size, "{text}");
+            assert_eq!(
+                again.span.and_then(|s| s.title),
+                Some("t \"q\"".to_string()),
+                "{text}"
+            );
+        }
+        assert_eq!(
+            image_source(&image, None),
+            "![ab \\[c\\]](<minitodo-image://a b.png> \"t \\\"q\\\"\")"
+        );
+        let plain = first_image(&parse_blocks("![image.png](minitodo-image://1_a.png)"));
+        assert_eq!(
+            image_source(
+                &plain,
+                Some(ImageSize {
+                    width: 240,
+                    height: None
+                })
+            ),
+            "![image.png|240](minitodo-image://1_a.png)"
+        );
+    }
+
+    #[test]
+    fn display_size_prefers_the_suffix() {
+        let natural = Some((400, 200));
+        assert_eq!(display_size(None, natural), Some((400., Some(200.))));
+        assert_eq!(display_size(None, None), None);
+        let width_only = Some(ImageSize {
+            width: 100,
+            height: None,
+        });
+        assert_eq!(display_size(width_only, natural), Some((100., Some(50.))));
+        // 读不到原图：只知道宽
+        assert_eq!(display_size(width_only, None), Some((100., None)));
+        let both = Some(ImageSize {
+            width: 100,
+            height: Some(80),
+        });
+        assert_eq!(display_size(both, natural), Some((100., Some(80.))));
+    }
+
+    #[test]
+    fn resize_math() {
+        let min = editor_theme::MD_IMAGE_MIN_SIZE;
+        let start = (200., 100.);
+        // 右边 / 底边只改一边
+        assert_eq!(
+            resize_by(ResizeHandle::Right, start, (-50., 30.), false, None),
+            (150., 100.)
+        );
+        assert_eq!(
+            resize_by(ResizeHandle::Bottom, start, (-50., 30.), false, None),
+            (200., 130.)
+        );
+        // 角：等比，横纵里变化大的那个说了算
+        assert_eq!(
+            resize_by(ResizeHandle::Corner, start, (-100., 5.), false, None),
+            (100., 50.)
+        );
+        assert_eq!(
+            resize_by(ResizeHandle::Corner, start, (2., 40.), false, None),
+            (280., 140.)
+        );
+        // Shift：宽高各自跟随
+        assert_eq!(
+            resize_by(ResizeHandle::Corner, start, (10., -20.), true, None),
+            (210., 80.)
+        );
+        // 最小尺寸（等比时短边也不小于最小值）
+        assert_eq!(
+            resize_by(ResizeHandle::Right, start, (-500., 0.), false, None),
+            (min, 100.)
+        );
+        assert_eq!(
+            resize_by(ResizeHandle::Corner, start, (-500., 0.), false, None),
+            (min * 2., min)
+        );
+        // 容器宽度
+        assert_eq!(
+            resize_by(ResizeHandle::Corner, start, (300., 0.), false, Some(300.)),
+            (300., 150.)
+        );
+        assert_eq!(
+            resize_by(ResizeHandle::Right, start, (300., 0.), false, Some(250.)),
+            (250., 100.)
+        );
+    }
+
+    #[test]
+    fn committed_size_omits_height_when_proportional() {
+        let natural = Some((1920, 1080));
+        assert_eq!(
+            committed_size(480.2, 270.4, natural),
+            ImageSize {
+                width: 480,
+                height: None
+            }
+        );
+        assert_eq!(
+            committed_size(480., 300., natural),
+            ImageSize {
+                width: 480,
+                height: Some(300)
+            }
+        );
+        assert_eq!(
+            committed_size(480., 270., None),
+            ImageSize {
+                width: 480,
+                height: Some(270)
+            }
+        );
     }
 
     #[test]

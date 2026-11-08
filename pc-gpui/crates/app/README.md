@@ -68,7 +68,7 @@ src/
                       macos/（mod.rs GPUI 胶水 + ns.rs AppKit 原始调用，objc2；含收纳箱桌面层与取色面板）、
                       mac_geometry.rs（macOS 坐标换算，全平台编译带单测）、fallback.rs（Linux）、embed.rs（Windows 嵌入桌面层）、
                       subclass.rs（窗口子类过程）、fence_win.rs（收纳箱「自定义颜色」：Windows ChooseColorW / macOS NSColorPanel）、
-                      file_dialog.rs（带过滤器的打开 / 保存对话框）
+                      file_dialog.rs（带过滤器的打开 / 保存对话框）、clipboard.rs（粘贴图片时直接读剪贴板，Windows）
 ```
 
 ### 2.1 维护规则
@@ -226,7 +226,7 @@ editor::open(cx, Some(parent), None, EditorMode::Edit);
 | `EpCheckbox`（`ep_checkbox`） | `EpCheckbox::new(id, "周一").checked(b).last(b).on_change(\|v: &bool, window, cx\| ..)` |
 | `EpColorPicker`（`ep_color_picker`） | `cx.new(\|cx\| EpColorPicker::new(id, window, cx).predefine(colors))`、`set_value(Option<String>) / value() / set_disabled / is_open / close`；事件 `EpColorPickerEvent::Change(Option<String>)`（OK = 小写 `#rrggbb`，Clear = `None`） |
 | `EpRadioButtons`（`ep_radio`）、`EpSlider`（`ep_slider`，`on_input` / `on_change`）、`EpInputNumber`（`ep_input_number`）、`EpDatePicker` / `EpTimePicker`（`ep_date_picker` / `ep_time_picker`） | 见各文件头部 |
-| Markdown（`markdown` / `markdown_editor` / `markdown_image_viewer`） | 只读渲染（`minitodo-image://` 映射到本机图片、链接白名单）、源码 + 预览编辑器（图片粘贴 / 拖入上传）、图片预览 |
+| Markdown（`markdown` / `markdown_editor` / `markdown_image_viewer`） | 只读渲染（`minitodo-image://` 映射到本机图片、链接白名单）、源码 + 预览编辑器（图片粘贴 / 拖入上传、拖动手柄调整图片大小——尺寸存在 alt 后缀 `|宽` / `|宽x高`）、图片预览 |
 | 外部文件拖入（`external_drop`） | 视图构造时 `ExternalDrop::new()`，render 末尾 `drop.attach(root, DropScope::Window \| Element, on_drop, on_exit)`。**不要用 `.on_drop::<ExternalPaths>()`**：gpui-pre 0.3.9 的文件拖放不改输入模态，`on_drop` 要求 `is_hovered`，窗口最后一次输入是键盘时（打完字、改名回车后）松手被丢掉、悬停状态残留 |
 | 原生 title tooltip | `.tooltip(ui::tooltip::native("设置"))`（任意 `.id()` 元素；光标右下、500ms） |
 | EP 深色 tooltip | `EpTooltip::new(id, "每天重复", child).show_after_ms(300).placement(Placement::Top).max_width(px(..))` |
@@ -262,6 +262,7 @@ editor::open(cx, Some(parent), None, EditorMode::Edit);
 | `subclass::set_flag(hwnd, FLAG_BOTTOM \| FLAG_LOCK_GEOMETRY, on)` | `SetWindowSubclass` 子类过程：置底（`WM_WINDOWPOSCHANGING`）、固定模式锁定位置与尺寸（`WM_NCHITTEST` / `WM_SYSCOMMAND`） |
 | `fence_win::choose_color(cx, owner, initial) -> Task<Option<(u8, u8, u8)>>` | 收纳箱「自定义颜色」：Windows `ChooseColorW`（独立线程）；macOS 共享的 `NSColorPanel`（`ns::show_color_panel` / `color_panel_state`；前台任务里显示——会把应用切到前台——之后每 150ms 读一次，面板关掉时返回最后的颜色，没改过视为取消）；Linux `None` |
 | `file_dialog::{save_file, open_file}` | 带标题 / 过滤器 / 默认文件名的对话框（Windows `rfd`，独立线程；其它平台 GPUI 自带对话框）；debug 下 `MINI_TODO_DEBUG_DIALOG_PATH` 直接返回路径 |
+| `clipboard::{read, from_item, bitmap_to_png}` | Markdown 编辑器粘贴用：Windows 上 `read` 直接枚举剪贴板，按 PNG > JPEG > GIF > WebP > BMP 文件 > `CF_DIB` 取第一个能解码的图片（也认 `image/png` 等 MIME 名格式），附带 `CF_HDROP` 文件与是否有文字；其它平台返回 `None`，用 `from_item` 转换 GPUI 读到的内容；位图由调用方在后台 `bitmap_to_png` |
 
 ## 5. 调试开关（只在 debug 构建读取，release 一律忽略）
 

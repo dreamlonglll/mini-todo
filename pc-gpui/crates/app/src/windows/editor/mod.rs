@@ -833,9 +833,10 @@ impl EditorWindow {
         if message_box::is_open(window, cx) {
             return;
         }
-        if let Some(viewer) = &self.image_viewer {
+        if let Some(viewer) = self.image_viewer.take() {
             viewer.update(cx, |v, cx| v.close(cx));
-            self.image_viewer = None;
+            // 预览打开时拿走了焦点：还给窗口，否则之后的 Esc / Ctrl+Enter 派发不到本窗口
+            window.focus(&self.focus, cx);
             cx.notify();
             return;
         }
@@ -918,9 +919,10 @@ impl EditorWindow {
         }
         let viewer = cx.new(|cx| ImageViewer::new(paths, index, window, cx));
         self._subscriptions
-            .push(cx.observe(&viewer, |this, viewer, cx| {
-                if viewer.read(cx).is_closed() {
-                    this.image_viewer = None;
+            .push(cx.observe_in(&viewer, window, |this, viewer, window, cx| {
+                // 预览自己关掉（关闭按钮）：焦点还给窗口（预览打开时拿走了焦点，见 on_close_action）
+                if viewer.read(cx).is_closed() && this.image_viewer.take().is_some() {
+                    window.focus(&this.focus, cx);
                     cx.notify();
                 }
             }));
