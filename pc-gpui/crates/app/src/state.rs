@@ -5,8 +5,8 @@
 //! - 写操作经 core 在后台执行，成功后更新本地副本并 `cx.notify()`；返回 `Task<Result<_, String>>`，
 //!   调用方按旧版文案提示失败（`ui::message::error(window, cx, "更新待办失败", &e)`）。
 //! - 需要整个主窗口提示的错误（加载待办失败）以 [`AppStateEvent::Message`] 发出，主窗口订阅后显示。
-//! - 窗口模式（固定 / 嵌入 / 贴边隐藏）、窗口位置保存等平台动作在 `services::window_mode`，
-//!   本文件只放状态字段与入口（`toggle_fixed_mode` / `save_window_state`）。
+//! - 窗口模式（锁定 / 嵌入 / 贴边隐藏）、窗口位置保存等平台动作在 `services::window_mode`：锁定按窗口
+//!   （`window_mode::is_fixed(cx, key)` / `toggle_fixed(cx, key)`），这里只放全局的偏好（嵌入桌面、贴边隐藏、唤起置顶）。
 
 use std::path::PathBuf;
 
@@ -119,8 +119,7 @@ pub struct AppState {
     change_seq_warned: bool,
 
     // ---- appStore ----
-    /// 是否固定（`screen_configs.is_fixed`，按屏幕组合；含嵌入桌面）
-    pub is_fixed: bool,
+    // 是否固定（锁定）按窗口，在 `services::window_mode`（按屏幕组合持久化，见 `window_mode::store`）
     /// 深色主题（settings `text_theme == "light"`，注意语义反转）
     pub is_dark_theme: bool,
     /// 主窗口位置 / 尺寸（物理像素；`services::window_mode` 维护）
@@ -229,7 +228,6 @@ impl AppState {
             fetch_queued: false,
             fetch_failing: false,
             change_seq_warned: false,
-            is_fixed: false,
             is_dark_theme: false,
             window_position: None,
             window_size: None,
@@ -279,16 +277,6 @@ impl AppState {
     /// 主窗口调色板（深色主题只在主窗口生效）
     pub fn main_palette(&self) -> Palette {
         Palette::for_main(self.is_dark_theme, &self.window_bg)
-    }
-
-    /// `isEmbeddedInDesktop = IS_WINDOWS && isFixed && fixedEmbedDesktop`
-    pub fn is_embedded_in_desktop(&self) -> bool {
-        cfg!(windows) && self.is_fixed && self.fixed_embed_desktop
-    }
-
-    /// 主窗口是否挂 `body.fixed-mode`（经典固定：无圆角、无描边）
-    pub fn is_classic_fixed(&self) -> bool {
-        self.is_fixed && !self.is_embedded_in_desktop()
     }
 
     /// 未完成待办，按 `sortOrder` 升序（同序保持后端顺序）
@@ -965,26 +953,6 @@ impl AppState {
         cx.notify();
         true
     }
-
-    // ------------------------------------------------------------------
-    // 平台相关动作（实现在 `services::window_mode`）
-    // ------------------------------------------------------------------
-
-    /// 切换固定模式（旧 `toggleFixedMode`）：翻转 `is_fixed` → 按"嵌入桌面"偏好进入经典固定 / 嵌入桌面，
-    /// 或退回普通模式 → 保存窗口状态；失败提示 `切换固定模式失败：…`（`services::window_mode`）
-    pub fn toggle_fixed_mode(&mut self, cx: &mut Context<Self>) {
-        self.is_fixed = !self.is_fixed;
-        let fixed = self.is_fixed;
-        cx.notify();
-        cx.defer(move |cx| crate::services::window_mode::toggle_fixed(cx, fixed));
-    }
-
-    /// 保存主窗口状态（旧 `saveWindowState`：读窗口物理几何（贴边隐藏中用锚点）→
-    /// `settings::save_screen_config` → `settings::save_window_settings` → 刷新运行时偏好）。
-    /// 设置窗口里不要调用（几何取的是主窗口，但旧版约定设置项各写各的键）
-    pub fn save_window_state(&mut self, cx: &mut Context<Self>) {
-        cx.defer(crate::services::window_mode::save_window_state);
-    }
 }
 
 fn empty_update() -> UpdateTodoRequest {
@@ -1116,15 +1084,5 @@ mod tests {
             NotificationType::parse("whatever"),
             NotificationType::System
         );
-    }
-
-    #[test]
-    fn embedded_only_on_windows_when_fixed() {
-        let mut state = AppState::new();
-        state.fixed_embed_desktop = true;
-        assert!(!state.is_embedded_in_desktop());
-        state.is_fixed = true;
-        assert_eq!(state.is_embedded_in_desktop(), cfg!(windows));
-        assert_eq!(state.is_classic_fixed(), !cfg!(windows));
     }
 }

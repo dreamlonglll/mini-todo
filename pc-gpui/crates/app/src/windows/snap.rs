@@ -1,36 +1,49 @@
-//! 收纳箱拖动 / 缩放时的吸附对齐（纯函数，不依赖 GPUI，单测向量来自任务 `10-18-fence-snap` 的 PRD 验收用例）。
+//! 吸附对齐的纯函数（不依赖 GPUI，单测向量来自任务 `10-18-fence-snap` 的 PRD 验收用例）。清单窗口、日历窗口与收纳箱是
+//! 同一个吸附组（任务 `11-09-multi-list-windows` R10），双向吸附；跨窗口的运行时（参与者登记、目标快照、高亮）在
+//! `services::snap`。
 //!
-//! 几何一律是物理像素的客户区（与库里的几何同一口径）。目标是其它显示中的收纳箱**屏幕上的可见矩形**（折叠的只有标题栏），
-//! 拖动 / 缩放开始时快照一次（[`SnapScene`]），每次移动只取光标所在显示器上的（[`SnapScene::targets_at`]）。
+//! 几何一律是物理像素的客户区（与库里的几何同一口径）。目标是吸附组里其它显示中的窗口**屏幕上的可见矩形**（折叠的收纳箱
+//! 只有标题栏），拖动 / 缩放开始时快照一次（[`SnapScene`]），每次移动只取光标所在显示器上的（[`SnapScene::targets_at`]）。
 //!
-//! - 横向 / 纵向独立：两个方向各自找距离最近、且不超过阈值的候选，可以同时吸 x 和 y；同距离取目标列表里靠前的（确定性）
+//! - 横向 / 纵向独立：两个方向各自找距离最近、且不超过阈值的候选，可以同时吸 x 和 y；同距离取目标列表里靠前的（确定性：
+//!   列表按 [`SnapKey`] 排序，收纳箱在前（按 id），清单 / 日历窗口在后（按 `BlockKey`））
 //! - 移动（[`snap_move`]）：同名边对齐 left↔left、right↔right、top↔top、bottom↔bottom，只平移、尺寸不变
-//! - 缩放（[`snap_resize`]，在 `logic::resize_rect` 之后）：只调整被拖动的边（对边不动）；候选 = 同名边对齐 + 等宽（拖 E / W）/
+//! - 缩放（[`snap_resize`]，在 `drag::resize_rect` 之后）：只调整被拖动的边（对边不动）；候选 = 同名边对齐 + 等宽（拖 E / W）/
 //!   等高（拖 N / S），放在一起取最近；吸附后小于最小尺寸的候选跳过
 //! - 不做：相邻贴边（我的 left 吸别人的 right）、屏幕工作区边缘、中心线
 //!
-//! 高亮（[`SnapGuide`]）画在**目标**收纳箱上：同名边对齐 → 目标的那条边；等宽 → 目标的上、下两边；等高 → 目标的左、右两边。
+//! 高亮（[`SnapGuide`]）画在**目标**窗口上：同名边对齐 → 目标的那条边；等宽 → 目标的上、下两边；等高 → 目标的左、右两边。
 //! 吸附生效的方向上，所有与结果恰好成立的关系都高亮（例如两个目标的 left 相同，吸上之后两个都亮）。
 
 use std::collections::HashMap;
 
 use mini_todo_core::fence::{PxRect, pick_work_area};
 
-use super::logic::{ResizeDir, js_round};
+use super::block::BlockKey;
+use super::drag::{ResizeDir, js_round};
 
 /// 吸附阈值（逻辑像素）：实际阈值 = `round(10 × 物理系数)` 物理像素（[`snap_threshold`]）
 pub const SNAP_THRESHOLD_DIP: f64 = 10.;
 
-/// 物理像素的吸附阈值。`scale` 是拖动中收纳箱的逻辑 → 物理系数（`platform::physical_scale`；非法值按 1）
+/// 物理像素的吸附阈值。`scale` 是拖动中窗口的逻辑 → 物理系数（`platform::physical_scale`；非法值按 1）
 pub fn snap_threshold(scale: f64) -> i32 {
     let scale = if scale > 0. { scale } else { 1. };
     js_round(SNAP_THRESHOLD_DIP * scale)
 }
 
-/// 一个吸附目标：另一个收纳箱窗口屏幕上的可见客户区（物理像素）
+/// 吸附组里的一个窗口
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum SnapKey {
+    /// 桌面收纳箱（`fences.id`）
+    Fence(i64),
+    /// 清单窗口 / 日历窗口
+    Block(BlockKey),
+}
+
+/// 一个吸附目标：另一个窗口屏幕上的可见客户区（物理像素）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SnapTarget {
-    pub fence_id: i64,
+    pub key: SnapKey,
     pub rect: PxRect,
 }
 
@@ -41,10 +54,10 @@ pub struct SnapMonitor {
     pub work: PxRect,
 }
 
-/// 拖动 / 缩放开始时的快照（拖动期间其它收纳箱不会动、显示器不会变）
+/// 拖动 / 缩放开始时的快照（拖动期间其它窗口不会动、显示器不会变）
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SnapScene {
-    /// 其它显示中的收纳箱，按 `fence_id` 排序（同距离时按这个顺序取第一个）
+    /// 其它显示中的窗口，按 [`SnapKey`] 排序（同距离时按这个顺序取第一个）
     pub targets: Vec<SnapTarget>,
     pub monitors: Vec<SnapMonitor>,
 }
@@ -70,7 +83,7 @@ impl SnapScene {
     }
 }
 
-/// 目标收纳箱上要高亮的一条边
+/// 目标窗口上要高亮的一条边
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SnapEdge {
     Left,
@@ -90,14 +103,14 @@ impl SnapEdge {
     }
 }
 
-/// 高亮：目标收纳箱 `fence_id` 的 `edge` 边
+/// 高亮：目标窗口 `key` 的 `edge` 边
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SnapGuide {
-    pub fence_id: i64,
+    pub key: SnapKey,
     pub edge: SnapEdge,
 }
 
-/// 一个收纳箱要高亮的边的集合
+/// 一个窗口要高亮的边的集合
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SnapEdges(u8);
 
@@ -115,26 +128,29 @@ impl SnapEdges {
     }
 }
 
-/// 按目标收纳箱归并高亮（跨窗口高亮状态的形状）
-pub fn group_guides(guides: &[SnapGuide]) -> HashMap<i64, SnapEdges> {
-    let mut map: HashMap<i64, SnapEdges> = HashMap::new();
+/// 按目标窗口归并高亮（跨窗口高亮状态的形状）
+pub fn group_guides(guides: &[SnapGuide]) -> HashMap<SnapKey, SnapEdges> {
+    let mut map: HashMap<SnapKey, SnapEdges> = HashMap::new();
     for guide in guides {
-        map.entry(guide.fence_id).or_default().insert(guide.edge);
+        map.entry(guide.key).or_default().insert(guide.edge);
     }
     map
 }
 
-/// 高亮从 `old` 变成 `new` 时需要重绘的收纳箱（升序、不重复）
-pub fn changed_fences(old: &HashMap<i64, SnapEdges>, new: &HashMap<i64, SnapEdges>) -> Vec<i64> {
-    let mut ids: Vec<i64> = old
+/// 高亮从 `old` 变成 `new` 时需要重绘的窗口（升序、不重复）
+pub fn changed_targets(
+    old: &HashMap<SnapKey, SnapEdges>,
+    new: &HashMap<SnapKey, SnapEdges>,
+) -> Vec<SnapKey> {
+    let mut keys: Vec<SnapKey> = old
         .keys()
         .chain(new.keys())
         .copied()
-        .filter(|id| old.get(id) != new.get(id))
+        .filter(|key| old.get(key) != new.get(key))
         .collect();
-    ids.sort_unstable();
-    ids.dedup();
-    ids
+    keys.sort_unstable();
+    keys.dedup();
+    keys
 }
 
 /// 候选里绝对值最小、且不超过阈值的那个；同距离取先出现的
@@ -148,8 +164,8 @@ fn nearest(candidates: impl IntoIterator<Item = i32>, threshold: i32) -> Option<
     best
 }
 
-fn push_guide(guides: &mut Vec<SnapGuide>, fence_id: i64, edge: SnapEdge) {
-    let guide = SnapGuide { fence_id, edge };
+fn push_guide(guides: &mut Vec<SnapGuide>, key: SnapKey, edge: SnapEdge) {
+    let guide = SnapGuide { key, edge };
     if !guides.contains(&guide) {
         guides.push(guide);
     }
@@ -178,18 +194,18 @@ pub fn snap_move(rect: PxRect, targets: &[SnapTarget], threshold: i32) -> (PxRec
     for t in targets {
         if dx.is_some() {
             if t.rect.x == snapped.x {
-                push_guide(&mut guides, t.fence_id, SnapEdge::Left);
+                push_guide(&mut guides, t.key, SnapEdge::Left);
             }
             if t.rect.right() == snapped.right() {
-                push_guide(&mut guides, t.fence_id, SnapEdge::Right);
+                push_guide(&mut guides, t.key, SnapEdge::Right);
             }
         }
         if dy.is_some() {
             if t.rect.y == snapped.y {
-                push_guide(&mut guides, t.fence_id, SnapEdge::Top);
+                push_guide(&mut guides, t.key, SnapEdge::Top);
             }
             if t.rect.bottom() == snapped.bottom() {
-                push_guide(&mut guides, t.fence_id, SnapEdge::Bottom);
+                push_guide(&mut guides, t.key, SnapEdge::Bottom);
             }
         }
     }
@@ -293,11 +309,11 @@ pub fn snap_resize(
                 (t.rect.x == out.x).then_some(SnapEdge::Left)
             };
             if let Some(edge) = edge_aligned {
-                push_guide(&mut guides, t.fence_id, edge);
+                push_guide(&mut guides, t.key, edge);
             }
             if t.rect.width == out.width {
-                push_guide(&mut guides, t.fence_id, SnapEdge::Top);
-                push_guide(&mut guides, t.fence_id, SnapEdge::Bottom);
+                push_guide(&mut guides, t.key, SnapEdge::Top);
+                push_guide(&mut guides, t.key, SnapEdge::Bottom);
             }
         }
         if snap_y {
@@ -307,11 +323,11 @@ pub fn snap_resize(
                 (t.rect.y == out.y).then_some(SnapEdge::Top)
             };
             if let Some(edge) = edge_aligned {
-                push_guide(&mut guides, t.fence_id, edge);
+                push_guide(&mut guides, t.key, edge);
             }
             if t.rect.height == out.height {
-                push_guide(&mut guides, t.fence_id, SnapEdge::Left);
-                push_guide(&mut guides, t.fence_id, SnapEdge::Right);
+                push_guide(&mut guides, t.key, SnapEdge::Left);
+                push_guide(&mut guides, t.key, SnapEdge::Right);
             }
         }
     }
@@ -321,7 +337,7 @@ pub fn snap_resize(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::windows::fence::logic::resize_rect;
+    use crate::windows::drag::resize_rect;
 
     fn r(x: i32, y: i32, width: i32, height: i32) -> PxRect {
         PxRect {
@@ -332,12 +348,19 @@ mod tests {
         }
     }
 
+    /// 收纳箱目标
     fn target(fence_id: i64, rect: PxRect) -> SnapTarget {
-        SnapTarget { fence_id, rect }
+        SnapTarget {
+            key: SnapKey::Fence(fence_id),
+            rect,
+        }
     }
 
     fn g(fence_id: i64, edge: SnapEdge) -> SnapGuide {
-        SnapGuide { fence_id, edge }
+        SnapGuide {
+            key: SnapKey::Fence(fence_id),
+            edge,
+        }
     }
 
     /// PRD 的收纳箱 A（left=200、top=100、宽 400、高 300）
@@ -613,19 +636,16 @@ mod tests {
             ],
             monitors: vec![left, right],
         };
-        let ids = |cursor| -> Vec<i64> {
-            scene
-                .targets_at(cursor)
-                .iter()
-                .map(|t| t.fence_id)
-                .collect()
-        };
-        assert_eq!(ids(Some((500, 500))), [1]);
-        assert_eq!(ids(Some((3000, 700))), [2, 3]);
-        assert_eq!(ids(None), [1, 2, 3], "取不到光标：不按显示器过滤");
+        let ids =
+            |cursor| -> Vec<SnapKey> { scene.targets_at(cursor).iter().map(|t| t.key).collect() };
+        let fences =
+            |ids: &[i64]| -> Vec<SnapKey> { ids.iter().map(|id| SnapKey::Fence(*id)).collect() };
+        assert_eq!(ids(Some((500, 500))), fences(&[1]));
+        assert_eq!(ids(Some((3000, 700))), fences(&[2, 3]));
+        assert_eq!(ids(None), fences(&[1, 2, 3]), "取不到光标：不按显示器过滤");
         assert_eq!(
             ids(Some((-50, 0))),
-            [1, 2, 3],
+            fences(&[1, 2, 3]),
             "光标不在任何显示器上：不过滤"
         );
         let no_monitors = SnapScene {
@@ -644,25 +664,110 @@ mod tests {
             g(1, SnapEdge::Top),
         ]);
         assert_eq!(grouped.len(), 2);
-        let one = grouped[&1];
+        let one = grouped[&SnapKey::Fence(1)];
         assert!(one.contains(SnapEdge::Top) && one.contains(SnapEdge::Bottom));
         assert!(!one.contains(SnapEdge::Left) && !one.contains(SnapEdge::Right));
-        assert!(grouped[&2].contains(SnapEdge::Left));
+        assert!(grouped[&SnapKey::Fence(2)].contains(SnapEdge::Left));
         assert!(SnapEdges::default().is_empty());
         assert!(group_guides(&[]).is_empty());
 
-        // 只有变了的收纳箱要重绘：#1 不变、#2 消失、#3 新增
+        // 只有变了的窗口要重绘：#1 不变、#2 消失、#3 新增
         let next = group_guides(&[
             g(1, SnapEdge::Top),
             g(1, SnapEdge::Bottom),
             g(3, SnapEdge::Right),
         ]);
-        assert_eq!(changed_fences(&grouped, &next), [2, 3]);
-        assert_eq!(changed_fences(&next, &next), Vec::<i64>::new());
         assert_eq!(
-            changed_fences(&next, &HashMap::new()),
-            [1, 3],
+            changed_targets(&grouped, &next),
+            [SnapKey::Fence(2), SnapKey::Fence(3)]
+        );
+        assert_eq!(changed_targets(&next, &next), Vec::<SnapKey>::new());
+        assert_eq!(
+            changed_targets(&next, &HashMap::new()),
+            [SnapKey::Fence(1), SnapKey::Fence(3)],
             "清空：之前亮着的都要重绘"
+        );
+    }
+
+    // ---- 吸附组：清单 / 日历窗口与收纳箱（任务 11-09-multi-list-windows R10） ----
+
+    fn block(key: BlockKey, rect: PxRect) -> SnapTarget {
+        SnapTarget {
+            key: SnapKey::Block(key),
+            rect,
+        }
+    }
+
+    #[test]
+    fn keys_sort_fences_first_then_lists_then_the_calendar() {
+        let mut keys = vec![
+            SnapKey::Block(BlockKey::Calendar),
+            SnapKey::Fence(9),
+            SnapKey::Block(BlockKey::List(1_762_000_000_000_123)),
+            SnapKey::Block(BlockKey::DEFAULT_LIST),
+            SnapKey::Fence(2),
+        ];
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![
+                SnapKey::Fence(2),
+                SnapKey::Fence(9),
+                SnapKey::Block(BlockKey::DEFAULT_LIST),
+                SnapKey::Block(BlockKey::List(1_762_000_000_000_123)),
+                SnapKey::Block(BlockKey::Calendar),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_list_window_snaps_to_fences_and_fences_snap_to_list_windows() {
+        // 主窗口（默认清单）380×600 在 (1500, 100)；收纳箱 A 在左边
+        let main = r(1500, 100, 380, 600);
+        // 拖主窗口：top 差 4 → 吸到收纳箱的 top，高亮画在收纳箱上
+        let (rect, guides) = snap_move(r(1500, 104, 380, 600), &[a()], 10);
+        assert_eq!(rect.y, 100);
+        assert_eq!(guides, [g(1, SnapEdge::Top)]);
+        // 拖收纳箱：bottom 差 -6 → 吸到主窗口的 bottom，高亮画在主窗口上
+        let (rect, guides) = snap_move(
+            r(900, 394, 400, 300),
+            &[block(BlockKey::DEFAULT_LIST, main)],
+            10,
+        );
+        assert_eq!(rect.bottom(), 700);
+        assert_eq!(
+            guides,
+            [SnapGuide {
+                key: SnapKey::Block(BlockKey::DEFAULT_LIST),
+                edge: SnapEdge::Bottom
+            }]
+        );
+        // 缩放主窗口的 S 边到收纳箱的高度（300 ≥ 最小 400？不够：跳过；等高候选要满足窗口自己的最小尺寸）
+        let (rect, guides) =
+            snap_resize(r(1500, 100, 380, 405), ResizeDir::S, &[a()], 10, 320, 400);
+        assert_eq!(rect.height, 405, "收纳箱 A 高 300 < 主窗口最小高 400：不吸");
+        assert!(guides.is_empty());
+    }
+
+    #[test]
+    fn mixed_targets_break_ties_by_key_order_and_diff_per_window() {
+        // 收纳箱 #5 与清单窗口同距离：收纳箱排在前面
+        let targets = [
+            target(5, r(1000, 100, 200, 200)),
+            block(BlockKey::DEFAULT_LIST, r(1300, 120, 380, 600)),
+        ];
+        let (rect, guides) = snap_move(r(100, 110, 200, 50), &targets, 10);
+        assert_eq!(rect.y, 100);
+        assert_eq!(guides, [g(5, SnapEdge::Top)]);
+
+        let before = group_guides(&guides);
+        let after = group_guides(&[SnapGuide {
+            key: SnapKey::Block(BlockKey::Calendar),
+            edge: SnapEdge::Left,
+        }]);
+        assert_eq!(
+            changed_targets(&before, &after),
+            [SnapKey::Fence(5), SnapKey::Block(BlockKey::Calendar)]
         );
     }
 }
