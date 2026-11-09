@@ -1356,28 +1356,26 @@ fn list_tombstone_set(tombstones: &[ListTombstone], cutoff: &str) -> BTreeSet<(i
         .collect()
 }
 
-/// 远端是否丢了本机知道的 `listId`（需要重新上传把它补回去）。
+/// 远端是否丢了本机知道的 `listId`（契约 §12-8：需要补传一次，修复文档）。
 ///
 /// 旧版本（≤ 3.0.x）是强类型的、不认识 `listId`：它每次上传都按自己的本地版本重新序列化待办——平局保留本地，连它
-/// 没改过的待办也会丢掉 `listId`。新版本合并时平局保留本地，自己不受影响；但 cloud 与还没同步过的设备看到的是缺
-/// `listId` 的版本（= 默认清单）。所以：远端某条待办**没有** `listId` 键、而上传文档里同一条带着非默认的 `listId` 时，
-/// 需要上传一次。只看"缺键"：新版本的写入方都会写出 `listId`，两台新设备之间不会因此来回上传；旧设备只在自己有变更时
-/// 才上传，补回之后不会再触发
+/// 没改过的待办也会丢掉 `listId`。新版本合并时把缺 `listId` 当作"未知"、沿用本地的归属，自己不受影响；但 cloud 与
+/// 还没同步过的设备看到的是归属未知的版本。所以：远端某条待办的 `listId` 缺失或为 `null`、而上传文档里同一条带着
+/// 已知的 `listId`（任何值，含默认清单 1）时上传一次。本机未知的待办在文档里本来就不写 `listId`，不会触发；新版本的
+/// 写入方都会写出已知值，两台新设备之间不会因此来回上传；旧设备只在自己有变更时才上传，补回之后不会再触发
 fn remote_lost_list_ids(doc: &SyncData, remote: &SyncData) -> bool {
-    let stripped: HashSet<i64> = remote
+    let unknown_on_remote: HashSet<i64> = remote
         .todos
         .iter()
-        .filter(|t| t.as_object().is_some_and(|o| !o.contains_key("listId")))
+        .filter(|t| t.is_object() && t.get("listId").is_none_or(Value::is_null))
         .filter_map(sync_store::value_id)
         .collect();
-    if stripped.is_empty() {
+    if unknown_on_remote.is_empty() {
         return false;
     }
     doc.todos.iter().any(|t| {
-        sync_store::value_id(t).is_some_and(|id| stripped.contains(&id))
-            && t.get("listId")
-                .and_then(Value::as_i64)
-                .is_some_and(|list_id| list_id != DEFAULT_LIST_ID)
+        sync_store::value_id(t).is_some_and(|id| unknown_on_remote.contains(&id))
+            && t.get("listId").and_then(Value::as_i64).is_some()
     })
 }
 

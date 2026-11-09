@@ -4,8 +4,8 @@
 //! 清单参与同步（同步文档 `todoLists` / `listTombstones`，合并在 `db::sync_store`）；PC 与 cloud 是同一份数据的两个
 //! 写入方，规则逐条对齐 `.trellis/tasks/11-09-multi-list-windows/contract.md`。所有函数阻塞，错误是面向用户的中文。
 //!
-//! - 默认清单：id 固定为 [`DEFAULT_LIST_ID`]，可改名、不可删除；`listId` 缺失或指向不存在（含已删除）的清单的待办
-//!   都按它显示（[`effective_list_id`]，记录本身不改写）
+//! - 默认清单：id 固定为 [`DEFAULT_LIST_ID`]，可改名、不可删除；归属未知（`listId` 缺失，契约 §12）或指向不存在
+//!   （含已删除）的清单的待办都按它显示（[`effective_list_id`]，记录本身不改写）
 //! - 名称（[`normalize_name`]）：去首尾空白，不能为空、不超过 [`MAX_LIST_NAME_CHARS`] 个字（按 `char` 计）；在现有清单里
 //!   去首尾空白后不区分大小写不能重名。同步造成的重名容忍，不在这里处理
 //! - 新清单 id：[`crate::ids::new_id`]（与 cloud 同一算法），撞主键换 id 重试；`sortOrder` = 现有最大值 + 1。
@@ -141,7 +141,7 @@ pub fn delete(db: &Database, id: i64) -> Result<usize, String> {
     .map_err(|e| e.to_string())?
 }
 
-/// 存储的 `list_id` 等于 `id` 的待办数（含已完成）：删除确认框"N 项待办将移到「待办清单」"用
+/// 存储的 `list_id` 等于 `id` 的待办数（含已完成；归属未知的不算）：删除确认框"N 项待办将移到「待办清单」"用
 pub fn todo_count(db: &Database, id: i64) -> Result<usize, String> {
     db.with_connection(|conn| {
         conn.query_row("SELECT COUNT(*) FROM todos WHERE list_id = ?1", [id], |r| {
@@ -152,13 +152,12 @@ pub fn todo_count(db: &Database, id: i64) -> Result<usize, String> {
     .map_err(|e| e.to_string())
 }
 
-/// 有效清单（契约 §3）：`list_id` 指向一个现有（未删除）的清单时就是它，否则是默认清单。
-/// 用于界面归属 / 计数 / 过滤；存储与同步的仍是原值，收到清单墓碑时也不改写待办
-pub fn effective_list_id(list_id: i64, lists: &[TodoList]) -> i64 {
-    if list_id == DEFAULT_LIST_ID || lists.iter().any(|l| l.id == list_id) {
-        list_id
-    } else {
-        DEFAULT_LIST_ID
+/// 有效清单（契约 §3 / §12-4）：`list_id` 指向一个现有（未删除）的清单时就是它；归属未知（`None`）或指向不存在
+/// （含已删除）的清单时是默认清单。只用于界面归属 / 计数 / 过滤，不写回：存储与同步的仍是原值，收到清单墓碑时也不改写待办
+pub fn effective_list_id(list_id: Option<i64>, lists: &[TodoList]) -> i64 {
+    match list_id {
+        Some(id) if id == DEFAULT_LIST_ID || lists.iter().any(|l| l.id == id) => id,
+        _ => DEFAULT_LIST_ID,
     }
 }
 
@@ -241,7 +240,8 @@ mod tests {
         .unwrap()
     }
 
-    fn insert_todo(db: &Database, id: i64, list_id: i64, updated_at: &str) {
+    /// `list_id = None`：归属未知（迁移前的存量待办 / 旧版本写的）
+    fn insert_todo(db: &Database, id: i64, list_id: Option<i64>, updated_at: &str) {
         db.with_connection(|c| {
             c.execute(
                 "INSERT INTO todos (id, title, list_id, updated_at) VALUES (?1, 't', ?2, ?3)",
@@ -251,7 +251,7 @@ mod tests {
         .unwrap();
     }
 
-    fn todo_row(db: &Database, id: i64) -> (i64, String) {
+    fn todo_row(db: &Database, id: i64) -> (Option<i64>, String) {
         db.with_connection(|c| {
             c.query_row(
                 "SELECT list_id, updated_at FROM todos WHERE id = ?1",
@@ -374,11 +374,12 @@ mod tests {
         let db = db();
         let work = create(&db, "工作").unwrap();
         let other = create(&db, "其他").unwrap();
-        insert_todo(&db, 1, work.id, "2026-01-01 00:00:00");
+        insert_todo(&db, 1, Some(work.id), "2026-01-01 00:00:00");
         // 同步自时钟偏快的设备：移动后的版本也要严格晚于它
-        insert_todo(&db, 2, work.id, "2099-01-01 08:00:00");
-        insert_todo(&db, 3, other.id, "2026-01-01 00:00:00");
-        insert_todo(&db, 4, DEFAULT_LIST_ID, "2026-01-01 00:00:00");
+        insert_todo(&db, 2, Some(work.id), "2099-01-01 08:00:00");
+        insert_todo(&db, 3, Some(other.id), "2026-01-01 00:00:00");
+        insert_todo(&db, 4, Some(DEFAULT_LIST_ID), "2026-01-01 00:00:00");
+        insert_todo(&db, 5, None, "2026-01-01 00:00:00");
         db.with_connection(|c| c.execute("UPDATE todos SET completed = 1 WHERE id = 2", []))
             .unwrap();
         assert_eq!(todo_count(&db, work.id).unwrap(), 2);
@@ -389,17 +390,22 @@ mod tests {
         assert!(seq(&db) > base);
 
         let (list_id, updated_at) = todo_row(&db, 1);
-        assert_eq!(list_id, DEFAULT_LIST_ID);
+        assert_eq!(list_id, Some(DEFAULT_LIST_ID));
         assert!(updated_at >= before, "{updated_at}");
         assert_eq!(
             todo_row(&db, 2),
-            (DEFAULT_LIST_ID, "2099-01-01 08:00:01".to_string())
+            (Some(DEFAULT_LIST_ID), "2099-01-01 08:00:01".to_string())
         );
-        assert_eq!(todo_row(&db, 3).0, other.id, "其它清单的待办不动");
+        assert_eq!(todo_row(&db, 3).0, Some(other.id), "其它清单的待办不动");
         assert_eq!(
             todo_row(&db, 4),
-            (DEFAULT_LIST_ID, "2026-01-01 00:00:00".to_string()),
+            (Some(DEFAULT_LIST_ID), "2026-01-01 00:00:00".to_string()),
             "本来就在默认清单的不刷新"
+        );
+        assert_eq!(
+            todo_row(&db, 5),
+            (None, "2026-01-01 00:00:00".to_string()),
+            "归属未知的待办不动（仍是未知）"
         );
 
         let tombs = list_tombstones(&db);
@@ -433,7 +439,7 @@ mod tests {
     #[test]
     fn the_default_list_cannot_be_deleted() {
         let db = db();
-        insert_todo(&db, 1, DEFAULT_LIST_ID, "2026-01-01 00:00:00");
+        insert_todo(&db, 1, Some(DEFAULT_LIST_ID), "2026-01-01 00:00:00");
         assert_eq!(
             delete(&db, DEFAULT_LIST_ID).unwrap_err(),
             "默认清单不能删除"
@@ -442,7 +448,7 @@ mod tests {
         assert!(list_tombstones(&db).is_empty());
         assert_eq!(
             todo_row(&db, 1),
-            (DEFAULT_LIST_ID, "2026-01-01 00:00:00".to_string())
+            (Some(DEFAULT_LIST_ID), "2026-01-01 00:00:00".to_string())
         );
     }
 
@@ -508,15 +514,26 @@ mod tests {
         let db = db();
         let work = create(&db, "工作").unwrap();
         let lists = list(&db).unwrap();
-        assert_eq!(effective_list_id(work.id, &lists), work.id);
-        assert_eq!(effective_list_id(DEFAULT_LIST_ID, &lists), DEFAULT_LIST_ID);
+        assert_eq!(effective_list_id(Some(work.id), &lists), work.id);
         assert_eq!(
-            effective_list_id(12345, &lists),
+            effective_list_id(Some(DEFAULT_LIST_ID), &lists),
+            DEFAULT_LIST_ID
+        );
+        assert_eq!(
+            effective_list_id(None, &lists),
+            DEFAULT_LIST_ID,
+            "归属未知按默认清单显示"
+        );
+        assert_eq!(
+            effective_list_id(Some(12345), &lists),
             DEFAULT_LIST_ID,
             "已删除 / 不存在"
         );
-        assert_eq!(effective_list_id(0, &lists), DEFAULT_LIST_ID);
-        assert_eq!(effective_list_id(DEFAULT_LIST_ID, &[]), DEFAULT_LIST_ID);
+        assert_eq!(effective_list_id(Some(0), &lists), DEFAULT_LIST_ID);
+        assert_eq!(
+            effective_list_id(Some(DEFAULT_LIST_ID), &[]),
+            DEFAULT_LIST_ID
+        );
     }
 
     #[test]

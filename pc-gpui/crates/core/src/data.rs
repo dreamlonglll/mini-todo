@@ -248,8 +248,10 @@ pub fn export_json(db: &Database) -> Result<String, String> {
 /// 4. 导入前存在、导入后不存在的记录写墓碑（时间不早于记录自己的 updated_at，理由同上），
 ///    删除随同步传播；导入后存在的记录清掉同键墓碑
 /// 5. 清单（契约 §9）：备份有 `todoLists`（4.1）时同样按上面的规则恢复（保留 id、`updated_at` 刷新、备份里没有的
-///    清单写清单墓碑并删除），默认清单始终保留、只取备份里的名字；备份没有 `todoLists`（3.0 / 4.0）时现有清单不动，
-///    备份里的待办缺 `listId`，全部进默认清单。被删掉的清单的窗口记录随之清理
+///    清单写清单墓碑并删除），默认清单始终保留、只取备份里的名字；被删掉的清单的窗口记录随之清理
+/// 6. 待办的归属（契约 §12-9）：3.0 / 4.0 备份（没有 `todoLists`）的待办没有 `listId`，恢复成**具体的**默认清单 1
+///    （导入旧备份 = 全部进默认清单，并随同步传播）；现有清单不动。4.1 备份里缺 `listId` 的待办导出时就是"未知"，
+///    照原样恢复成未知（同步时从别处学到真实归属，不会以新版本把它们全改成 1）
 ///
 /// 任一步失败整体回滚，原有数据不受影响。
 ///
@@ -289,11 +291,16 @@ fn import_records(
     conn.execute("DELETE FROM subtasks", [])?;
     conn.execute("DELETE FROM todos", [])?;
 
+    // 3.0 / 4.0 备份不认识清单：恢复它 = 全部进默认清单（具体的 1，不是"未知"）
+    let legacy_backup = import.todo_lists.is_none();
     let mut after_todos = HashSet::new();
     let mut after_subtasks = HashSet::new();
     for original in &import.todos {
         let mut todo = original.clone();
         normalize_todo_lenient(&mut todo);
+        if legacy_backup && todo.list_id.is_none() {
+            todo.list_id = Some(DEFAULT_LIST_ID);
+        }
         todo.updated_at = imported_at(&before_todos, todo.id);
         if todo.created_at.trim().is_empty() {
             todo.created_at = now.to_string();
@@ -489,7 +496,8 @@ mod tests {
             repeat_interval: 1,
             repeat_weekdays: None,
             repeat_month_day: None,
-            list_id: 1,
+            // 3.0 / 4.0 备份里的待办没有 listId
+            list_id: None,
             subtasks: Vec::new(),
         }
     }
@@ -1002,7 +1010,8 @@ mod tests {
         .unwrap()
     }
 
-    fn list_id_of(db: &Database, todo_id: i64) -> i64 {
+    /// 存储的归属；`None` = 未知
+    fn list_id_of(db: &Database, todo_id: i64) -> Option<i64> {
         db.with_connection(|c| {
             c.query_row("SELECT list_id FROM todos WHERE id = ?1", [todo_id], |r| {
                 r.get(0)
@@ -1011,7 +1020,8 @@ mod tests {
         .unwrap()
     }
 
-    /// 导出 4.1：顶层 todoLists（含默认清单），每条待办带 listId；不导出清单墓碑与窗口属性。导入到另一个库往返一致
+    /// 导出 4.1：顶层 todoLists（含默认清单），归属已知的待办带 listId、未知的不写（契约 §12-5）；不导出清单墓碑与
+    /// 窗口属性。导入到另一个库往返一致（未知仍是未知）
     #[test]
     fn export_4_1_carries_lists_and_round_trips() {
         let db = test_db();
@@ -1019,8 +1029,16 @@ mod tests {
         let gone = lists::create(&db, "已删").unwrap();
         lists::delete(&db, gone.id).unwrap();
         seed_existing(&db);
-        db.with_connection(|c| c.execute("UPDATE todos SET list_id = ?1 WHERE id = 1", [work.id]))
-            .unwrap();
+        db.with_connection(|c| {
+            c.execute("UPDATE todos SET list_id = ?1 WHERE id = 1", [work.id])?;
+            // 迁移前的存量待办：归属未知
+            c.execute(
+                "INSERT INTO todos (id, title, created_at, updated_at)
+                 VALUES (2, '未知', '2026-01-01 00:00:00', '2026-01-01 00:00:00')",
+                [],
+            )
+        })
+        .unwrap();
 
         let text = export_json(&db).unwrap();
         let value: Value = serde_json::from_str(&text).unwrap();
@@ -1034,6 +1052,7 @@ mod tests {
         assert_eq!(ids, vec![1, work.id], "按 (sortOrder, id)");
         assert_eq!(value["todoLists"][1]["name"], "工作");
         assert_eq!(value["todos"][0]["listId"], work.id);
+        assert!(value["todos"][1].get("listId").is_none(), "未知不写 listId");
         assert!(value.get("listTombstones").is_none());
 
         let restored = test_db();
@@ -1044,7 +1063,12 @@ mod tests {
             .map(|l| l.name)
             .collect();
         assert_eq!(names, vec!["待办清单", "工作"]);
-        assert_eq!(list_id_of(&restored, 1), work.id);
+        assert_eq!(list_id_of(&restored, 1), Some(work.id));
+        assert_eq!(
+            list_id_of(&restored, 2),
+            None,
+            "4.1 备份里的未知照原样恢复成未知，同步时再从别处学到"
+        );
     }
 
     /// 导入 4.1 = 恢复备份：保留 id、updated_at 刷新为导入时刻；备份里没有的清单写清单墓碑并删除（窗口记录一并清理）；
@@ -1078,7 +1102,7 @@ mod tests {
         let mut default_list = backup_list(DEFAULT_LIST_ID, "备份里的默认清单名");
         default_list.sort_order = 9;
         let mut todo = make_todo(1, "a");
-        todo.list_id = 777;
+        todo.list_id = Some(777);
         let json = backup_with_lists(
             vec![todo],
             vec![
@@ -1118,7 +1142,7 @@ mod tests {
             crate::window_prefs::get_prefs(&db, WindowKey::List(local_only.id)).unwrap(),
             None
         );
-        assert_eq!(list_id_of(&db, 1), 777);
+        assert_eq!(list_id_of(&db, 1), Some(777));
     }
 
     #[test]
@@ -1140,23 +1164,32 @@ mod tests {
         assert!(list_tombstones(&db).is_empty());
     }
 
-    /// 导入 3.0 / 4.0（没有 todoLists）：现有清单不动（不改名、不刷新、不写墓碑），备份里的待办进默认清单
+    /// 导入 3.0 / 4.0（没有 todoLists）：现有清单不动（不改名、不刷新、不写墓碑）；备份里的待办没有 listId，
+    /// 恢复成**具体的**默认清单 1（契约 §12-9：导入旧备份 = 全部进默认清单，并随同步传播），不是"未知"
     #[test]
     fn importing_a_4_0_backup_leaves_existing_lists_alone() {
         let db = test_db();
-        lists::create(&db, "工作").unwrap();
+        let work = lists::create(&db, "工作").unwrap();
         lists::rename(&db, DEFAULT_LIST_ID, "收件箱").unwrap();
         let before = list_rows(&db);
 
-        let mut doc: Value =
-            serde_json::from_str(&backup_json(vec![make_todo(5, "旧备份")])).unwrap();
-        doc["todos"][0].as_object_mut().unwrap().remove("listId");
+        let mut kept = make_todo(6, "手写了 listId 的旧格式");
+        kept.list_id = Some(work.id);
+        let doc: Value =
+            serde_json::from_str(&backup_json(vec![make_todo(5, "旧备份"), kept])).unwrap();
         assert!(doc.get("todoLists").is_none(), "前提：4.0 备份没有清单");
+        assert!(doc["todos"][0].get("listId").is_none(), "前提：没有 listId");
         import_json(&db, &doc.to_string()).unwrap();
 
         assert_eq!(list_rows(&db), before);
         assert!(list_tombstones(&db).is_empty());
-        assert_eq!(list_id_of(&db, 5), DEFAULT_LIST_ID);
+        assert_eq!(list_id_of(&db, 5), Some(DEFAULT_LIST_ID));
+        assert_eq!(list_id_of(&db, 6), Some(work.id), "有 listId 的照原值");
+        let exported: Value = serde_json::from_str(&export_json(&db).unwrap()).unwrap();
+        assert_eq!(
+            exported["todos"][0]["listId"], DEFAULT_LIST_ID,
+            "导出 / 上传时写出具体的 1"
+        );
     }
 
     /// 旧版本（4.0 的 ExportData，没有 todoLists 字段）读 4.1 导出：未知字段忽略，照常导入

@@ -176,8 +176,13 @@ pub(crate) fn run_migrations_to(conn: &Connection, target: i32) -> Result<()> {
 ///   PC 只在本机新建 / 改名时校验
 /// - 默认清单：id 1、"待办清单"、`sort_order` 0、`created_at` = `updated_at` = `2000-01-01 00:00:00`（固定的早时间：
 ///   两台设备各自迁移出的 id 1 不互相"抢"，任何一次改名都胜出）。在建触发器之前插入，不算本地变更
-/// - `todos.list_id INTEGER NOT NULL DEFAULT 1`：存量待办全部进默认清单（`ALTER TABLE` 不触发 UPDATE 触发器，也不算
-///   本地变更）。不加外键：指向不存在（含已删除）的清单时由读侧兜底按默认清单显示，记录不改写
+/// - `todos.list_id INTEGER`（可空，契约 §12）：NULL = 归属**未知**，不等于默认清单。存量待办全部是 NULL——它们可能
+///   早已被别的设备放进了某个清单，这台设备（以前跑的是不认识清单的旧版本）只是不知道；写成 1 的话，同一版本平局保留本地，
+///   它永远学不到真实归属，之后一上传还会把文档里的 `listId` 全改成 1。未知时界面按默认清单显示，合并时从远端学到真实归属。
+///   新建 / 导入旧备份一律写具体值。`ALTER TABLE` 不触发 UPDATE 触发器，也不算本地变更。不加外键：指向不存在（含已删除）
+///   的清单时由读侧兜底按默认清单显示，记录不改写
+/// - 作废 WebDAV 基准 ETag（`webdav_remote_etag`）：升级后第一次同步一定是无条件 GET——远端没变时条件 GET 只会得到 304，
+///   存量待办就迟迟学不到归属
 /// - `list_tombstones(entity_id, deleted_at)`：清单删除墓碑，同步文档里是独立顶层键 `listTombstones`——不进共用的
 ///   `tombstones`：v2.5.0 / 3.0.x 丢弃未知 `entityType` 后按本地表重建 `tombstones`，会把它抹掉，已删的清单随后复活。
 ///   与 `tombstones` 一样不接触发器（合并远端墓碑不是本地变更；本地删除清单时 `todo_lists` 的 DELETE 已经计数）
@@ -233,10 +238,8 @@ fn migration_v31(conn: &Connection) -> Result<()> {
     // 不会因"列已存在"启动失败；表 / 触发器都是 IF NOT EXISTS，种子都是 INSERT OR IGNORE
     let has_list_id = conn.prepare("SELECT list_id FROM todos LIMIT 0").is_ok();
     if !has_list_id {
-        conn.execute(
-            "ALTER TABLE todos ADD COLUMN list_id INTEGER NOT NULL DEFAULT 1",
-            [],
-        )?;
+        // 不给默认值：存量行是 NULL（未知），见上
+        conn.execute("ALTER TABLE todos ADD COLUMN list_id INTEGER", [])?;
     }
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_todos_list_id ON todos(list_id)",
@@ -247,7 +250,9 @@ fn migration_v31(conn: &Connection) -> Result<()> {
          VALUES (?1, ?2, 0, ?3, ?3)",
         rusqlite::params![DEFAULT_LIST_ID, DEFAULT_LIST_NAME, DEFAULT_LIST_CREATED_AT],
     )?;
-    // 种子在建触发器之前写入：迁移本身不算本地变更（升级后由"远端缺本地清单"触发一次上传）
+    // 升级后第一次同步无条件 GET（`webdav_remote_etag` 是设备本地的同步状态键，不参与设置同步）
+    crate::db::settings_kv::set_setting(conn, "webdav_remote_etag", "")?;
+    // 种子在建触发器之前写入：迁移本身不算本地变更
     for event in ["insert", "update", "delete"] {
         conn.execute_batch(&format!(
             "CREATE TRIGGER IF NOT EXISTS trg_todo_lists_{event}_local_seq
@@ -1263,10 +1268,10 @@ mod tests {
                 )
                 .unwrap();
             assert!(subtasks >= 1, "from v{from}: 子任务不能丢");
-            let list_id: i64 = conn
+            let list_id: Option<i64> = conn
                 .query_row("SELECT list_id FROM todos WHERE id = 1", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(list_id, 1, "from v{from}: 存量待办进默认清单");
+            assert_eq!(list_id, None, "from v{from}: 存量待办的归属未知");
             assert!(
                 foreign_key_violations(&conn).unwrap().is_empty(),
                 "from v{from}"
@@ -1797,14 +1802,24 @@ mod tests {
         )
     }
 
-    /// v31：默认清单（id 1、固定的早时间）、存量待办全部进默认清单；迁移本身不算本地变更
+    fn setting_of(conn: &Connection, key: &str) -> Option<String> {
+        conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
+            r.get(0)
+        })
+        .optional()
+        .unwrap()
+    }
+
+    /// v31：默认清单（id 1、固定的早时间）；存量待办的归属是**未知**（NULL，契约 §12），不是默认清单；
+    /// 基准 ETag 作废（升级后第一次同步无条件 GET）；迁移本身不算本地变更
     #[test]
-    fn v31_creates_the_default_list_and_assigns_existing_todos_to_it() {
+    fn v31_creates_the_default_list_and_leaves_existing_todos_unknown() {
         let conn = fresh_conn();
         run_migrations_to(&conn, 30).expect("迁移到 v30 失败");
         conn.execute_batch(
             "INSERT INTO todos (id, title) VALUES (1, 'a'), (2, 'b');
-             INSERT INTO subtasks (id, parent_id, title) VALUES (11, 1, 's');",
+             INSERT INTO subtasks (id, parent_id, title) VALUES (11, 1, 's');
+             UPDATE settings SET value = '\"v7\"' WHERE key = 'webdav_remote_etag';",
         )
         .unwrap();
         let base = meta(&conn, "local_seq");
@@ -1821,27 +1836,32 @@ mod tests {
                 "2000-01-01 00:00:00".to_string()
             )]
         );
-        let list_ids: Vec<i64> = conn
+        let list_ids: Vec<Option<i64>> = conn
             .prepare("SELECT list_id FROM todos ORDER BY id")
             .unwrap()
             .query_map([], |r| r.get(0))
             .unwrap()
             .collect::<Result<_>>()
             .unwrap();
-        assert_eq!(list_ids, vec![1, 1]);
+        assert_eq!(list_ids, vec![None, None], "存量待办的归属未知");
+        assert_eq!(
+            setting_of(&conn, "webdav_remote_etag").as_deref(),
+            Some(""),
+            "基准 ETag 作废：升级后第一次同步无条件 GET"
+        );
         assert_eq!(
             meta(&conn, "local_seq"),
             base,
             "建默认清单 / 加列不算本地变更"
         );
 
-        // 旧版本的显式列写法照常可用：新待办落进默认清单
+        // 旧版本的显式列写法照常可用：它写的待办同样是未知
         conn.execute("INSERT INTO todos (id, title) VALUES (3, 'c')", [])
             .unwrap();
-        let list_id: i64 = conn
+        let list_id: Option<i64> = conn
             .query_row("SELECT list_id FROM todos WHERE id = 3", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(list_id, 1);
+        assert_eq!(list_id, None);
     }
 
     /// v31：清单参与同步（增删改都计 local_seq，改待办的 list_id 也是）；清单墓碑与 tombstones 一样不计数

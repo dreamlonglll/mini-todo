@@ -890,6 +890,22 @@ fn todo_exists(conn: &Connection, id: i64) -> Result<bool> {
         .is_some())
 }
 
+/// 本地待办的 (updated_at, list_id)；`list_id` 为 `None` 表示归属未知
+fn local_todo_version(conn: &Connection, id: i64) -> Result<Option<(String, Option<i64>)>> {
+    conn.prepare_cached("SELECT updated_at, list_id FROM todos WHERE id = ?1")?
+        .query_row([id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()
+}
+
+/// 契约 §12-3：本地归属未知时采纳远端已知的 `listId`——只改 `list_id`，**不改** `updated_at`
+/// （远端本来就有这个值，这不是本地的新版本）。返回是否改了
+fn adopt_list_id(conn: &Connection, id: i64, list_id: i64) -> Result<bool> {
+    Ok(conn
+        .prepare_cached("UPDATE todos SET list_id = ?1 WHERE id = ?2 AND list_id IS NULL")?
+        .execute(params![list_id, id])?
+        > 0)
+}
+
 /// K3 记录级合并：把远端待办 / 子任务 / 墓碑合并进本地（调用方提供事务）。
 ///
 /// 1. 远端墓碑（`deleted_at >= cutoff`）并入本地墓碑表，同键取较大时间
@@ -898,6 +914,10 @@ fn todo_exists(conn: &Connection, id: i64) -> Result<bool> {
 ///    本地没有 → 以远端 id 插入；被墓碑压制 → 丢弃
 /// 4. 仅本地存在的记录保留（不做缺席清理）
 /// 5. 无法识别 / 无法落库的远端记录跳过并计数，不影响其它记录
+/// 6. 待办的清单归属（契约 §12，`listId` 缺失 = 未知）：远端胜出但没有 `listId` → 沿用本地的归属；
+///    远端有 `listId`、本地未知 → 不论 LWW 谁胜（含平局、本地较新）都采纳远端的值且不改 `updated_at`。
+///    采纳计入 `todos_updated`（本地数据变了，界面要刷新）；它让 `local_seq` 加一，但本次同步收尾时 `synced_seq`
+///    取合并之后的值，不会因此多上传一次
 pub fn merge_remote(
     tx: &mut Transaction<'_>,
     remote: &[RemoteTodo],
@@ -934,21 +954,39 @@ pub fn merge_remote(
         match &rt.todo {
             Some(todo) => {
                 if !is_suppressed(&tombs, EntityKind::Todo, todo_id, &todo.updated_at) {
-                    match local_updated_at(tx, EntityKind::Todo, todo_id)? {
+                    let label = format!("todo#{todo_id}");
+                    match local_todo_version(tx, todo_id)? {
                         None => {
-                            let label = format!("todo#{todo_id}");
                             if write_record(tx, &label, |c| insert_todo_row(c, todo))? {
                                 stats.todos_inserted += 1;
                             } else {
                                 stats.records_skipped += 1;
                             }
                         }
-                        Some(local) if todo.updated_at > local => {
-                            let label = format!("todo#{todo_id}");
-                            if write_record(tx, &label, |c| update_todo_row(c, todo))? {
+                        Some((local_at, local_list)) if todo.updated_at > local_at => {
+                            // 远端胜出但不认识清单（没有 listId）：沿用本地的归属，未知不覆盖已知
+                            let filled;
+                            let incoming = if todo.list_id.is_none() && local_list.is_some() {
+                                filled = Todo {
+                                    list_id: local_list,
+                                    ..todo.clone()
+                                };
+                                &filled
+                            } else {
+                                todo
+                            };
+                            if write_record(tx, &label, |c| update_todo_row(c, incoming))? {
                                 stats.todos_updated += 1;
                             } else {
                                 stats.records_skipped += 1;
+                            }
+                        }
+                        Some((_, None)) => {
+                            // 平局 / 本地较新、本地归属未知：采纳远端已知的 listId（不改 updated_at）
+                            if let Some(list_id) = todo.list_id {
+                                if adopt_list_id(tx, todo_id, list_id)? {
+                                    stats.todos_updated += 1;
+                                }
                             }
                         }
                         Some(_) => {}
@@ -1118,7 +1156,7 @@ fn all_ids(conn: &Connection, table: &str) -> Result<Vec<i64>> {
 ///
 /// - 本地墓碑表替换为远端墓碑（保留期内）
 /// - 删除本地独有的待办 / 子任务（不生成墓碑）
-/// - 远端记录无条件覆盖本地（被远端自身墓碑压制的除外）
+/// - 远端记录无条件覆盖本地（被远端自身墓碑压制的除外）；远端待办没有 `listId`（归属未知）时保留本地已知的归属
 /// - 无法识别的远端记录跳过计数；同 id 的本地记录保留（无法用看不懂的版本替换）
 pub fn force_pull_replace(
     tx: &mut Transaction<'_>,
@@ -1173,25 +1211,39 @@ pub fn force_pull_replace(
                     tx.execute("DELETE FROM todos WHERE id = ?1", [todo_id])? as u32;
                 continue;
             }
-            Some(todo) => match load_todo_row(tx, todo_id)? {
-                None => {
-                    let label = format!("todo#{todo_id}");
-                    if write_record(tx, &label, |c| insert_todo_row(c, todo))? {
-                        stats.todos_inserted += 1;
-                    } else {
-                        stats.records_skipped += 1;
+            Some(todo) => {
+                let local = load_todo_row(tx, todo_id)?;
+                // 远端不认识清单（没有 listId）：保留本地已知的归属——未知不覆盖已知（契约 §12）
+                let filled;
+                let incoming = match &local {
+                    Some(l) if todo.list_id.is_none() && l.list_id.is_some() => {
+                        filled = Todo {
+                            list_id: l.list_id,
+                            ..todo.clone()
+                        };
+                        &filled
                     }
-                }
-                Some(local) if &local != todo => {
-                    let label = format!("todo#{todo_id}");
-                    if write_record(tx, &label, |c| update_todo_row(c, todo))? {
-                        stats.todos_updated += 1;
-                    } else {
-                        stats.records_skipped += 1;
+                    _ => todo,
+                };
+                let label = format!("todo#{todo_id}");
+                match local {
+                    None => {
+                        if write_record(tx, &label, |c| insert_todo_row(c, incoming))? {
+                            stats.todos_inserted += 1;
+                        } else {
+                            stats.records_skipped += 1;
+                        }
                     }
+                    Some(local) if &local != incoming => {
+                        if write_record(tx, &label, |c| update_todo_row(c, incoming))? {
+                            stats.todos_updated += 1;
+                        } else {
+                            stats.records_skipped += 1;
+                        }
+                    }
+                    Some(_) => {}
                 }
-                Some(_) => {}
-            },
+            }
             None => {
                 stats.records_skipped += 1;
                 log::warn!(
@@ -1324,6 +1376,7 @@ pub fn force_pull_replace_lists(
 ///   updatedAt 比 now 还新——另一端时钟偏快或时区配置不同——时取它，保证墓碑压得住）
 /// - 远端版本比本地新、或远端墓碑会压制本地记录 → 把本地记录的 updated_at 推到
 ///   "至少 now、且严格晚于远端那个时间戳"，避免其它设备按 LWW 留下自己的旧版本
+/// - 本地归属未知、远端同一条已知 → 采纳远端的 `listId`（只改归属；"本地覆盖远端"不该丢掉本机本来就不知道的信息）
 ///
 /// 返回被推进 updated_at 的记录数。
 pub fn force_push_prepare(
@@ -1357,6 +1410,10 @@ pub fn force_push_prepare(
                     let remote_ts = value_updated_at(rv);
                     if remote_ts > *local {
                         note((EntityKind::Todo, id), remote_ts);
+                    }
+                    // 本机归属未知、远端已知：先采纳（契约 §12-3 同理），覆盖远端时不把它的已知值丢掉
+                    if let Some(list_id) = rv.get("listId").and_then(Value::as_i64) {
+                        adopt_list_id(tx, id, list_id)?;
                     }
                 }
             }
@@ -2348,34 +2405,205 @@ mod tests {
         assert_eq!(count(&db, "todo_lists"), 2);
     }
 
+    /// (list_id, title, updated_at)
+    fn todo_row(db: &Database, id: i64) -> (Option<i64>, String, String) {
+        db.with_connection(|c| {
+            c.query_row(
+                "SELECT list_id, title, updated_at FROM todos WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+        })
+        .unwrap()
+    }
+
+    fn todo_in(id: i64, title: &str, updated_at: &str, list_id: i64) -> Value {
+        let mut todo = todo_json(id, title, updated_at);
+        todo["listId"] = json!(list_id);
+        todo
+    }
+
+    /// 契约 §12：`listId` 缺失 = 未知，永远不覆盖已知的归属。远端胜出但没有 listId → 内容取远端、归属沿用本地；
+    /// 远端新增且没有 listId → 本地也是未知（不是默认清单）
     #[test]
-    fn remote_todo_without_list_id_lands_in_the_default_list() {
+    fn missing_list_id_means_unknown_and_never_overrides_a_known_list() {
         let db = db();
-        let mut todo = todo_json(1, "新设备上的", "2026-05-01 10:00:00");
-        todo["listId"] = json!(WORK);
-        merge(&db, vec![todo], vec![]);
-        let list_of = |db: &Database| -> i64 {
-            db.with_connection(|c| {
-                c.query_row("SELECT list_id FROM todos WHERE id = 1", [], |r| r.get(0))
-            })
-            .unwrap()
-        };
-        assert_eq!(list_of(&db), WORK, "listId 随记录落库");
+        merge(
+            &db,
+            vec![todo_in(1, "新设备上的", "2026-05-01 10:00:00", WORK)],
+            vec![],
+        );
+        assert_eq!(todo_row(&db, 1).0, Some(WORK), "listId 随记录落库");
 
         // 旧设备上传的同一版本（平局）缺 listId：保留本地
-        merge(
+        let s = merge(
             &db,
             vec![todo_json(1, "旧设备", "2026-05-01 10:00:00")],
             vec![],
         );
-        assert_eq!(list_of(&db), WORK);
-        // 旧设备真的改过（更新）：按默认值落进默认清单（接受的退化）
-        merge(
+        assert_eq!(s, MergeStats::default());
+        assert_eq!(todo_row(&db, 1).1, "新设备上的");
+        // 旧设备改过（远端较新）缺 listId：内容取远端，归属沿用本地清单
+        let s = merge(
             &db,
             vec![todo_json(1, "旧设备改过", "2026-05-02 10:00:00")],
             vec![],
         );
-        assert_eq!(list_of(&db), DEFAULT_LIST_ID);
+        assert_eq!(s.todos_updated, 1);
+        assert_eq!(
+            todo_row(&db, 1),
+            (
+                Some(WORK),
+                "旧设备改过".to_string(),
+                "2026-05-02 10:00:00".to_string()
+            )
+        );
+        // 远端新增、没有 listId：未知（显示在默认清单，但不是"已知的 1"）
+        merge(
+            &db,
+            vec![todo_json(2, "旧设备新建", "2026-05-01 10:00:00")],
+            vec![],
+        );
+        assert_eq!(todo_row(&db, 2).0, None);
+        let local = db
+            .with_connection(|c| local_records(c, CUTOFF))
+            .unwrap()
+            .todos;
+        let written: Vec<Value> = local
+            .iter()
+            .map(|t| serde_json::to_value(t).unwrap())
+            .collect();
+        assert_eq!(written[0]["listId"], WORK);
+        assert!(
+            written[1].get("listId").is_none(),
+            "上传时未知不写 listId 键"
+        );
+    }
+
+    /// 契约 §12-3：远端有 listId、本地未知 → 不论 LWW 谁胜（平局、本地较新、远端较新）都采纳远端的值；
+    /// 平局 / 本地较新时只改归属、不改 updated_at 与内容。本地已知时不"采纳"别的值（只有 LWW 胜出才改）
+    #[test]
+    fn unknown_local_todos_adopt_a_known_remote_list_whoever_wins() {
+        let db = db();
+        merge(
+            &db,
+            vec![
+                todo_json(1, "本地", "2026-05-01 10:00:00"),
+                todo_json(2, "本地较新", "2026-05-05 10:00:00"),
+                todo_json(3, "本地较旧", "2026-05-01 10:00:00"),
+                todo_json(4, "两边都未知", "2026-05-01 10:00:00"),
+            ],
+            vec![],
+        );
+        for id in 1..=4 {
+            assert_eq!(todo_row(&db, id).0, None, "前提：本地归属未知");
+        }
+
+        let s = merge(
+            &db,
+            vec![
+                todo_in(1, "远端平局", "2026-05-01 10:00:00", WORK),
+                todo_in(2, "远端较旧", "2026-05-01 10:00:00", LIFE),
+                todo_in(3, "远端较新", "2026-05-02 10:00:00", DEFAULT_LIST_ID),
+                todo_json(4, "两边都未知", "2026-05-01 10:00:00"),
+            ],
+            vec![],
+        );
+        assert_eq!(s.todos_updated, 3, "采纳归属也是本地数据变化，界面要刷新");
+        assert_eq!(
+            todo_row(&db, 1),
+            (
+                Some(WORK),
+                "本地".to_string(),
+                "2026-05-01 10:00:00".to_string()
+            ),
+            "平局：内容保留本地，采纳远端的归属，不改 updated_at"
+        );
+        assert_eq!(
+            todo_row(&db, 2),
+            (
+                Some(LIFE),
+                "本地较新".to_string(),
+                "2026-05-05 10:00:00".to_string()
+            ),
+            "本地较新：同上"
+        );
+        assert_eq!(
+            todo_row(&db, 3),
+            (
+                Some(DEFAULT_LIST_ID),
+                "远端较新".to_string(),
+                "2026-05-02 10:00:00".to_string()
+            )
+        );
+        assert_eq!(todo_row(&db, 4).0, None, "远端也未知：仍是未知");
+
+        // 本地已经已知：平局时不被远端的另一个值改掉
+        let s = merge(
+            &db,
+            vec![todo_in(1, "远端平局", "2026-05-01 10:00:00", LIFE)],
+            vec![],
+        );
+        assert_eq!(s, MergeStats::default());
+        assert_eq!(todo_row(&db, 1).0, Some(WORK));
+    }
+
+    /// 强制推送前：本机未知、远端已知的归属先采纳（只改归属），本机已知的照旧以本机为准
+    #[test]
+    fn force_push_prepare_adopts_known_remote_lists_for_unknown_local_todos() {
+        let db = db();
+        merge(
+            &db,
+            vec![
+                todo_json(1, "本机未知", "2026-05-09 10:00:00"),
+                todo_in(2, "本机已知", "2026-05-09 10:00:00", WORK),
+            ],
+            vec![],
+        );
+        let remote = vec![
+            todo_in(1, "远端", "2026-05-01 10:00:00", LIFE),
+            todo_in(2, "远端", "2026-05-01 10:00:00", LIFE),
+        ];
+        db.with_transaction(|tx| force_push_prepare(tx, &remote, &[], "2026-05-10 00:00:00"))
+            .unwrap();
+        assert_eq!(
+            todo_row(&db, 1),
+            (
+                Some(LIFE),
+                "本机未知".to_string(),
+                "2026-05-09 10:00:00".to_string()
+            )
+        );
+        assert_eq!(todo_row(&db, 2).0, Some(WORK), "本机已知：以本机为准");
+    }
+
+    /// 强制拉取同样不让"未知"覆盖本地已知的归属；远端已知时照常覆盖
+    #[test]
+    fn force_pull_keeps_a_known_list_when_the_remote_does_not_know_it() {
+        let db = db();
+        merge(
+            &db,
+            vec![
+                todo_in(1, "本地", "2026-05-09 10:00:00", WORK),
+                todo_in(2, "本地", "2026-05-09 10:00:00", WORK),
+            ],
+            vec![],
+        );
+        let remote = parse_remote_todos(&[
+            todo_json(1, "远端不认识清单", "2026-05-01 10:00:00"),
+            todo_in(2, "远端已知", "2026-05-01 10:00:00", LIFE),
+        ]);
+        db.with_transaction(|tx| force_pull_replace(tx, &remote, &[], CUTOFF))
+            .unwrap();
+        assert_eq!(
+            todo_row(&db, 1),
+            (
+                Some(WORK),
+                "远端不认识清单".to_string(),
+                "2026-05-01 10:00:00".to_string()
+            )
+        );
+        assert_eq!(todo_row(&db, 2).0, Some(LIFE));
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use rusqlite::Row;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 
 pub const SUBTASK_COLUMNS: &str =
     "id, parent_id, title, content, completed, sort_order, created_at, updated_at";
@@ -48,7 +48,7 @@ pub fn todo_from_row(row: &Row) -> rusqlite::Result<Todo> {
     })
 }
 
-/// 默认清单的 id（v31 迁移建；可改名、不可删除）。`listId` 缺失或指向不存在（含已删除）的清单的待办都按它显示
+/// 默认清单的 id（v31 迁移建；可改名、不可删除）。归属未知或指向不存在（含已删除）的清单的待办都按它显示
 pub const DEFAULT_LIST_ID: i64 = 1;
 
 /// 默认清单的初始名称（= 3.0 主窗口标题栏写死的文字）
@@ -57,15 +57,6 @@ pub const DEFAULT_LIST_NAME: &str = "待办清单";
 /// 默认清单的初始 `createdAt` / `updatedAt`（PC v31 迁移与 cloud 惰性补建用同一个值）：固定的早时间，
 /// 两台设备各自建出的 id 1 不会互相"抢"，任何一次改名都在 LWW 里胜出
 pub const DEFAULT_LIST_CREATED_AT: &str = "2000-01-01 00:00:00";
-
-fn default_list_id() -> i64 {
-    DEFAULT_LIST_ID
-}
-
-/// `listId`：缺失（`#[serde(default)]`）或为 `null` 都是默认清单
-fn de_list_id<'de, D: Deserializer<'de>>(d: D) -> Result<i64, D::Error> {
-    Ok(Option::<i64>::deserialize(d)?.unwrap_or(DEFAULT_LIST_ID))
-}
 
 /// todo_lists 查询列，与 [`todo_list_from_row`] 的下标一一对应
 pub const TODO_LIST_COLUMNS: &str = "id, name, sort_order, created_at, updated_at";
@@ -143,10 +134,13 @@ pub struct Todo {
     pub repeat_weekdays: Option<String>,
     #[serde(default)]
     pub repeat_month_day: Option<i32>,
-    /// 所属清单（v31）。缺失或为 `null` 时是默认清单（旧版本 / 旧备份的记录）；指向不存在（含已删除）的清单时
-    /// 界面按默认清单显示（读侧兜底 `lists::effective_list_id`），存储与同步的仍是原值，不因清单不存在而改写
-    #[serde(default = "default_list_id", deserialize_with = "de_list_id")]
-    pub list_id: i64,
+    /// 所属清单（v31）。`None` = **未知**（契约 §12）：写这条记录的一方不认识清单——旧版本上传的、迁移前的存量待办
+    /// （`todos.list_id` 为 NULL）——**不等于**默认清单。未知时界面按默认清单显示（`lists::effective_list_id`），
+    /// 合并时不覆盖别处的已知值、也会从远端学到已知值，上传 / 导出时不写 `listId` 键；已知值（含 1）照常写出。
+    /// 缺失与 `null` 都是未知；类型错误（如字符串）与其它字段一样按无法识别的记录处理。
+    /// 指向不存在（含已删除）的清单时同样按默认清单显示，存储与同步的仍是原值
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub list_id: Option<i64>,
     #[serde(default)]
     pub subtasks: Vec<SubTask>,
 }
@@ -380,7 +374,8 @@ fn default_notification_type() -> String {
 /// v4.0 起不再包含 agent_configs / workflow_steps / task_dependencies / prompt_templates /
 /// agent_executions 等 AI Agent 相关字段；反序列化保持向后兼容，旧 v3.0 备份中的这些字段
 /// 在解析时通过 `#[serde(default)]` 静默跳过。
-/// v4.1 起带顶层 `todoLists`、每条待办带 `listId`；不导出清单墓碑与窗口属性。旧版本导入 4.1 时忽略 `todoLists`。
+/// v4.1 起带顶层 `todoLists`，归属已知的待办带 `listId`（未知的不写，契约 §12）；不导出清单墓碑与窗口属性。
+/// 旧版本导入 4.1 时忽略 `todoLists`。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportData {
@@ -535,28 +530,39 @@ mod tests {
         serde_json::from_value(v)
     }
 
-    /// 旧版本 / 旧备份的待办没有 `listId`：落进默认清单；`null` 同缺失；显式值原样保留（不校验清单是否存在）
+    /// 契约 §12：旧版本 / 旧写入方的待办没有 `listId` = 归属未知（不是默认清单）；`null` 同缺失；
+    /// 显式值原样保留（不校验清单是否存在）；类型错误按无法识别处理
     #[test]
-    fn todo_list_id_defaults_to_the_default_list() {
-        assert_eq!(todo_with(json!({})).unwrap().list_id, DEFAULT_LIST_ID);
-        assert_eq!(
-            todo_with(json!({"listId": null})).unwrap().list_id,
-            DEFAULT_LIST_ID
-        );
+    fn missing_or_null_list_id_means_unknown() {
+        assert_eq!(todo_with(json!({})).unwrap().list_id, None);
+        assert_eq!(todo_with(json!({"listId": null})).unwrap().list_id, None);
         assert_eq!(
             todo_with(json!({"listId": 1_731_000_000_000_123_i64}))
                 .unwrap()
                 .list_id,
-            1_731_000_000_000_123
+            Some(1_731_000_000_000_123)
         );
-        assert_eq!(todo_with(json!({"listId": 999})).unwrap().list_id, 999);
+        assert_eq!(
+            todo_with(json!({"listId": DEFAULT_LIST_ID}))
+                .unwrap()
+                .list_id,
+            Some(DEFAULT_LIST_ID)
+        );
         assert!(
             todo_with(json!({"listId": "工作"})).is_err(),
             "类型错误与其它字段一样按无法识别处理"
         );
+    }
 
-        let out = serde_json::to_value(todo_with(json!({"listId": 7})).unwrap()).unwrap();
-        assert_eq!(out["listId"], 7, "总是写出 listId");
+    /// 上传 / 导出：未知不写 `listId` 键（未知永远不会覆盖别人的已知值）；已知值（含默认清单 1）照常写出
+    #[test]
+    fn unknown_list_id_is_not_written_but_known_ones_are() {
+        let unknown = serde_json::to_value(todo_with(json!({})).unwrap()).unwrap();
+        assert!(unknown.get("listId").is_none(), "{unknown}");
+        for known in [DEFAULT_LIST_ID, 7] {
+            let out = serde_json::to_value(todo_with(json!({"listId": known})).unwrap()).unwrap();
+            assert_eq!(out["listId"], known);
+        }
     }
 
     /// 清单记录：驼峰字段；`id` / `name` 必填，其余缺失取默认；未知字段丢弃

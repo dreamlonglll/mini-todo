@@ -263,7 +263,8 @@ pub fn update(db: &Database, id: i64, data: &UpdateTodoRequest) -> Result<Todo, 
 }
 
 /// 把待办移到另一个清单（右键「移动到」）：只改 `list_id`，`updated_at` 严格递增（随同步传播）；
-/// 已经在这个清单里时什么都不改。目标清单不存在报"清单不存在"，待办不存在报"待办不存在"
+/// 存储的已经是这个清单时什么都不改。归属未知（契约 §12）时显式移动总会写成已知——目标是默认清单也一样。
+/// 目标清单不存在报"清单不存在"，待办不存在报"待办不存在"
 pub fn move_to_list(db: &Database, id: i64, list_id: i64) -> Result<Todo, String> {
     db.with_connection(|conn| -> rusqlite::Result<Result<Todo, String>> {
         if !lists::is_valid_target(conn, list_id)? {
@@ -752,19 +753,20 @@ mod tests {
 
     // ---- 清单（v31）----
 
+    /// 新建总是写具体的清单（契约 §12-6 / 7）：不指定时是默认清单 1，不是"未知"
     #[test]
     fn new_todos_go_to_the_default_list_unless_another_list_is_given() {
         let db = db();
         assert_eq!(
             create(&db, &create_request("a")).unwrap().list_id,
-            DEFAULT_LIST_ID
+            Some(DEFAULT_LIST_ID)
         );
         let work = lists::create(&db, "工作").unwrap();
         let mut req = create_request("b");
         req.list_id = Some(work.id);
         let todo = create(&db, &req).unwrap();
-        assert_eq!(todo.list_id, work.id);
-        assert_eq!(get(&db, todo.id).unwrap().list_id, work.id);
+        assert_eq!(todo.list_id, Some(work.id));
+        assert_eq!(get(&db, todo.id).unwrap().list_id, Some(work.id));
 
         req.list_id = Some(12345);
         assert_eq!(create(&db, &req).unwrap_err(), "清单不存在");
@@ -788,7 +790,7 @@ mod tests {
         .unwrap();
 
         let moved = move_to_list(&db, todo.id, work.id).unwrap();
-        assert_eq!(moved.list_id, work.id);
+        assert_eq!(moved.list_id, Some(work.id));
         assert!(moved.updated_at.as_str() > "2026-01-01 00:00:00");
 
         // 已在目标清单：什么都不改
@@ -803,14 +805,17 @@ mod tests {
         // 编辑表单的「清单」下拉走 update
         let mut upd = update_request();
         upd.list_id = Some(DEFAULT_LIST_ID);
-        assert_eq!(update(&db, todo.id, &upd).unwrap().list_id, DEFAULT_LIST_ID);
+        assert_eq!(
+            update(&db, todo.id, &upd).unwrap().list_id,
+            Some(DEFAULT_LIST_ID)
+        );
         upd.list_id = Some(999);
         upd.title = Some("不该写进去".to_string());
         assert_eq!(update(&db, todo.id, &upd).unwrap_err(), "清单不存在");
         let current = get(&db, todo.id).unwrap();
         assert_eq!(
             (current.list_id, current.title.as_str()),
-            (DEFAULT_LIST_ID, "a"),
+            (Some(DEFAULT_LIST_ID), "a"),
             "目标清单不存在时整条更新都不生效"
         );
 
@@ -821,8 +826,50 @@ mod tests {
         .unwrap();
         assert_eq!(
             move_to_list(&db, todo.id, DEFAULT_LIST_ID).unwrap().list_id,
-            DEFAULT_LIST_ID
+            Some(DEFAULT_LIST_ID)
         );
+    }
+
+    /// 契约 §12-6：只改其它字段时归属保持未知；只有显式设置清单（移动 / 编辑时改了清单）才让它变成已知
+    #[test]
+    fn unknown_list_stays_unknown_until_a_list_is_set_explicitly() {
+        let db = db();
+        let work = lists::create(&db, "工作").unwrap();
+        let todo = create(&db, &create_request("a")).unwrap();
+        // 迁移前的存量待办 / 旧版本写的：归属未知
+        db.with_connection(|c| {
+            c.execute("UPDATE todos SET list_id = NULL WHERE id = ?1", [todo.id])
+        })
+        .unwrap();
+        assert_eq!(get(&db, todo.id).unwrap().list_id, None);
+
+        let mut upd = update_request();
+        upd.title = Some("只改标题".to_string());
+        upd.completed = Some(true);
+        let edited = update(&db, todo.id, &upd).unwrap();
+        assert_eq!(
+            (edited.title.as_str(), edited.list_id),
+            ("只改标题", None),
+            "list_id = None 的更新不动归属"
+        );
+        db.with_transaction(|tx| apply_order(tx, OrderTable::Todos, &[todo.id]))
+            .unwrap();
+        assert_eq!(get(&db, todo.id).unwrap().list_id, None, "排序也不动归属");
+
+        // 显式移到默认清单：未知变成已知的 1（版本前进，随同步传播）
+        let before = get(&db, todo.id).unwrap().updated_at;
+        let moved = move_to_list(&db, todo.id, DEFAULT_LIST_ID).unwrap();
+        assert_eq!(moved.list_id, Some(DEFAULT_LIST_ID));
+        assert!(moved.updated_at > before);
+
+        // 编辑时改了清单：同样变成已知
+        db.with_connection(|c| {
+            c.execute("UPDATE todos SET list_id = NULL WHERE id = ?1", [todo.id])
+        })
+        .unwrap();
+        let mut upd = update_request();
+        upd.list_id = Some(work.id);
+        assert_eq!(update(&db, todo.id, &upd).unwrap().list_id, Some(work.id));
     }
 
     fn seq(db: &Database) -> i64 {

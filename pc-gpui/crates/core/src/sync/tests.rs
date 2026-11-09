@@ -1634,7 +1634,8 @@ fn todo_of(doc: &Value, id: i64) -> Value {
         .unwrap_or_else(|| panic!("远端没有待办 #{id}"))
 }
 
-fn local_list_id(db: &Database, todo_id: i64) -> i64 {
+/// 本地存储的归属；`None` = 未知
+fn local_list_id(db: &Database, todo_id: i64) -> Option<i64> {
     db.with_connection(|c| {
         c.query_row("SELECT list_id FROM todos WHERE id = ?1", [todo_id], |r| {
             r.get(0)
@@ -1662,7 +1663,10 @@ fn sync_uploads_lists_and_only_adds_list_info_when_it_carries_something() {
                 "createdAt": "2000-01-01 00:00:00", "updatedAt": "2000-01-01 00:00:00"}])
     );
     assert_eq!(first["listTombstones"], json!([]));
-    assert_eq!(todo_of(&first, 1)["listId"], 1);
+    assert!(
+        todo_of(&first, 1).get("listId").is_none(),
+        "归属未知的待办（旧版本写进库的）不写 listId"
+    );
     let mut old = first.clone();
     old.as_object_mut().unwrap().remove("todoLists");
     old.as_object_mut().unwrap().remove("listTombstones");
@@ -1724,7 +1728,7 @@ fn lists_and_list_deletions_sync_in_both_directions() {
     assert!(report.lists_changed() && report.local_changed());
     assert_eq!(report.status, SyncStatus::Pulled);
     assert_eq!(list_names(&fx.db), vec!["收件箱", "工作", "生活"]);
-    assert_eq!(local_list_id(&fx.db, 1), LIFE);
+    assert_eq!(local_list_id(&fx.db, 1), Some(LIFE));
 
     // 另一台设备删除"工作"：本机随之删除，窗口记录一并清理；远端已是结果，不再上传
     window_prefs::update_prefs(
@@ -1772,10 +1776,10 @@ fn lists_and_list_deletions_sync_in_both_directions() {
 }
 
 /// 混跑旧版本：旧设备（≤ 3.0.x，强类型、不认识清单）同步一次——todoLists / listTombstones 经它的 extra 原样带回，
-/// 清单不丢、已删清单不复活；它改过的待办以缺 listId 的形式上传，落进默认清单（接受的退化）；它没改过的待办也被
-/// 它去掉了 listId（平局保留它自己的版本），新设备不受影响，并上传一次把远端补回来
+/// 清单不丢、已删清单不复活；它按自己的版本重新序列化了**全部**待办、全都丢了 listId（契约 §12：缺失 = 未知）。
+/// 新设备不受影响：它改过的待办内容取它的、归属沿用本地清单；随后补传一次把远端的 listId 补回来（已知的默认清单 1 也补）
 #[test]
-fn old_devices_keep_list_keys_and_only_their_edits_fall_back_to_the_default_list() {
+fn old_devices_keep_list_keys_and_their_edits_keep_the_local_list() {
     #[derive(Serialize, Deserialize)]
     struct OldSyncData {
         #[serde(default)]
@@ -1793,8 +1797,15 @@ fn old_devices_keep_list_keys_and_only_their_edits_fall_back_to_the_default_list
         add_local_todo(&fx.db, id, "工作待办", "2026-09-01 10:00:00");
         crate::todo::move_to_list(&fx.db, id, work.id).unwrap();
     }
+    add_local_todo(&fx.db, 3, "默认清单待办", "2026-09-01 10:00:00");
+    crate::todo::move_to_list(&fx.db, 3, 1).unwrap();
     lists::delete(&fx.db, gone.id).unwrap();
     fx.engine().sync(false).unwrap();
+    assert_eq!(
+        todo_of(&fx.remote(), 3)["listId"],
+        1,
+        "已知的默认清单照常写出"
+    );
 
     // 旧设备：未知顶层键进 extra；待办按旧模型重新序列化（没有 listId），其中一条它真的改过
     let mut old: OldSyncData = serde_json::from_value(fx.remote()).unwrap();
@@ -1821,16 +1832,23 @@ fn old_devices_keep_list_keys_and_only_their_edits_fall_back_to_the_default_list
     );
     assert_eq!(
         local_list_id(&fx.db, 1),
-        work.id,
+        Some(work.id),
         "旧设备没改过：留在原清单"
     );
-    assert_eq!(local_list_id(&fx.db, 2), 1, "旧设备改过：落进默认清单");
+    assert_eq!(
+        local_list_id(&fx.db, 2),
+        Some(work.id),
+        "旧设备改过：内容取它的，归属沿用本地清单"
+    );
+    assert_eq!(crate::todo::get(&fx.db, 2).unwrap().title, "旧设备改的标题");
+    assert_eq!(local_list_id(&fx.db, 3), Some(1));
 
-    // 远端丢了 #1 的 listId：本机上传一次补回；之后不再来回
+    // 远端丢了全部 listId：本机上传一次补回（含已知的 1）；之后不再来回
     assert_eq!(fx.count(PUT_DOC), 1);
     let remote = fx.remote();
     assert_eq!(todo_of(&remote, 1)["listId"], work.id);
-    assert_eq!(todo_of(&remote, 2)["listId"], 1);
+    assert_eq!(todo_of(&remote, 2)["listId"], work.id);
+    assert_eq!(todo_of(&remote, 3)["listId"], 1);
     assert_eq!(list_ids_of(&remote), vec![1, work.id]);
     assert_eq!(list_tombstone_ids(&remote), vec![gone.id]);
     fx.clear_log();
@@ -1839,6 +1857,85 @@ fn old_devices_keep_list_keys_and_only_their_edits_fall_back_to_the_default_list
         SyncStatus::NoChanges
     );
     assert_eq!(fx.count(PUT_DOC), 0);
+}
+
+/// 先跑旧版本、后升级的设备（契约 §12）：迁移后存量待办的归属是未知（NULL）、updatedAt 与远端相同，基准 ETag 被作废。
+/// 升级后第一次同步是无条件 GET；平局也采纳远端的 listId，学到真实归属，且这次采纳不触发上传。之后它上传时，
+/// 文档里的 listId 保持各自的真实值（不会被改成 1），两边都未知的待办仍不写 listId
+#[test]
+fn upgraded_old_device_learns_list_ids_without_uploading() {
+    let fx = Fixture::new("lists-upgraded-device");
+    // 另一台新版本设备写过远端：#1 在"生活"、#2 明确在默认清单、#3 归属未知
+    let new_db = Database::new_in_memory().unwrap();
+    let new_device = SyncEngine {
+        db: &new_db,
+        client: &fx.client,
+        images_dir: fx.dir.clone(),
+        device_id: "new-pc".to_string(),
+        retry_delay: fx.retry_delay,
+    };
+    let life = lists::create(&new_db, "生活").unwrap();
+    for id in 1..=3 {
+        add_local_todo(&new_db, id, "待办", "2026-09-01 10:00:00");
+    }
+    crate::todo::move_to_list(&new_db, 1, life.id).unwrap();
+    crate::todo::move_to_list(&new_db, 2, 1).unwrap();
+    new_device.sync(false).unwrap();
+
+    // 本机以前跑旧版本、同步过同一批待办（同一版本）；迁移 v31 后归属全部未知、基准 ETag 作废、没有未同步的变更
+    fx.engine().sync(false).unwrap();
+    fx.db
+        .with_transaction(|tx| -> rusqlite::Result<()> {
+            tx.execute("UPDATE todos SET list_id = NULL", [])?;
+            let seq = sync_store::local_seq(tx)?;
+            sync_store::set_synced_seq(tx, seq)?;
+            set_setting(tx, KEY_REMOTE_ETAG, "")?;
+            Ok(())
+        })
+        .unwrap();
+    let versions_before: Vec<String> = (1..=3)
+        .map(|id| crate::todo::get(&fx.db, id).unwrap().updated_at)
+        .collect();
+    assert!(
+        !fx.engine().read_pre_state().unwrap().dirty(),
+        "前提：没有未同步的变更"
+    );
+
+    fx.clear_log();
+    let report = fx.engine().sync(false).unwrap();
+    assert_eq!(
+        fx.server().get_conditions.last(),
+        Some(&(None, None)),
+        "升级后第一次同步是无条件 GET"
+    );
+    assert_eq!(report.todos_updated, 2, "学到 #1 / #2 的归属");
+    assert_eq!(report.status, SyncStatus::Pulled);
+    assert_eq!(local_list_id(&fx.db, 1), Some(life.id));
+    assert_eq!(local_list_id(&fx.db, 2), Some(1));
+    assert_eq!(local_list_id(&fx.db, 3), None, "远端也未知：仍是未知");
+    let versions_after: Vec<String> = (1..=3)
+        .map(|id| crate::todo::get(&fx.db, id).unwrap().updated_at)
+        .collect();
+    assert_eq!(versions_after, versions_before, "采纳归属不改 updated_at");
+    assert_eq!(fx.count(PUT_DOC), 0, "采纳远端本来就有的 listId 不触发上传");
+    fx.clear_log();
+    assert_eq!(
+        fx.engine().sync(false).unwrap().status,
+        SyncStatus::NoChanges
+    );
+    assert_eq!(fx.count(PUT_DOC), 0);
+
+    // 之后本机改了 #3（只改标题，归属保持未知）并上传：远端的 listId 保持真实值，#3 仍不写 listId
+    let mut upd: crate::db::UpdateTodoRequest = serde_json::from_value(json!({})).unwrap();
+    upd.title = Some("升级后的设备改的".to_string());
+    crate::todo::update(&fx.db, 3, &upd).unwrap();
+    assert_eq!(fx.engine().sync(false).unwrap().status, SyncStatus::Pushed);
+    let remote = fx.remote();
+    assert_eq!(todo_of(&remote, 1)["listId"], life.id);
+    assert_eq!(todo_of(&remote, 2)["listId"], 1);
+    let third = todo_of(&remote, 3);
+    assert_eq!(third["title"], "升级后的设备改的");
+    assert!(third.get("listId").is_none(), "未知不写出");
 }
 
 /// 两台设备离线各建一个清单（甚至同名）：id 不撞，同步后两边都有两个（同步造成的重名容忍）
