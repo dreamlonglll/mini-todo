@@ -1008,6 +1008,7 @@ fn empty_update() -> UpdateTodoRequest {
         repeat_weekdays: None,
         repeat_month_day: None,
         clear_repeat: false,
+        list_id: None,
     }
 }
 

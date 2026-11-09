@@ -495,7 +495,8 @@ pub fn list_screen_configs(db: &Database) -> Result<Vec<ScreenConfig>, String> {
     .map_err(|e| e.to_string())
 }
 
-/// 删除屏幕配置，连同桌面收纳箱在该屏幕组合下的位置记录（`fence_layouts`，PRD R5）
+/// 删除屏幕配置，连同该屏幕组合下桌面收纳箱的位置记录（`fence_layouts`，PRD R5）与
+/// 清单 / 日历窗口的布局（`window_layouts`，v31）
 fn delete_screen_config_rows(conn: &rusqlite::Connection, config_id: &str) -> rusqlite::Result<()> {
     conn.execute(
         "DELETE FROM screen_configs WHERE config_id = ?",
@@ -505,10 +506,11 @@ fn delete_screen_config_rows(conn: &rusqlite::Connection, config_id: &str) -> ru
         "DELETE FROM fence_layouts WHERE screen_config_id = ?",
         [config_id],
     )?;
+    crate::window_prefs::delete_layouts_for_screen(conn, config_id)?;
     Ok(())
 }
 
-/// 删除屏幕配置（连带该组合的收纳箱位置记录）（`delete_screen_config`）
+/// 删除屏幕配置（连带该组合下收纳箱的位置记录与清单 / 日历窗口的布局）（`delete_screen_config`）
 pub fn delete_screen_config(db: &Database, config_id: &str) -> Result<(), String> {
     db.with_transaction(|tx| delete_screen_config_rows(tx, config_id))
         .map_err(|e: rusqlite::Error| e.to_string())
@@ -559,7 +561,7 @@ mod tests {
     // ---- 原 window.rs ----
 
     #[test]
-    fn deleting_a_screen_config_also_drops_fence_layouts_of_that_combination() {
+    fn deleting_a_screen_config_also_drops_fence_and_window_layouts_of_that_combination() {
         let db = Database::new_in_memory().unwrap();
         db.with_connection(|conn| {
             conn.execute_batch(
@@ -568,7 +570,11 @@ mod tests {
                  INSERT INTO fences (id, title, folder_name, x, y, width, height, created_at, updated_at)
                      VALUES (1, '收纳箱', '收纳箱', 0, 0, 368, 334, '', '');
                  INSERT INTO fence_layouts (fence_id, screen_config_id, x, y, width, height, updated_at)
-                     VALUES (1, '1_1920x1080@100', 0, 0, 368, 334, ''), (1, '2_3840x2160@150_2560x1600@125', 9, 9, 552, 504, '');",
+                     VALUES (1, '1_1920x1080@100', 0, 0, 368, 334, ''), (1, '2_3840x2160@150_2560x1600@125', 9, 9, 552, 504, '');
+                 INSERT INTO window_layouts (window_key, screen_config_id, x, y, width, height, is_fixed, updated_at)
+                     VALUES ('list:1', '1_1920x1080@100', 0, 0, 380, 600, 1, ''),
+                            ('calendar', '1_1920x1080@100', 380, 0, 600, 600, 1, ''),
+                            ('list:1', '2_3840x2160@150_2560x1600@125', 9, 9, 570, 900, 0, '');",
             )?;
             delete_screen_config_rows(conn, "1_1920x1080@100")?;
             let configs: i64 =
@@ -577,8 +583,20 @@ mod tests {
                 .prepare("SELECT screen_config_id FROM fence_layouts")?
                 .query_map([], |r| r.get(0))?
                 .collect::<rusqlite::Result<_>>()?;
+            let window_layouts: Vec<(String, String)> = conn
+                .prepare("SELECT window_key, screen_config_id FROM window_layouts")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
             assert_eq!(configs, 1);
             assert_eq!(layouts, vec!["2_3840x2160@150_2560x1600@125".to_string()]);
+            assert_eq!(
+                window_layouts,
+                vec![(
+                    "list:1".to_string(),
+                    "2_3840x2160@150_2560x1600@125".to_string()
+                )],
+                "该组合下全部清单 / 日历窗口的布局一并删除，其它组合不动"
+            );
             Ok(())
         })
         .unwrap();

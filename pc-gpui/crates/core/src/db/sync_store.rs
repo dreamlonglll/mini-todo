@@ -8,7 +8,7 @@
 //!
 //! 网络与 JSON 文档拼装在 `commands::sync_cmd`；本模块只认已解析的记录和 SQLite。
 
-use super::models::{SubTask, Todo, Tombstone};
+use super::models::{SubTask, Todo, Tombstone, DEFAULT_LIST_ID};
 use super::time::{normalize_datetime, superseding, DefaultTime};
 use super::{subtask_from_row, todo_from_row, SUBTASK_COLUMNS, TODO_COLUMNS};
 use rusqlite::{params, Connection, ErrorCode, OptionalExtension, Result, Transaction};
@@ -120,6 +120,31 @@ pub fn list_tombstones(conn: &Connection, cutoff: &str) -> Result<Vec<Tombstone>
 /// 清理 `deleted_at < cutoff` 的墓碑，返回清理条数
 pub fn purge_tombstones_before(conn: &Connection, cutoff: &str) -> Result<usize> {
     conn.execute("DELETE FROM tombstones WHERE deleted_at < ?1", [cutoff])
+}
+
+// ============================================================================
+// 清单墓碑（v31 `list_tombstones`，同步文档顶层 `listTombstones`）
+// ============================================================================
+
+/// 写入清单墓碑；同键已存在时保留较大的 `deleted_at`。默认清单（id 1）不可删除，它的墓碑一律不存
+pub fn record_list_tombstone(conn: &Connection, list_id: i64, deleted_at: &str) -> Result<()> {
+    if list_id == DEFAULT_LIST_ID {
+        return Ok(());
+    }
+    conn.execute(
+        "INSERT INTO list_tombstones (entity_id, deleted_at) VALUES (?1, ?2)
+         ON CONFLICT(entity_id) DO UPDATE SET deleted_at = MAX(deleted_at, excluded.deleted_at)",
+        params![list_id, deleted_at],
+    )?;
+    Ok(())
+}
+
+pub fn remove_list_tombstone(conn: &Connection, list_id: i64) -> Result<()> {
+    conn.execute(
+        "DELETE FROM list_tombstones WHERE entity_id = ?1",
+        [list_id],
+    )?;
+    Ok(())
 }
 
 /// 删除墓碑时间：至少是现在，且不早于记录自己的 updated_at（防止另一端时钟偏快时，

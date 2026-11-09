@@ -208,6 +208,9 @@ pub struct CreateTodoRequest {
     pub start_time: Option<String>,
     /// 截止时间（可为空）
     pub end_time: Option<String>,
+    /// 所属清单（v31）；`None` = 默认清单。必须是现有的清单，否则报"清单不存在"
+    #[serde(default)]
+    pub list_id: Option<i64>,
 }
 
 fn default_quadrant() -> i32 {
@@ -253,6 +256,9 @@ pub struct UpdateTodoRequest {
     /// 是否明确清除重复提醒
     #[serde(default)]
     pub clear_repeat: bool,
+    /// 移到另一个清单（v31）；必须是现有的清单，否则报"清单不存在"
+    #[serde(default)]
+    pub list_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
