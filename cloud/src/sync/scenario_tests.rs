@@ -13,11 +13,12 @@ use tempfile::TempDir;
 use crate::config::Config;
 use crate::db::repo::{self, meta_keys as mk};
 use crate::db::Db;
+use crate::model;
 use crate::sync::doc::{placeholder_settings, CLOUD_DEVICE_ID};
 use crate::sync::mock_dav::{MockDav, XmlStyle};
 use crate::sync::push::PRECONDITION_RETRY_DELAY;
 use crate::sync::{gzip, images, pull, push, SyncCtx, SYNC_DATA_FILE};
-use crate::time::now_local_string;
+use crate::time::{bump_updated_at, deletion_time, now_local_string};
 
 struct Env {
     mock: MockDav,
@@ -1240,4 +1241,472 @@ fn mirror_falls_back_to_document_image_list() {
     assert_eq!(r.missing, 1);
     assert!(e.ctx.cfg.images_dir.join("a.png").exists());
     assert_eq!(e.mock.count("GET", "evil"), 0);
+}
+
+// =============================================================================
+// 多清单：todoLists / listTombstones（契约 .trellis/tasks/11-09-multi-list-windows/contract.md）
+// =============================================================================
+
+/// 新版 PC 写出的清单记录（`{id, name, sortOrder, createdAt, updatedAt}`）。
+fn pc_list(id: i64, name: &str, sort_order: i64, updated_at: &str) -> Value {
+    json!({"id": id, "name": name, "sortOrder": sort_order,
+           "createdAt": "2026-11-01 08:00:00", "updatedAt": updated_at})
+}
+
+fn pc_default_list() -> Value {
+    Value::Object(model::default_list_record())
+}
+
+fn pc_todo_in(id: i64, title: &str, updated_at: &str, list_id: i64) -> Value {
+    let mut t = pc_todo(id, title, updated_at, vec![]);
+    t["listId"] = json!(list_id);
+    t
+}
+
+/// 新版 PC（多清单）写出的文档：顶层多了 todoLists / listTombstones。
+fn pc_doc_lists(
+    todos: Vec<Value>,
+    lists: Vec<Value>,
+    list_tombstones: Vec<Value>,
+    tombstones: Vec<Value>,
+) -> Value {
+    let mut doc = pc_doc(todos, tombstones);
+    doc["todoLists"] = json!(lists);
+    doc["listTombstones"] = json!(list_tombstones);
+    doc
+}
+
+fn remote_list_names(doc: &Value) -> Vec<(i64, String)> {
+    doc["todoLists"]
+        .as_array()
+        .expect("todoLists 必须写出")
+        .iter()
+        .map(|l| {
+            (
+                l["id"].as_i64().unwrap(),
+                l["name"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+fn remote_list_tombstone_ids(doc: &Value) -> Vec<i64> {
+    doc["listTombstones"]
+        .as_array()
+        .expect("listTombstones 必须写出")
+        .iter()
+        .map(|t| t["entityId"].as_i64().unwrap())
+        .collect()
+}
+
+fn local_list_name(db: &Db, id: &str) -> Option<String> {
+    db.with_conn(|c| repo::all_list_rows(c))
+        .unwrap()
+        .into_iter()
+        .find(|r| r.id == id)
+        .map(|r| {
+            serde_json::from_str::<Value>(&r.data_json).unwrap()["name"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+}
+
+fn local_todo(db: &Db, id: &str) -> Value {
+    let row = db
+        .with_conn(|c| repo::get_todo(c, id))
+        .unwrap()
+        .expect("todo exists");
+    serde_json::from_str(&row.data_json).unwrap()
+}
+
+/// 与 API `POST /lists` 相同的落库动作（插入 + 标脏）。
+fn api_create_list(db: &Db, id: i64, name: &str) {
+    let now = now_local_string(tz());
+    let record = Value::Object(model::new_list_record(id, name, 1, &now));
+    db.with_conn(|c| {
+        repo::upsert_list(c, &id.to_string(), &record.to_string(), &now).unwrap();
+        repo::mark_dirty(c).unwrap();
+    });
+}
+
+/// 与 API `PATCH /lists/:id` 改名相同的落库动作（`updatedAt = max(now, 旧值 + 1 秒)` + 标脏）。
+fn api_rename_list(db: &Db, id: &str, name: &str) {
+    let now = now_local_string(tz());
+    db.with_conn(|c| {
+        let row = repo::all_list_rows(c)
+            .unwrap()
+            .into_iter()
+            .find(|r| r.id == id)
+            .unwrap();
+        let mut obj: Value = serde_json::from_str(&row.data_json).unwrap();
+        let updated_at = bump_updated_at(&now, &[&row.updated_at], tz());
+        obj["name"] = json!(name);
+        obj["updatedAt"] = json!(updated_at);
+        repo::upsert_list(c, id, &obj.to_string(), &updated_at).unwrap();
+        repo::mark_dirty(c).unwrap();
+    });
+}
+
+/// 与 API `DELETE /lists/:id` 相同的落库动作（契约 §5）：其下待办移到默认清单并刷新
+/// `updatedAt`、删清单、写清单墓碑、标脏。
+fn api_delete_list(db: &Db, id: &str) {
+    let now = now_local_string(tz());
+    db.with_conn(|c| {
+        let tx = c.transaction().unwrap();
+        for row in repo::all_todos(&tx).unwrap() {
+            let mut obj: Value = serde_json::from_str(&row.data_json).unwrap();
+            if obj["listId"].as_i64().map(|n| n.to_string()).as_deref() != Some(id) {
+                continue;
+            }
+            let updated_at = bump_updated_at(&now, &[&row.updated_at], tz());
+            obj["listId"] = json!(model::DEFAULT_LIST_ID);
+            obj["updatedAt"] = json!(updated_at);
+            repo::upsert_todo(&tx, &row.id, &obj.to_string(), &updated_at).unwrap();
+        }
+        let row = repo::all_list_rows(&tx)
+            .unwrap()
+            .into_iter()
+            .find(|r| r.id == id)
+            .unwrap();
+        assert!(repo::delete_list(&tx, id).unwrap());
+        let deleted_at = deletion_time(&now, &[&row.updated_at], tz());
+        repo::add_list_tombstone(&tx, id, &deleted_at).unwrap();
+        repo::mark_dirty(&tx).unwrap();
+        tx.commit().unwrap();
+    });
+}
+
+/// 两端同时改同一个清单的名字：按 `updatedAt` 整条 LWW，较新的一方胜出、两端收敛。
+#[test]
+fn concurrent_list_renames_resolve_by_lww() {
+    let e = env(MockDav::start());
+    let t0 = "2026-11-01 10:00:00";
+    e.mock.put_doc(&pc_doc_lists(
+        vec![],
+        vec![
+            pc_default_list(),
+            pc_list(5, "工作", 1, t0),
+            pc_list(6, "生活", 2, t0),
+        ],
+        vec![],
+        vec![],
+    ));
+    pull::pull_once(&e.ctx).unwrap();
+    assert_eq!(local_list_name(&e.db, "5").as_deref(), Some("工作"));
+
+    // 云端（AI）把两个都改了名；PC 同时也改了：5 比云端晚、6 比云端早
+    api_rename_list(&e.db, "5", "工作-AI");
+    api_rename_list(&e.db, "6", "生活-AI");
+    e.mock.put_doc(&pc_doc_lists(
+        vec![],
+        vec![
+            pc_default_list(),
+            pc_list(5, "工作-PC", 1, &ts(60)),
+            pc_list(6, "生活-PC", 2, &ts(-60)),
+        ],
+        vec![],
+        vec![],
+    ));
+    let report = push::push_once(&e.ctx).unwrap();
+    assert!(report.pushed);
+    let remote = e.mock.doc().unwrap();
+    assert_eq!(
+        remote_list_names(&remote),
+        vec![
+            (1, "待办清单".to_string()),
+            (5, "工作-PC".to_string()),
+            (6, "生活-AI".to_string()),
+        ]
+    );
+    assert_eq!(local_list_name(&e.db, "5").as_deref(), Some("工作-PC"));
+    assert_eq!(local_list_name(&e.db, "6").as_deref(), Some("生活-AI"));
+    assert!(!is_dirty(&e.db));
+}
+
+/// 删除双向传播：PC 删清单 → 云端删掉本地清单（待办不改写，读侧兜底）；云端删清单 → 其下待办
+/// 移到默认清单、写出 listTombstones；之后陈旧写入方带回已删清单也不会复活。
+#[test]
+fn list_deletion_propagates_both_ways_without_resurrection() {
+    let e = env(MockDav::start());
+    let t0 = "2026-11-01 10:00:00";
+    let lists = vec![
+        pc_default_list(),
+        pc_list(5, "工作", 1, t0),
+        pc_list(6, "生活", 2, t0),
+    ];
+    e.mock.put_doc(&pc_doc_lists(
+        vec![
+            pc_todo_in(1, "写周报", t0, 5),
+            pc_todo_in(2, "买菜", t0, 6),
+            pc_todo_in(3, "云端也有", t0, 5),
+        ],
+        lists.clone(),
+        vec![],
+        vec![],
+    ));
+    pull::pull_once(&e.ctx).unwrap();
+
+    // PC 删了清单 5：自己把 1 移到默认清单（刷新 updatedAt）；3 在 PC 上没改写（旧设备编辑过等）
+    let deleted_at = ts(-5);
+    e.mock.put_doc(&pc_doc_lists(
+        vec![
+            pc_todo_in(1, "写周报", &ts(-5), 1),
+            pc_todo_in(2, "买菜", t0, 6),
+            pc_todo_in(3, "云端也有", t0, 5),
+        ],
+        vec![pc_default_list(), pc_list(6, "生活", 2, t0)],
+        vec![json!({"entityId": 5, "deletedAt": deleted_at})],
+        vec![],
+    ));
+    let r = pull::pull_once(&e.ctx).unwrap();
+    assert_eq!(r.stats.lists_deleted, 1);
+    assert!(local_list_name(&e.db, "5").is_none());
+    assert_eq!(local_todo(&e.db, "1")["listId"], json!(1));
+    assert_eq!(
+        local_todo(&e.db, "3")["listId"],
+        json!(5),
+        "收到清单墓碑不改写待办（读侧兜底到默认清单）"
+    );
+    assert!(!r.repush_scheduled);
+
+    // 云端删清单 6：2 移到默认清单、updatedAt 刷新
+    let before = local_todo(&e.db, "2")["updatedAt"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    api_delete_list(&e.db, "6");
+    push::push_once(&e.ctx).unwrap();
+    let remote = e.mock.doc().unwrap();
+    assert_eq!(
+        remote_list_names(&remote),
+        vec![(1, "待办清单".to_string())]
+    );
+    assert_eq!(remote_list_tombstone_ids(&remote), vec![5, 6]);
+    let moved = remote_todo(&remote, 2).unwrap();
+    assert_eq!(moved["listId"], json!(1));
+    assert!(moved["updatedAt"].as_str().unwrap() > before.as_str());
+    assert_eq!(
+        remote["tombstones"],
+        json!([]),
+        "清单墓碑不进共用的 tombstones（旧版本会丢掉未知 entityType）"
+    );
+
+    // 陈旧写入方（例如还没同步到删除的 PC，在忽略前置条件的服务端上）整包覆盖：
+    // 带回清单 5 / 6、没有清单墓碑
+    e.mock.put_doc(&pc_doc_lists(
+        vec![pc_todo_in(1, "写周报", t0, 5), pc_todo_in(2, "买菜", t0, 6)],
+        lists,
+        vec![],
+        vec![],
+    ));
+    let r = pull::pull_once(&e.ctx).unwrap();
+    assert!(local_list_name(&e.db, "5").is_none(), "墓碑压制陈旧副本");
+    assert!(local_list_name(&e.db, "6").is_none());
+    assert!(r.repush_scheduled, "远端缺本地内容（含清单墓碑）→ 重推");
+    push::push_once(&e.ctx).unwrap();
+    let remote = e.mock.doc().unwrap();
+    assert_eq!(
+        remote_list_names(&remote),
+        vec![(1, "待办清单".to_string())]
+    );
+    assert_eq!(remote_list_tombstone_ids(&remote), vec![5, 6]);
+    assert_eq!(remote_todo(&remote, 2).unwrap()["listId"], json!(1));
+}
+
+/// 远端没有 todoLists 键（旧格式 / 某个写入方丢了它）：本地清单一条都不删，并重推把它补回去；
+/// 本地只有初始值的默认清单时不为此上传。
+#[test]
+fn remote_without_todo_lists_keeps_local_lists() {
+    let e = env(MockDav::start());
+    e.mock.put_doc(&pc_doc(
+        vec![pc_todo(1, "A", "2026-10-01 10:00:00", vec![])],
+        vec![],
+    ));
+    let r = pull::pull_once(&e.ctx).unwrap();
+    assert!(
+        !r.repush_scheduled,
+        "只有初始值的默认清单：远端缺它不算落后"
+    );
+    assert!(!is_dirty(&e.db));
+
+    e.mock.put_doc(&pc_doc_lists(
+        vec![pc_todo_in(1, "A", "2026-10-01 10:00:00", 5)],
+        vec![
+            pc_default_list(),
+            pc_list(5, "工作", 1, "2026-11-01 10:00:00"),
+        ],
+        vec![],
+        vec![],
+    ));
+    pull::pull_once(&e.ctx).unwrap();
+    assert_eq!(local_list_name(&e.db, "5").as_deref(), Some("工作"));
+
+    e.mock.put_doc(&pc_doc(
+        vec![pc_todo_in(1, "A", "2026-10-01 10:00:00", 5)],
+        vec![],
+    ));
+    let r = pull::pull_once(&e.ctx).unwrap();
+    assert_eq!(r.stats.lists_deleted, 0);
+    assert_eq!(local_list_name(&e.db, "5").as_deref(), Some("工作"));
+    assert!(r.repush_scheduled);
+    push::push_once(&e.ctx).unwrap();
+    assert_eq!(
+        remote_list_names(&e.mock.doc().unwrap()),
+        vec![(1, "待办清单".to_string()), (5, "工作".to_string())]
+    );
+}
+
+/// 旧格式文档（todo 没有 listId、没有 todoLists）：记录原样往返（不替 PC 补 listId），
+/// 上传时照常写出默认清单与空的清单墓碑。
+#[test]
+fn legacy_todos_without_list_id_round_trip_unchanged() {
+    let e = env(MockDav::start());
+    let todo1 = pc_todo(1, "A", "2026-10-01 10:00:00", vec![]);
+    assert!(todo1.get("listId").is_none());
+    e.mock.put_doc(&pc_doc(vec![todo1.clone()], vec![]));
+    pull::pull_once(&e.ctx).unwrap();
+    api_create_todo(&e.db, 100, "from AI");
+    push::push_once(&e.ctx).unwrap();
+    let remote = e.mock.doc().unwrap();
+    assert_eq!(remote_todo(&remote, 1).unwrap(), todo1);
+    assert_eq!(remote["todoLists"], json!([pc_default_list()]));
+    assert_eq!(remote["listTombstones"], json!([]));
+}
+
+/// 默认清单（entityId = 1）的清单墓碑一律忽略：不存、不传播；默认清单的改名照常生效。
+#[test]
+fn default_list_tombstone_is_ignored_and_not_propagated() {
+    let e = env(MockDav::start());
+    e.mock.put_doc(&pc_doc_lists(
+        vec![],
+        vec![pc_list(1, "收件箱", 0, &ts(-5))],
+        vec![
+            json!({"entityId": 1, "deletedAt": ts(0)}),
+            json!({"entityId": 9, "deletedAt": ts(-1)}),
+        ],
+        vec![],
+    ));
+    let r = pull::pull_once(&e.ctx).unwrap();
+    assert_eq!(r.stats.list_tombstones_applied, 1);
+    assert_eq!(local_list_name(&e.db, "1").as_deref(), Some("收件箱"));
+    let stones = e.db.with_conn(|c| repo::all_list_tombstones(c)).unwrap();
+    assert_eq!(stones.len(), 1);
+    assert_eq!(stones[0].0, "9");
+
+    api_create_todo(&e.db, 100, "from AI");
+    push::push_once(&e.ctx).unwrap();
+    let remote = e.mock.doc().unwrap();
+    assert_eq!(remote_list_tombstone_ids(&remote), vec![9]);
+    assert_eq!(remote_list_names(&remote), vec![(1, "收件箱".to_string())]);
+}
+
+/// 云端 GET 与 PUT 之间 PC 改了清单：412 → 重新 GET 合并 → 重试；两边的清单与清单墓碑都在。
+#[test]
+fn lists_survive_412_merge_and_retry() {
+    let e = env(MockDav::start());
+    e.mock.put_doc(&pc_doc_lists(
+        vec![],
+        vec![
+            pc_default_list(),
+            pc_list(5, "工作", 1, "2026-11-01 10:00:00"),
+        ],
+        vec![],
+        vec![],
+    ));
+    pull::pull_once(&e.ctx).unwrap();
+    api_create_list(&e.db, 1731000000000777, "AI 建的");
+
+    let pc_v2 = pc_doc_lists(
+        vec![],
+        vec![
+            pc_default_list(),
+            pc_list(5, "工作-PC", 1, &ts(-1)),
+            pc_list(8, "PC 新建", 3, &ts(-1)),
+        ],
+        vec![json!({"entityId": 9, "deletedAt": ts(-1)})],
+        vec![],
+    );
+    e.mock
+        .with(|s| s.before_put = Some(Box::new(move |s| s.write_doc(&pc_v2))));
+    let report = push::push_once(&e.ctx).unwrap();
+    assert_eq!(report.attempts, 2);
+    assert_eq!(
+        sync_data_calls(&e.mock)
+            .into_iter()
+            .filter(|(m, _)| m == "PUT")
+            .map(|(_, s)| s)
+            .collect::<Vec<_>>(),
+        vec![412, 204]
+    );
+    let remote = e.mock.doc().unwrap();
+    assert_eq!(
+        remote_list_names(&remote),
+        vec![
+            (1, "待办清单".to_string()),
+            (5, "工作-PC".to_string()),
+            (1731000000000777, "AI 建的".to_string()),
+            (8, "PC 新建".to_string()),
+        ],
+        "按 (sortOrder, id) 排序"
+    );
+    assert_eq!(remote_list_tombstone_ids(&remote), vec![9]);
+    assert_eq!(local_list_name(&e.db, "8").as_deref(), Some("PC 新建"));
+}
+
+/// 从不认识清单的旧版 cloud 升级：旧信封里还原样存着 PC 写的 todoLists / listTombstones，本地清单表
+/// 是空的。升级后第一次推送前的 GET 必须是全量 GET 并把清单合并进来，不能 304 后用只有默认清单的
+/// 本地表把它们从远端抹掉。
+#[test]
+fn upgrade_from_cloud_without_lists_merges_remote_lists_before_first_push() {
+    let e = env(MockDav::start());
+    let doc = pc_doc_lists(
+        vec![pc_todo_in(1, "A", "2026-11-01 10:00:00", 5)],
+        vec![
+            pc_default_list(),
+            pc_list(5, "工作", 1, "2026-11-01 10:00:00"),
+        ],
+        vec![json!({"entityId": 9, "deletedAt": ts(-1)})],
+        vec![],
+    );
+    e.mock.put_doc(&doc);
+    // 旧版 cloud 留下的状态：基准 = 当前远端版本，信封里带着清单键，本地清单表里只有默认清单
+    let mut old_envelope = doc.as_object().unwrap().clone();
+    old_envelope.remove("todos");
+    old_envelope.remove("tombstones");
+    let etag = e.mock.with(|s| s.etag_of(SYNC_DATA_FILE)).unwrap();
+    e.db.with_conn(|c| -> rusqlite::Result<()> {
+        repo::upsert_todo(
+            c,
+            "1",
+            &pc_todo_in(1, "A", "2026-11-01 10:00:00", 5).to_string(),
+            "2026-11-01 10:00:00",
+        )?;
+        repo::set_meta(c, mk::BASE_ETAG, &etag)?;
+        repo::set_meta(
+            c,
+            mk::REMOTE_ENVELOPE,
+            &Value::Object(old_envelope).to_string(),
+        )?;
+        repo::delete_meta(c, "lists_base_reset_v1")
+    })
+    .unwrap();
+    // 升级后重启
+    e.db.with_conn(|c| crate::db::schema::init(c)).unwrap();
+
+    api_create_todo(&e.db, 100, "from AI");
+    e.mock.clear_log();
+    push::push_once(&e.ctx).unwrap();
+    assert_eq!(
+        sync_data_calls(&e.mock)[0],
+        ("GET".to_string(), 200),
+        "升级后第一次 GET 不带 If-None-Match"
+    );
+    let remote = e.mock.doc().unwrap();
+    assert_eq!(
+        remote_list_names(&remote),
+        vec![(1, "待办清单".to_string()), (5, "工作".to_string())]
+    );
+    assert_eq!(remote_list_tombstone_ids(&remote), vec![9]);
+    assert_eq!(local_list_name(&e.db, "5").as_deref(), Some("工作"));
 }

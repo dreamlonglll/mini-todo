@@ -695,6 +695,13 @@ pub fn default_list_record() -> Map<String, Value> {
     new_list_record(DEFAULT_LIST_ID, DEFAULT_LIST_NAME, 0, DEFAULT_LIST_TIME)
 }
 
+/// 还是初始值的默认清单（id 1、规范化后的 `updatedAt` 不晚于 [`DEFAULT_LIST_TIME`]）：每个写入方
+/// 都会按同样的值补建它，所以远端缺它不算"远端落后"，本地只有它也不算"有待同步的内容"
+/// ——否则每个还没有清单信息的远端文档都会触发一次没有意义的上传。
+pub fn is_pristine_default_list(id: &str, canonical_updated_at: &str) -> bool {
+    id.parse::<i64>() == Ok(DEFAULT_LIST_ID) && canonical_updated_at <= DEFAULT_LIST_TIME
+}
+
 // =============================================================================
 // 存量数据归一化
 // =============================================================================

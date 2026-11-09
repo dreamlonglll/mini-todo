@@ -30,7 +30,7 @@ use serde_json::{json, Value};
 use tracing::{debug, warn};
 
 use crate::db::repo;
-use crate::model::{canonicalize_record_times, DEFAULT_LIST_ID};
+use crate::model::{canonicalize_record_times, is_pristine_default_list, DEFAULT_LIST_ID};
 use crate::sync::doc::{list_record_id, EntityType, RemoteDoc};
 use crate::time::normalize_datetime;
 use crate::util::id_string;
@@ -346,6 +346,9 @@ fn merge_lists(
 /// - 本地墓碑（`deletedAt >= recheck_cutoff`）远端没有，或远端同键的 `deletedAt` 更早。
 ///   远端是旧协议文档（没有 `tombstones` 键，旧版 PC 写的）时不比较墓碑——旧版 PC
 ///   不认识墓碑，每次都会把它们丢掉，比较会导致每轮都重推。
+/// - 清单与清单墓碑按同样的规则比较（远端没有 `todoLists` 键时本地的每个清单都算缺失）；
+///   还是初始值的默认清单不算（每个写入方都会按同样的值补建它）。旧协议文档同样不比较：
+///   那么旧的 PC 也不会原样带回它不认识的顶层键。
 ///
 /// 典型场景：别的写入方在忽略前置条件的服务端（nginx dav / Caddy webdav）上用自己的旧
 /// 快照整包覆盖了云端刚写入的记录或墓碑。调用方（pull）为真时标脏，让 push 把并集写回去，
@@ -397,6 +400,9 @@ pub fn remote_lacks_local_state(
     if !doc.has_tombstones_key() {
         return Ok(false);
     }
+    if remote_lacks_local_lists(conn, doc, tz, recheck_cutoff)? {
+        return Ok(true);
+    }
     // 墓碑按数值 id 比较：写出的墓碑 `entityId` 一律是整数（`Tombstone::to_value`），
     // 本地 id 不是整数的墓碑根本导不出去，算进来会让每次 pull 都判定"远端缺墓碑"而无限重推
     let (remote_tombs, _) = doc.tombstones(tz);
@@ -427,6 +433,57 @@ pub fn remote_lacks_local_state(
             .is_none_or(|remote| local > *remote)
         {
             debug!(target: "minitodo_cloud::sync", "remote lacks local tombstone {}:{}", typ, id);
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// `remote_lacks_local_state` 的清单部分（规则见那里）。
+fn remote_lacks_local_lists(
+    conn: &Connection,
+    doc: &RemoteDoc,
+    tz: Tz,
+    recheck_cutoff: &str,
+) -> rusqlite::Result<bool> {
+    let remote_lists: HashMap<String, String> = doc
+        .lists()
+        .iter()
+        .filter_map(|l| list_record_id(l).map(|id| (id, record_ts(l, tz))))
+        .collect();
+    for (id, ts) in repo::exportable_list_timestamps(conn)? {
+        let local = canon_ts(Some(&ts), tz);
+        if is_pristine_default_list(&id, &local) {
+            continue;
+        }
+        if remote_lists
+            .get(&id)
+            .is_none_or(|remote_ts| local > *remote_ts)
+        {
+            debug!(target: "minitodo_cloud::sync", "remote lacks local list {}", id);
+            return Ok(true);
+        }
+    }
+
+    let (remote_tombs, _) = doc.list_tombstones(tz);
+    let mut remote_deleted: HashMap<String, String> = HashMap::new();
+    for t in remote_tombs {
+        let entry = remote_deleted.entry(t.entity_id).or_default();
+        if t.deleted_at > *entry {
+            *entry = t.deleted_at;
+        }
+    }
+    for (id, deleted_at) in repo::all_list_tombstones(conn)? {
+        // 与 `ListTombstone::to_value` 的判定一致：导不出去的墓碑不算
+        if id.parse::<i64>().is_err() {
+            continue;
+        }
+        let local = canon_ts(Some(&deleted_at), tz);
+        if local.is_empty() || local.as_str() < recheck_cutoff {
+            continue;
+        }
+        if remote_deleted.get(&id).is_none_or(|remote| local > *remote) {
+            debug!(target: "minitodo_cloud::sync", "remote lacks local list tombstone {}", id);
             return Ok(true);
         }
     }
@@ -1195,6 +1252,72 @@ mod tests {
         assert_eq!(stats.records_skipped, 4);
         assert_eq!(list_name(&db, "5").as_deref(), Some("工作"));
         assert_eq!(list_name(&db, "8").as_deref(), Some("ok"));
+    }
+
+    /// 远端缺本地清单 / 清单墓碑（或版本更旧）→ 落后；初始值的默认清单不算；旧协议文档不比较。
+    #[test]
+    fn remote_lacks_local_lists_and_list_tombstones() {
+        let (db, _tmp) = fresh_db();
+        // 只有初始值的默认清单：远端没有任何清单信息也不算落后
+        assert!(!lacks(&db, &doc(vec![], vec![]), CUTOFF));
+        assert!(!lacks(&db, &lists_doc(vec![], vec![]), CUTOFF));
+
+        let full = lists_doc(
+            vec![
+                list_value(1, "收件箱", "2026-11-01 09:00:00"),
+                list_value(5, "工作", "2026-11-01 10:00:00"),
+            ],
+            vec![list_tomb(6, "2026-11-01 11:00:00")],
+        );
+        merge(&db, &full);
+        assert!(!lacks(&db, &full, CUTOFF), "完全一致");
+        // 缺清单 5
+        assert!(lacks(
+            &db,
+            &lists_doc(
+                vec![list_value(1, "收件箱", "2026-11-01 09:00:00")],
+                vec![list_tomb(6, "2026-11-01 11:00:00")]
+            ),
+            CUTOFF
+        ));
+        // 改过名的默认清单不再是初始值：远端缺它同样算落后
+        assert!(lacks(
+            &db,
+            &lists_doc(
+                vec![list_value(5, "工作", "2026-11-01 10:00:00")],
+                vec![list_tomb(6, "2026-11-01 11:00:00")]
+            ),
+            CUTOFF
+        ));
+        // 远端版本更旧；平局不算
+        assert!(lacks(
+            &db,
+            &lists_doc(
+                vec![
+                    list_value(1, "收件箱", "2026-11-01 09:00:00"),
+                    list_value(5, "工作", "2026-11-01T09:30:00"),
+                ],
+                vec![list_tomb(6, "2026-11-01 11:00:00")]
+            ),
+            CUTOFF
+        ));
+        // 缺清单墓碑 / 远端的更早
+        let without_tomb = lists_doc(
+            vec![
+                list_value(1, "收件箱", "2026-11-01 09:00:00"),
+                list_value(5, "工作", "2026-11-01 10:00"),
+            ],
+            vec![],
+        );
+        assert!(lacks(&db, &without_tomb, CUTOFF));
+        assert!(
+            !lacks(&db, &without_tomb, "2026-11-02 00:00:00"),
+            "快过期的清单墓碑不要求远端保留"
+        );
+        // 远端没有 todoLists 键：本地清单都算缺失
+        assert!(lacks(&db, &doc(vec![], vec![]), CUTOFF));
+        // 旧协议文档（没有 tombstones 键）不比较清单
+        assert!(!lacks(&db, &legacy_doc(vec![]), CUTOFF));
     }
 
     #[test]

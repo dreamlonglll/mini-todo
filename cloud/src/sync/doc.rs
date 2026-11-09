@@ -19,10 +19,11 @@
 //! 又按本地表重建它），旧版本经 `#[serde(flatten)] extra` 把这两个键原样带回。远端没有
 //! `todoLists` 键 = 远端没有清单信息，本地清单一条都不删。
 //!
-//! 云端上传时**以远端文档为底**：除 `todos / images / tombstones / updatedAt /
-//! version / deviceId` 外的顶层键（含 `settings`、`settingsUpdatedAt` 与未知键）
+//! 云端上传时**以远端文档为底**：除 `todos / tombstones / todoLists / listTombstones / images /
+//! updatedAt / version / deviceId` 外的顶层键（含 `settings`、`settingsUpdatedAt` 与未知键）
 //! 一律原样保留。远端 304 时拿不到正文，所以把基准版本的这部分（"信封"）存在
-//! `meta.remote_envelope`，见 `sync::pull`。
+//! `meta.remote_envelope`，见 `sync::pull`。记录与墓碑（含清单与清单墓碑）每次都从本地表
+//! 重建：本地表已经合并过基准版本，写出的就是"远端 ∪ 本地"按规则合并后的结果。
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -47,6 +48,15 @@ pub const TOMBSTONE_RETENTION_DAYS: i64 = 30;
 pub const KEY_TODO_LISTS: &str = "todoLists";
 /// 顶层键：清单删除墓碑。
 pub const KEY_LIST_TOMBSTONES: &str = "listTombstones";
+/// 由本地表重建、不进信封的顶层键（记录与墓碑）。
+const RECORD_KEYS: [&str; 4] = ["todos", "tombstones", KEY_TODO_LISTS, KEY_LIST_TOMBSTONES];
+
+/// 去掉记录与墓碑键，剩下的就是信封（远端 304 时重建上传文档用）。
+pub fn strip_record_keys(doc: &mut Map<String, Value>) {
+    for key in RECORD_KEYS {
+        doc.remove(key);
+    }
+}
 
 /// 墓碑的实体类型。todo 与 subtask 的 id 是两个独立命名空间。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -133,6 +143,20 @@ impl ListTombstone {
             entity_id: entity_id.to_string(),
             deleted_at,
         })
+    }
+
+    /// 写出到 sync-data 的形态。`entityId` 必须是整数（PC 端是 i64），否则不写出；默认清单的
+    /// 墓碑永不写出（契约 §2）。
+    pub fn to_value(&self) -> Option<Value> {
+        let id = self
+            .entity_id
+            .parse::<i64>()
+            .ok()
+            .filter(|id| *id != crate::model::DEFAULT_LIST_ID)?;
+        Some(json!({
+            "entityId": id,
+            "deletedAt": self.deleted_at,
+        }))
     }
 }
 
@@ -245,11 +269,10 @@ impl RemoteDoc {
         self.map.get("settings")
     }
 
-    /// 信封：除 `todos` / `tombstones` 外的全部顶层键。
+    /// 信封：除记录与墓碑（`todos` / `tombstones` / `todoLists` / `listTombstones`）外的全部顶层键。
     pub fn envelope(&self) -> Map<String, Value> {
         let mut env = self.map.clone();
-        env.remove("todos");
-        env.remove("tombstones");
+        strip_record_keys(&mut env);
         env
     }
 }
@@ -301,6 +324,8 @@ fn cmp_records(a: &Value, b: &Value) -> Ordering {
 /// - `todos`：本地全部 todo（嵌套各自的 subtasks）。本地状态已经合并过基准版本，
 ///   所以它就是"远端 ∪ 本地"按 K3 合并后的结果。
 /// - `tombstones`：本地墓碑表（已包含合并进来的远端墓碑），按保留期过滤。
+/// - `todoLists` / `listTombstones`：本地全部清单（总是含默认清单 id 1，本地缺它时按初始值补上）
+///   与保留期内的全部清单墓碑（契约 §1），同样是合并后的结果。
 /// - `images`：调用方算好的清单。
 /// - 其它顶层键来自 `envelope`，原样保留；`settings` 缺失时写占位并去掉
 ///   `settingsUpdatedAt`。
@@ -364,6 +389,7 @@ pub fn build_outgoing_doc(
         })
     });
     let tombstones: Vec<Value> = tombs.iter().filter_map(Tombstone::to_value).collect();
+    let (lists, list_tombstones) = outgoing_lists(conn, tz, retention_cutoff)?;
 
     let mut doc = envelope.clone();
     let version = doc
@@ -385,7 +411,52 @@ pub fn build_outgoing_doc(
         Value::Array(images.into_iter().map(Value::String).collect()),
     );
     doc.insert("tombstones".into(), Value::Array(tombstones));
+    doc.insert(KEY_TODO_LISTS.into(), Value::Array(lists));
+    doc.insert(KEY_LIST_TOMBSTONES.into(), Value::Array(list_tombstones));
     Ok(doc)
+}
+
+/// 要写出的 `todoLists`（按 `(sortOrder, id)` 排序，总是含默认清单）与 `listTombstones`
+/// （保留期内、按 id 排序，默认清单的墓碑不写）。
+fn outgoing_lists(
+    conn: &Connection,
+    tz: Tz,
+    retention_cutoff: &str,
+) -> rusqlite::Result<(Vec<Value>, Vec<Value>)> {
+    let default_id = crate::model::DEFAULT_LIST_ID.to_string();
+    let mut has_default = false;
+    let mut lists = Vec::new();
+    for row in repo::all_list_rows(conn)? {
+        match serde_json::from_str::<Value>(&row.data_json) {
+            Ok(v) if v.is_object() => {
+                has_default |= row.id == default_id;
+                lists.push(v);
+            }
+            _ => warn!(target: "minitodo_cloud::push", "skip corrupt list row {}", row.id),
+        }
+    }
+    if !has_default {
+        // 本地缺默认清单（不该发生：建库与每次合并都会补建）：照样写出它的初始记录
+        lists.push(Value::Object(crate::model::default_list_record()));
+    }
+    lists.sort_by(cmp_records);
+
+    let mut tombs: Vec<ListTombstone> = Vec::new();
+    for (id, deleted_at) in repo::all_list_tombstones(conn)? {
+        let Some(deleted_at) = normalize_datetime(&deleted_at, tz, NaiveTime::MIN) else {
+            continue;
+        };
+        if deleted_at.as_str() < retention_cutoff {
+            continue;
+        }
+        tombs.push(ListTombstone {
+            entity_id: id,
+            deleted_at,
+        });
+    }
+    tombs.sort_by_key(|t| t.entity_id.parse::<i64>().unwrap_or(i64::MAX));
+    let list_tombstones = tombs.iter().filter_map(ListTombstone::to_value).collect();
+    Ok((lists, list_tombstones))
 }
 
 /// 去重、过滤 K5 非法名、排序。
@@ -515,12 +586,15 @@ mod tests {
             "settings": {"isFixed": true},
             "settingsUpdatedAt": "2026-05-13 10:00:00",
             "futureKey": {"nested": [1, 2]},
-            "images": ["a.png"]
+            "images": ["a.png"],
+            "todoLists": [{"id": 1, "name": "待办清单"}],
+            "listTombstones": []
         }))
         .unwrap();
         let env = doc.envelope();
-        assert!(!env.contains_key("todos"));
-        assert!(!env.contains_key("tombstones"));
+        for owned in ["todos", "tombstones", "todoLists", "listTombstones"] {
+            assert!(!env.contains_key(owned), "{} 由本地表重建，不进信封", owned);
+        }
         assert_eq!(env["futureKey"], json!({"nested": [1, 2]}));
         assert_eq!(env["settingsUpdatedAt"], json!("2026-05-13 10:00:00"));
         assert_eq!(env["settings"], json!({"isFixed": true}));
@@ -578,7 +652,10 @@ mod tests {
             "updatedAt": "old",
             "settings": {"isFixed": true, "theme": "x"},
             "settingsUpdatedAt": "2026-05-01 00:00:00",
-            "futureKey": [1, 2, 3]
+            "futureKey": [1, 2, 3],
+            // 旧版 cloud 存下的信封里可能还带着它们：一律被本地表的内容取代
+            "todoLists": [{"id": 99, "name": "stale"}],
+            "listTombstones": [{"entityId": 98, "deletedAt": "2026-05-01 00:00:00"}]
         });
         let doc = build_outgoing_doc(
             &c,
@@ -602,6 +679,81 @@ mod tests {
         assert_eq!(todos[1]["id"], json!(1));
         assert_eq!(todos[1]["subtasks"][0]["id"], json!(9));
         assert_eq!(todos[0]["subtasks"], json!([]));
+        assert_eq!(
+            doc["todoLists"],
+            json!([crate::model::default_list_record()]),
+            "只有默认清单"
+        );
+        assert_eq!(doc["listTombstones"], json!([]));
+    }
+
+    #[test]
+    fn outgoing_doc_writes_all_lists_and_list_tombstones() {
+        let c = mem_db();
+        repo::upsert_list(
+            &c,
+            "1731000000000123",
+            r#"{"id":1731000000000123,"name":"工作","sortOrder":1,"futureField":true}"#,
+            "2026-11-01 10:00:00",
+        )
+        .unwrap();
+        repo::upsert_list(
+            &c,
+            "1731000000000999",
+            r#"{"id":1731000000000999,"name":"生活","sortOrder":1}"#,
+            "2026-11-01 10:00:00",
+        )
+        .unwrap();
+        repo::upsert_list(&c, "7", "corrupt", "2026-11-01 10:00:00").unwrap();
+        repo::add_list_tombstone(&c, "50", "2026-10-30T11:00:00").unwrap();
+        repo::add_list_tombstone(&c, "40", "2026-10-30 10:00:00").unwrap();
+        repo::add_list_tombstone(&c, "30", "2026-01-01 10:00:00").unwrap(); // 过期
+        repo::add_list_tombstone(&c, "not-a-number", "2026-10-30 10:00:00").unwrap();
+        let doc = build_outgoing_doc(&c, &Map::new(), vec![], tz(), "2026-10-01 00:00:00").unwrap();
+        let ids: Vec<i64> = doc["todoLists"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![1, 1731000000000123, 1731000000000999],
+            "按 (sortOrder, id) 排序；坏行不写出"
+        );
+        assert_eq!(
+            doc["todoLists"][1]["futureField"],
+            json!(true),
+            "未知字段原样保留"
+        );
+        assert_eq!(
+            doc["listTombstones"],
+            json!([
+                {"entityId": 40, "deletedAt": "2026-10-30 10:00:00"},
+                {"entityId": 50, "deletedAt": "2026-10-30 11:00:00"}
+            ])
+        );
+
+        // 本地缺默认清单（不该发生）：照样写出它的初始记录
+        c.execute("DELETE FROM todo_lists WHERE id = '1'", [])
+            .unwrap();
+        let doc = build_outgoing_doc(&c, &Map::new(), vec![], tz(), "2026-10-01 00:00:00").unwrap();
+        assert_eq!(doc["todoLists"][0]["id"], json!(1));
+        assert_eq!(doc["todoLists"][0]["name"], json!("待办清单"));
+    }
+
+    #[test]
+    fn list_tombstone_for_default_list_is_never_written() {
+        let t = ListTombstone {
+            entity_id: "1".into(),
+            deleted_at: "2026-11-01 10:00:00".into(),
+        };
+        assert_eq!(t.to_value(), None);
+        let t = ListTombstone {
+            entity_id: "x".into(),
+            deleted_at: "2026-11-01 10:00:00".into(),
+        };
+        assert_eq!(t.to_value(), None);
     }
 
     #[test]

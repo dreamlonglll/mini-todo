@@ -104,6 +104,15 @@ fn upgrade(conn: &Connection) -> rusqlite::Result<()> {
         SELECT 'dirty_since', CAST(strftime('%s', 'now') AS TEXT)
         WHERE EXISTS (SELECT 1 FROM meta WHERE key = 'dirty' AND value = 'true')
           AND NOT EXISTS (SELECT 1 FROM meta WHERE key = 'dirty_since');
+
+        -- 多清单升级（只做一次）：旧版 cloud 不认识 todoLists / listTombstones，把它们当作未知
+        -- 顶层键存进了信封（remote_envelope），本地清单表是空的。作废基准 ETag，升级后第一次
+        -- 拉取 / 推送前的 GET 一定是无条件全量 GET 并把清单合并进来；否则远端 304 时会用只有
+        -- 默认清单的本地表重建文档，把 PC 写的清单与清单墓碑从远端抹掉。
+        DELETE FROM meta WHERE key = 'base_etag'
+          AND NOT EXISTS (SELECT 1 FROM meta WHERE key = 'lists_base_reset_v1');
+        INSERT INTO meta (key, value) VALUES ('lists_base_reset_v1', '1')
+          ON CONFLICT(key) DO NOTHING;
         "#,
     )
 }
@@ -137,6 +146,29 @@ mod tests {
             )
             .ok();
         assert!(since.is_some(), "已 dirty 的库要补 dirty_since");
+    }
+
+    /// 多清单升级：基准 ETag 只在第一次启动时作废（之后记下的新基准不再被删）。
+    #[test]
+    fn lists_upgrade_resets_base_etag_only_once() {
+        let c = Connection::open_in_memory().unwrap();
+        // 模拟升级前的旧库：有基准、没有升级标记
+        c.execute_batch(
+            "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+             INSERT INTO meta (key, value) VALUES ('base_etag', '\"old\"'), ('remote_envelope', '{}');",
+        )
+        .unwrap();
+        init(&c).unwrap();
+        let etag = |c: &Connection| -> Option<String> {
+            c.query_row("SELECT value FROM meta WHERE key = 'base_etag'", [], |r| {
+                r.get(0)
+            })
+            .ok()
+        };
+        assert_eq!(etag(&c), None, "升级后第一次 GET 必须全量");
+        repo::set_meta(&c, repo::meta_keys::BASE_ETAG, "\"new\"").unwrap();
+        init(&c).unwrap();
+        assert_eq!(etag(&c).as_deref(), Some("\"new\""), "只作废一次");
     }
 
     /// 默认清单按固定初始值补建；已有（例如已改名）时 init 不动它。

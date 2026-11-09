@@ -597,13 +597,17 @@ pub fn delete_todo_with_children(conn: &Connection, id: &str) -> rusqlite::Resul
     Ok(n_subs)
 }
 
-/// 本地是否有任何需要同步的状态（todo / subtask / 墓碑）。远端 404 时判断要不要重新推送。
+/// 本地是否有任何需要同步的状态（todo / subtask / 墓碑 / 清单 / 清单墓碑）。远端 404 时判断要不要
+/// 重新推送。还是初始值的默认清单不算（每个写入方都会按同样的值补建它，见
+/// `model::is_pristine_default_list`）。
 pub fn has_any_sync_state(conn: &Connection) -> rusqlite::Result<bool> {
     conn.query_row(
         "SELECT EXISTS (SELECT 1 FROM todos)
              OR EXISTS (SELECT 1 FROM subtasks)
-             OR EXISTS (SELECT 1 FROM tombstones)",
-        [],
+             OR EXISTS (SELECT 1 FROM tombstones)
+             OR EXISTS (SELECT 1 FROM todo_lists WHERE NOT (id = ?1 AND updated_at <= ?2))
+             OR EXISTS (SELECT 1 FROM list_tombstones)",
+        params![default_list_key(), model::DEFAULT_LIST_TIME],
         |row| row.get(0),
     )
 }
@@ -854,7 +858,6 @@ pub fn purge_tombstones_before(conn: &Connection, cutoff_local: &str) -> rusqlit
 // =============================================================================
 
 /// 单条清单在 SQLite 中的快照：`data_json` 是同步文档 `todoLists` 里的清单对象原样存储。
-#[cfg(test)]
 #[derive(Debug, Clone)]
 pub struct ListRow {
     pub id: String,
@@ -880,7 +883,6 @@ pub fn ensure_default_list(conn: &Connection) -> rusqlite::Result<bool> {
 }
 
 /// 全部清单行（未排序；按 `(sortOrder, id)` 排序由调用方做，见 `sync::doc` / `api::lists`）。
-#[cfg(test)]
 pub fn all_list_rows(conn: &Connection) -> rusqlite::Result<Vec<ListRow>> {
     let mut stmt = conn.prepare("SELECT id, data_json, updated_at FROM todo_lists")?;
     let rows = stmt.query_map([], |row| {
@@ -891,6 +893,21 @@ pub fn all_list_rows(conn: &Connection) -> rusqlite::Result<Vec<ListRow>> {
         })
     })?;
     rows.collect()
+}
+
+/// 会被写进 sync-data 的清单（data_json 是 JSON 对象）的 `id → updated_at`，用途同
+/// `exportable_timestamps`：导不出去的坏行永远到不了远端，不能算作"远端缺少"。
+pub fn exportable_list_timestamps(conn: &Connection) -> rusqlite::Result<HashMap<String, String>> {
+    Ok(all_list_rows(conn)?
+        .into_iter()
+        .filter(|r| {
+            matches!(
+                serde_json::from_str::<Value>(&r.data_json),
+                Ok(Value::Object(_))
+            )
+        })
+        .map(|r| (r.id, r.updated_at))
+        .collect())
 }
 
 /// 直接 upsert 清单（无 LWW）。同步合并与 REST 改写用。
@@ -1444,6 +1461,36 @@ mod tests {
 
     fn tombstone_free(c: &Connection) -> bool {
         list_tombstones(c).unwrap().is_empty()
+    }
+
+    /// 远端 404 时要不要重推：初始值的默认清单不算待同步内容，改过名的 / 其它清单 / 清单墓碑算。
+    #[test]
+    fn sync_state_ignores_only_the_pristine_default_list() {
+        let c = fresh();
+        assert!(!has_any_sync_state(&c).unwrap());
+        upsert_list(
+            &c,
+            "1",
+            r#"{"id":1,"name":"收件箱"}"#,
+            "2026-11-01 10:00:00",
+        )
+        .unwrap();
+        assert!(has_any_sync_state(&c).unwrap());
+
+        let c = fresh();
+        add_list_tombstone(&c, "5", "2026-11-01 10:00:00").unwrap();
+        assert!(has_any_sync_state(&c).unwrap());
+
+        let c = fresh();
+        upsert_list(&c, "5", r#"{"id":5,"name":"工作"}"#, "2026-11-01 10:00:00").unwrap();
+        assert!(has_any_sync_state(&c).unwrap());
+        let exportable = exportable_list_timestamps(&c).unwrap();
+        assert_eq!(exportable.len(), 2, "默认清单 + 工作");
+        upsert_list(&c, "6", "corrupt", "2026-11-01 10:00:00").unwrap();
+        assert!(
+            !exportable_list_timestamps(&c).unwrap().contains_key("6"),
+            "导不出去的坏行不算"
+        );
     }
 
     #[test]
