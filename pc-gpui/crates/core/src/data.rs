@@ -399,6 +399,7 @@ mod tests {
             repeat_interval: 1,
             repeat_weekdays: None,
             repeat_month_day: None,
+            list_id: 1,
             subtasks: Vec::new(),
         }
     }

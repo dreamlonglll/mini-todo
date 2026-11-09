@@ -501,9 +501,9 @@ pub fn insert_todo_row(conn: &Connection, t: &Todo) -> Result<()> {
                             notify_at, notify_before, notified, completed,
                             sort_order, start_time, end_time, created_at, updated_at,
                             repeat_enabled, repeat_type, repeat_interval,
-                            repeat_weekdays, repeat_month_day)
+                            repeat_weekdays, repeat_month_day, list_id)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                 ?15, ?16, ?17, ?18, ?19)",
+                 ?15, ?16, ?17, ?18, ?19, ?20)",
     )?
     .execute(params![
         t.id,
@@ -525,6 +525,7 @@ pub fn insert_todo_row(conn: &Connection, t: &Todo) -> Result<()> {
         t.repeat_interval,
         t.repeat_weekdays,
         t.repeat_month_day,
+        t.list_id,
     ])?;
     Ok(())
 }
@@ -537,8 +538,8 @@ pub fn update_todo_row(conn: &Connection, t: &Todo) -> Result<()> {
             completed = ?8, sort_order = ?9, start_time = ?10, end_time = ?11,
             created_at = ?12, updated_at = ?13,
             repeat_enabled = ?14, repeat_type = ?15, repeat_interval = ?16,
-            repeat_weekdays = ?17, repeat_month_day = ?18
-         WHERE id = ?19",
+            repeat_weekdays = ?17, repeat_month_day = ?18, list_id = ?19
+         WHERE id = ?20",
     )?
     .execute(params![
         t.title,
@@ -559,6 +560,7 @@ pub fn update_todo_row(conn: &Connection, t: &Todo) -> Result<()> {
         t.repeat_interval,
         t.repeat_weekdays,
         t.repeat_month_day,
+        t.list_id,
         t.id,
     ])?;
     Ok(())

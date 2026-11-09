@@ -1,12 +1,12 @@
 use rusqlite::Row;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 pub const SUBTASK_COLUMNS: &str =
     "id, parent_id, title, content, completed, sort_order, created_at, updated_at";
 
 pub const TODO_COLUMNS: &str = "id, title, description, color, quadrant, notify_at, notify_before,
      notified, completed, sort_order, start_time, end_time, created_at, updated_at,
-     repeat_enabled, repeat_type, repeat_interval, repeat_weekdays, repeat_month_day";
+     repeat_enabled, repeat_type, repeat_interval, repeat_weekdays, repeat_month_day, list_id";
 
 pub fn subtask_from_row(row: &Row) -> rusqlite::Result<SubTask> {
     Ok(SubTask {
@@ -43,8 +43,60 @@ pub fn todo_from_row(row: &Row) -> rusqlite::Result<Todo> {
         repeat_interval: row.get(16).unwrap_or(1),
         repeat_weekdays: row.get(17).unwrap_or(None),
         repeat_month_day: row.get(18).unwrap_or(None),
+        list_id: row.get(19)?,
         subtasks: Vec::new(),
     })
+}
+
+/// 默认清单的 id（v31 迁移建；可改名、不可删除）。`listId` 缺失或指向不存在（含已删除）的清单的待办都按它显示
+pub const DEFAULT_LIST_ID: i64 = 1;
+
+/// 默认清单的初始名称（= 3.0 主窗口标题栏写死的文字）
+pub const DEFAULT_LIST_NAME: &str = "待办清单";
+
+/// 默认清单的初始 `createdAt` / `updatedAt`（PC v31 迁移与 cloud 惰性补建用同一个值）：固定的早时间，
+/// 两台设备各自建出的 id 1 不会互相"抢"，任何一次改名都在 LWW 里胜出
+pub const DEFAULT_LIST_CREATED_AT: &str = "2000-01-01 00:00:00";
+
+fn default_list_id() -> i64 {
+    DEFAULT_LIST_ID
+}
+
+/// `listId`：缺失（`#[serde(default)]`）或为 `null` 都是默认清单
+fn de_list_id<'de, D: Deserializer<'de>>(d: D) -> Result<i64, D::Error> {
+    Ok(Option::<i64>::deserialize(d)?.unwrap_or(DEFAULT_LIST_ID))
+}
+
+/// todo_lists 查询列，与 [`todo_list_from_row`] 的下标一一对应
+pub const TODO_LIST_COLUMNS: &str = "id, name, sort_order, created_at, updated_at";
+
+pub fn todo_list_from_row(row: &Row) -> rusqlite::Result<TodoList> {
+    Ok(TodoList {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        sort_order: row.get(2)?,
+        created_at: row.get(3)?,
+        updated_at: row.get(4)?,
+    })
+}
+
+/// 待办清单（v31 `todo_lists`）：待办的分区，每个清单在桌面上是一个独立窗口。
+///
+/// 参与同步（同步文档顶层 `todoLists`，墓碑在 `listTombstones`）与导出（格式 4.1 起）。反序列化宽容规则同 [`Todo`]：
+/// `id` / `name` 必填；`updatedAt` 缺失时为空串，同步合并按"无法识别"跳过。PC 是强类型的，清单记录里的未知字段丢弃
+/// （cloud 原样保留）。`sortOrder` 用 i64：cloud 可经 `PATCH` 改它，读侧不因取值范围丢清单
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodoList {
+    pub id: i64,
+    pub name: String,
+    /// 显示顺序：列表一律按 `(sortOrder, id)` 升序；新清单排最后（现有最大值 + 1）
+    #[serde(default)]
+    pub sort_order: i64,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub updated_at: String,
 }
 
 /// 待办。
@@ -91,6 +143,10 @@ pub struct Todo {
     pub repeat_weekdays: Option<String>,
     #[serde(default)]
     pub repeat_month_day: Option<i32>,
+    /// 所属清单（v31）。缺失或为 `null` 时是默认清单（旧版本 / 旧备份的记录）；指向不存在（含已删除）的清单时
+    /// 界面按默认清单显示（读侧兜底 `lists::effective_list_id`），存储与同步的仍是原值，不因清单不存在而改写
+    #[serde(default = "default_list_id", deserialize_with = "de_list_id")]
+    pub list_id: i64,
     #[serde(default)]
     pub subtasks: Vec<SubTask>,
 }
@@ -442,4 +498,73 @@ pub struct SaveScreenConfigRequest {
     pub window_width: i32,
     pub window_height: i32,
     pub is_fixed: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn todo_with(extra: serde_json::Value) -> serde_json::Result<Todo> {
+        let mut v = json!({"id": 5, "title": "t", "description": null, "notifyAt": null,
+                           "startTime": null, "endTime": null});
+        v.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(v)
+    }
+
+    /// 旧版本 / 旧备份的待办没有 `listId`：落进默认清单；`null` 同缺失；显式值原样保留（不校验清单是否存在）
+    #[test]
+    fn todo_list_id_defaults_to_the_default_list() {
+        assert_eq!(todo_with(json!({})).unwrap().list_id, DEFAULT_LIST_ID);
+        assert_eq!(
+            todo_with(json!({"listId": null})).unwrap().list_id,
+            DEFAULT_LIST_ID
+        );
+        assert_eq!(
+            todo_with(json!({"listId": 1_731_000_000_000_123_i64}))
+                .unwrap()
+                .list_id,
+            1_731_000_000_000_123
+        );
+        assert_eq!(todo_with(json!({"listId": 999})).unwrap().list_id, 999);
+        assert!(
+            todo_with(json!({"listId": "工作"})).is_err(),
+            "类型错误与其它字段一样按无法识别处理"
+        );
+
+        let out = serde_json::to_value(todo_with(json!({"listId": 7})).unwrap()).unwrap();
+        assert_eq!(out["listId"], 7, "总是写出 listId");
+    }
+
+    /// 清单记录：驼峰字段；`id` / `name` 必填，其余缺失取默认；未知字段丢弃
+    #[test]
+    fn todo_list_serde_uses_the_contract_shape() {
+        let list: TodoList = serde_json::from_value(json!({
+            "id": 1_731_000_000_000_123_i64, "name": "工作", "sortOrder": 3,
+            "createdAt": "2026-11-01 08:00:00", "updatedAt": "2026-11-02 08:00:00",
+            "color": "#123456"
+        }))
+        .unwrap();
+        assert_eq!(
+            list,
+            TodoList {
+                id: 1_731_000_000_000_123,
+                name: "工作".to_string(),
+                sort_order: 3,
+                created_at: "2026-11-01 08:00:00".to_string(),
+                updated_at: "2026-11-02 08:00:00".to_string(),
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(&list).unwrap(),
+            json!({"id": 1_731_000_000_000_123_i64, "name": "工作", "sortOrder": 3,
+                   "createdAt": "2026-11-01 08:00:00", "updatedAt": "2026-11-02 08:00:00"})
+        );
+        let minimal: TodoList = serde_json::from_value(json!({"id": 2, "name": "x"})).unwrap();
+        assert_eq!((minimal.sort_order, minimal.updated_at.as_str()), (0, ""));
+        assert!(serde_json::from_value::<TodoList>(json!({"id": 2})).is_err());
+        assert!(serde_json::from_value::<TodoList>(json!({"name": "x"})).is_err());
+    }
 }

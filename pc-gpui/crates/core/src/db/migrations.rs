@@ -1,4 +1,4 @@
-use rusqlite::{Connection, Result, Transaction, TransactionBehavior};
+use rusqlite::{Connection, OptionalExtension, Result, Transaction, TransactionBehavior};
 use std::collections::BTreeSet;
 
 /// 执行单个迁移，并把"迁移体 + 版本号 INSERT"包进同一个事务。
@@ -125,10 +125,11 @@ const MIGRATIONS: &[(i32, MigrationFn)] = &[
     (28, migration_v28),
     (29, migration_v29),
     (30, migration_v30),
+    (31, migration_v31),
 ];
 
 /// 最新迁移版本号（启动时可与 [`current_version`] 比较，判断是否有待执行迁移，例如迁移前备份）
-pub const LATEST_VERSION: i32 = 30;
+pub const LATEST_VERSION: i32 = 31;
 
 fn ensure_migrations_table(conn: &Connection) -> Result<()> {
     conn.execute(
@@ -162,6 +163,164 @@ pub(crate) fn run_migrations_to(conn: &Connection, target: i32) -> Result<()> {
     for &(version, migration) in MIGRATIONS {
         if version > current && version <= target {
             apply_migration(conn, version, migration)?;
+        }
+    }
+    Ok(())
+}
+
+/// 迁移 v31：多待办清单（11-09 multi-list-windows，PC ↔ cloud 数据契约见该任务的 `contract.md`）。
+///
+/// 参与同步（`todo_lists` 接 v28 的 `local_seq` 触发器）：
+/// - `todo_lists`：清单。`id` 不用 AUTOINCREMENT——新清单的 id 由 `ids::new_id` 生成（毫秒 × 1000 + 随机，
+///   与 cloud 同一算法），两台设备离线各建一个也不撞号。名称**不加**唯一约束：同步造成的重名要能落库（容忍），
+///   PC 只在本机新建 / 改名时校验
+/// - 默认清单：id 1、"待办清单"、`sort_order` 0、`created_at` = `updated_at` = `2000-01-01 00:00:00`（固定的早时间：
+///   两台设备各自迁移出的 id 1 不互相"抢"，任何一次改名都胜出）。在建触发器之前插入，不算本地变更
+/// - `todos.list_id INTEGER NOT NULL DEFAULT 1`：存量待办全部进默认清单（`ALTER TABLE` 不触发 UPDATE 触发器，也不算
+///   本地变更）。不加外键：指向不存在（含已删除）的清单时由读侧兜底按默认清单显示，记录不改写
+/// - `list_tombstones(entity_id, deleted_at)`：清单删除墓碑，同步文档里是独立顶层键 `listTombstones`——不进共用的
+///   `tombstones`：v2.5.0 / 3.0.x 丢弃未知 `entityType` 后按本地表重建 `tombstones`，会把它抹掉，已删的清单随后复活。
+///   与 `tombstones` 一样不接触发器（合并远端墓碑不是本地变更；本地删除清单时 `todo_lists` 的 DELETE 已经计数）
+///
+/// 设备本地（不同步、不导出、不接 `local_seq`，性质同 `screen_configs` / 收纳箱表）：
+/// - `window_prefs`：每个窗口（清单窗口 `list:<清单 id>`、日历窗口 `calendar`）的隐藏 / 深色 / 视图模式 /
+///   展开全部子任务 / 日历清单筛选（`NULL` = 全部，否则清单 id 的 JSON 数组）
+/// - `window_layouts`：每个 (窗口, 屏幕组合) 的客户区物理像素几何与是否锁定（口径同 `screen_configs`），
+///   随 `window_prefs` 行级联删除
+/// - 种子：`list:1` 继承原主窗口——`text_theme`（`"light"` = 深色主题，语义反转）、`view_mode`，以及每条
+///   `screen_configs` 的位置 / 尺寸 / `is_fixed`；`calendar` 隐藏 = `!show_calendar`、深色同 `list:1`。原来开着日历时
+///   把每条 `screen_configs` 的矩形按左 40%（取整）/ 右 60% 切开，左给 `list:1`、右给 `calendar`，两者锁定相同；没开
+///   日历时 `calendar` 没有布局（第一次显示时由界面决定位置）。展开全部子任务存在 app 的 `ui-state.json` 里，由 app
+///   首次启动时迁移，不在这里
+fn migration_v31(conn: &Connection) -> Result<()> {
+    use crate::db::models::{DEFAULT_LIST_CREATED_AT, DEFAULT_LIST_ID, DEFAULT_LIST_NAME};
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS todo_lists (
+            id          INTEGER PRIMARY KEY,
+            name        TEXT    NOT NULL,
+            sort_order  INTEGER NOT NULL DEFAULT 0,
+            created_at  TEXT    NOT NULL,
+            updated_at  TEXT    NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS list_tombstones (
+            entity_id   INTEGER PRIMARY KEY,
+            deleted_at  TEXT    NOT NULL
+        );
+        ALTER TABLE todos ADD COLUMN list_id INTEGER NOT NULL DEFAULT 1;
+        CREATE INDEX IF NOT EXISTS idx_todos_list_id ON todos(list_id);
+        CREATE TABLE IF NOT EXISTS window_prefs (
+            window_key      TEXT    PRIMARY KEY,
+            hidden          INTEGER NOT NULL DEFAULT 0,
+            dark            INTEGER NOT NULL DEFAULT 0,
+            view_mode       TEXT    NOT NULL DEFAULT 'list',
+            expand_all      INTEGER NOT NULL DEFAULT 0,
+            calendar_filter TEXT,
+            updated_at      TEXT    NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS window_layouts (
+            window_key       TEXT    NOT NULL REFERENCES window_prefs(window_key) ON DELETE CASCADE,
+            screen_config_id TEXT    NOT NULL,
+            x                INTEGER NOT NULL,
+            y                INTEGER NOT NULL,
+            width            INTEGER NOT NULL,
+            height           INTEGER NOT NULL,
+            is_fixed         INTEGER NOT NULL DEFAULT 0,
+            updated_at       TEXT    NOT NULL,
+            PRIMARY KEY (window_key, screen_config_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_window_layouts_screen ON window_layouts(screen_config_id);",
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO todo_lists (id, name, sort_order, created_at, updated_at)
+         VALUES (?1, ?2, 0, ?3, ?3)",
+        rusqlite::params![DEFAULT_LIST_ID, DEFAULT_LIST_NAME, DEFAULT_LIST_CREATED_AT],
+    )?;
+    // 种子在建触发器之前写入：迁移本身不算本地变更（升级后由"远端缺本地清单"触发一次上传）
+    for event in ["insert", "update", "delete"] {
+        conn.execute_batch(&format!(
+            "CREATE TRIGGER IF NOT EXISTS trg_todo_lists_{event}_local_seq
+             AFTER {upper} ON todo_lists
+             BEGIN
+                 UPDATE sync_meta SET value = value + 1 WHERE key = 'local_seq';
+             END;",
+            upper = event.to_uppercase(),
+        ))?;
+    }
+    seed_window_prefs(conn)
+}
+
+/// v31 窗口属性的种子数据：默认清单窗口继承原主窗口，日历窗口按原来是否显示日历（见 [`migration_v31`]）
+fn seed_window_prefs(conn: &Connection) -> Result<()> {
+    let setting = |key: &str| -> Result<Option<String>> {
+        conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
+            r.get(0)
+        })
+        .optional()
+    };
+    // text_theme 描述的是文字颜色："light"（浅色文字）= 深色主题开启（同 app `AppState.is_dark_theme`）
+    let dark = setting("text_theme")?.as_deref() == Some("light");
+    let view_mode = match setting("view_mode")?.as_deref() {
+        Some("quadrant") => "quadrant",
+        _ => "list",
+    };
+    let show_calendar = setting("show_calendar")?.as_deref() == Some("true");
+
+    conn.execute(
+        "INSERT OR IGNORE INTO window_prefs (window_key, hidden, dark, view_mode, updated_at)
+         VALUES ('list:1', 0, ?1, ?2, datetime('now', 'localtime'))",
+        rusqlite::params![dark as i32, view_mode],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO window_prefs (window_key, hidden, dark, updated_at)
+         VALUES ('calendar', ?1, ?2, datetime('now', 'localtime'))",
+        rusqlite::params![!show_calendar as i32, dark as i32],
+    )?;
+
+    let configs: Vec<(String, i32, i32, i32, i32, i32)> = {
+        let mut stmt = conn.prepare(
+            "SELECT config_id, window_x, window_y, window_width, window_height, is_fixed
+             FROM screen_configs ORDER BY id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        })?;
+        rows.collect::<Result<_>>()?
+    };
+    let mut layout = conn.prepare(
+        "INSERT OR IGNORE INTO window_layouts
+             (window_key, screen_config_id, x, y, width, height, is_fixed, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now', 'localtime'))",
+    )?;
+    for (screen, x, y, width, height, fixed) in configs {
+        let fixed = (fixed != 0) as i32;
+        // 开着日历时主窗口是加宽后的整体：左栏（清单）默认占 40%（`main_window` 的 `relative(0.4)`），右边是日历。
+        // 尺寸不合法的记录（app 恢复时本来就忽略几何）原样留给默认清单，只继承锁定
+        if show_calendar && width >= 2 && height > 0 {
+            let left = ((f64::from(width) * 0.4).round() as i32).clamp(1, width - 1);
+            layout.execute(rusqlite::params![
+                "list:1", screen, x, y, left, height, fixed
+            ])?;
+            layout.execute(rusqlite::params![
+                "calendar",
+                screen,
+                x.saturating_add(left),
+                y,
+                width - left,
+                height,
+                fixed
+            ])?;
+        } else {
+            layout.execute(rusqlite::params![
+                "list:1", screen, x, y, width, height, fixed
+            ])?;
         }
     }
     Ok(())
@@ -1093,6 +1252,10 @@ mod tests {
                 )
                 .unwrap();
             assert!(subtasks >= 1, "from v{from}: 子任务不能丢");
+            let list_id: i64 = conn
+                .query_row("SELECT list_id FROM todos WHERE id = 1", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(list_id, 1, "from v{from}: 存量待办进默认清单");
             assert!(
                 foreign_key_violations(&conn).unwrap().is_empty(),
                 "from v{from}"
@@ -1128,7 +1291,7 @@ mod tests {
         run_migrations(&conn).expect("全新库迁移失败");
 
         assert_eq!(max_version(&conn), LATEST_VERSION);
-        assert_eq!(LATEST_VERSION, 30);
+        assert_eq!(LATEST_VERSION, 31);
         assert_eq!(
             MIGRATIONS.last().map(|(v, _)| *v),
             Some(LATEST_VERSION),
@@ -1138,6 +1301,14 @@ mod tests {
         assert!(table_exists(&conn, "subtasks"));
         assert!(table_exists(&conn, "settings"));
         assert!(table_exists(&conn, "screen_configs"));
+        for table in [
+            "todo_lists",
+            "list_tombstones",
+            "window_prefs",
+            "window_layouts",
+        ] {
+            assert!(table_exists(&conn, table), "{table}");
+        }
         // v23 已删除的 Agent 相关表不应残留
         assert!(!table_exists(&conn, "agent_configs"));
     }
@@ -1477,7 +1648,7 @@ mod tests {
         .unwrap();
 
         migrate(&conn).expect("升级到 v30 失败");
-        assert_eq!(max_version(&conn), 30);
+        assert_eq!(max_version(&conn), LATEST_VERSION);
         assert_eq!(
             fence_hidden_flags(&conn),
             (0, vec![("a.lnk".to_string(), 0)]),
@@ -1515,6 +1686,329 @@ mod tests {
             fence_hidden_flags(&conn),
             (1, vec![("x.lnk".to_string(), 1)])
         );
+        assert_eq!(meta(&conn, "local_seq"), base);
+    }
+
+    // ---- v31：多待办清单 ----
+
+    type ListRow = (i64, String, i64, String, String);
+
+    fn lists(conn: &Connection) -> Vec<ListRow> {
+        conn.prepare(
+            "SELECT id, name, sort_order, created_at, updated_at FROM todo_lists ORDER BY id",
+        )
+        .unwrap()
+        .query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })
+        .unwrap()
+        .collect::<Result<_>>()
+        .unwrap()
+    }
+
+    /// (window_key, hidden, dark, view_mode, expand_all, calendar_filter)
+    type PrefsRow = (String, i64, i64, String, i64, Option<String>);
+
+    fn window_prefs(conn: &Connection) -> Vec<PrefsRow> {
+        conn.prepare(
+            "SELECT window_key, hidden, dark, view_mode, expand_all, calendar_filter
+             FROM window_prefs ORDER BY window_key",
+        )
+        .unwrap()
+        .query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<_>>()
+        .unwrap()
+    }
+
+    /// (window_key, screen_config_id, x, y, width, height, is_fixed)
+    type LayoutRow = (String, String, i64, i64, i64, i64, i64);
+
+    fn window_layouts(conn: &Connection) -> Vec<LayoutRow> {
+        conn.prepare(
+            "SELECT window_key, screen_config_id, x, y, width, height, is_fixed
+             FROM window_layouts ORDER BY window_key, screen_config_id",
+        )
+        .unwrap()
+        .query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<_>>()
+        .unwrap()
+    }
+
+    fn put_setting(conn: &Connection, key: &str, value: &str) {
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value, updated_at)
+             VALUES (?1, ?2, '2026-01-01 00:00:00')",
+            [key, value],
+        )
+        .unwrap();
+    }
+
+    fn put_screen_config(conn: &Connection, id: &str, rect: (i32, i32, i32, i32), fixed: bool) {
+        conn.execute(
+            "INSERT INTO screen_configs
+                 (config_id, display_name, window_x, window_y, window_width, window_height, is_fixed)
+             VALUES (?1, 'x', ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![id, rect.0, rect.1, rect.2, rect.3, fixed as i32],
+        )
+        .unwrap();
+    }
+
+    fn layout(key: &str, screen: &str, rect: (i64, i64, i64, i64), fixed: i64) -> LayoutRow {
+        (
+            key.to_string(),
+            screen.to_string(),
+            rect.0,
+            rect.1,
+            rect.2,
+            rect.3,
+            fixed,
+        )
+    }
+
+    /// v31：默认清单（id 1、固定的早时间）、存量待办全部进默认清单；迁移本身不算本地变更
+    #[test]
+    fn v31_creates_the_default_list_and_assigns_existing_todos_to_it() {
+        let conn = fresh_conn();
+        run_migrations_to(&conn, 30).expect("迁移到 v30 失败");
+        conn.execute_batch(
+            "INSERT INTO todos (id, title) VALUES (1, 'a'), (2, 'b');
+             INSERT INTO subtasks (id, parent_id, title) VALUES (11, 1, 's');",
+        )
+        .unwrap();
+        let base = meta(&conn, "local_seq");
+
+        migrate(&conn).expect("升级到 v31 失败");
+        assert_eq!(max_version(&conn), 31);
+        assert_eq!(
+            lists(&conn),
+            vec![(
+                1,
+                "待办清单".to_string(),
+                0,
+                "2000-01-01 00:00:00".to_string(),
+                "2000-01-01 00:00:00".to_string()
+            )]
+        );
+        let list_ids: Vec<i64> = conn
+            .prepare("SELECT list_id FROM todos ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_>>()
+            .unwrap();
+        assert_eq!(list_ids, vec![1, 1]);
+        assert_eq!(
+            meta(&conn, "local_seq"),
+            base,
+            "建默认清单 / 加列不算本地变更"
+        );
+
+        // 旧版本的显式列写法照常可用：新待办落进默认清单
+        conn.execute("INSERT INTO todos (id, title) VALUES (3, 'c')", [])
+            .unwrap();
+        let list_id: i64 = conn
+            .query_row("SELECT list_id FROM todos WHERE id = 3", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(list_id, 1);
+    }
+
+    /// v31：清单参与同步（增删改都计 local_seq，改待办的 list_id 也是）；清单墓碑与 tombstones 一样不计数
+    #[test]
+    fn v31_list_writes_count_as_sync_changes_but_list_tombstones_do_not() {
+        let conn = fresh_conn();
+        run_migrations(&conn).expect("迁移失败");
+        conn.execute("INSERT INTO todos (id, title) VALUES (1, 'a')", [])
+            .unwrap();
+        let base = meta(&conn, "local_seq");
+
+        conn.execute(
+            "INSERT INTO todo_lists (id, name, sort_order, created_at, updated_at)
+             VALUES (1731000000000123, '工作', 1, '2026-01-01 00:00:00', '2026-01-01 00:00:00')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(meta(&conn, "local_seq"), base + 1);
+        conn.execute(
+            "UPDATE todo_lists SET name = '生活' WHERE id = 1731000000000123",
+            [],
+        )
+        .unwrap();
+        assert_eq!(meta(&conn, "local_seq"), base + 2);
+        conn.execute(
+            "UPDATE todos SET list_id = 1731000000000123 WHERE id = 1",
+            [],
+        )
+        .unwrap();
+        assert_eq!(meta(&conn, "local_seq"), base + 3);
+        conn.execute("DELETE FROM todo_lists WHERE id = 1731000000000123", [])
+            .unwrap();
+        assert_eq!(meta(&conn, "local_seq"), base + 4);
+
+        conn.execute(
+            "INSERT INTO list_tombstones (entity_id, deleted_at) VALUES (1731000000000123, '2026-01-02 00:00:00')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(meta(&conn, "local_seq"), base + 4, "清单墓碑不计数");
+        let dup = conn.execute(
+            "INSERT INTO list_tombstones (entity_id, deleted_at) VALUES (1731000000000123, '2026-01-03 00:00:00')",
+            [],
+        );
+        assert!(dup.is_err(), "entity_id 为主键");
+    }
+
+    /// v31：没开日历的升级——默认清单窗口继承主窗口的深色 / 视图 / 各屏幕组合的位置与锁定；日历窗口隐藏、没有布局
+    #[test]
+    fn v31_seeds_the_default_list_window_from_the_main_window() {
+        let conn = fresh_conn();
+        run_migrations_to(&conn, 30).expect("迁移到 v30 失败");
+        put_setting(&conn, "text_theme", "light");
+        put_setting(&conn, "view_mode", "quadrant");
+        put_setting(&conn, "show_calendar", "false");
+        put_screen_config(&conn, "1_1920x1080@100", (100, 50, 380, 600), false);
+        put_screen_config(
+            &conn,
+            "2_3840x2160@150_1920x1080@100",
+            (-1900, 20, 570, 900),
+            true,
+        );
+        let base = meta(&conn, "local_seq");
+
+        migrate(&conn).expect("升级到 v31 失败");
+        assert_eq!(
+            window_prefs(&conn),
+            vec![
+                ("calendar".to_string(), 1, 1, "list".to_string(), 0, None),
+                ("list:1".to_string(), 0, 1, "quadrant".to_string(), 0, None),
+            ],
+            "text_theme = light 即深色主题；日历没开 → 隐藏"
+        );
+        assert_eq!(
+            window_layouts(&conn),
+            vec![
+                layout("list:1", "1_1920x1080@100", (100, 50, 380, 600), 0),
+                layout(
+                    "list:1",
+                    "2_3840x2160@150_1920x1080@100",
+                    (-1900, 20, 570, 900),
+                    1
+                ),
+            ]
+        );
+        assert_eq!(meta(&conn, "local_seq"), base, "窗口属性是设备本地数据");
+    }
+
+    /// v31：开着日历的升级——把加宽的主窗口按左 40%（取整）/ 右 60% 切开，日历继承同样的锁定与深色
+    #[test]
+    fn v31_splits_the_widened_main_window_when_the_calendar_was_open() {
+        let conn = fresh_conn();
+        run_migrations_to(&conn, 30).expect("迁移到 v30 失败");
+        put_setting(&conn, "text_theme", "dark");
+        put_setting(&conn, "view_mode", "list");
+        put_setting(&conn, "show_calendar", "true");
+        put_screen_config(&conn, "1_1920x1080@100", (100, 50, 1000, 600), true);
+        put_screen_config(&conn, "2_a", (-1920, 0, 905, 700), false);
+        put_screen_config(&conn, "1_broken", (0, 0, 0, 0), true);
+
+        migrate(&conn).expect("升级到 v31 失败");
+        assert_eq!(
+            window_prefs(&conn),
+            vec![
+                ("calendar".to_string(), 0, 0, "list".to_string(), 0, None),
+                ("list:1".to_string(), 0, 0, "list".to_string(), 0, None),
+            ]
+        );
+        assert_eq!(
+            window_layouts(&conn),
+            vec![
+                layout("calendar", "1_1920x1080@100", (500, 50, 600, 600), 1),
+                // 905 × 0.4 = 362
+                layout("calendar", "2_a", (-1558, 0, 543, 700), 0),
+                layout("list:1", "1_1920x1080@100", (100, 50, 400, 600), 1),
+                // 尺寸不合法的记录不切，原样留给默认清单（只继承锁定）
+                layout("list:1", "1_broken", (0, 0, 0, 0), 1),
+                layout("list:1", "2_a", (-1920, 0, 362, 700), 0),
+            ]
+        );
+    }
+
+    /// v31：全新安装（没有屏幕配置、默认设置）也有两个窗口的属性记录
+    #[test]
+    fn v31_fresh_install_seeds_default_window_prefs() {
+        let conn = fresh_conn();
+        run_migrations(&conn).expect("迁移失败");
+        assert_eq!(
+            window_prefs(&conn),
+            vec![
+                ("calendar".to_string(), 1, 0, "list".to_string(), 0, None),
+                ("list:1".to_string(), 0, 0, "list".to_string(), 0, None),
+            ]
+        );
+        assert!(window_layouts(&conn).is_empty());
+        assert_eq!(lists(&conn).len(), 1);
+    }
+
+    /// v31：窗口属性 / 布局是设备本地数据（不计 local_seq）；布局随窗口记录级联删除，(窗口, 屏幕组合) 唯一
+    #[test]
+    fn v31_window_tables_are_device_local_and_layouts_cascade() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).expect("迁移失败");
+        let base = meta(&conn, "local_seq");
+
+        conn.execute_batch(
+            "INSERT INTO window_prefs (window_key, updated_at) VALUES ('list:7', '');
+             UPDATE window_prefs SET dark = 1, view_mode = 'quadrant' WHERE window_key = 'list:1';
+             INSERT INTO window_layouts (window_key, screen_config_id, x, y, width, height, updated_at)
+                 VALUES ('list:7', '1_1920x1080@100', 0, 0, 380, 600, '');
+             INSERT INTO window_layouts (window_key, screen_config_id, x, y, width, height, updated_at)
+                 VALUES ('list:1', '1_1920x1080@100', 0, 0, 380, 600, '');",
+        )
+        .unwrap();
+        assert_eq!(meta(&conn, "local_seq"), base);
+        let dup = conn.execute(
+            "INSERT INTO window_layouts (window_key, screen_config_id, x, y, width, height, updated_at)
+             VALUES ('list:7', '1_1920x1080@100', 1, 1, 1, 1, '')",
+            [],
+        );
+        assert!(dup.is_err(), "(window_key, screen_config_id) 唯一");
+        let orphan = conn.execute(
+            "INSERT INTO window_layouts (window_key, screen_config_id, x, y, width, height, updated_at)
+             VALUES ('list:999', '1_1920x1080@100', 1, 1, 1, 1, '')",
+            [],
+        );
+        assert!(orphan.is_err(), "布局必须属于已有的窗口记录");
+
+        conn.execute("DELETE FROM window_prefs WHERE window_key = 'list:7'", [])
+            .unwrap();
+        let keys: Vec<String> = conn
+            .prepare("SELECT window_key FROM window_layouts")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_>>()
+            .unwrap();
+        assert_eq!(keys, vec!["list:1".to_string()]);
         assert_eq!(meta(&conn, "local_seq"), base);
     }
 }
