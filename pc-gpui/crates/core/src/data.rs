@@ -249,9 +249,10 @@ pub fn export_json(db: &Database) -> Result<String, String> {
 ///    删除随同步传播；导入后存在的记录清掉同键墓碑
 /// 5. 清单（契约 §9）：备份有 `todoLists`（4.1）时同样按上面的规则恢复（保留 id、`updated_at` 刷新、备份里没有的
 ///    清单写清单墓碑并删除），默认清单始终保留、只取备份里的名字；被删掉的清单的窗口记录随之清理
-/// 6. 待办的归属（契约 §12-9）：3.0 / 4.0 备份（没有 `todoLists`）的待办没有 `listId`，恢复成**具体的**默认清单 1
+/// 6. 待办的归属（契约 §12-9 / §13-9）：3.0 / 4.0 备份（没有 `todoLists`）的待办没有 `listId`，恢复成**具体的**默认清单 1
 ///    （导入旧备份 = 全部进默认清单，并随同步传播）；现有清单不动。4.1 备份里缺 `listId` 的待办导出时就是"未知"，
-///    照原样恢复成未知（同步时从别处学到真实归属，不会以新版本把它们全改成 1）
+///    照原样恢复成未知（同步时从别处学到真实归属，不会以新版本把它们全改成 1）。已知的归属（含落成的 1）的版本
+///    `listUpdatedAt` 与第 3 条同理：刷新为导入时刻，且严格晚于本机原来的版本，恢复的归属才能在字段级合并里胜出
 ///
 /// 任一步失败整体回滚，原有数据不受影响。
 ///
@@ -282,6 +283,15 @@ fn import_records(
     };
     let before_todos = versions_of("todos")?;
     let before_subtasks = versions_of("subtasks")?;
+    // 导入前已知归属的版本（契约 §13）：id → list_updated_at
+    let before_list_versions: HashMap<i64, String> = {
+        let mut stmt = conn.prepare(
+            "SELECT id, list_updated_at FROM todos
+             WHERE list_id IS NOT NULL AND list_updated_at IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
     // 导入版本的时间：至少是现在，且严格晚于被它取代的本地版本
     let imported_at = |before: &HashMap<i64, String>, id: i64| match before.get(&id) {
         Some(previous) => superseding(now, previous),
@@ -301,6 +311,11 @@ fn import_records(
         if legacy_backup && todo.list_id.is_none() {
             todo.list_id = Some(DEFAULT_LIST_ID);
         }
+        // 归属（契约 §13-9）：已知的（含旧备份落成的 1）版本刷新为导入时刻、并严格晚于本机原来的版本，
+        // 恢复结果才能在同步里胜出；未知的保持未知
+        todo.list_updated_at = todo
+            .list_id
+            .map(|_| imported_at(&before_list_versions, todo.id));
         todo.updated_at = imported_at(&before_todos, todo.id);
         if todo.created_at.trim().is_empty() {
             todo.created_at = now.to_string();
@@ -498,6 +513,7 @@ mod tests {
             repeat_month_day: None,
             // 3.0 / 4.0 备份里的待办没有 listId
             list_id: None,
+            list_updated_at: None,
             subtasks: Vec::new(),
         }
     }
@@ -1020,6 +1036,18 @@ mod tests {
         .unwrap()
     }
 
+    /// 存储的归属版本 `list_updated_at`（契约 §13）
+    fn list_version_of(db: &Database, todo_id: i64) -> Option<String> {
+        db.with_connection(|c| {
+            c.query_row(
+                "SELECT list_updated_at FROM todos WHERE id = ?1",
+                [todo_id],
+                |r| r.get(0),
+            )
+        })
+        .unwrap()
+    }
+
     /// 导出 4.1：顶层 todoLists（含默认清单），归属已知的待办带 listId、未知的不写（契约 §12-5）；不导出清单墓碑与
     /// 窗口属性。导入到另一个库往返一致（未知仍是未知）
     #[test]
@@ -1030,7 +1058,11 @@ mod tests {
         lists::delete(&db, gone.id).unwrap();
         seed_existing(&db);
         db.with_connection(|c| {
-            c.execute("UPDATE todos SET list_id = ?1 WHERE id = 1", [work.id])?;
+            c.execute(
+                "UPDATE todos SET list_id = ?1, list_updated_at = '2026-03-01 00:00:00'
+                 WHERE id = 1",
+                [work.id],
+            )?;
             // 迁移前的存量待办：归属未知
             c.execute(
                 "INSERT INTO todos (id, title, created_at, updated_at)
@@ -1052,10 +1084,16 @@ mod tests {
         assert_eq!(ids, vec![1, work.id], "按 (sortOrder, id)");
         assert_eq!(value["todoLists"][1]["name"], "工作");
         assert_eq!(value["todos"][0]["listId"], work.id);
+        assert_eq!(value["todos"][0]["listUpdatedAt"], "2026-03-01 00:00:00");
         assert!(value["todos"][1].get("listId").is_none(), "未知不写 listId");
+        assert!(
+            value["todos"][1].get("listUpdatedAt").is_none(),
+            "未知时版本也不写（契约 §13-7）"
+        );
         assert!(value.get("listTombstones").is_none());
 
         let restored = test_db();
+        let before = now_local();
         import_json(&restored, &text).unwrap();
         let names: Vec<String> = lists::list(&restored)
             .unwrap()
@@ -1064,11 +1102,17 @@ mod tests {
             .collect();
         assert_eq!(names, vec!["待办清单", "工作"]);
         assert_eq!(list_id_of(&restored, 1), Some(work.id));
+        let version = list_version_of(&restored, 1).expect("已知归属有版本");
+        assert!(
+            version >= before,
+            "归属的版本刷新为导入时刻，恢复结果才能胜出（契约 §13-9）: {version}"
+        );
         assert_eq!(
             list_id_of(&restored, 2),
             None,
             "4.1 备份里的未知照原样恢复成未知，同步时再从别处学到"
         );
+        assert_eq!(list_version_of(&restored, 2), None);
     }
 
     /// 导入 4.1 = 恢复备份：保留 id、updated_at 刷新为导入时刻；备份里没有的清单写清单墓碑并删除（窗口记录一并清理）；
@@ -1094,6 +1138,12 @@ mod tests {
         db.with_connection(|c| {
             c.execute(
                 "UPDATE todo_lists SET updated_at = '2099-01-01 08:00:00' WHERE id = ?1",
+                [shared.id],
+            )?;
+            // 本机同一条待办的归属版本也来自时钟偏快的设备：恢复的归属同样要严格晚于它
+            c.execute(
+                "INSERT INTO todos (id, title, list_id, list_updated_at, updated_at)
+                 VALUES (1, '本机', ?1, '2099-01-01 07:00:00', '2026-01-01 00:00:00')",
                 [shared.id],
             )
         })
@@ -1143,6 +1193,11 @@ mod tests {
             None
         );
         assert_eq!(list_id_of(&db, 1), Some(777));
+        assert_eq!(
+            list_version_of(&db, 1).as_deref(),
+            Some("2099-01-01 07:00:01"),
+            "恢复的归属严格晚于被它取代的本地版本（契约 §13-9）"
+        );
     }
 
     #[test]
@@ -1179,17 +1234,24 @@ mod tests {
             serde_json::from_str(&backup_json(vec![make_todo(5, "旧备份"), kept])).unwrap();
         assert!(doc.get("todoLists").is_none(), "前提：4.0 备份没有清单");
         assert!(doc["todos"][0].get("listId").is_none(), "前提：没有 listId");
+        let imported_from = now_local();
         import_json(&db, &doc.to_string()).unwrap();
 
         assert_eq!(list_rows(&db), before);
         assert!(list_tombstones(&db).is_empty());
         assert_eq!(list_id_of(&db, 5), Some(DEFAULT_LIST_ID));
         assert_eq!(list_id_of(&db, 6), Some(work.id), "有 listId 的照原值");
+        // 契约 §13-9：归属的版本 = 导入时刻
+        for id in [5, 6] {
+            let version = list_version_of(&db, id).expect("导入后归属已知、有版本");
+            assert!(version >= imported_from, "{version}");
+        }
         let exported: Value = serde_json::from_str(&export_json(&db).unwrap()).unwrap();
         assert_eq!(
             exported["todos"][0]["listId"], DEFAULT_LIST_ID,
             "导出 / 上传时写出具体的 1"
         );
+        assert!(exported["todos"][0]["listUpdatedAt"].is_string());
     }
 
     /// 旧版本（4.0 的 ExportData，没有 todoLists 字段）读 4.1 导出：未知字段忽略，照常导入

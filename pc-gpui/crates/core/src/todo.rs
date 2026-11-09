@@ -4,7 +4,10 @@
 
 use crate::db::paths::{self, is_safe_image_name};
 use crate::db::sync_store;
-use crate::db::time::{normalize_datetime, now_local, DefaultTime, SQL_SET_UPDATED_AT};
+use crate::db::time::{
+    normalize_datetime, now_local, DefaultTime, SQL_SET_LIST_UPDATED_AT,
+    SQL_SET_LIST_UPDATED_AT_IF_MOVED, SQL_SET_UPDATED_AT,
+};
 use crate::db::{
     subtask_from_row, todo_from_row, CreateSubTaskRequest, CreateTodoRequest, Database, SubTask,
     Todo, UpdateSubTaskRequest, UpdateTodoRequest, DEFAULT_LIST_ID, SUBTASK_COLUMNS, TODO_COLUMNS,
@@ -115,9 +118,10 @@ pub fn create(db: &Database, data: &CreateTodoRequest) -> Result<Todo, String> {
             [],
             |row| row.get(0),
         )?;
+        // 新建总是显式设置清单：归属已知，版本取现在（契约 §13-2）
         tx.execute(
-            "INSERT INTO todos (title, description, color, quadrant, notify_at, notify_before, start_time, end_time, sort_order, list_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO todos (title, description, color, quadrant, notify_at, notify_before, start_time, end_time, sort_order, list_id, list_updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, datetime('now', 'localtime'))",
             rusqlite::params![
                 data.title,
                 data.description,
@@ -138,7 +142,8 @@ pub fn create(db: &Database, data: &CreateTodoRequest) -> Result<Todo, String> {
 }
 
 /// 只更新给出的字段（`clear_*` 标志清空；改提醒时间重置已通知；开启重复提醒时提前量归零），
-/// `updated_at` 严格晚于原值（`update_todo`）
+/// `updated_at` 严格晚于原值（`update_todo`）。`list_id: Some` 且清单真的变了（含未知 → 已知）时，归属的版本
+/// `list_updated_at` 同样严格递增；`None` 时归属与它的版本都不动（契约 §13-2）
 pub fn update(db: &Database, id: i64, data: &UpdateTodoRequest) -> Result<Todo, String> {
     let times = TodoTimes::normalize(
         data.notify_at.as_deref(),
@@ -235,6 +240,9 @@ pub fn update(db: &Database, id: i64, data: &UpdateTodoRequest) -> Result<Todo, 
         }
     }
     if let Some(list_id) = data.list_id {
+        // 归属的版本只在清单真的变了时刷新（契约 §13-2；片段里的 list_id 是更新前的值）
+        updates.push(SQL_SET_LIST_UPDATED_AT_IF_MOVED);
+        params.push(Box::new(list_id));
         updates.push("list_id = ?");
         params.push(Box::new(list_id));
     }
@@ -262,9 +270,9 @@ pub fn update(db: &Database, id: i64, data: &UpdateTodoRequest) -> Result<Todo, 
     .ok_or_else(|| "待办不存在".to_string())
 }
 
-/// 把待办移到另一个清单（右键「移动到」）：只改 `list_id`，`updated_at` 严格递增（随同步传播）；
-/// 存储的已经是这个清单时什么都不改。归属未知（契约 §12）时显式移动总会写成已知——目标是默认清单也一样。
-/// 目标清单不存在报"清单不存在"，待办不存在报"待办不存在"
+/// 把待办移到另一个清单（右键「移动到」）：只改 `list_id`，它的版本 `list_updated_at`（契约 §13-2）与
+/// `updated_at` 都严格递增（随同步传播）；存储的已经是这个清单时什么都不改。归属未知（契约 §12）时显式移动总会写成
+/// 已知——目标是默认清单也一样。目标清单不存在报"清单不存在"，待办不存在报"待办不存在"
 pub fn move_to_list(db: &Database, id: i64, list_id: i64) -> Result<Todo, String> {
     db.with_connection(|conn| -> rusqlite::Result<Result<Todo, String>> {
         if !lists::is_valid_target(conn, list_id)? {
@@ -272,7 +280,8 @@ pub fn move_to_list(db: &Database, id: i64, list_id: i64) -> Result<Todo, String
         }
         conn.execute(
             &format!(
-                "UPDATE todos SET list_id = ?1, {SQL_SET_UPDATED_AT} WHERE id = ?2 AND list_id IS NOT ?1"
+                "UPDATE todos SET list_id = ?1, {SQL_SET_LIST_UPDATED_AT}, {SQL_SET_UPDATED_AT}
+                 WHERE id = ?2 AND list_id IS NOT ?1"
             ),
             rusqlite::params![list_id, id],
         )?;
@@ -870,6 +879,59 @@ mod tests {
         let mut upd = update_request();
         upd.list_id = Some(work.id);
         assert_eq!(update(&db, todo.id, &upd).unwrap().list_id, Some(work.id));
+    }
+
+    /// 契约 §13-2：归属的版本 `list_updated_at` 只在显式设置清单时刷新——新建、移到清单、编辑时改了清单——
+    /// 取 `max(now, 旧值 + 1 秒)`；只改其它字段、编辑时带着没变的清单、排序都不动它
+    #[test]
+    fn list_version_only_moves_when_the_list_is_set_explicitly() {
+        let db = db();
+        let work = lists::create(&db, "工作").unwrap();
+        let todo = create(&db, &create_request("a")).unwrap();
+        let created = todo.list_updated_at.clone().expect("新建总有归属的版本");
+        assert_eq!(
+            normalize_datetime(&created, DefaultTime::StartOfDay).as_deref(),
+            Some(created.as_str()),
+            "规范格式"
+        );
+        assert_eq!(get(&db, todo.id).unwrap().list_updated_at, Some(created));
+
+        // 旧版本放到未来：刷新后必须严格晚于它
+        db.with_connection(|c| {
+            c.execute(
+                "UPDATE todos SET list_updated_at = '2099-01-01 00:00:00' WHERE id = ?1",
+                [todo.id],
+            )
+        })
+        .unwrap();
+        let version = || get(&db, todo.id).unwrap().list_updated_at;
+
+        let mut upd = update_request();
+        upd.title = Some("只改标题".to_string());
+        update(&db, todo.id, &upd).unwrap();
+        upd.list_id = Some(DEFAULT_LIST_ID);
+        update(&db, todo.id, &upd).unwrap();
+        db.with_transaction(|tx| apply_order(tx, OrderTable::Todos, &[todo.id]))
+            .unwrap();
+        move_to_list(&db, todo.id, DEFAULT_LIST_ID).unwrap();
+        assert_eq!(
+            version().as_deref(),
+            Some("2099-01-01 00:00:00"),
+            "清单没变：版本不动"
+        );
+
+        upd.list_id = Some(work.id);
+        let edited = update(&db, todo.id, &upd).unwrap();
+        assert_eq!(edited.list_id, Some(work.id));
+        assert_eq!(
+            edited.list_updated_at.as_deref(),
+            Some("2099-01-01 00:00:01")
+        );
+        let moved = move_to_list(&db, todo.id, DEFAULT_LIST_ID).unwrap();
+        assert_eq!(
+            moved.list_updated_at.as_deref(),
+            Some("2099-01-01 00:00:02")
+        );
     }
 
     fn seq(db: &Database) -> i64 {

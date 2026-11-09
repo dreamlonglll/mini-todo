@@ -1720,7 +1720,12 @@ fn lists_and_list_deletions_sync_in_both_directions() {
     life["sortOrder"] = json!(2);
     other["todoLists"].as_array_mut().unwrap().push(life);
     let todo = other["todos"][0].clone();
+    assert!(
+        todo["listUpdatedAt"].is_string(),
+        "移到清单写出归属的版本（契约 §13）"
+    );
     other["todos"][0]["listId"] = json!(LIFE);
+    other["todos"][0]["listUpdatedAt"] = json!(later_than(&todo["listUpdatedAt"]));
     other["todos"][0]["updatedAt"] = json!(later_than(&todo["updatedAt"]));
     fx.other_device_writes(&other);
     let report = fx.engine().sync(false).unwrap();
@@ -1807,14 +1812,16 @@ fn old_devices_keep_list_keys_and_their_edits_keep_the_local_list() {
         "已知的默认清单照常写出"
     );
 
-    // 旧设备：未知顶层键进 extra；待办按旧模型重新序列化（没有 listId），其中一条它真的改过
+    // 旧设备：未知顶层键进 extra；待办按旧模型重新序列化（没有 listId / listUpdatedAt），其中一条它真的改过
     let mut old: OldSyncData = serde_json::from_value(fx.remote()).unwrap();
     assert!(
         old.extra.contains_key("todoLists") && old.extra.contains_key("listTombstones"),
         "新顶层键在旧版本里是未知键"
     );
     for todo in &mut old.todos {
-        todo.as_object_mut().unwrap().remove("listId");
+        let todo_obj = todo.as_object_mut().unwrap();
+        todo_obj.remove("listId");
+        todo_obj.remove("listUpdatedAt");
         if todo["id"] == 2 {
             todo["title"] = json!("旧设备改的标题");
             todo["updatedAt"] = json!(later_than(&todo["updatedAt"]));
@@ -1886,7 +1893,10 @@ fn upgraded_old_device_learns_list_ids_without_uploading() {
     fx.engine().sync(false).unwrap();
     fx.db
         .with_transaction(|tx| -> rusqlite::Result<()> {
-            tx.execute("UPDATE todos SET list_id = NULL", [])?;
+            tx.execute(
+                "UPDATE todos SET list_id = NULL, list_updated_at = NULL",
+                [],
+            )?;
             let seq = sync_store::local_seq(tx)?;
             sync_store::set_synced_seq(tx, seq)?;
             set_setting(tx, KEY_REMOTE_ETAG, "")?;
@@ -1936,6 +1946,207 @@ fn upgraded_old_device_learns_list_ids_without_uploading() {
     let third = todo_of(&remote, 3);
     assert_eq!(third["title"], "升级后的设备改的");
     assert!(third.get("listId").is_none(), "未知不写出");
+}
+
+/// 契约 §13（F1）：A 把待办移到"工作"；B 拿着旧副本改了标题——记录版本比 A 的新、归属是陈旧的默认清单。
+/// 两种同步顺序都收敛到 B 的内容 + A 的移动（连同它的版本），收敛之后谁再同步都不再上传
+#[test]
+fn a_stale_copy_cannot_undo_a_move_in_either_order() {
+    for move_syncs_first in [true, false] {
+        let fx = Fixture::new(if move_syncs_first {
+            "f1-move-first"
+        } else {
+            "f1-edit-first"
+        });
+        let b_db = Database::new_in_memory().unwrap();
+        let b = SyncEngine {
+            db: &b_db,
+            client: &fx.client,
+            images_dir: fx.dir.clone(),
+            device_id: "pc-b".to_string(),
+            retry_delay: fx.retry_delay,
+        };
+        let a = fx.engine();
+        let work = lists::create(&fx.db, "工作").unwrap();
+        add_local_todo(&fx.db, 1, "原标题", "2026-09-01 10:00:00");
+        crate::todo::move_to_list(&fx.db, 1, DEFAULT_LIST_ID).unwrap();
+        a.sync(false).unwrap();
+        b.sync(false).unwrap();
+        assert_eq!(
+            crate::todo::get(&b_db, 1).unwrap().list_id,
+            Some(DEFAULT_LIST_ID)
+        );
+
+        let moved = crate::todo::move_to_list(&fx.db, 1, work.id).unwrap();
+        b_db.with_connection(|c| {
+            c.execute(
+                "UPDATE todos SET title = 'B 改的标题', updated_at = ?1 WHERE id = 1",
+                [later_than(&json!(moved.updated_at))],
+            )
+        })
+        .unwrap();
+
+        let (first, second) = if move_syncs_first { (&a, &b) } else { (&b, &a) };
+        first.sync(false).unwrap();
+        second.sync(false).unwrap();
+        first.sync(false).unwrap();
+
+        for db in [&fx.db, &b_db] {
+            let t = crate::todo::get(db, 1).unwrap();
+            assert_eq!(
+                (t.title.as_str(), t.list_id, &t.list_updated_at),
+                ("B 改的标题", Some(work.id), &moved.list_updated_at),
+                "先同步的是{}",
+                if move_syncs_first { "移动" } else { "编辑" }
+            );
+        }
+        let remote = todo_of(&fx.remote(), 1);
+        assert_eq!(
+            (
+                &remote["title"],
+                &remote["listId"],
+                &remote["listUpdatedAt"]
+            ),
+            (
+                &json!("B 改的标题"),
+                &json!(work.id),
+                &json!(moved.list_updated_at)
+            )
+        );
+        fx.clear_log();
+        for engine in [first, second] {
+            assert_eq!(engine.sync(false).unwrap().status, SyncStatus::NoChanges);
+        }
+        assert_eq!(fx.count(PUT_DOC), 0, "收敛之后不再来回上传");
+    }
+}
+
+/// 契约 §13-6：远端那一版的归属比本机旧（写入方带着陈旧的已知归属写了更新的记录版本），记录版本两边相同，
+/// 本机也没有未同步的变更——照样补传一次，之后不再上传
+#[test]
+fn a_stale_assignment_on_the_remote_is_fixed_by_one_upload() {
+    let fx = Fixture::new("stale-assignment");
+    let work = lists::create(&fx.db, "工作").unwrap();
+    add_local_todo(&fx.db, 1, "原标题", "2026-09-01 10:00:00");
+    let moved = crate::todo::move_to_list(&fx.db, 1, work.id).unwrap();
+    fx.engine().sync(false).unwrap();
+
+    let mut other = fx.remote();
+    other["todos"][0]["title"] = json!("别处改的");
+    other["todos"][0]["updatedAt"] = json!(later_than(&other["todos"][0]["updatedAt"]));
+    other["todos"][0]["listId"] = json!(DEFAULT_LIST_ID);
+    other["todos"][0]["listUpdatedAt"] = json!("2026-09-01 10:00:00");
+    fx.other_device_writes(&other);
+    fx.clear_log();
+    assert_eq!(fx.engine().sync(false).unwrap().status, SyncStatus::Merged);
+    assert_eq!(fx.count(PUT_DOC), 1);
+    let t = crate::todo::get(&fx.db, 1).unwrap();
+    assert_eq!((t.title.as_str(), t.list_id), ("别处改的", Some(work.id)));
+    let remote = todo_of(&fx.remote(), 1);
+    assert_eq!(
+        (&remote["listId"], &remote["listUpdatedAt"]),
+        (&json!(work.id), &json!(moved.list_updated_at))
+    );
+    fx.clear_log();
+    assert_eq!(
+        fx.engine().sync(false).unwrap().status,
+        SyncStatus::NoChanges
+    );
+    assert_eq!(fx.count(PUT_DOC), 0);
+}
+
+/// 契约 §13（F3）：降级到旧版本（≤ 3.0.x）时它只改记录、不认识也不碰清单列，留下陈旧的归属；升级回来后，
+/// 别处更新的「移动到」照样胜出，本机较新的内容照常上传
+#[test]
+fn a_downgraded_device_learns_the_newer_list_after_upgrading() {
+    let fx = Fixture::new("f3-downgrade");
+    let work = lists::create(&fx.db, "工作").unwrap();
+    add_local_todo(&fx.db, 1, "原标题", "2026-09-01 10:00:00");
+    crate::todo::move_to_list(&fx.db, 1, work.id).unwrap();
+    fx.engine().sync(false).unwrap();
+
+    // 别的设备把它移到"生活"
+    let mut other = fx.remote();
+    let todo = other["todos"][0].clone();
+    other["todoLists"]
+        .as_array_mut()
+        .unwrap()
+        .push(list_json(LIFE, "生活", "2026-10-01 10:00:00"));
+    other["todos"][0]["listId"] = json!(LIFE);
+    other["todos"][0]["listUpdatedAt"] = json!(later_than(&todo["listUpdatedAt"]));
+    other["todos"][0]["updatedAt"] = json!(later_than(&todo["updatedAt"]));
+    let moved_at = other["todos"][0]["listUpdatedAt"].clone();
+    fx.other_device_writes(&other);
+
+    // 本机此时跑的是旧版本：改了标题（比别处的移动更新），只动 updated_at，list_id / list_updated_at 原样留下
+    let edited_at = later_than(&other["todos"][0]["updatedAt"]);
+    fx.db
+        .with_connection(|c| {
+            c.execute(
+                "UPDATE todos SET title = '旧版本改的', updated_at = ?1 WHERE id = 1",
+                [&edited_at],
+            )
+        })
+        .unwrap();
+
+    assert_eq!(fx.engine().sync(false).unwrap().status, SyncStatus::Merged);
+    let t = crate::todo::get(&fx.db, 1).unwrap();
+    assert_eq!(
+        (t.title.as_str(), t.list_id, t.updated_at.as_str()),
+        ("旧版本改的", Some(LIFE), edited_at.as_str()),
+        "内容取本机较新的，归属取别处更新的"
+    );
+    let remote = todo_of(&fx.remote(), 1);
+    assert_eq!(
+        (
+            &remote["title"],
+            &remote["listId"],
+            &remote["listUpdatedAt"]
+        ),
+        (&json!("旧版本改的"), &json!(LIFE), &moved_at)
+    );
+}
+
+/// 契约 §13-10：清单墓碑永不过期——超过 30 天的照样并入、压制长期离线的设备带回来的旧清单、随上传写出，
+/// 同步收尾也不清理；待办墓碑仍按 30 天
+#[test]
+fn list_tombstones_never_expire() {
+    const GONE: i64 = 1_731_000_000_000_789;
+    let fx = Fixture::new("list-tombstones-forever");
+    fx.db
+        .with_transaction(|tx| sync_store::record_list_tombstone(tx, GONE, "2020-01-01 00:00:00"))
+        .unwrap();
+    let mut remote = doc(vec![]);
+    remote["todoLists"] = json!([
+        list_json(DEFAULT_LIST_ID, "待办清单", "2000-01-01 00:00:00"),
+        list_json(LIFE, "离线设备带回的", "2019-12-01 00:00:00")
+    ]);
+    remote["listTombstones"] = json!([{"entityId": LIFE, "deletedAt": "2019-12-02 00:00:00"}]);
+    remote["tombstones"] =
+        json!([{"entityType": "todo", "entityId": 9, "deletedAt": "2020-01-01 00:00:00"}]);
+    fx.set_remote(&remote);
+
+    fx.engine().sync(false).unwrap();
+    assert!(lists::get(&fx.db, LIFE).is_err(), "已删的清单没有复活");
+    let mut expected = vec![GONE, LIFE];
+    expected.sort();
+    let uploaded = fx.remote();
+    assert_eq!(list_tombstone_ids(&uploaded), expected);
+    assert_eq!(list_ids_of(&uploaded), vec![DEFAULT_LIST_ID]);
+    assert_eq!(
+        uploaded["tombstones"],
+        json!([]),
+        "过期的待办墓碑照旧不写出"
+    );
+    let local = fx
+        .db
+        .with_connection(sync_store::load_list_tombstones)
+        .unwrap();
+    assert_eq!(
+        local.iter().map(|t| t.entity_id).collect::<Vec<_>>(),
+        expected,
+        "同步收尾不清理清单墓碑"
+    );
 }
 
 /// 两台设备离线各建一个清单（甚至同名）：id 不撞，同步后两边都有两个（同步造成的重名容忍）
@@ -2023,7 +2234,7 @@ fn force_push_and_force_pull_cover_lists() {
     );
     let tombs = fx
         .db
-        .with_connection(|c| sync_store::load_list_tombstones(c, "2000-01-01 00:00:00"))
+        .with_connection(sync_store::load_list_tombstones)
         .unwrap();
     assert!(tombs.is_empty(), "清单墓碑表替换为远端");
 

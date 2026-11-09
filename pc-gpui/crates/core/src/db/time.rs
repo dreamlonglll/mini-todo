@@ -98,6 +98,18 @@ pub fn superseding(now: &str, previous: &str) -> String {
 pub const SQL_SET_UPDATED_AT: &str = "updated_at = MAX(datetime('now', 'localtime'), \
      COALESCE(datetime(updated_at, '+1 second'), ''))";
 
+/// 显式设置清单时刷新 `todos.list_updated_at`（`listId` 自己的版本，契约 §13-2）的 SET 片段，语义同
+/// [`SQL_SET_UPDATED_AT`]：`max(now, 旧值 + 1 秒)`，旧值为 NULL / 无法解析时取现在。
+/// 调用方用 WHERE 保证清单确实变了（`list_id IS NOT <新值>`）
+pub const SQL_SET_LIST_UPDATED_AT: &str = "list_updated_at = MAX(datetime('now', 'localtime'), \
+     COALESCE(datetime(list_updated_at, '+1 second'), ''))";
+
+/// [`SQL_SET_LIST_UPDATED_AT`] 的条件版，给 WHERE 管不了的多字段 UPDATE 用（编辑待办时可能带着没变的清单）：
+/// 只有新的 `list_id`（**一个匿名占位符 `?`**）与原值不同时才刷新，否则保持原值。SET 里引用的列都是更新前的值
+pub const SQL_SET_LIST_UPDATED_AT_IF_MOVED: &str = "list_updated_at = CASE WHEN list_id IS NOT ? \
+     THEN MAX(datetime('now', 'localtime'), COALESCE(datetime(list_updated_at, '+1 second'), '')) \
+     ELSE list_updated_at END";
+
 /// 解析核心：带时区后缀的输入换算到 `tz` 的墙钟。抽出 `tz` 参数是为了让单测不依赖机器时区。
 fn parse_in_tz<Tz: TimeZone>(s: &str, default: DefaultTime, tz: &Tz) -> Option<NaiveDateTime> {
     let s = s.trim();
