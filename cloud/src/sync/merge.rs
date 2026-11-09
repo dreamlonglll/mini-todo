@@ -12,13 +12,16 @@
 //!
 //! 清单（`todoLists` / `listTombstones`，契约 `.trellis/tasks/11-09-multi-list-windows/contract.md`
 //! §4）与 todo 完全同构：记录级 LWW（平局保留本地）、`deletedAt >= updatedAt` 压制、并集（远端
-//! 没有 `todoLists` 键时本地清单一条都不删）、墓碑并集取较大值并按同一保留期清理；默认清单
-//! （id 1）的墓碑一律忽略。收到清单墓碑时**不**改写本地待办（读侧按"有效清单"兜底显示在默认
-//! 清单，见 `db::repo` 的有效清单过滤）。
+//! 没有 `todoLists` 键时本地清单一条都不删）、墓碑并集取较大值；默认清单（id 1）的墓碑一律忽略。
+//! **清单墓碑永不过期**（§13-10：清单很少，这样已删的清单不会被长期离线的设备复活），todo 墓碑
+//! 仍是 30 天。收到清单墓碑时**不**改写本地待办（读侧按"有效清单"兜底显示在默认清单，见
+//! `db::repo` 的有效清单过滤）。
 //!
-//! 待办的 `listId`（契约 §12 修订 1）：缺失或 `null` = **未知**（写入方不认识清单，旧版本每次
-//! 上传都会丢掉全部 `listId`），不等于默认清单。远端胜出但未知 → 沿用本地已知的值；远端已知、
-//! 本地未知 → 不论 LWW 谁胜都采纳远端的值（不改 `updatedAt`、不标脏）。未知永远不会覆盖已知。
+//! 待办的清单归属（契约 §12 修订 1 + §13 修订 2）：`listId` 缺失或 `null` = **未知**，不等于默认
+//! 清单；`listId` 有自己的版本 `listUpdatedAt`，按 `(listId, listUpdatedAt)` 做**字段级 LWW**，
+//! 与记录级的 `updatedAt` 无关：记录级结果照旧，只要结果记录存在，归属就取所有可见版本（本地合并
+//! 前的版本、远端版本——哪怕它被墓碑压制）里最新的那个，新旧见 `model::Ownership`。采纳不改
+//! `updatedAt`、不标脏。畸形记录（`listId` 类型不对、`updatedAt` 无法解析）不参与归属合并。
 //!
 //! 云端不解析 PC 记录的业务字段：记录 JSON 原样存进 `data_json`（只剥掉嵌套的
 //! `subtasks`、把子任务的 `parentId` 对齐到外层 todo、把可解析的非规范时间串统一成
@@ -35,8 +38,8 @@ use tracing::{debug, warn};
 
 use crate::db::repo;
 use crate::model::{
-    canonicalize_record_times, is_pristine_default_list, list_id_state, ListIdState,
-    DEFAULT_LIST_ID,
+    apply_ownership, canonicalize_record_times, is_pristine_default_list, newest_ownership,
+    ownership_of, Ownership, DEFAULT_LIST_ID,
 };
 use crate::sync::doc::{list_record_id, EntityType, RemoteDoc};
 use crate::time::normalize_datetime;
@@ -55,9 +58,9 @@ pub struct MergeStats {
     pub lists_deleted: usize,
     /// 新增或推后了 `deletedAt` 的清单墓碑数。
     pub list_tombstones_applied: usize,
-    /// 远端胜出但缺 `listId`、沿用了本地已知值的待办数（契约 §12-2）。
+    /// 远端版本胜出、但归属取了本地更新的那个的待办数（契约 §13-4）。
     pub list_ids_carried: usize,
-    /// 本地未知、采纳了远端 `listId` 的待办数（契约 §12-3，不改 updatedAt）。
+    /// 本地版本保留、但归属采纳了远端更新的那个的待办数（契约 §13-4，不改 updatedAt）。
     pub list_ids_adopted: usize,
     /// 跳过的坏记录（缺 id / 不是对象）与非法墓碑（含清单与清单墓碑）。
     pub records_skipped: usize,
@@ -132,8 +135,8 @@ pub fn apply_remote_doc(
         .collect();
     let mut seen_todos: HashSet<String> = HashSet::new();
     let mut seen_subs: HashSet<String> = HashSet::new();
-    // 本地每条 todo 的 listId 状态（契约 §12：缺失 / null = 未知）
-    let local_list_ids = repo::todo_list_id_states(conn)?;
+    // 本地每条 todo **合并前**的归属（契约 §13-4：在应用任何墓碑之前读出，墓碑不影响归属的合并）
+    let local_owners = local_ownerships(conn, tz)?;
 
     for todo in doc.todos() {
         let Some(todo_id) = id_string(todo).filter(|_| todo.is_object()) else {
@@ -153,10 +156,14 @@ pub fn apply_remote_doc(
             local_ts.clone().unwrap_or_default()
         };
         if suppressed(EntityType::Todo, &todo_id, &winner_ts) {
-            // 远端版本连同子任务一起丢弃；本地副本在第 3 步清扫时删除
+            // 远端版本连同子任务一起丢弃；本地副本在第 3 步清扫时删除（结果记录不存在，归属无从谈起）
             continue;
         }
-        let local_list = local_list_ids.get(&todo_id).copied();
+        // §13-4：结果记录存在 → 归属取所有可见版本里最新的：本地合并前的版本（哪怕它刚被墓碑
+        // 删掉、又被远端更新的编辑救回来）与远端版本（哪怕它被墓碑压制）；畸形版本不参与
+        let local_owner = local_owners.get(&todo_id).cloned().flatten();
+        let remote_owner = todo.as_object().and_then(|obj| ownership_of(obj, tz));
+        let owner = newest_ownership(local_owner.as_ref(), remote_owner.as_ref());
         if remote_wins {
             let mut body = todo.clone();
             if let Some(obj) = body.as_object_mut() {
@@ -164,30 +171,21 @@ pub fn apply_remote_doc(
                 obj.remove("subtasks");
                 // 缓存里的时间统一成规范格式（列表过滤 / 排序按字符串比较）
                 canonicalize_record_times(obj, true, tz);
-                // §12-2：远端胜出但不认识清单（缺 listId / null）→ 沿用本地已知的 listId；
-                // 本地也未知 / 本地没有这条 → 仍是未知（统一成缺失）
-                if list_id_state(obj) == ListIdState::Unknown {
-                    match local_list {
-                        Some(ListIdState::Known(list_id)) => {
-                            obj.insert("listId".into(), json!(list_id));
-                            stats.list_ids_carried += 1;
-                        }
-                        _ => {
-                            obj.remove("listId");
-                        }
-                    }
+                // 两边都不参与（远端畸形、本地没有或也畸形）：不从远端采纳，存成未知
+                let owner = owner.unwrap_or(Ownership::Unknown);
+                if remote_owner.as_ref() != Some(&owner) && local_owner.as_ref() == Some(&owner) {
+                    stats.list_ids_carried += 1;
                 }
+                apply_ownership(obj, &owner);
             }
             repo::upsert_todo(conn, &todo_id, &body.to_string(), &remote_ts)?;
             local_todos.insert(todo_id.clone(), remote_ts);
             stats.todos_upserted += 1;
-        } else if let (Some(ListIdState::Unknown), Some(obj)) = (local_list, todo.as_object()) {
-            // §12-3：本地胜出（含平局、本地更新）但本地不认识清单，远端已知 → 采纳远端的 listId，
-            // 不改 updatedAt（不是一次新的编辑，也不标脏：远端本来就有这个值）
-            if let ListIdState::Known(list_id) = list_id_state(obj) {
-                if repo::set_todo_list_id(conn, &todo_id, list_id)? {
-                    stats.list_ids_adopted += 1;
-                }
+        } else if let Some(owner) = owner.filter(|o| local_owner.as_ref() != Some(o)) {
+            // 本地版本保留，归属采纳远端更新的那个：只改 listId / listUpdatedAt，不改 updatedAt、
+            // 不标脏（§13-5，远端本来就有这个归属）
+            if rewrite_ownership(conn, &todo_id, &owner)? {
+                stats.list_ids_adopted += 1;
             }
         }
 
@@ -277,24 +275,54 @@ pub fn apply_remote_doc(
     repo::purge_tombstones_before(conn, retention_cutoff)?;
 
     // ---- 6. 清单 ----
-    merge_lists(conn, doc, tz, retention_cutoff, &mut stats)?;
+    merge_lists(conn, doc, tz, &mut stats)?;
 
     Ok(stats)
 }
 
-/// 合并远端清单（契约 §4，与 todo 同构；见模块注释）。
+/// 本地每条 todo 的归属（契约 §13）；`None` = 畸形记录（`listId` 类型不对、`updatedAt` 无法解析、
+/// data_json 不是对象），不参与归属合并。
+fn local_ownerships(
+    conn: &Connection,
+    tz: Tz,
+) -> rusqlite::Result<HashMap<String, Option<Ownership>>> {
+    Ok(repo::all_todos(conn)?
+        .into_iter()
+        .map(|row| {
+            let owner = match serde_json::from_str::<Value>(&row.data_json) {
+                Ok(Value::Object(obj)) => ownership_of(&obj, tz),
+                _ => None,
+            };
+            (row.id, owner)
+        })
+        .collect())
+}
+
+/// 只改本地记录的归属（`listId` / `listUpdatedAt`），`updatedAt` 与 updated_at 列都不动（§13-5）。
+fn rewrite_ownership(conn: &Connection, id: &str, owner: &Ownership) -> rusqlite::Result<bool> {
+    let Some(row) = repo::get_todo(conn, id)? else {
+        return Ok(false);
+    };
+    let Ok(Value::Object(mut obj)) = serde_json::from_str::<Value>(&row.data_json) else {
+        return Ok(false);
+    };
+    apply_ownership(&mut obj, owner);
+    repo::upsert_todo(conn, id, &Value::Object(obj).to_string(), &row.updated_at)?;
+    Ok(true)
+}
+
+/// 合并远端清单（契约 §4，与 todo 同构；见模块注释）。清单墓碑永不过期（§13-10）。
 fn merge_lists(
     conn: &Connection,
     doc: &RemoteDoc,
     tz: Tz,
-    retention_cutoff: &str,
     stats: &mut MergeStats,
 ) -> rusqlite::Result<()> {
     let default_id = DEFAULT_LIST_ID.to_string();
     // 默认清单不可删除；本地没有时按固定初始值补建（契约 §2）
     repo::ensure_default_list(conn)?;
 
-    // ---- 清单墓碑：本地 ∪ 远端，同键取较大 deletedAt；保留期外的远端墓碑不导入 ----
+    // ---- 清单墓碑：本地 ∪ 远端，同键取较大 deletedAt；不按保留期过滤（永不过期） ----
     let mut tombs: HashMap<String, String> = HashMap::new();
     for (id, deleted_at) in repo::all_list_tombstones(conn)? {
         let d = canon_ts(Some(&deleted_at), tz);
@@ -311,9 +339,6 @@ fn merge_lists(
         stats.records_skipped += invalid;
     }
     for t in remote_tombs {
-        if t.deleted_at.as_str() < retention_cutoff {
-            continue;
-        }
         if tombs
             .get(&t.entity_id)
             .is_none_or(|old| t.deleted_at > *old)
@@ -369,8 +394,6 @@ fn merge_lists(
             stats.lists_deleted += 1;
         }
     }
-
-    repo::purge_list_tombstones_before(conn, retention_cutoff)?;
     Ok(())
 }
 
@@ -381,10 +404,11 @@ fn merge_lists(
 /// - 本地墓碑（`deletedAt >= recheck_cutoff`）远端没有，或远端同键的 `deletedAt` 更早。
 ///   远端是旧协议文档（没有 `tombstones` 键，旧版 PC 写的）时不比较墓碑——旧版 PC
 ///   不认识墓碑，每次都会把它们丢掉，比较会导致每轮都重推。
-/// - 清单与清单墓碑按同样的规则比较（远端没有 `todoLists` 键时本地的每个清单都算缺失）；
-///   还是初始值的默认清单不算（每个写入方都会按同样的值补建它）。旧协议文档同样不比较清单：
-///   写它的旧版 PC 也不会原样带回不认识的顶层键，比较会导致每轮都重推。
-/// - 远端待办缺 `listId`（未知）而本地同一条已知（契约 §12-8）；旧协议文档同样不比较。
+/// - 清单与清单墓碑按同样的规则比较（远端没有 `todoLists` 键时本地的每个清单都算缺失；清单墓碑
+///   永不过期，不留"快过期"的余量）；还是初始值的默认清单不算（每个写入方都会按同样的值补建它）。
+///   旧协议文档同样不比较清单：写它的旧版 PC 也不会原样带回不认识的顶层键，比较会导致每轮都重推。
+/// - 待办的归属：远端那一版的归属比本地旧（包括远端缺失 / 畸形、本地已知），契约 §13-6；
+///   旧协议文档同样不比较。
 ///
 /// 典型场景：别的写入方在忽略前置条件的服务端（nginx dav / Caddy webdav）上用自己的旧
 /// 快照整包覆盖了云端刚写入的记录或墓碑。调用方（pull）为真时标脏，让 push 把并集写回去，
@@ -436,10 +460,10 @@ pub fn remote_lacks_local_state(
     if !doc.has_tombstones_key() {
         return Ok(false);
     }
-    if remote_lacks_local_list_ids(conn, doc)? {
+    if remote_lacks_local_ownership(conn, doc, tz)? {
         return Ok(true);
     }
-    if remote_lacks_local_lists(conn, doc, tz, recheck_cutoff)? {
+    if remote_lacks_local_lists(conn, doc, tz)? {
         return Ok(true);
     }
     // 墓碑按数值 id 比较：写出的墓碑 `entityId` 一律是整数（`Tombstone::to_value`），
@@ -478,18 +502,27 @@ pub fn remote_lacks_local_state(
     Ok(false)
 }
 
-/// 远端某条待办缺 `listId`（未知）、本地同一条已知（任何值，含 1）→ 远端缺少本地内容
-/// （契约 §12-8 的 cloud 对应：补传一次修复文档）。上传时本地的已知值随记录写出，之后远端就不再缺。
-fn remote_lacks_local_list_ids(conn: &Connection, doc: &RemoteDoc) -> rusqlite::Result<bool> {
-    let local = repo::todo_list_id_states(conn)?;
+/// 合并后远端那一版的归属比本地旧 → 补传一次（契约 §13-6）。远端缺 `listId` 或是畸形记录、本地已知
+/// 也算；本地没有这条、本地是畸形记录时不比较。上传写出本地的归属后远端就不再旧，不会来回推送。
+fn remote_lacks_local_ownership(
+    conn: &Connection,
+    doc: &RemoteDoc,
+    tz: Tz,
+) -> rusqlite::Result<bool> {
+    let local = local_ownerships(conn, tz)?;
     for todo in doc.todos() {
         let (Some(id), Some(obj)) = (id_string(todo), todo.as_object()) else {
             continue;
         };
-        if list_id_state(obj) == ListIdState::Unknown
-            && matches!(local.get(&id), Some(ListIdState::Known(_)))
-        {
-            debug!(target: "minitodo_cloud::sync", "remote todo {} lacks the local listId", id);
+        let Some(Some(local)) = local.get(&id) else {
+            continue;
+        };
+        let behind = match ownership_of(obj, tz) {
+            Some(remote) => local.newer_than(&remote),
+            None => local.is_known(),
+        };
+        if behind {
+            debug!(target: "minitodo_cloud::sync", "remote todo {} has an older list ownership", id);
             return Ok(true);
         }
     }
@@ -497,12 +530,7 @@ fn remote_lacks_local_list_ids(conn: &Connection, doc: &RemoteDoc) -> rusqlite::
 }
 
 /// `remote_lacks_local_state` 的清单部分（规则见那里）。
-fn remote_lacks_local_lists(
-    conn: &Connection,
-    doc: &RemoteDoc,
-    tz: Tz,
-    recheck_cutoff: &str,
-) -> rusqlite::Result<bool> {
+fn remote_lacks_local_lists(conn: &Connection, doc: &RemoteDoc, tz: Tz) -> rusqlite::Result<bool> {
     let remote_lists: HashMap<String, String> = doc
         .lists()
         .iter()
@@ -535,8 +563,9 @@ fn remote_lacks_local_lists(
         if id.parse::<i64>().is_err() {
             continue;
         }
+        // 清单墓碑永不过期（§13-10）：不管多旧都要求远端保留
         let local = canon_ts(Some(&deleted_at), tz);
-        if local.is_empty() || local.as_str() < recheck_cutoff {
+        if local.is_empty() {
             continue;
         }
         if remote_deleted.get(&id).is_none_or(|remote| local > *remote) {
@@ -1311,7 +1340,7 @@ mod tests {
         assert_eq!(list_name(&db, "8").as_deref(), Some("ok"));
     }
 
-    // ---------------------------------------------------------------- 待办的 listId（契约 §12）
+    // ------------------------------------------------- 待办的清单归属（契约 §12 / §13）
 
     fn todo_in(id: i64, title: &str, updated_at: &str, list_id: Option<Value>) -> Value {
         let mut t = todo_value(id, title, updated_at);
@@ -1319,6 +1348,39 @@ mod tests {
             t["listId"] = l;
         }
         t
+    }
+
+    /// 已知归属的待办；`list_at` 为 None 时不写 `listUpdatedAt`（已知但没有时间）。
+    fn todo_owned(
+        id: i64,
+        title: &str,
+        updated_at: &str,
+        list_id: i64,
+        list_at: Option<&str>,
+    ) -> Value {
+        let mut t = todo_in(id, title, updated_at, Some(json!(list_id)));
+        if let Some(at) = list_at {
+            t["listUpdatedAt"] = json!(at);
+        }
+        t
+    }
+
+    /// 缓存里的归属 `(listId, listUpdatedAt)`，缺失的键为 Null。
+    fn owner(db: &Db, id: &str) -> (Value, Value) {
+        let (t, _) = stored(db, id);
+        (
+            t.get("listId").cloned().unwrap_or(Value::Null),
+            t.get("listUpdatedAt").cloned().unwrap_or(Value::Null),
+        )
+    }
+
+    /// 这个副本上传出去的文档（`build_outgoing_doc` 的结果），用来模拟两个写入方之间的往返。
+    fn outgoing(db: &Db) -> RemoteDoc {
+        let out = db.with_conn(|c| {
+            crate::sync::doc::build_outgoing_doc(c, &serde_json::Map::new(), vec![], tz(), CUTOFF)
+                .unwrap()
+        });
+        RemoteDoc::from_value(Value::Object(out)).unwrap()
     }
 
     /// 缓存里的 data_json 与 updated_at 列。
@@ -1336,17 +1398,18 @@ mod tests {
         db.with_conn(|c| repo::is_dirty(c).unwrap())
     }
 
-    /// §12-2：远端胜出但不认识清单（缺 listId / null）→ 沿用本地已知的 listId；本地也未知时
-    /// 仍是未知（不补成 1）。远端已知的新值照常按 LWW 覆盖。
+    /// §12-2 / §13-4：远端版本胜出、但它的归属比本地旧（未知、null、已知没有时间、时间更早）→
+    /// 归属取本地的（连同版本）；两边都未知时仍是未知（不补成 1）。远端的归属更新时照常采用。
     #[test]
-    fn remote_winner_without_list_id_keeps_the_local_list_id() {
+    fn remote_winner_with_an_older_ownership_keeps_the_local_one() {
         let (db, _tmp) = fresh_db();
+        let t10 = "2026-11-01 10:00:00";
         merge(
             &db,
             &doc(
                 vec![
-                    todo_in(1, "a", "2026-11-01 10:00:00", Some(json!(5))),
-                    todo_in(2, "b", "2026-11-01 10:00:00", None),
+                    todo_owned(1, "a", t10, 5, Some(t10)),
+                    todo_in(2, "b", t10, None),
                 ],
                 vec![],
             ),
@@ -1365,49 +1428,78 @@ mod tests {
         assert_eq!(stats.list_ids_carried, 1);
         let (t1, ts1) = stored(&db, "1");
         assert_eq!(t1["title"], "a-old-pc");
-        assert_eq!(t1["listId"], 5, "沿用本地已知的清单");
-        assert_eq!(ts1, "2026-11-01 11:00:00", "版本是远端的");
+        assert_eq!(ts1, "2026-11-01 11:00:00", "记录的版本是远端的");
+        assert_eq!(owner(&db, "1"), (json!(5), json!(t10)), "归属沿用本地的");
         let (t2, _) = stored(&db, "2");
         assert_eq!(t2["title"], "b-old-pc");
-        assert!(
-            t2.get("listId").is_none(),
-            "本地也未知：仍是未知（null 统一成缺失），不补成 1: {}",
-            t2
+        assert_eq!(
+            owner(&db, "2"),
+            (Value::Null, Value::Null),
+            "本地也未知：仍是未知（null 统一成缺失），不补成 1"
         );
 
+        // 远端已知但没有时间（次旧）、或时间更早：同样保留本地的；其它字段照旧按记录级 LWW
         merge(
             &db,
             &doc(
-                vec![todo_in(1, "a3", "2026-11-01 12:00:00", Some(Value::Null))],
+                vec![todo_owned(1, "a3", "2026-11-01 12:00:00", 9, None)],
                 vec![],
             ),
         );
-        assert_eq!(stored(&db, "1").0["listId"], 5, "远端 null 同样算未知");
+        assert_eq!(owner(&db, "1"), (json!(5), json!(t10)));
         merge(
             &db,
             &doc(
-                vec![todo_in(1, "a4", "2026-11-01 13:00:00", Some(json!(7)))],
+                vec![todo_owned(
+                    1,
+                    "a4",
+                    "2026-11-01 13:00:00",
+                    9,
+                    Some("2026-11-01T09:00:00"),
+                )],
                 vec![],
             ),
         );
-        assert_eq!(stored(&db, "1").0["listId"], 7, "远端已知的新值照常覆盖");
+        assert_eq!(owner(&db, "1"), (json!(5), json!(t10)));
+        assert_eq!(todo_title(&db, "1").as_deref(), Some("a4"));
+        // 远端的归属更新：采用（非规范时间统一成规范格式）
+        merge(
+            &db,
+            &doc(
+                vec![todo_owned(
+                    1,
+                    "a5",
+                    "2026-11-01 14:00:00",
+                    7,
+                    Some("2026-11-01T13:30:00"),
+                )],
+                vec![],
+            ),
+        );
+        assert_eq!(owner(&db, "1"), (json!(7), json!("2026-11-01 13:30:00")));
         assert!(!dirty(&db), "合并从不标脏");
     }
 
-    /// §12-3：远端已知、本地未知 → 不论 LWW 谁胜（含平局、本地更新）都采纳远端的 listId，
-    /// 不改 updatedAt、不标脏；本地已知 / 远端类型不对时不采纳。
+    /// §12-3 / §13-4：本地版本保留（平局、本地更新）时，远端更新的归属照样采纳，不改 updatedAt、
+    /// 不标脏；本地已知但远端的更新也采纳。本地的归属更新、远端是畸形记录时不采纳。
     #[test]
-    fn remote_list_id_fills_unknown_local_regardless_of_lww() {
+    fn newer_remote_ownership_is_adopted_regardless_of_record_lww() {
         let (db, _tmp) = fresh_db();
+        let (t9, t10, t12) = (
+            "2026-11-01 09:00:00",
+            "2026-11-01 10:00:00",
+            "2026-11-01 12:00:00",
+        );
         merge(
             &db,
             &doc(
                 vec![
-                    todo_in(1, "tie", "2026-11-01 10:00:00", None),
-                    todo_in(2, "local-newer", "2026-11-01 12:00:00", None),
-                    todo_in(3, "known", "2026-11-01 10:00:00", Some(json!(5))),
-                    todo_in(4, "bad remote", "2026-11-01 10:00:00", None),
-                    todo_in(5, "remote-newer", "2026-11-01 10:00:00", None),
+                    todo_in(1, "tie", t10, None),
+                    todo_in(2, "local-newer", t12, None),
+                    todo_owned(3, "known", t10, 5, Some(t9)),
+                    todo_in(4, "bad remote", t10, None),
+                    todo_in(5, "remote-newer", t10, None),
+                    todo_owned(6, "local-owner-newer", t12, 5, Some(t9)),
                 ],
                 vec![],
             ),
@@ -1416,28 +1508,39 @@ mod tests {
             &db,
             &doc(
                 vec![
-                    todo_in(1, "tie", "2026-11-01 10:00:00", Some(json!(7))),
+                    todo_in(1, "tie", t10, Some(json!(7))),
                     todo_in(2, "remote-older", "2026-11-01 11:00:00", Some(json!(7))),
-                    todo_in(3, "known", "2026-11-01 10:00:00", Some(json!(8))),
-                    todo_in(4, "bad remote", "2026-11-01 10:00:00", Some(json!("7"))),
-                    todo_in(5, "remote-newer", "2026-11-01 13:00:00", Some(json!(7))),
+                    todo_owned(3, "known", t10, 8, Some("2026-11-01 09:30:00")),
+                    todo_in(4, "bad remote", t10, Some(json!("7"))),
+                    todo_owned(5, "remote-newer", "2026-11-01 13:00:00", 7, Some(t12)),
+                    todo_owned(
+                        6,
+                        "remote-older",
+                        "2026-11-01 11:00:00",
+                        9,
+                        Some("2026-11-01 08:00:00"),
+                    ),
                 ],
                 vec![],
             ),
         );
-        assert_eq!(stats.list_ids_adopted, 2);
+        assert_eq!(stats.list_ids_adopted, 3);
         let (t1, ts1) = stored(&db, "1");
-        assert_eq!(t1["listId"], 7, "平局：采纳");
-        assert_eq!(ts1, "2026-11-01 10:00:00");
-        assert_eq!(t1["updatedAt"], "2026-11-01 10:00:00", "不改 updatedAt");
+        assert_eq!(owner(&db, "1"), (json!(7), Value::Null), "平局：采纳");
+        assert_eq!(ts1, t10);
+        assert_eq!(t1["updatedAt"], t10, "不改 updatedAt");
         let (t2, ts2) = stored(&db, "2");
         assert_eq!(t2["listId"], 7, "本地更新：也采纳");
-        assert_eq!(t2["title"], "local-newer", "本地版本保留，只补 listId");
-        assert_eq!(ts2, "2026-11-01 12:00:00");
-        assert_eq!(t2["updatedAt"], "2026-11-01 12:00:00");
-        assert_eq!(stored(&db, "3").0["listId"], 5, "本地已知：平局保留本地");
-        assert!(
-            stored(&db, "4").0.get("listId").is_none(),
+        assert_eq!(t2["title"], "local-newer", "本地版本保留，只换归属");
+        assert_eq!((ts2.as_str(), t2["updatedAt"].clone()), (t12, json!(t12)));
+        assert_eq!(
+            owner(&db, "3"),
+            (json!(8), json!("2026-11-01 09:30:00")),
+            "本地已知、远端的归属更新：采纳"
+        );
+        assert_eq!(
+            owner(&db, "4"),
+            (Value::Null, Value::Null),
             "类型不对的远端值不采纳"
         );
         let (t5, ts5) = stored(&db, "5");
@@ -1446,45 +1549,273 @@ mod tests {
             (json!(7), "2026-11-01 13:00:00"),
             "远端胜出：整条采用"
         );
+        let (t6, _) = stored(&db, "6");
+        assert_eq!(t6["title"], "local-owner-newer");
+        assert_eq!(
+            owner(&db, "6"),
+            (json!(5), json!(t9)),
+            "本地的归属更新：不动"
+        );
         assert!(!dirty(&db));
 
-        // 只采纳 listId（平局）不会让远端显得"落后"：不为它多推一次
+        // 只采纳归属（平局）不会让远端显得"落后"：不为它多推一次
         let (db2, _tmp2) = fresh_db();
-        merge(
-            &db2,
-            &doc(vec![todo_in(1, "a", "2026-11-01 10:00:00", None)], vec![]),
-        );
-        let new_writer = doc(
-            vec![todo_in(1, "a", "2026-11-01 10:00:00", Some(json!(7)))],
-            vec![],
-        );
+        merge(&db2, &doc(vec![todo_in(1, "a", t10, None)], vec![]));
+        let new_writer = doc(vec![todo_owned(1, "a", t10, 7, Some(t10))], vec![]);
         merge(&db2, &new_writer);
-        assert_eq!(stored(&db2, "1").0["listId"], 7);
+        assert_eq!(owner(&db2, "1"), (json!(7), json!(t10)));
         assert!(!lacks(&db2, &new_writer, CUTOFF));
         assert!(!dirty(&db2));
     }
 
-    /// §12-8 的 cloud 对应：远端缺 listId（未知）而本地已知 → 远端落后，补传一次；
-    /// 两边都未知、远端已知、旧协议文档都不算。
+    /// §13-6：合并后远端那一版的归属比本地旧（缺失 / null / 已知没有时间 / 时间更早 / 同时间但
+    /// listId 较小 / 畸形）→ 远端落后，补传一次；一样新、远端更新、两边都未知、旧协议文档都不算。
     #[test]
-    fn remote_missing_a_known_list_id_counts_as_behind() {
+    fn remote_with_an_older_ownership_counts_as_behind() {
         let (db, _tmp) = fresh_db();
-        let t = todo_in(1, "a", "2026-11-01 10:00:00", Some(json!(5)));
+        let t10 = "2026-11-01 10:00:00";
+        let t = todo_owned(1, "a", t10, 5, Some(t10));
         merge(&db, &doc(vec![t.clone()], vec![]));
-        assert!(!lacks(&db, &doc(vec![t], vec![]), CUTOFF));
-        let unknown = todo_in(1, "a", "2026-11-01 10:00:00", None);
-        assert!(lacks(&db, &doc(vec![unknown.clone()], vec![]), CUTOFF));
-        let null = todo_in(1, "a", "2026-11-01 10:00:00", Some(Value::Null));
-        assert!(lacks(&db, &doc(vec![null], vec![]), CUTOFF));
+        let behind = |remote: Value| lacks(&db, &doc(vec![remote], vec![]), CUTOFF);
+        let at = |list_id: i64, list_at: Option<&str>| todo_owned(1, "a", t10, list_id, list_at);
+        assert!(!behind(t), "一样新");
+        assert!(behind(todo_in(1, "a", t10, None)), "远端未知");
+        assert!(behind(todo_in(1, "a", t10, Some(Value::Null))), "远端 null");
+        assert!(behind(at(5, None)), "远端已知但没有时间");
+        assert!(behind(at(6, Some("2026-11-01 09:00:00"))), "远端时间更早");
+        assert!(behind(at(4, Some(t10))), "同时间、远端 listId 较小");
+        assert!(behind(todo_in(1, "a", t10, Some(json!("5")))), "远端畸形");
+        assert!(!behind(at(6, Some(t10))), "同时间、远端 listId 较大");
+        assert!(!behind(at(4, Some("2026-11-01 11:00:00"))), "远端更新");
         assert!(
-            !lacks(&db, &legacy_doc(vec![unknown]), CUTOFF),
+            !lacks(&db, &legacy_doc(vec![todo_in(1, "a", t10, None)]), CUTOFF),
             "旧协议文档不比较"
         );
 
         let (db2, _tmp2) = fresh_db();
-        let u = todo_in(2, "b", "2026-11-01 10:00:00", None);
+        let u = todo_in(2, "b", t10, None);
         merge(&db2, &doc(vec![u.clone()], vec![]));
         assert!(!lacks(&db2, &doc(vec![u], vec![]), CUTOFF), "两边都未知");
+    }
+
+    /// §13-3：两边一样新但 listId 不同 → 取较大的 listId。两端各自合并的结论相同；持有较小值的
+    /// 那一版算落后、补传一次后收敛，之后谁都不再补传。
+    #[test]
+    fn same_time_ownerships_resolve_to_the_larger_list_id() {
+        let t10 = "2026-11-01 10:00:00";
+        let (a, _ta) = fresh_db();
+        let (b, _tb) = fresh_db();
+        let a_doc = doc(vec![todo_owned(1, "z", t10, 5, Some(t10))], vec![]);
+        let b_doc = doc(vec![todo_owned(1, "z", t10, 6, Some(t10))], vec![]);
+        merge(&a, &a_doc);
+        merge(&b, &b_doc);
+
+        merge(&a, &b_doc);
+        assert_eq!(owner(&a, "1"), (json!(6), json!(t10)), "A 采纳较大的 6");
+        assert!(!lacks(&a, &b_doc, CUTOFF));
+        merge(&b, &a_doc);
+        assert_eq!(owner(&b, "1"), (json!(6), json!(t10)), "B 保留较大的 6");
+        assert!(lacks(&b, &a_doc, CUTOFF), "A 那一版落后：B 补传");
+        let b_push = outgoing(&b);
+        merge(&a, &b_push);
+        assert_eq!(owner(&a, "1"), (json!(6), json!(t10)));
+        assert!(!lacks(&a, &b_push, CUTOFF) && !lacks(&b, &outgoing(&a), CUTOFF));
+        assert!(!dirty(&a) && !dirty(&b));
+    }
+
+    /// F1：陈旧副本不再吞掉别处更新的「移动到」。t0 Z 在清单 5；t1 设备 A 把 Z 移到 6；旧设备 O
+    /// 拿到 t1 的版本、在 t2 改了标题后整份上传（没有归属）；cloud 只见过 t0。两种到达顺序都收敛到
+    /// A 的移动，收敛后谁都不再补传。（A 用同一套合并代码模拟：PC 的规则与这里一致。）
+    #[test]
+    fn stale_ownership_never_beats_a_newer_move_in_either_order() {
+        let (t0, t1, t2) = (
+            "2026-11-01 10:00:00",
+            "2026-11-01 11:00:00",
+            "2026-11-01 12:00:00",
+        );
+        let old_device = doc(vec![todo_in(1, "Z-旧设备改", t2, None)], vec![]);
+        let moved = (json!(6), json!(t1));
+
+        // cloud 只见过 t0：收到 O 的上传时沿用自己（陈旧但有版本）的归属，并补传
+        let (cloud, _c) = fresh_db();
+        merge(
+            &cloud,
+            &doc(vec![todo_owned(1, "Z", t0, 5, Some(t0))], vec![]),
+        );
+        merge(&cloud, &old_device);
+        assert_eq!(owner(&cloud, "1"), (json!(5), json!(t0)));
+        assert!(lacks(&cloud, &old_device, CUTOFF));
+        let cloud_push = outgoing(&cloud);
+
+        // 情形 1：A 先收到 cloud 的补传 → 记录取远端的（t2），归属仍是 A 自己更新的 6 → A 补传
+        let (a, _a) = fresh_db();
+        merge(&a, &doc(vec![todo_owned(1, "Z", t1, 6, Some(t1))], vec![]));
+        merge(&a, &cloud_push);
+        assert_eq!(todo_title(&a, "1").as_deref(), Some("Z-旧设备改"));
+        assert_eq!(owner(&a, "1"), moved, "A 的移动没有被 cloud 的陈旧归属覆盖");
+        assert!(lacks(&a, &cloud_push, CUTOFF));
+        let a_push = outgoing(&a);
+
+        // 情形 2：A 先收到 O 的上传（沿用 6 并补传），随后 cloud 的 PUT 盖掉了 A 的补传
+        let (a2, _a2) = fresh_db();
+        merge(&a2, &doc(vec![todo_owned(1, "Z", t1, 6, Some(t1))], vec![]));
+        merge(&a2, &old_device);
+        assert_eq!(owner(&a2, "1"), moved);
+        assert!(lacks(&a2, &old_device, CUTOFF));
+        merge(&a2, &cloud_push);
+        assert_eq!(owner(&a2, "1"), moved, "平局保留本地记录，归属仍是更新的 6");
+        assert!(
+            lacks(&a2, &cloud_push, CUTOFF),
+            "远端已知但更旧：仍补传，不再永久分叉"
+        );
+        let a2_push = outgoing(&a2);
+        assert_eq!(a_push.todos(), a2_push.todos(), "两种顺序 A 写出的结果相同");
+
+        // cloud 收到 A 的补传：记录平局保留本地，归属采纳 6；不标脏，之后谁都不再补传
+        let stats = merge(&cloud, &a_push);
+        assert_eq!(stats.list_ids_adopted, 1);
+        assert_eq!(owner(&cloud, "1"), moved);
+        assert_eq!(stored(&cloud, "1").1, t2, "不改 updatedAt");
+        assert!(!lacks(&cloud, &a_push, CUTOFF));
+        assert!(!lacks(&a, &outgoing(&cloud), CUTOFF));
+        assert!(!dirty(&cloud));
+    }
+
+    /// §13-4（F2）：本地版本刚被远端墓碑删掉、又被远端更新的编辑（旧设备写的，没有归属）救回来：
+    /// 本地合并前的版本仍是可见版本，归属取它的；远端那一版落后，补传。
+    #[test]
+    fn ownership_of_a_local_version_deleted_then_rescued_is_kept() {
+        let (db, _tmp) = fresh_db();
+        let t10 = "2026-11-01 10:00:00";
+        merge(
+            &db,
+            &doc(vec![todo_owned(1, "z", t10, 5, Some(t10))], vec![]),
+        );
+        let remote = doc(
+            vec![todo_in(
+                1,
+                "z-删除后旧设备又改",
+                "2026-11-01 12:00:00",
+                None,
+            )],
+            vec![json!({"entityType": "todo", "entityId": 1, "deletedAt": "2026-11-01 11:00:00"})],
+        );
+        merge(&db, &remote);
+        let (z, ts) = stored(&db, "1");
+        assert_eq!(z["title"], "z-删除后旧设备又改");
+        assert_eq!(ts, "2026-11-01 12:00:00");
+        assert_eq!(owner(&db, "1"), (json!(5), json!(t10)));
+        assert!(lacks(&db, &remote, CUTOFF), "远端那一版没有归属：补传");
+    }
+
+    /// §13-4（F4）：远端版本被墓碑压制（记录级丢弃），本地删除后又编辑过的版本留下：被压制的远端
+    /// 版本仍是可见版本，它的归属更新就采纳（不改 updatedAt、不标脏）。墓碑在本地或在同一份远端
+    /// 文档里结果都一样。
+    #[test]
+    fn ownership_from_a_suppressed_remote_version_is_adopted() {
+        let (t10, t11, t12) = (
+            "2026-11-01 10:00:00",
+            "2026-11-01 11:00:00",
+            "2026-11-01 12:00:00",
+        );
+        for tomb_in_remote in [false, true] {
+            let (db, _tmp) = fresh_db();
+            db.with_conn(|c| {
+                if !tomb_in_remote {
+                    repo::add_tombstone(c, "todo", "1", t11).unwrap();
+                }
+                let local = todo_in(1, "删除后又编辑", t12, None);
+                repo::upsert_todo(c, "1", &local.to_string(), t12).unwrap();
+            });
+            let tombs = if tomb_in_remote {
+                vec![json!({"entityType": "todo", "entityId": 1, "deletedAt": t11})]
+            } else {
+                vec![]
+            };
+            let stats = merge(
+                &db,
+                &doc(
+                    vec![todo_owned(1, "被删的旧版本", t10, 7, Some(t10))],
+                    tombs,
+                ),
+            );
+            assert_eq!(stats.list_ids_adopted, 1, "墓碑在远端：{}", tomb_in_remote);
+            let (z, ts) = stored(&db, "1");
+            assert_eq!(z["title"], "删除后又编辑", "记录级：本地版本留下");
+            assert_eq!((z["updatedAt"].clone(), ts.as_str()), (json!(t12), t12));
+            assert_eq!(
+                owner(&db, "1"),
+                (json!(7), json!(t10)),
+                "归属采纳被压制版本的"
+            );
+            assert!(!dirty(&db));
+        }
+    }
+
+    /// §13-11（F6）：畸形记录（listId 类型不对、记录的 updatedAt 无法解析）不参与归属合并，谁都不从
+    /// 它采纳；它在记录级胜出时，归属取其它可见版本里最新的（都没有就是未知）；本地已知时远端算落后。
+    #[test]
+    fn malformed_records_take_no_part_in_ownership() {
+        let (db, _tmp) = fresh_db();
+        let (t10, t11) = ("2026-11-01 10:00:00", "2026-11-01 11:00:00");
+        merge(
+            &db,
+            &doc(
+                vec![
+                    todo_in(1, "a", t10, None),
+                    todo_in(2, "b", t10, None),
+                    todo_owned(3, "c", t10, 5, Some(t10)),
+                ],
+                vec![],
+            ),
+        );
+        let mut bad_time = todo_owned(2, "b", t10, 7, Some(t10));
+        bad_time["updatedAt"] = json!("not a time");
+        let bad_list_c = todo_in(3, "c-new", t11, Some(json!("6")));
+        let stats = merge(
+            &db,
+            &doc(
+                vec![
+                    todo_in(1, "a", t10, Some(json!("5"))),
+                    bad_time,
+                    bad_list_c.clone(),
+                    todo_in(4, "d-new", t11, Some(json!("6"))),
+                ],
+                vec![],
+            ),
+        );
+        assert_eq!(stats.list_ids_adopted, 0);
+        assert_eq!(
+            owner(&db, "1"),
+            (Value::Null, Value::Null),
+            "listId 类型不对：不采纳"
+        );
+        assert_eq!(
+            owner(&db, "2"),
+            (Value::Null, Value::Null),
+            "updatedAt 无法解析：不采纳"
+        );
+        assert_eq!(todo_title(&db, "3").as_deref(), Some("c-new"), "记录级照旧");
+        assert_eq!(owner(&db, "3"), (json!(5), json!(t10)), "归属取本地的");
+        assert_eq!(
+            owner(&db, "4"),
+            (Value::Null, Value::Null),
+            "只有畸形版本：未知"
+        );
+
+        // 本地已知、远端那一版畸形 → 补传（只看 3：其余几条不让远端显得落后）
+        let (db2, _tmp2) = fresh_db();
+        merge(
+            &db2,
+            &doc(vec![todo_owned(3, "c", t10, 5, Some(t10))], vec![]),
+        );
+        merge(&db2, &doc(vec![bad_list_c.clone()], vec![]));
+        assert!(lacks(&db2, &doc(vec![bad_list_c], vec![]), CUTOFF));
+        let fixed = outgoing(&db2);
+        assert!(
+            !lacks(&db2, &fixed, CUTOFF),
+            "补传写出的是合法归属，之后不再补传"
+        );
     }
 
     /// 远端缺本地清单 / 清单墓碑（或版本更旧）→ 落后；初始值的默认清单不算；旧协议文档不比较。
@@ -1544,8 +1875,8 @@ mod tests {
         );
         assert!(lacks(&db, &without_tomb, CUTOFF));
         assert!(
-            !lacks(&db, &without_tomb, "2026-11-02 00:00:00"),
-            "快过期的清单墓碑不要求远端保留"
+            lacks(&db, &without_tomb, "2026-11-02 00:00:00"),
+            "清单墓碑永不过期（§13-10）：再旧也要求远端保留"
         );
         // 远端没有 todoLists 键：本地清单都算缺失
         assert!(lacks(&db, &doc(vec![], vec![]), CUTOFF));
@@ -1553,22 +1884,30 @@ mod tests {
         assert!(!lacks(&db, &legacy_doc(vec![]), CUTOFF));
     }
 
+    /// 清单墓碑：同键取较大 deletedAt；**永不过期**（§13-10）——早于 todo 墓碑保留期的本地墓碑
+    /// 不清理、远端墓碑照样导入，被它们压制的清单不会复活。todo 墓碑照旧按保留期清理。
     #[test]
-    fn list_tombstone_union_takes_max_and_respects_retention() {
+    fn list_tombstones_take_max_and_never_expire() {
         let (db, _tmp) = fresh_db();
         db.with_conn(|c| {
             repo::add_list_tombstone(c, "5", "2026-09-20 10:00:00").unwrap();
             repo::add_list_tombstone(c, "6", "2026-09-25 10:00:00").unwrap();
-            repo::add_list_tombstone(c, "7", "2026-08-01 10:00:00").unwrap(); // 本地过期
+            repo::add_list_tombstone(c, "7", "2026-08-01 10:00:00").unwrap(); // 早于保留期
+            repo::add_tombstone(c, "todo", "70", "2026-08-01 10:00:00").unwrap();
+            // 早于保留期
         });
         merge_with_cutoff(
             &db,
             &lists_doc(
-                vec![],
+                vec![
+                    // 长期离线的设备带回早已删除的清单 7 / 8
+                    list_value(7, "复活？", "2026-07-01 10:00:00"),
+                    list_value(8, "复活？", "2026-07-01 10:00:00"),
+                ],
                 vec![
                     list_tomb(5, "2026-09-21 10:00:00"),
                     list_tomb(6, "2026-09-24 10:00:00"),
-                    list_tomb(8, "2026-08-15 10:00:00"), // 远端过期：不导入
+                    list_tomb(8, "2026-08-15 10:00:00"), // 早于保留期：照样导入
                     list_tomb(9, "2026-09-30 10:00:00"),
                 ],
             ),
@@ -1579,9 +1918,14 @@ mod tests {
             vec![
                 ("5".to_string(), "2026-09-21 10:00:00".to_string()),
                 ("6".to_string(), "2026-09-25 10:00:00".to_string()),
+                ("7".to_string(), "2026-08-01 10:00:00".to_string()),
+                ("8".to_string(), "2026-08-15 10:00:00".to_string()),
                 ("9".to_string(), "2026-09-30 10:00:00".to_string()),
             ]
         );
+        assert!(list_name(&db, "7").is_none(), "已删的清单不复活");
+        assert!(list_name(&db, "8").is_none());
+        assert!(tombstones(&db).is_empty(), "todo 墓碑照旧按保留期清理");
     }
 
     /// 墓碑集合：同键取较大 deletedAt；保留期外的远端墓碑不导入，本地过期墓碑被清理。

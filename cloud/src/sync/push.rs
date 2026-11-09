@@ -180,8 +180,8 @@ fn push_sync_data(ctx: &SyncCtx, g0: i64, report: &mut PushReport) -> anyhow::Re
                         store_base(&tx, &validators, &envelope)?;
                         repo::set_meta(&tx, mk::LAST_PUSH_OK_AT, &now)?;
                         repo::delete_meta(&tx, mk::LAST_PUSH_ERROR)?;
+                        // 只清 todo / subtask 墓碑：清单墓碑永不过期（契约 §13-10）
                         repo::purge_tombstones_before(&tx, &cutoff)?;
-                        repo::purge_list_tombstones_before(&tx, &cutoff)?;
                         let cleared = repo::clear_dirty_if_unchanged(&tx, g0)?;
                         tx.commit()?;
                         Ok(cleared)

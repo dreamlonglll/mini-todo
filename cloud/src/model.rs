@@ -93,8 +93,8 @@ pub fn derived_priority(todo: &Map<String, Value>) -> Option<Priority> {
     effective_color(todo).and_then(Priority::from_color)
 }
 
-/// API 响应里的 todo：附加派生字段 `priority` 与（有的话）`seq`；`listId: null`（未知，契约 §12）
-/// 与缺失一样不带出。不改动其它字段。
+/// API 响应里的 todo：附加派生字段 `priority` 与（有的话）`seq`。清单未知（`listId` 缺失或 null，
+/// 契约 §12）时 `listId` / `listUpdatedAt` 都不带出。不改动其它字段。
 pub fn todo_view(mut v: Value, seq: Option<i64>) -> Value {
     if let Value::Object(obj) = &mut v {
         let p = derived_priority(obj).map(Priority::as_str);
@@ -102,8 +102,9 @@ pub fn todo_view(mut v: Value, seq: Option<i64>) -> Value {
         if let Some(seq) = seq {
             obj.insert("seq".into(), json!(seq));
         }
-        if obj.get("listId").is_some_and(Value::is_null) {
+        if list_id_state(obj) == ListIdState::Unknown {
             obj.remove("listId");
+            obj.remove("listUpdatedAt");
         }
     }
     v
@@ -126,6 +127,88 @@ pub fn list_id_state(obj: &Map<String, Value>) -> ListIdState {
     match obj.get("listId") {
         None | Some(Value::Null) => ListIdState::Unknown,
         Some(v) => v.as_i64().map_or(ListIdState::Invalid, ListIdState::Known),
+    }
+}
+
+/// 待办的清单归属 `(listId, listUpdatedAt)`（契约 §13 修订 2）：`listId` 这一个字段有自己的版本
+/// `listUpdatedAt`，合并时按它做字段级 LWW，与记录级的 `updatedAt` 无关。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ownership {
+    /// `listId` 缺失或 null：最旧。
+    Unknown,
+    /// `listId` 已知；`at` 是规范化后的 `listUpdatedAt`，缺失或无法解析时为 `None`（比有时间的旧）。
+    Known { list_id: i64, at: Option<String> },
+}
+
+impl Ownership {
+    /// 新旧比较的键（§13-3）：未知 < 已知但没有时间 < 已知且有时间（按时间比）；一样新但 `listId`
+    /// 不同时 `listId` 大的算新（确定性规则，两端结论相同）。规范时间按字符串比较即按时间比较。
+    fn rank(&self) -> (u8, &str, i64) {
+        match self {
+            Ownership::Unknown => (0, "", i64::MIN),
+            Ownership::Known { list_id, at: None } => (1, "", *list_id),
+            Ownership::Known {
+                list_id,
+                at: Some(at),
+            } => (2, at.as_str(), *list_id),
+        }
+    }
+
+    /// 是否比 `other` 新（完全相同不算）。
+    pub fn newer_than(&self, other: &Ownership) -> bool {
+        self.rank() > other.rank()
+    }
+
+    pub fn is_known(&self) -> bool {
+        matches!(self, Ownership::Known { .. })
+    }
+}
+
+/// 记录参与归属合并的归属；**畸形记录**（`listId` 类型不对，或记录的 `updatedAt` 缺失 / 无法解析）
+/// 返回 `None`：不参与归属合并，谁都不从它采纳（§13-11）。
+pub fn ownership_of(obj: &Map<String, Value>, tz: Tz) -> Option<Ownership> {
+    let updated_at = obj.get("updatedAt").and_then(Value::as_str)?;
+    normalize_datetime(updated_at, tz, NaiveTime::MIN)?;
+    match list_id_state(obj) {
+        ListIdState::Invalid => None,
+        ListIdState::Unknown => Some(Ownership::Unknown),
+        ListIdState::Known(list_id) => Some(Ownership::Known {
+            list_id,
+            at: obj
+                .get("listUpdatedAt")
+                .and_then(Value::as_str)
+                .and_then(|s| normalize_datetime(s, tz, NaiveTime::MIN)),
+        }),
+    }
+}
+
+/// 两个（参与归属合并的）版本里更新的那个；都不参与时 `None`。一样新时取 `a`。
+pub fn newest_ownership(a: Option<&Ownership>, b: Option<&Ownership>) -> Option<Ownership> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(if b.newer_than(a) { b } else { a }.clone()),
+        (Some(x), None) | (None, Some(x)) => Some(x.clone()),
+        (None, None) => None,
+    }
+}
+
+/// 把归属写进记录 JSON：未知 → 两个键都去掉；已知 → 写 `listId`，有时间就写 `listUpdatedAt`、否则去掉它。
+pub fn apply_ownership(obj: &mut Map<String, Value>, owner: &Ownership) {
+    match owner {
+        Ownership::Unknown => {
+            obj.remove("listId");
+            obj.remove("listUpdatedAt");
+        }
+        Ownership::Known { list_id, at } => {
+            obj.insert("listId".into(), json!(list_id));
+            match at {
+                Some(at) => {
+                    obj.insert("listUpdatedAt".into(), json!(at));
+                }
+                None => {
+                    obj.remove("listUpdatedAt");
+                }
+            }
+        }
     }
 }
 
@@ -302,10 +385,12 @@ const TODO_ALIASES: &[(&str, &str)] = &[
 ];
 
 /// 服务端维护的字段与只读派生字段：写入时忽略（方便客户端"读出来改完整包写回"）。
+/// `listUpdatedAt` 是清单归属的版本（契约 §13-2），只在显式设置清单时由服务端刷新。
 const TODO_IGNORED: &[&str] = &[
     "id",
     "createdAt",
     "updatedAt",
+    "listUpdatedAt",
     "seq",
     "subtasks",
     "subtaskCount",
@@ -698,7 +783,8 @@ pub fn validate_list_input(
     }
 }
 
-/// 新建 todo 的完整记录（PC 导出的形态，所有字段齐全），再叠加已校验的补丁。
+/// 新建 todo 的完整记录（PC 导出的形态，所有字段齐全），再叠加已校验的补丁。新建总是已知归属：
+/// `listId` 缺省为默认清单，`listUpdatedAt = now`（契约 §12-6 / §13-2）。
 pub fn new_todo_record(id: i64, patch: &Map<String, Value>, now: &str) -> Map<String, Value> {
     let mut obj = json!({
         "id": id,
@@ -721,6 +807,7 @@ pub fn new_todo_record(id: i64, patch: &Map<String, Value>, now: &str) -> Map<St
         "repeatWeekdays": null,
         "repeatMonthDay": null,
         "listId": DEFAULT_LIST_ID,
+        "listUpdatedAt": now,
     })
     .as_object()
     .cloned()
@@ -857,6 +944,7 @@ pub fn canonicalize_record_times(obj: &mut Map<String, Value>, is_todo: bool, tz
             .iter()
             .map(|(f, k)| (*f, k.default_time()))
             .chain(META_TIME_FIELDS.iter().map(|f| (*f, NaiveTime::MIN)))
+            .chain(std::iter::once(("listUpdatedAt", NaiveTime::MIN)))
             .collect()
     } else {
         META_TIME_FIELDS
@@ -1119,6 +1207,35 @@ impl Fixer<'_> {
             }
         }
     }
+
+    /// `listUpdatedAt`（契约 §13）：只在清单已知时有意义——未知时去掉（仅格式）；null 去掉（仅格式）；
+    /// 可解析的时间统一成规范格式（仅格式），无法解析的字符串不动（等同"已知但没有时间"）；
+    /// 数字 / 布尔等会让 PC 整条反序列化失败，去掉（语义修复）。存量缺它的已知归属不补时间。
+    fn list_updated_at(&mut self) {
+        let unknown = list_id_state(self.obj) == ListIdState::Unknown;
+        let canonical = match self.obj.get("listUpdatedAt") {
+            None => return,
+            Some(Value::String(s)) if !unknown => {
+                if is_canonical(s) {
+                    return;
+                }
+                match normalize_datetime(s, self.tz, NaiveTime::MIN) {
+                    Some(c) => c,
+                    None => return,
+                }
+            }
+            Some(v) if unknown || v.is_null() => {
+                self.remove("listUpdatedAt");
+                return;
+            }
+            Some(_) => {
+                self.obj.remove("listUpdatedAt");
+                self.out.semantic = true;
+                return;
+            }
+        };
+        self.set("listUpdatedAt", json!(canonical), false);
+    }
 }
 
 /// 归一化缓存里的一条 todo（存量数据修复，见模块注释）。`row_id` 是表主键，
@@ -1215,6 +1332,7 @@ pub fn normalize_stored_todo(
     f.weekdays();
     f.nullable_int_field("repeatMonthDay", 1..=31);
     f.list_id();
+    f.list_updated_at();
 
     // ---- 时间：可解析的统一成规范格式（仅格式），坏值置空（语义修复） ----
     for (field, kind) in TODO_TIME_FIELDS {
@@ -1555,7 +1673,11 @@ mod tests {
         assert_eq!(r["repeatInterval"], 1);
         assert_eq!(r["createdAt"], "2026-05-13 10:00:00");
         assert_eq!(r["listId"], DEFAULT_LIST_ID, "不指定清单时进默认清单");
-        assert_eq!(r.len(), 20, "与 PC Todo 字段一一对应（不含 subtasks）");
+        assert_eq!(
+            r["listUpdatedAt"], "2026-05-13 10:00:00",
+            "新建总是已知归属，归属版本 = 新建时刻（契约 §13-2）"
+        );
+        assert_eq!(r.len(), 21, "与 PC Todo 字段一一对应（不含 subtasks）");
         assert!(r.get("priority").is_none());
 
         let s = new_subtask_record(7, 42, &obj(json!({"title": "s"})), "2026-05-13 10:00:00");
@@ -1907,9 +2029,139 @@ mod tests {
             list_id_state(&obj(json!({"listId": 1.5}))),
             ListIdState::Invalid
         );
-        let v = todo_view(json!({"id": 1, "listId": null}), None);
-        assert!(v.get("listId").is_none(), "未知不带出");
-        let v = todo_view(json!({"id": 1, "listId": 7}), None);
+        let v = todo_view(
+            json!({"id": 1, "listId": null, "listUpdatedAt": "2026-11-01 10:00:00"}),
+            None,
+        );
+        assert!(
+            v.get("listId").is_none() && v.get("listUpdatedAt").is_none(),
+            "未知：两个键都不带出"
+        );
+        let v = todo_view(
+            json!({"id": 1, "listId": 7, "listUpdatedAt": "2026-11-01 10:00:00"}),
+            None,
+        );
         assert_eq!(v["listId"], 7);
+        assert_eq!(v["listUpdatedAt"], "2026-11-01 10:00:00", "已知：照常返回");
+    }
+
+    /// 契约 §13-3 / §13-11：归属的读取与新旧顺序。
+    #[test]
+    fn ownership_order_and_malformed_records() {
+        let t = "2026-11-01 10:00:00";
+        let own = |v: Value| ownership_of(&obj(v), tz());
+        let known = |list_id: i64, at: Option<&str>| Ownership::Known {
+            list_id,
+            at: at.map(str::to_string),
+        };
+        assert_eq!(own(json!({"updatedAt": t})), Some(Ownership::Unknown));
+        assert_eq!(
+            own(json!({"updatedAt": t, "listId": null, "listUpdatedAt": t})),
+            Some(Ownership::Unknown)
+        );
+        assert_eq!(
+            own(json!({"updatedAt": t, "listId": 5})),
+            Some(known(5, None))
+        );
+        assert_eq!(
+            own(json!({"updatedAt": t, "listId": 5, "listUpdatedAt": "2026-11-01T10:00"})),
+            Some(known(5, Some(t))),
+            "非规范时间按规范形态比较"
+        );
+        assert_eq!(
+            own(json!({"updatedAt": t, "listId": 5, "listUpdatedAt": "garbage"})),
+            Some(known(5, None)),
+            "时间无法解析：已知但没有时间"
+        );
+        for bad in [
+            json!({"updatedAt": t, "listId": "5"}),
+            json!({"updatedAt": t, "listId": 1.5}),
+            json!({"updatedAt": "garbage", "listId": 5, "listUpdatedAt": t}),
+            json!({"listId": 5, "listUpdatedAt": t}),
+        ] {
+            assert_eq!(own(bad.clone()), None, "畸形记录不参与归属合并: {}", bad);
+        }
+
+        // 未知 < 已知没有时间 < 已知有时间（按时间）；一样新时 listId 大的算新
+        let later = "2026-11-01 10:00:01";
+        let ordered = [
+            Ownership::Unknown,
+            known(1, None),
+            known(9, None),
+            known(1, Some(t)),
+            known(5, Some(t)),
+            known(6, Some(t)),
+            known(1, Some(later)),
+        ];
+        for (i, a) in ordered.iter().enumerate() {
+            for (j, b) in ordered.iter().enumerate() {
+                assert_eq!(a.newer_than(b), i > j, "{:?} vs {:?}", a, b);
+            }
+        }
+        assert_eq!(
+            newest_ownership(Some(&known(5, Some(t))), Some(&known(6, Some(t)))),
+            Some(known(6, Some(t)))
+        );
+        assert_eq!(
+            newest_ownership(Some(&known(6, Some(t))), Some(&known(5, Some(t)))),
+            Some(known(6, Some(t))),
+            "与参数顺序无关"
+        );
+        assert_eq!(
+            newest_ownership(None, Some(&Ownership::Unknown)),
+            Some(Ownership::Unknown)
+        );
+        assert_eq!(newest_ownership(None, None), None);
+
+        let mut o = obj(json!({"listId": 5, "listUpdatedAt": t, "title": "x"}));
+        apply_ownership(&mut o, &known(7, None));
+        assert_eq!(Value::Object(o.clone()), json!({"listId": 7, "title": "x"}));
+        apply_ownership(&mut o, &known(8, Some(later)));
+        assert_eq!(
+            Value::Object(o.clone()),
+            json!({"listId": 8, "listUpdatedAt": later, "title": "x"})
+        );
+        apply_ownership(&mut o, &Ownership::Unknown);
+        assert_eq!(Value::Object(o), json!({"title": "x"}));
+    }
+
+    /// `listUpdatedAt` 的存量归一化：只修表示形式，不补时间（§13-7）；只有会让 PC 整条反序列化失败的
+    /// 类型（数字等）才算语义修复。未知归属上残留的 `listUpdatedAt` 去掉。
+    #[test]
+    fn list_updated_at_is_repaired_without_adding_times() {
+        let t = "2026-11-01 10:00:00";
+        let format_only = NormalizeOutcome {
+            semantic: false,
+            format: true,
+        };
+        for (raw, fixed, outcome) in [
+            (json!(t), Some(json!(t)), NormalizeOutcome::default()),
+            (json!("2026-11-01T10:00"), Some(json!(t)), format_only),
+            (
+                json!("garbage"),
+                Some(json!("garbage")),
+                NormalizeOutcome::default(),
+            ),
+            (Value::Null, None, format_only),
+            (
+                json!(20261101),
+                None,
+                NormalizeOutcome {
+                    semantic: true,
+                    format: false,
+                },
+            ),
+        ] {
+            let (o, out) = norm_todo(json!({"id": 1, "title": "t", "listId": 5,
+                                            "listUpdatedAt": raw.clone()}));
+            assert_eq!(o.get("listUpdatedAt").cloned(), fixed, "{}", raw);
+            assert_eq!(out, outcome, "{}", raw);
+        }
+        let (o, out) = norm_todo(json!({"id": 1, "title": "t", "listId": 5}));
+        assert_eq!(out, NormalizeOutcome::default());
+        assert!(o.get("listUpdatedAt").is_none(), "已知没有时间：不补时间");
+        let (o, out) = norm_todo(json!({"id": 1, "title": "t", "listUpdatedAt": t}));
+        assert_eq!(out, format_only, "未知归属上残留的版本：去掉（仅格式）");
+        assert!(o.get("listUpdatedAt").is_none());
     }
 }

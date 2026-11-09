@@ -1258,10 +1258,41 @@ fn pc_default_list() -> Value {
     Value::Object(model::default_list_record())
 }
 
+/// 新版 PC 写出的已知归属的待办：归属就是在这个版本里设置的（`listUpdatedAt = updatedAt`，契约 §13）。
 fn pc_todo_in(id: i64, title: &str, updated_at: &str, list_id: i64) -> Value {
+    pc_todo_owned(id, title, updated_at, list_id, updated_at)
+}
+
+/// 新版 PC 写出的已知归属的待办，归属版本单独给出。
+fn pc_todo_owned(
+    id: i64,
+    title: &str,
+    updated_at: &str,
+    list_id: i64,
+    list_updated_at: &str,
+) -> Value {
     let mut t = pc_todo(id, title, updated_at, vec![]);
     t["listId"] = json!(list_id);
+    t["listUpdatedAt"] = json!(list_updated_at);
     t
+}
+
+/// 远端某条待办的归属 `(listId, listUpdatedAt)`，缺失的键为 Null。
+fn remote_owner(doc: &Value, id: i64) -> (Value, Value) {
+    let t = remote_todo(doc, id).expect("todo exists");
+    (
+        t.get("listId").cloned().unwrap_or(Value::Null),
+        t.get("listUpdatedAt").cloned().unwrap_or(Value::Null),
+    )
+}
+
+/// cloud 本地某条待办的归属 `(listId, listUpdatedAt)`，缺失的键为 Null。
+fn local_owner(db: &Db, id: &str) -> (Value, Value) {
+    let t = local_todo(db, id);
+    (
+        t.get("listId").cloned().unwrap_or(Value::Null),
+        t.get("listUpdatedAt").cloned().unwrap_or(Value::Null),
+    )
 }
 
 /// 新版 PC（多清单）写出的文档：顶层多了 todoLists / listTombstones。
@@ -1452,7 +1483,7 @@ fn list_deletion_propagates_both_ways_without_resurrection() {
     );
     assert!(!r.repush_scheduled);
 
-    // 云端删清单 6：2 移到默认清单、updatedAt 刷新
+    // 云端删清单 6：2 移到默认清单、updatedAt 与归属版本 listUpdatedAt 都刷新（§13-2）
     let before = local_todo(&e.db, "2")["updatedAt"]
         .as_str()
         .unwrap()
@@ -1468,6 +1499,7 @@ fn list_deletion_propagates_both_ways_without_resurrection() {
     let moved = remote_todo(&remote, 2).unwrap();
     assert_eq!(moved["listId"], json!(1));
     assert!(moved["updatedAt"].as_str().unwrap() > before.as_str());
+    assert!(moved["listUpdatedAt"].as_str().unwrap() > t0);
     assert_eq!(
         remote["tombstones"],
         json!([]),
@@ -1700,6 +1732,7 @@ fn upgrade_from_cloud_without_lists_merges_remote_lists_before_first_push() {
 
 // =============================================================================
 // 契约 §12 修订 1：待办的 listId 缺失 = 未知（旧版本每次上传都会丢掉全部 listId）
+// 契约 §13 修订 2：归属 (listId, listUpdatedAt) 按自己的版本做字段级 LWW
 // =============================================================================
 
 /// 与 API `PATCH /todos/:id {"title": …}`（不带 listId）相同的落库动作：只改标题、
@@ -1779,13 +1812,17 @@ fn old_writer_upload_without_list_ids_keeps_the_known_list() {
     );
     assert!(
         r.repush_scheduled,
-        "远端缺本地已知的 listId → 补传一次修复文档（§12-8）"
+        "远端那一版的归属（未知）比本地旧 → 补传一次修复文档（§13-6）"
     );
 
     push::push_once(&e.ctx).unwrap();
     let remote = e.mock.doc().unwrap();
     let fixed = remote_todo(&remote, 1).unwrap();
-    assert_eq!(fixed["listId"], 5);
+    assert_eq!(
+        remote_owner(&remote, 1),
+        (json!(5), json!(t0)),
+        "补传带着归属的版本（§13-7）"
+    );
     assert_eq!(fixed["updatedAt"], json!(edited), "补传不改 updatedAt");
     assert!(
         remote_todo(&remote, 2).unwrap().get("listId").is_none(),
@@ -1867,5 +1904,258 @@ fn new_writer_list_id_is_adopted_under_a_newer_local_edit() {
     assert_eq!(pushed["title"], "A-ai");
     assert_eq!(pushed["listId"], 5);
     assert_eq!(pushed["updatedAt"], ai_version);
+    assert_stable_for_two_rounds(&e);
+}
+
+/// F1 的初始状态：远端（与 cloud）只有 Z 在 t0 放进清单 5 的版本；随后旧设备 O（不认识清单）
+/// 拿到设备 A 在 t1 把 Z 移到 6 的版本，在 t2 改了标题后整份上传——归属全丢了。cloud 拉到 O 的
+/// 上传时只能沿用自己（陈旧但带版本）的 5@t0，并标脏补传。
+const F1_T0: &str = "2026-11-01 10:00:00";
+const F1_T1: &str = "2026-11-01 11:00:00";
+const F1_T2: &str = "2026-11-01 12:00:00";
+
+fn f1_lists() -> Vec<Value> {
+    vec![
+        pc_default_list(),
+        pc_list(5, "工作", 1, F1_T0),
+        pc_list(6, "生活", 2, F1_T0),
+    ]
+}
+
+/// A 在 t1 移动、又拿到 O 在 t2 的编辑之后的版本（PC 按 §13 合并的结果）。
+fn f1_a_version() -> Value {
+    pc_todo_owned(1, "Z-旧设备改", F1_T2, 6, F1_T1)
+}
+
+fn f1_cloud_after_old_device(e: &Env) {
+    e.mock.put_doc(&pc_doc_lists(
+        vec![pc_todo_in(1, "Z", F1_T0, 5)],
+        f1_lists(),
+        vec![],
+        vec![],
+    ));
+    pull::pull_once(&e.ctx).unwrap();
+    e.mock.put_doc(&pc_doc_lists(
+        vec![pc_todo(1, "Z-旧设备改", F1_T2, vec![])],
+        f1_lists(),
+        vec![],
+        vec![],
+    ));
+    // 全量 GET：nginx 的 ETag 只有秒级精度，同一秒内的两次写入可能 304
+    let r = pull::pull_once_with(&e.ctx, true).unwrap();
+    assert_eq!(r.stats.list_ids_carried, 1);
+    assert_eq!(local_owner(&e.db, "1"), (json!(5), json!(F1_T0)));
+    assert!(r.repush_scheduled, "远端那一版没有归属 → 补传");
+}
+
+/// F1 情形 1：cloud 的补传先落到远端，A 收到后保留自己更新的归属并再补传；cloud 采纳 A 的 6，
+/// 记录平局不动、不标脏、不再推送，两轮往返稳定。（§12 时 A 的移动会被 cloud 的陈旧值覆盖。）
+#[test]
+fn stale_cloud_ownership_yields_to_a_newer_move_after_its_repush() {
+    let e = env(MockDav::start());
+    f1_cloud_after_old_device(&e);
+    push::push_once(&e.ctx).unwrap();
+    assert_eq!(
+        remote_owner(&e.mock.doc().unwrap(), 1),
+        (json!(5), json!(F1_T0)),
+        "cloud 补传的是它自己带版本的归属"
+    );
+
+    e.mock.put_doc(&pc_doc_lists(
+        vec![f1_a_version()],
+        f1_lists(),
+        vec![],
+        vec![],
+    ));
+    let r = pull::pull_once(&e.ctx).unwrap();
+    assert_eq!(r.stats.list_ids_adopted, 1);
+    assert_eq!(r.stats.todos_upserted, 0, "记录平局：保留本地，只换归属");
+    assert_eq!(local_owner(&e.db, "1"), (json!(6), json!(F1_T1)));
+    assert_eq!(local_todo(&e.db, "1")["updatedAt"], F1_T2, "不改 updatedAt");
+    assert!(!r.repush_scheduled);
+    assert!(!is_dirty(&e.db), "采纳不标脏");
+    assert_stable_for_two_rounds(&e);
+}
+
+/// F1 情形 2：cloud 补传前的 GET 之后、PUT 之前，A 的补传先到（A 先收到了 O 的上传）：If-Match
+/// 412 → 重新 GET 合并时采纳 A 的 6 → 推出去的是 6；两轮往返稳定。
+#[test]
+fn newer_move_arriving_during_the_repush_is_adopted_on_412_retry() {
+    let e = env(MockDav::start());
+    f1_cloud_after_old_device(&e);
+    let a_doc = pc_doc_lists(vec![f1_a_version()], f1_lists(), vec![], vec![]);
+    e.mock
+        .with(|s| s.before_put = Some(Box::new(move |s| s.write_doc(&a_doc))));
+    let report = push::push_once(&e.ctx).unwrap();
+    assert_eq!(report.attempts, 2, "第一次 PUT 412，重新合并后成功");
+    let remote = e.mock.doc().unwrap();
+    assert_eq!(remote_owner(&remote, 1), (json!(6), json!(F1_T1)));
+    assert_eq!(remote_todo(&remote, 1).unwrap()["title"], "Z-旧设备改");
+    assert_eq!(local_owner(&e.db, "1"), (json!(6), json!(F1_T1)));
+    assert_stable_for_two_rounds(&e);
+}
+
+/// F1 在忽略前置条件的服务端（nginx）：cloud 的补传盖掉了 A 的补传，远端回到 5@t0。A 看到远端那一版
+/// 的归属比自己旧，再补传一次（§13-6；§12 时远端"已知"就不补传，永久分叉）；cloud 随后采纳 6。
+#[test]
+fn newer_move_overwritten_by_a_stale_repush_still_converges() {
+    let e = env(MockDav::start_nginx());
+    f1_cloud_after_old_device(&e);
+    let a_doc = pc_doc_lists(vec![f1_a_version()], f1_lists(), vec![], vec![]);
+    e.mock
+        .with(|s| s.before_put = Some(Box::new(move |s| s.write_doc(&a_doc))));
+    push::push_once(&e.ctx).unwrap();
+    assert_eq!(
+        remote_owner(&e.mock.doc().unwrap(), 1),
+        (json!(5), json!(F1_T0)),
+        "nginx 忽略 If-Match：cloud 的 PUT 盖掉了 A 的补传"
+    );
+
+    // A 拉到这份文档：记录平局，归属仍是自己的 6@t1，远端那一版落后 → 再补传
+    e.mock.put_doc(&pc_doc_lists(
+        vec![f1_a_version()],
+        f1_lists(),
+        vec![],
+        vec![],
+    ));
+    let r = pull::pull_once_with(&e.ctx, true).unwrap();
+    assert_eq!(r.stats.list_ids_adopted, 1);
+    assert!(!r.repush_scheduled);
+    assert_eq!(local_owner(&e.db, "1"), (json!(6), json!(F1_T1)));
+    assert_stable_for_two_rounds(&e);
+}
+
+/// §13-3：一样新（listUpdatedAt 相同）但 listId 不同 → 两端都取较大的 listId：cloud 持有较大值的
+/// 那条补传一次，持有较小值的那条直接采纳；之后两轮往返稳定。
+#[test]
+fn same_time_ownerships_converge_on_the_larger_list_id() {
+    let e = env(MockDav::start());
+    let t0 = "2026-11-01 10:00:00";
+    let lists = vec![
+        pc_default_list(),
+        pc_list(5, "工作", 1, t0),
+        pc_list(6, "生活", 2, t0),
+    ];
+    e.mock.put_doc(&pc_doc_lists(
+        vec![pc_todo_in(1, "A", t0, 6), pc_todo_in(2, "B", t0, 5)],
+        lists.clone(),
+        vec![],
+        vec![],
+    ));
+    pull::pull_once(&e.ctx).unwrap();
+
+    // 另一个写入方的同一秒：1 在 5、2 在 6（记录版本也相同）
+    e.mock.put_doc(&pc_doc_lists(
+        vec![pc_todo_in(1, "A", t0, 5), pc_todo_in(2, "B", t0, 6)],
+        lists,
+        vec![],
+        vec![],
+    ));
+    let r = pull::pull_once(&e.ctx).unwrap();
+    assert_eq!(r.stats.list_ids_adopted, 1);
+    assert_eq!(
+        local_owner(&e.db, "1"),
+        (json!(6), json!(t0)),
+        "本地的 6 较大：保留"
+    );
+    assert_eq!(
+        local_owner(&e.db, "2"),
+        (json!(6), json!(t0)),
+        "远端的 6 较大：采纳"
+    );
+    assert!(r.repush_scheduled, "远端的 1 落后");
+    push::push_once(&e.ctx).unwrap();
+    let remote = e.mock.doc().unwrap();
+    assert_eq!(remote_owner(&remote, 1), (json!(6), json!(t0)));
+    assert_eq!(remote_owner(&remote, 2), (json!(6), json!(t0)));
+    assert_stable_for_two_rounds(&e);
+}
+
+/// §13-11（F6）：畸形记录（listId 是字符串）不参与归属合并：cloud 不从它采纳；它在记录级胜出时
+/// 归属取本地合法的那个，并补传一次；之后两轮往返稳定，不来回推送。
+#[test]
+fn malformed_remote_records_never_lend_their_list_id() {
+    let e = env(MockDav::start());
+    let t0 = "2026-11-01 10:00:00";
+    let lists = vec![pc_default_list(), pc_list(5, "工作", 1, t0)];
+    e.mock.put_doc(&pc_doc_lists(
+        vec![pc_todo(1, "A", t0, vec![]), pc_todo_in(2, "B", t0, 5)],
+        lists.clone(),
+        vec![],
+        vec![],
+    ));
+    pull::pull_once(&e.ctx).unwrap();
+
+    let mut a = pc_todo(1, "A", t0, vec![]);
+    a["listId"] = json!("5");
+    let mut b = pc_todo(2, "B-改", &ts(-5), vec![]);
+    b["listId"] = json!("1");
+    b["listUpdatedAt"] = json!(ts(-5));
+    e.mock
+        .put_doc(&pc_doc_lists(vec![a, b], lists, vec![], vec![]));
+    let r = pull::pull_once(&e.ctx).unwrap();
+    assert_eq!(r.stats.list_ids_adopted, 0);
+    assert_eq!(
+        local_owner(&e.db, "1"),
+        (Value::Null, Value::Null),
+        "不从畸形记录采纳"
+    );
+    assert_eq!(local_todo(&e.db, "2")["title"], "B-改", "记录级照旧");
+    assert_eq!(
+        local_owner(&e.db, "2"),
+        (json!(5), json!(t0)),
+        "归属仍是本地合法的那个"
+    );
+    assert!(r.repush_scheduled, "远端那一版的归属畸形、本地已知 → 补传");
+    push::push_once(&e.ctx).unwrap();
+    let remote = e.mock.doc().unwrap();
+    assert_eq!(remote_owner(&remote, 1), (Value::Null, Value::Null));
+    assert_eq!(remote_owner(&remote, 2), (json!(5), json!(t0)));
+    assert_stable_for_two_rounds(&e);
+}
+
+/// §13-10：清单墓碑永不过期。早于 todo 墓碑保留期（30 天）的清单墓碑照样合并进来、照样写出，推送后的
+/// 本地清理也不动它；长期离线的设备带回已删的清单时不会复活。todo 墓碑照旧只留 30 天。
+#[test]
+fn list_tombstones_older_than_the_retention_are_kept_and_propagated() {
+    let e = env(MockDav::start());
+    let sixty_days_ago = ts(-60 * 24 * 60);
+    e.mock.put_doc(&pc_doc_lists(
+        vec![],
+        vec![pc_default_list()],
+        vec![json!({"entityId": 5, "deletedAt": sixty_days_ago})],
+        vec![json!({"entityType": "todo", "entityId": 9, "deletedAt": sixty_days_ago})],
+    ));
+    pull::pull_once(&e.ctx).unwrap();
+    api_create_todo(&e.db, 100, "from AI");
+    push::push_once(&e.ctx).unwrap();
+    let remote = e.mock.doc().unwrap();
+    assert_eq!(
+        remote_list_tombstone_ids(&remote),
+        vec![5],
+        "推送后照样写出"
+    );
+    assert_eq!(remote["tombstones"], json!([]), "todo 墓碑照旧 30 天");
+    let stones = e.db.with_conn(|c| repo::all_list_tombstones(c)).unwrap();
+    assert_eq!(stones.len(), 1, "推送后的本地清理不动清单墓碑");
+
+    // 长期离线的设备（在忽略前置条件的服务端上）整包覆盖：带回清单 5（它离线前的版本），
+    // 文档里没有清单墓碑；其余内容与远端相同
+    e.mock.put_doc(&pc_doc_lists(
+        vec![remote_todo(&remote, 100).unwrap()],
+        vec![pc_default_list(), pc_list(5, "工作", 1, &ts(-90 * 24 * 60))],
+        vec![],
+        vec![],
+    ));
+    let r = pull::pull_once(&e.ctx).unwrap();
+    assert!(local_list_name(&e.db, "5").is_none(), "已删的清单不复活");
+    assert!(r.repush_scheduled, "远端缺清单墓碑 → 补传");
+    push::push_once(&e.ctx).unwrap();
+    let remote = e.mock.doc().unwrap();
+    assert_eq!(
+        remote_list_names(&remote),
+        vec![(1, "待办清单".to_string())]
+    );
+    assert_eq!(remote_list_tombstone_ids(&remote), vec![5]);
     assert_stable_for_two_rounds(&e);
 }
