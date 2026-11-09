@@ -10,7 +10,8 @@
 //!   发 [`MarkdownEditorEvent::Changed`]、可在源码里撤销；
 //! - 粘贴 / 拖入图片：按旧版规则校验（只认图片、扩展名白名单、单张 ≤20MB，同样的警告文案）→ 后台
 //!   `core::todo::save_image` → 在光标处插入 `![<文件名>](minitodo-image://<name>)`（剪贴板位图没有文件名，用
-//!   `image.<ext>`，与浏览器粘贴截图时的 `image.png` 一致）；粘贴普通文字 / Markdown 源码原样插入。
+//!   `image.<ext>`，与浏览器粘贴截图时的 `image.png` 一致）；原图宽于 [`editor_theme::MD_IMAGE_INSERT_WIDTH`]（240）时
+//!   alt 带上 `|240`，默认按 240 宽显示（读不到原图尺寸、或原图更窄时不带，按原始尺寸）；粘贴普通文字 / Markdown 源码原样插入。
 //!   粘贴在 `Paste` 动作的捕获阶段处理（先于输入框）：Windows 上直接读系统剪贴板（`platform::clipboard`：PNG 优先，
 //!   GPUI 不认的 `image/png` 等格式也认），剪贴板位图在后台转成 PNG 再保存；复制的文件里有图片时只插入这些文件。
 //!   既没有可用的图片、也没有文字时给出提示（不再静默失败）。
@@ -220,18 +221,19 @@ fn upload_into(
             if bytes.len() > MAX_IMAGE_BYTES {
                 return Err("图片超过 20MB，未插入".to_string());
             }
-            mini_todo_core::todo::save_image(&bytes, &ext)
+            let width = insert_width(encoded_dimensions(&bytes));
+            mini_todo_core::todo::save_image(&bytes, &ext).map(|path| (path, width))
         });
         let handle = window.window_handle();
         let target = source.downgrade();
         window
             .spawn(cx, async move |cx| match task.await {
-                Ok(path) => {
+                Ok((path, width)) => {
                     let Some(file_name) = path.file_name().map(|n| n.to_string_lossy().to_string())
                     else {
                         return;
                     };
-                    let text = image_markdown(&name, &file_name);
+                    let text = image_markdown(&name, &file_name, width);
                     let _ = cx.update(|window, cx| {
                         if let Some(target) = target.upgrade() {
                             target.update(cx, |state, cx| state.insert(text, window, cx));
@@ -465,15 +467,35 @@ fn upload_from_path(path: &Path) -> Option<Upload> {
     })
 }
 
-/// `![alt](minitodo-image://name)`（alt 里的方括号与反斜杠转义）
-pub fn image_markdown(alt: &str, file_name: &str) -> String {
-    let alt: String = alt
+/// 已编码图片的像素尺寸（只读文件头；格式不认识 / 读不出时 `None`）
+fn encoded_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
+}
+
+/// 新插入图片的默认显示宽度：原图宽于 [`editor_theme::MD_IMAGE_INSERT_WIDTH`] 时缩到它（高按原图比例），
+/// 否则 `None`（不写后缀，按原始尺寸；小图不放大）
+fn insert_width(natural: Option<(u32, u32)>) -> Option<u32> {
+    let limit = editor_theme::MD_IMAGE_INSERT_WIDTH;
+    natural.filter(|(w, h)| *w > limit && *h > 0).map(|_| limit)
+}
+
+/// `![alt](minitodo-image://name)`，`width` 有值时 alt 带尺寸后缀 `|宽`（alt 里的方括号与反斜杠转义）
+pub fn image_markdown(alt: &str, file_name: &str, width: Option<u32>) -> String {
+    let mut alt: String = alt
         .chars()
         .flat_map(|c| match c {
             '[' | ']' | '\\' => vec!['\\', c],
             c => vec![c],
         })
         .collect();
+    if let Some(width) = width {
+        alt.push('|');
+        alt.push_str(&width.to_string());
+    }
     format!("![{alt}]({})", image_ref::to_image_ref(file_name))
 }
 
@@ -798,13 +820,59 @@ mod tests {
     #[test]
     fn builds_image_markdown_with_escaped_alt() {
         assert_eq!(
-            image_markdown("image.png", "1700_abc123.png"),
+            image_markdown("image.png", "1700_abc123.png", None),
             "![image.png](minitodo-image://1700_abc123.png)"
         );
         assert_eq!(
-            image_markdown("a[1].png", "x.png"),
+            image_markdown("a[1].png", "x.png", None),
             "![a\\[1\\].png](minitodo-image://x.png)"
         );
+        assert_eq!(
+            image_markdown("image.png", "1700_abc123.png", Some(240)),
+            "![image.png|240](minitodo-image://1700_abc123.png)"
+        );
+    }
+
+    /// 插入的尺寸后缀能被渲染侧按同样的规则解析回来（alt 里本来就有 `|` 时取最后一段）
+    #[test]
+    fn inserted_size_suffix_round_trips() {
+        for (alt, expected_alt) in [("image.png", "image.png"), ("a|b.png", "a|b.png")] {
+            let text = image_markdown(alt, "x.png", Some(240));
+            let blocks = markdown::parse_blocks(&text);
+            let markdown::Block::Images(images) = &blocks[0] else {
+                panic!("应解析成图片段落: {blocks:?}");
+            };
+            assert_eq!(images[0].alt, expected_alt);
+            assert_eq!(
+                images[0].size,
+                Some(ImageSize {
+                    width: 240,
+                    height: None
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn insert_width_only_shrinks_wide_images() {
+        assert_eq!(insert_width(Some((1920, 1080))), Some(240));
+        assert_eq!(insert_width(Some((241, 10))), Some(240));
+        // 不比默认宽度宽：按原始尺寸，不放大
+        assert_eq!(insert_width(Some((240, 500))), None);
+        assert_eq!(insert_width(Some((100, 100))), None);
+        // 读不到尺寸 / 异常尺寸：按原始尺寸
+        assert_eq!(insert_width(None), None);
+        assert_eq!(insert_width(Some((1000, 0))), None);
+    }
+
+    #[test]
+    fn reads_encoded_dimensions_from_header() {
+        let mut png = Vec::new();
+        image::RgbImage::new(300, 120)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        assert_eq!(encoded_dimensions(&png), Some((300, 120)));
+        assert_eq!(encoded_dimensions(b"not an image"), None);
     }
 
     #[test]

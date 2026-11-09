@@ -960,6 +960,8 @@ pub mod editor_theme {
     pub const MD_IMAGE_PILL: f32 = 24.;
     /// 调整后图片的最小宽 / 高
     pub const MD_IMAGE_MIN_SIZE: f32 = 24.;
+    /// 粘贴 / 拖入图片时写进 alt 后缀的默认显示宽度（原图比它窄时不写，按原始尺寸显示）
+    pub const MD_IMAGE_INSERT_WIDTH: u32 = 240;
 
     /// 段落 16px / 行高 1.6，上下外边距 0.4em
     pub const MD_P_SIZE: f32 = 16.;

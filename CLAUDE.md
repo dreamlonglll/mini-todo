@@ -112,7 +112,8 @@ mini-todo/
 - Markdown 中的图片统一存为 `minitodo-image://<文件名>`（`crates/app/src/util/image_ref.rs`），渲染时映射成本机 images 目录下的文件
   （`img(PathBuf)`）；兼容旧数据里的 `http://asset.localhost/<绝对路径>` / `asset://localhost/...`（按文件名映射到本机，修复跨设备裂图，
   保存时换回规范形式）。粘贴 / 拖入图片 → 后台 `core::todo::save_image(bytes, ext)`：扩展名白名单 png/jpg/jpeg/webp/gif/bmp、单张 ≤20MB、
-  文件名由后端生成，插入 `![<文件名>](minitodo-image://<name>)`；单击图片打开预览（编辑 / 查看模式都是，编辑模式下不切到源码）。
+  文件名由后端生成，插入 `![<文件名>](minitodo-image://<name>)`（原图宽于 240 时插入 `![<文件名>|240](…)`，默认按 240 宽显示；
+  `editor_theme::MD_IMAGE_INSERT_WIDTH`）；单击图片打开预览（编辑 / 查看模式都是，编辑模式下不切到源码）。
   Windows 上粘贴直接读系统剪贴板（`platform/clipboard.rs`：PNG > JPEG > GIF > WebP > 位图，也认 `image/png` 等 MIME 名格式），
   剪贴板位图在后台转成 PNG 再保存，复制的文件里有图片时只插入文件；没有可用图片也没有文字时提示。
   描述框与放大编辑弹窗的源码框共用 `ui/markdown_editor.rs` 的 `paste_images`（弹窗里粘贴的图片确定后才写回描述）
