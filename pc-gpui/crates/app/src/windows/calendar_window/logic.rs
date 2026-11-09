@@ -245,6 +245,7 @@ mod tests {
             repeat_weekdays: None,
             repeat_month_day: None,
             list_id: Some(1),
+            list_updated_at: None,
             subtasks: vec![],
         }
     }
