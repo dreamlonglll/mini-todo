@@ -40,7 +40,7 @@ use gpui_kit::{
 };
 use mini_todo_core::db::{AppSettings, WindowPosition, WindowSize};
 use mini_todo_core::settings::{self, RuntimePrefs};
-use mini_todo_core::window_logic::{self, MonitorBounds};
+use mini_todo_core::window_logic::{self, MonitorBounds, WindowPersistState};
 
 pub use self::machine::TargetMode;
 use self::machine::{AutoHideMove, ModeState, Op, Ops, TickFacts, TickPlan};
@@ -756,25 +756,10 @@ pub fn save_window_state(cx: &mut App, key: BlockKey) {
 /// （`save_window_settings`：`is_fixed` / `window_position` / `window_size` / 主题 / 底色 / 贴边…，参与同步与导出；第 4 步决定去留），
 /// 写完刷新运行时偏好。
 ///
-/// 设置还没加载完（`AppState.initialized` 为假）时等加载完再写：`save_window_settings` 会写主题 / 底色 / 贴边等
-/// 9 个键，用默认值写就把用户设置覆盖了（旧版 `initSettings` 也是先读设置再保存）
+/// 几何与锁定在调用时就取好（贴边状态、锁定此刻的值；窗口随后关掉、注销也照样保存）。设置还没加载完（`AppState.initialized`
+/// 为假）时等加载完再写：`save_window_settings` 会写主题 / 底色 / 贴边等 9 个键，用默认值写就把用户设置覆盖了（旧版
+/// `initSettings` 也是先读设置再保存）
 pub fn save_window_state_with(cx: &mut App, key: BlockKey, rect: PhysRect) {
-    if !AppState::global(cx).read(cx).initialized {
-        cx.spawn(async move |cx| {
-            for _ in 0..200 {
-                cx.background_executor()
-                    .timer(Duration::from_millis(50))
-                    .await;
-                if cx.update(|cx| AppState::global(cx).read(cx).initialized) {
-                    cx.update(|cx| save_window_state_with(cx, key, rect));
-                    return;
-                }
-            }
-            log::warn!("[window] 设置迟迟没有加载完，放弃这次保存{key}的状态");
-        })
-        .detach();
-        return;
-    }
     let Some((persist, fixed)) = block(cx, key).map(|b| {
         let persist = b.state.auto_hide.persist_state(
             WindowPosition {
@@ -790,6 +775,27 @@ pub fn save_window_state_with(cx: &mut App, key: BlockKey, rect: PhysRect) {
     }) else {
         return;
     };
+    persist_window_state(cx, key, persist, fixed);
+}
+
+/// [`save_window_state_with`] 的落库部分（`persist`：贴边隐藏中已换成锚点的几何）
+fn persist_window_state(cx: &mut App, key: BlockKey, persist: WindowPersistState, fixed: bool) {
+    if !AppState::global(cx).read(cx).initialized {
+        cx.spawn(async move |cx| {
+            for _ in 0..200 {
+                cx.background_executor()
+                    .timer(Duration::from_millis(50))
+                    .await;
+                if cx.update(|cx| AppState::global(cx).read(cx).initialized) {
+                    cx.update(|cx| persist_window_state(cx, key, persist, fixed));
+                    return;
+                }
+            }
+            log::warn!("[window] 设置迟迟没有加载完，放弃这次保存{key}的状态");
+        })
+        .detach();
+        return;
+    }
     let state = AppState::global(cx);
     let screen_id = {
         let current = state.read(cx).current_screen_config_id.clone();
