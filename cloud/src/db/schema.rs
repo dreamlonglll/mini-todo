@@ -1,6 +1,9 @@
-//! 启动时建表 + 幂等升级。Schema 设计参考 prd：4 张表 + tombstones 表 + todo_seq。
+//! 启动时建表 + 幂等升级。Schema 设计参考 prd：4 张表 + tombstones 表 + todo_seq，
+//! 多清单（PC 迁移 v31 起）另加 todo_lists + list_tombstones。
 
 use rusqlite::Connection;
+
+use crate::db::repo;
 
 pub fn init(conn: &Connection) -> anyhow::Result<()> {
     conn.execute_batch(
@@ -57,11 +60,32 @@ pub fn init(conn: &Connection) -> anyhow::Result<()> {
             todo_id TEXT PRIMARY KEY,
             seq     INTEGER NOT NULL UNIQUE
         );
+
+        -- 待办清单（多清单；契约 .trellis/tasks/11-09-multi-list-windows/contract.md）。
+        -- KV-style，与 todos 同构：data_json 是同步文档 `todoLists` 里的清单对象原样
+        -- （{id, name, sortOrder, createdAt, updatedAt}，未知字段原样保留），updated_at 是
+        -- 规范化后的 updatedAt（LWW 比较用）。清单不分配 `C{seq}` 短码。
+        -- 默认清单 id 1 可改名、不可删除；本地没有时按固定初始值补建（repo::ensure_default_list）。
+        CREATE TABLE IF NOT EXISTS todo_lists (
+            id          TEXT PRIMARY KEY,
+            data_json   TEXT NOT NULL,
+            updated_at  TEXT NOT NULL
+        );
+
+        -- 清单删除墓碑（同步文档顶层 `listTombstones`）。与 tombstones 分开存放、分开传播：
+        -- 旧版本（≤ 3.0.x）的 parse_tombstone 丢弃未知 entityType，上传时又按本地表重建
+        -- `tombstones`，清单墓碑放进去会被旧设备抹掉。规则与 todo 墓碑相同（同键取较大
+        -- deleted_at、保留 30 天）；默认清单（entity_id = '1'）的墓碑一律不存。
+        CREATE TABLE IF NOT EXISTS list_tombstones (
+            entity_id   TEXT PRIMARY KEY,
+            deleted_at  TEXT NOT NULL
+        );
         "#,
     )
     .map_err(|e| anyhow::anyhow!("初始化 schema 失败: {}", e))?;
 
     upgrade(conn).map_err(|e| anyhow::anyhow!("升级 meta 失败: {}", e))?;
+    repo::ensure_default_list(conn).map_err(|e| anyhow::anyhow!("补建默认清单失败: {}", e))?;
     Ok(())
 }
 
@@ -80,6 +104,15 @@ fn upgrade(conn: &Connection) -> rusqlite::Result<()> {
         SELECT 'dirty_since', CAST(strftime('%s', 'now') AS TEXT)
         WHERE EXISTS (SELECT 1 FROM meta WHERE key = 'dirty' AND value = 'true')
           AND NOT EXISTS (SELECT 1 FROM meta WHERE key = 'dirty_since');
+
+        -- 多清单升级（只做一次）：旧版 cloud 不认识 todoLists / listTombstones，把它们当作未知
+        -- 顶层键存进了信封（remote_envelope），本地清单表是空的。作废基准 ETag，升级后第一次
+        -- 拉取 / 推送前的 GET 一定是无条件全量 GET 并把清单合并进来；否则远端 304 时会用只有
+        -- 默认清单的本地表重建文档，把 PC 写的清单与清单墓碑从远端抹掉。
+        DELETE FROM meta WHERE key = 'base_etag'
+          AND NOT EXISTS (SELECT 1 FROM meta WHERE key = 'lists_base_reset_v1');
+        INSERT INTO meta (key, value) VALUES ('lists_base_reset_v1', '1')
+          ON CONFLICT(key) DO NOTHING;
         "#,
     )
 }
@@ -113,5 +146,59 @@ mod tests {
             )
             .ok();
         assert!(since.is_some(), "已 dirty 的库要补 dirty_since");
+    }
+
+    /// 多清单升级：基准 ETag 只在第一次启动时作废（之后记下的新基准不再被删）。
+    #[test]
+    fn lists_upgrade_resets_base_etag_only_once() {
+        let c = Connection::open_in_memory().unwrap();
+        // 模拟升级前的旧库：有基准、没有升级标记
+        c.execute_batch(
+            "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+             INSERT INTO meta (key, value) VALUES ('base_etag', '\"old\"'), ('remote_envelope', '{}');",
+        )
+        .unwrap();
+        init(&c).unwrap();
+        let etag = |c: &Connection| -> Option<String> {
+            c.query_row("SELECT value FROM meta WHERE key = 'base_etag'", [], |r| {
+                r.get(0)
+            })
+            .ok()
+        };
+        assert_eq!(etag(&c), None, "升级后第一次 GET 必须全量");
+        repo::set_meta(&c, repo::meta_keys::BASE_ETAG, "\"new\"").unwrap();
+        init(&c).unwrap();
+        assert_eq!(etag(&c).as_deref(), Some("\"new\""), "只作废一次");
+    }
+
+    /// 默认清单按固定初始值补建；已有（例如已改名）时 init 不动它。
+    #[test]
+    fn init_creates_default_list_once() {
+        let c = Connection::open_in_memory().unwrap();
+        init(&c).unwrap();
+        let row = repo::all_list_rows(&c).unwrap();
+        assert_eq!(row.len(), 1);
+        assert_eq!(row[0].id, "1");
+        assert_eq!(row[0].updated_at, crate::model::DEFAULT_LIST_TIME);
+        let v: serde_json::Value = serde_json::from_str(&row[0].data_json).unwrap();
+        assert_eq!(
+            v,
+            serde_json::Value::Object(crate::model::default_list_record())
+        );
+
+        repo::upsert_list(
+            &c,
+            "1",
+            r#"{"id":1,"name":"收件箱","sortOrder":0,"createdAt":"2000-01-01 00:00:00","updatedAt":"2026-11-01 10:00:00"}"#,
+            "2026-11-01 10:00:00",
+        )
+        .unwrap();
+        init(&c).unwrap();
+        let row = repo::all_list_rows(&c).unwrap();
+        assert_eq!(row.len(), 1);
+        assert!(
+            row[0].data_json.contains("收件箱"),
+            "已有的默认清单不能被覆盖"
+        );
     }
 }

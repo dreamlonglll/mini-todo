@@ -7,7 +7,7 @@
 //!      （与 pull 同一实现，合并与记录基准同一事务）。服务端忽略前置条件
 //!      （nginx dav / Caddy webdav）时，丢更新窗口也只剩 GET→PUT 的几秒
 //!    - 用"合并后的本地状态 + 基准信封"构造文档：未知顶层键、`settings`、
-//!      `settingsUpdatedAt` 原样保留
+//!      `settingsUpdatedAt` 原样保留；记录、墓碑、清单与清单墓碑来自本地表
 //!    - 条件 PUT：知道基准 ETag 就发 `If-Match: "<opaque>"`（去掉 `W/`），否则不带前置
 //!      条件。**从不发 `If-Unmodified-Since`**：Apache 用文件的亚秒级 mtime 和秒级日期
 //!      比较，拿文件自己的 Last-Modified 也会 412（e2e 实测）
@@ -171,8 +171,7 @@ fn push_sync_data(ctx: &SyncCtx, g0: i64, report: &mut PushReport) -> anyhow::Re
             PutOutcome::Stored(from_put) => {
                 let validators = validators_after_put(dav, from_put, payload.len());
                 let mut envelope = doc;
-                envelope.remove("todos");
-                envelope.remove("tombstones");
+                doc::strip_record_keys(&mut envelope);
                 let now = now_local_string(tz);
                 let cleared = ctx
                     .db
@@ -182,6 +181,7 @@ fn push_sync_data(ctx: &SyncCtx, g0: i64, report: &mut PushReport) -> anyhow::Re
                         repo::set_meta(&tx, mk::LAST_PUSH_OK_AT, &now)?;
                         repo::delete_meta(&tx, mk::LAST_PUSH_ERROR)?;
                         repo::purge_tombstones_before(&tx, &cutoff)?;
+                        repo::purge_list_tombstones_before(&tx, &cutoff)?;
                         let cleared = repo::clear_dirty_if_unchanged(&tx, g0)?;
                         tx.commit()?;
                         Ok(cleared)

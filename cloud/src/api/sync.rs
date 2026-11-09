@@ -100,6 +100,9 @@ pub async fn post_sync_pull(
         "subtasksUpserted": r.stats.subtasks_upserted,
         "subtasksDeleted": r.stats.subtasks_deleted,
         "tombstonesApplied": r.stats.tombstones_applied,
+        "listsUpserted": r.stats.lists_upserted,
+        "listsDeleted": r.stats.lists_deleted,
+        "listTombstonesApplied": r.stats.list_tombstones_applied,
         "recordsSkipped": r.stats.records_skipped,
     })))
 }

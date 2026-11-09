@@ -240,6 +240,12 @@ enum Kind {
     PositiveInt,
     Weekdays,
     MonthDay,
+    /// 待办所属清单的 id（i64 ≥ 1；是否指向未删除的清单由 API 层查库判断）。
+    ListId,
+    /// 64 位整数（清单的 `sortOrder`：PC 端是 i64）。
+    LongInt,
+    /// 清单名称（契约 §6：去首尾空白、非空、≤ 50 个字）。
+    ListName,
 }
 
 /// todo 可写字段（K6）。
@@ -260,6 +266,7 @@ const TODO_FIELDS: &[(&str, Kind)] = &[
     ("repeatInterval", Kind::PositiveInt),
     ("repeatWeekdays", Kind::Weekdays),
     ("repeatMonthDay", Kind::MonthDay),
+    ("listId", Kind::ListId),
 ];
 
 /// todo 输入别名：`(别名, 规范字段)`。同时给了规范字段时以规范字段为准。
@@ -288,6 +295,11 @@ const SUBTASK_FIELDS: &[(&str, Kind)] = &[
 ];
 
 const SUBTASK_IGNORED: &[&str] = &["id", "createdAt", "updatedAt"];
+
+/// 清单可写字段（契约 §10）。
+const LIST_FIELDS: &[(&str, Kind)] = &[("name", Kind::ListName), ("sortOrder", Kind::LongInt)];
+
+const LIST_IGNORED: &[&str] = &["id", "createdAt", "updatedAt"];
 
 fn as_i32(v: &Value) -> Option<i64> {
     v.as_i64().filter(|n| i32::try_from(*n).is_ok())
@@ -403,6 +415,21 @@ fn coerce(kind: Kind, v: &Value, tz: Tz) -> Result<Value, String> {
                 .map(|d| json!(d))
                 .ok_or_else(|| "must be an integer 1-31 or null".into()),
         },
+        Kind::ListId => v
+            .as_i64()
+            .filter(|id| *id >= 1)
+            .map(|id| json!(id))
+            .ok_or_else(|| "must be a list id: an integer >= 1 (see GET /lists)".into()),
+        Kind::LongInt => v
+            .as_i64()
+            .map(|n| json!(n))
+            .ok_or_else(|| "must be an integer".into()),
+        Kind::ListName => match v.as_str() {
+            Some(s) => normalize_list_name(s)
+                .map(|name| json!(name))
+                .map_err(String::from),
+            None => Err("must be a string".into()),
+        },
     }
 }
 
@@ -430,6 +457,8 @@ fn allowed_list(
 ///   （读出的派生值对自定义颜色是 null，原样写回不报错）
 /// - `id` / `createdAt` / `updatedAt` / `seq` / `subtasks` / `subtaskCount` 忽略
 /// - 创建时 `title` 必填
+/// - `listId` 只校验类型（整数 ≥ 1）；是否指向未删除的清单要查库，由 API 层判断
+///   （不存在 → [`list_not_found_error`]）
 pub fn validate_todo_input(
     body: &Value,
     mode: WriteMode,
@@ -592,6 +621,57 @@ pub fn validate_subtask_input(
     }
 }
 
+/// 待办的 `listId` 指向不存在（含已删除）的清单时的 400（契约 §10：`清单不存在`）。
+pub fn list_not_found_error() -> ValidationError {
+    ValidationError {
+        unknown: Vec::new(),
+        invalid: vec![("listId".to_string(), LIST_NOT_FOUND.to_string())],
+        allowed: allowed_list(TODO_FIELDS, TODO_ALIASES),
+    }
+}
+
+/// 校验 `POST /lists` / `PATCH /lists/:id` 的 body：只接受 `name` / `sortOrder`
+/// （`id` / `createdAt` / `updatedAt` 忽略，其它字段 400）。`name` 按契约 §6 去首尾空白后
+/// 写入；创建时必填。重名（要查库）由 API 层判断。
+pub fn validate_list_input(
+    body: &Value,
+    mode: WriteMode,
+) -> Result<Map<String, Value>, ValidationError> {
+    let mut err = ValidationError {
+        allowed: allowed_list(LIST_FIELDS, &[]),
+        ..Default::default()
+    };
+    let Value::Object(input) = body else {
+        err.invalid("body", "must be a JSON object");
+        return Err(err);
+    };
+    // 清单没有业务时间字段，时区不影响校验
+    let tz = chrono_tz::UTC;
+    let mut out = Map::new();
+    for (key, value) in input {
+        if LIST_IGNORED.contains(&key.as_str()) {
+            continue;
+        }
+        match LIST_FIELDS.iter().find(|(f, _)| f == key) {
+            Some((_, kind)) => match coerce(*kind, value, tz) {
+                Ok(v) => {
+                    out.insert(key.clone(), v);
+                }
+                Err(msg) => err.invalid(key, msg),
+            },
+            None => err.unknown.push(key.clone()),
+        }
+    }
+    if mode == WriteMode::Create && !input.contains_key("name") {
+        err.invalid("name", "is required");
+    }
+    if err.is_empty() {
+        Ok(out)
+    } else {
+        Err(err)
+    }
+}
+
 /// 新建 todo 的完整记录（PC 导出的形态，所有字段齐全），再叠加已校验的补丁。
 pub fn new_todo_record(id: i64, patch: &Map<String, Value>, now: &str) -> Map<String, Value> {
     let mut obj = json!({
@@ -614,6 +694,7 @@ pub fn new_todo_record(id: i64, patch: &Map<String, Value>, now: &str) -> Map<St
         "repeatInterval": 1,
         "repeatWeekdays": null,
         "repeatMonthDay": null,
+        "listId": DEFAULT_LIST_ID,
     })
     .as_object()
     .cloned()
@@ -662,6 +743,68 @@ pub fn apply_todo_patch(obj: &mut Map<String, Value>, patch: &Map<String, Value>
     if patch.get("repeatEnabled") == Some(&json!(true)) && !patch.contains_key("notifyBefore") {
         obj.insert("notifyBefore".into(), json!(0));
     }
+}
+
+// =============================================================================
+// 待办清单（多清单；契约 .trellis/tasks/11-09-multi-list-windows/contract.md）
+// =============================================================================
+
+/// 默认清单的 id（契约 §2）：固定为 1，可改名、不可删除；`entityId = 1` 的清单墓碑一律忽略。
+pub const DEFAULT_LIST_ID: i64 = 1;
+/// 默认清单的初始名字（与 PC 迁移 v31 建出的一致）。
+pub const DEFAULT_LIST_NAME: &str = "待办清单";
+/// 默认清单的初始 `createdAt` / `updatedAt`：固定的早时间，两端各自建出的 id 1 不互相"抢"，
+/// 任何一次改名（新的 `updatedAt` 一定晚于它）都胜出。
+pub const DEFAULT_LIST_TIME: &str = "2000-01-01 00:00:00";
+/// 清单名称的长度上限（去首尾空白后按 `char` 计，契约 §6）。
+pub const LIST_NAME_MAX_CHARS: usize = 50;
+/// 与 PC 一致的错误文案（契约 §6 / §10）。
+pub const LIST_NAME_EMPTY: &str = "清单名称不能为空";
+pub const LIST_NAME_TOO_LONG: &str = "清单名称不能超过 50 个字";
+pub const LIST_NOT_FOUND: &str = "清单不存在";
+
+/// 规范化清单名称（契约 §6）：去首尾空白；空 → [`LIST_NAME_EMPTY`]，超过
+/// [`LIST_NAME_MAX_CHARS`] 个字 → [`LIST_NAME_TOO_LONG`]。
+pub fn normalize_list_name(raw: &str) -> Result<String, &'static str> {
+    let name = raw.trim();
+    if name.is_empty() {
+        return Err(LIST_NAME_EMPTY);
+    }
+    if name.chars().count() > LIST_NAME_MAX_CHARS {
+        return Err(LIST_NAME_TOO_LONG);
+    }
+    Ok(name.to_string())
+}
+
+/// 同名比较用的键（契约 §6）：去首尾空白后不区分大小写（Unicode 小写）。
+pub fn list_name_key(name: &str) -> String {
+    name.trim().to_lowercase()
+}
+
+/// 清单记录的完整形态（同步文档 `todoLists` 的元素）：`{id, name, sortOrder, createdAt, updatedAt}`。
+pub fn new_list_record(id: i64, name: &str, sort_order: i64, now: &str) -> Map<String, Value> {
+    json!({
+        "id": id,
+        "name": name,
+        "sortOrder": sort_order,
+        "createdAt": now,
+        "updatedAt": now,
+    })
+    .as_object()
+    .cloned()
+    .unwrap_or_default()
+}
+
+/// 默认清单的初始记录：`name = "待办清单"`、`sortOrder = 0`、时间都是 [`DEFAULT_LIST_TIME`]。
+pub fn default_list_record() -> Map<String, Value> {
+    new_list_record(DEFAULT_LIST_ID, DEFAULT_LIST_NAME, 0, DEFAULT_LIST_TIME)
+}
+
+/// 还是初始值的默认清单（id 1、规范化后的 `updatedAt` 不晚于 [`DEFAULT_LIST_TIME`]）：每个写入方
+/// 都会按同样的值补建它，所以远端缺它不算"远端落后"，本地只有它也不算"有待同步的内容"
+/// ——否则每个还没有清单信息的远端文档都会触发一次没有意义的上传。
+pub fn is_pristine_default_list(id: &str, canonical_updated_at: &str) -> bool {
+    id.parse::<i64>() == Ok(DEFAULT_LIST_ID) && canonical_updated_at <= DEFAULT_LIST_TIME
 }
 
 // =============================================================================
@@ -923,6 +1066,22 @@ impl Fixer<'_> {
             }
         }
     }
+
+    /// `listId`：PC 是 i64（缺失与 null 都是默认清单 1，不用修）。字符串 / 小数 / 布尔会让 PC
+    /// 整条反序列化失败：读得出整数的改成整数，读不出的改成默认清单。
+    fn list_id(&mut self) {
+        let fixed = match self.obj.get("listId") {
+            None | Some(Value::Null) => return,
+            Some(v) if v.as_i64().is_some() => return,
+            Some(Value::Number(n)) => n
+                .as_f64()
+                .filter(|f| f.fract() == 0.0 && f.abs() < 9.0e15)
+                .map(|f| f as i64),
+            Some(Value::String(s)) => s.trim().parse::<i64>().ok(),
+            Some(_) => None,
+        };
+        self.set("listId", json!(fixed.unwrap_or(DEFAULT_LIST_ID)), true);
+    }
 }
 
 /// 归一化缓存里的一条 todo（存量数据修复，见模块注释）。`row_id` 是表主键，
@@ -1018,6 +1177,7 @@ pub fn normalize_stored_todo(
     f.int_field("repeatInterval", 1, Some(1));
     f.weekdays();
     f.nullable_int_field("repeatMonthDay", 1..=31);
+    f.list_id();
 
     // ---- 时间：可解析的统一成规范格式（仅格式），坏值置空（语义修复） ----
     for (field, kind) in TODO_TIME_FIELDS {
@@ -1142,8 +1302,10 @@ mod tests {
             "repeatType": "Weekly",
             "repeatInterval": 2,
             "repeatWeekdays": "5, 1,3,3",
-            "repeatMonthDay": null
+            "repeatMonthDay": null,
+            "listId": 1731000000000123_i64
         }));
+        assert_eq!(p["listId"], 1731000000000123_i64);
         assert_eq!(p["color"], "#EF4444");
         assert_eq!(p["quadrant"], 2);
         assert_eq!(
@@ -1155,7 +1317,7 @@ mod tests {
         assert_eq!(p["repeatType"], "weekly");
         assert_eq!(p["repeatWeekdays"], "1,3,5");
         assert_eq!(p["sortOrder"], -3);
-        assert_eq!(p.len(), 16);
+        assert_eq!(p.len(), 17);
     }
 
     #[test]
@@ -1284,6 +1446,11 @@ mod tests {
             (json!({"priority": "urgent"}), "priority"),
             (json!({"dueDate": "someday"}), "dueDate"),
             (json!({"notes": 5}), "notes"),
+            (json!({"listId": 0}), "listId"),
+            (json!({"listId": -5}), "listId"),
+            (json!({"listId": "5"}), "listId"),
+            (json!({"listId": 1.5}), "listId"),
+            (json!({"listId": null}), "listId"),
         ] {
             let e = todo_err(body.clone());
             assert_eq!(e.invalid.len(), 1, "{} -> {:?}", body, e);
@@ -1350,7 +1517,8 @@ mod tests {
         assert_eq!(r["quadrant"], 4);
         assert_eq!(r["repeatInterval"], 1);
         assert_eq!(r["createdAt"], "2026-05-13 10:00:00");
-        assert_eq!(r.len(), 19, "与 PC Todo 字段一一对应（不含 subtasks）");
+        assert_eq!(r["listId"], DEFAULT_LIST_ID, "不指定清单时进默认清单");
+        assert_eq!(r.len(), 20, "与 PC Todo 字段一一对应（不含 subtasks）");
         assert!(r.get("priority").is_none());
 
         let s = new_subtask_record(7, 42, &obj(json!({"title": "s"})), "2026-05-13 10:00:00");
@@ -1554,5 +1722,117 @@ mod tests {
             !canonicalize_record_times(&mut s, false, tz()),
             "子任务没有业务时间字段"
         );
+    }
+
+    // ------------------------------------------------------------------ 清单（契约 §6 / §10）
+
+    #[test]
+    fn list_names_are_trimmed_and_bounded() {
+        assert_eq!(normalize_list_name("  工作 \t").as_deref(), Ok("工作"));
+        assert_eq!(
+            normalize_list_name("　工作　").as_deref(),
+            Ok("工作"),
+            "全角空格也去掉"
+        );
+        assert_eq!(normalize_list_name("我的 清单").as_deref(), Ok("我的 清单"));
+        assert_eq!(normalize_list_name("   "), Err(LIST_NAME_EMPTY));
+        let fifty = "清".repeat(50);
+        assert_eq!(
+            normalize_list_name(&format!(" {} ", fifty)),
+            Ok(fifty.clone())
+        );
+        assert_eq!(
+            normalize_list_name(&format!("{}a", fifty)),
+            Err(LIST_NAME_TOO_LONG)
+        );
+        assert_eq!(list_name_key(" Work "), list_name_key("wORK"));
+        assert_ne!(list_name_key("工作"), list_name_key("工作 2"));
+    }
+
+    #[test]
+    fn list_input_validation() {
+        let p = validate_list_input(
+            &json!({"name": "  工作 ", "sortOrder": 3, "id": 9, "createdAt": "x", "updatedAt": "y"}),
+            WriteMode::Create,
+        )
+        .unwrap();
+        assert_eq!(p, obj(json!({"name": "工作", "sortOrder": 3})));
+        assert!(validate_list_input(&json!({"sortOrder": -1}), WriteMode::Update).is_ok());
+        assert!(
+            validate_list_input(&json!({"sortOrder": 3_000_000_000_i64}), WriteMode::Update)
+                .is_ok(),
+            "清单的 sortOrder 在 PC 端是 i64"
+        );
+
+        let e = validate_list_input(&json!({"sortOrder": 1}), WriteMode::Create).unwrap_err();
+        assert!(e.message().contains("name: is required"), "{}", e.message());
+        let e = validate_list_input(&json!({"name": " "}), WriteMode::Update).unwrap_err();
+        assert_eq!(
+            e.invalid,
+            vec![("name".to_string(), LIST_NAME_EMPTY.to_string())]
+        );
+        let e =
+            validate_list_input(&json!({"name": "x".repeat(51)}), WriteMode::Update).unwrap_err();
+        assert_eq!(e.invalid[0].1, LIST_NAME_TOO_LONG);
+        let e = validate_list_input(
+            &json!({"name": 5, "sortOrder": "1", "color": "#FFFFFF"}),
+            WriteMode::Update,
+        )
+        .unwrap_err();
+        assert_eq!(e.unknown, vec!["color"]);
+        assert_eq!(e.invalid.len(), 2);
+        assert!(
+            e.message().contains("allowed: name, sortOrder"),
+            "{}",
+            e.message()
+        );
+        assert!(validate_list_input(&json!([1]), WriteMode::Create).is_err());
+    }
+
+    #[test]
+    fn list_records_and_default_list() {
+        let r = new_list_record(7, "工作", 2, "2026-11-01 10:00:00");
+        assert_eq!(
+            Value::Object(r),
+            json!({"id": 7, "name": "工作", "sortOrder": 2,
+                   "createdAt": "2026-11-01 10:00:00", "updatedAt": "2026-11-01 10:00:00"})
+        );
+        assert_eq!(
+            Value::Object(default_list_record()),
+            json!({"id": 1, "name": "待办清单", "sortOrder": 0,
+                   "createdAt": "2000-01-01 00:00:00", "updatedAt": "2000-01-01 00:00:00"})
+        );
+        assert!(is_pristine_default_list("1", DEFAULT_LIST_TIME));
+        assert!(is_pristine_default_list("1", ""), "无法解析的时间视为最旧");
+        assert!(!is_pristine_default_list("1", "2026-11-01 10:00:00"));
+        assert!(!is_pristine_default_list("2", DEFAULT_LIST_TIME));
+        let e = list_not_found_error();
+        assert_eq!(e.message(), "listId: 清单不存在");
+    }
+
+    /// 会让 PC 整条反序列化失败的 `listId` 在存量归一化时修好；整数、null 与缺失不动
+    /// （PC 把 null 与缺失都读成默认清单）。
+    #[test]
+    fn list_id_types_are_repaired() {
+        for (raw, fixed) in [
+            (json!("1731000000000123"), json!(1731000000000123_i64)),
+            (json!(5.0), json!(5)),
+            (json!("abc"), json!(1)),
+            (json!(true), json!(1)),
+        ] {
+            let (o, out) = norm_todo(json!({"id": 1, "title": "t", "listId": raw.clone()}));
+            assert!(out.semantic, "{}", raw);
+            assert_eq!(o["listId"], fixed, "{}", raw);
+        }
+        let (o, out) = norm_todo(json!({"id": 1, "title": "t", "listId": 999}));
+        assert_eq!(
+            out,
+            NormalizeOutcome::default(),
+            "指向已删除清单的整数也不改写（读侧兜底）"
+        );
+        assert_eq!(o["listId"], 999);
+        let (o, out) = norm_todo(json!({"id": 1, "title": "t", "listId": null}));
+        assert_eq!(out, NormalizeOutcome::default());
+        assert_eq!(o["listId"], Value::Null);
     }
 }

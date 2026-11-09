@@ -10,6 +10,12 @@
 //!    沿用旧的缺席清理。
 //! 4. 墓碑集合：并集，同键取较大 `deletedAt`，按 30 天保留期过滤。
 //!
+//! 清单（`todoLists` / `listTombstones`，契约 `.trellis/tasks/11-09-multi-list-windows/contract.md`
+//! §4）与 todo 完全同构：记录级 LWW（平局保留本地）、`deletedAt >= updatedAt` 压制、并集（远端
+//! 没有 `todoLists` 键时本地清单一条都不删）、墓碑并集取较大值并按同一保留期清理；默认清单
+//! （id 1）的墓碑一律忽略。收到清单墓碑时**不**改写本地待办（读侧按"有效清单"兜底显示在默认
+//! 清单，见 `db::repo` 的有效清单过滤）。
+//!
 //! 云端不解析 PC 记录的业务字段：记录 JSON 原样存进 `data_json`（只剥掉嵌套的
 //! `subtasks`、把子任务的 `parentId` 对齐到外层 todo、把可解析的非规范时间串统一成
 //! K1 规范格式——仅格式，不改语义，未知字段原样保留）。缺 id 的坏记录跳过并计数，
@@ -24,8 +30,8 @@ use serde_json::{json, Value};
 use tracing::{debug, warn};
 
 use crate::db::repo;
-use crate::model::canonicalize_record_times;
-use crate::sync::doc::{EntityType, RemoteDoc};
+use crate::model::{canonicalize_record_times, is_pristine_default_list, DEFAULT_LIST_ID};
+use crate::sync::doc::{list_record_id, EntityType, RemoteDoc};
 use crate::time::normalize_datetime;
 use crate::util::id_string;
 
@@ -38,7 +44,11 @@ pub struct MergeStats {
     pub subtasks_deleted: usize,
     /// 新增或推后了 `deletedAt` 的墓碑数。
     pub tombstones_applied: usize,
-    /// 跳过的坏记录（缺 id / 不是对象）与非法墓碑。
+    pub lists_upserted: usize,
+    pub lists_deleted: usize,
+    /// 新增或推后了 `deletedAt` 的清单墓碑数。
+    pub list_tombstones_applied: usize,
+    /// 跳过的坏记录（缺 id / 不是对象）与非法墓碑（含清单与清单墓碑）。
     pub records_skipped: usize,
     /// 是否走了旧协议的缺席清理。
     pub legacy_cleanup: bool,
@@ -231,7 +241,102 @@ pub fn apply_remote_doc(
     // ---- 5. 本地墓碑按保留期清理 ----
     repo::purge_tombstones_before(conn, retention_cutoff)?;
 
+    // ---- 6. 清单 ----
+    merge_lists(conn, doc, tz, retention_cutoff, &mut stats)?;
+
     Ok(stats)
+}
+
+/// 合并远端清单（契约 §4，与 todo 同构；见模块注释）。
+fn merge_lists(
+    conn: &Connection,
+    doc: &RemoteDoc,
+    tz: Tz,
+    retention_cutoff: &str,
+    stats: &mut MergeStats,
+) -> rusqlite::Result<()> {
+    let default_id = DEFAULT_LIST_ID.to_string();
+    // 默认清单不可删除；本地没有时按固定初始值补建（契约 §2）
+    repo::ensure_default_list(conn)?;
+
+    // ---- 清单墓碑：本地 ∪ 远端，同键取较大 deletedAt；保留期外的远端墓碑不导入 ----
+    let mut tombs: HashMap<String, String> = HashMap::new();
+    for (id, deleted_at) in repo::all_list_tombstones(conn)? {
+        let d = canon_ts(Some(&deleted_at), tz);
+        if id != default_id && !d.is_empty() {
+            tombs.insert(id, d);
+        }
+    }
+    let (remote_tombs, invalid) = doc.list_tombstones(tz);
+    if invalid > 0 {
+        warn!(
+            target: "minitodo_cloud::sync",
+            "skip {} invalid remote list tombstone(s)", invalid
+        );
+        stats.records_skipped += invalid;
+    }
+    for t in remote_tombs {
+        if t.deleted_at.as_str() < retention_cutoff {
+            continue;
+        }
+        if tombs
+            .get(&t.entity_id)
+            .is_none_or(|old| t.deleted_at > *old)
+        {
+            repo::add_list_tombstone(conn, &t.entity_id, &t.deleted_at)?;
+            tombs.insert(t.entity_id, t.deleted_at);
+            stats.list_tombstones_applied += 1;
+        }
+    }
+
+    // ---- 记录级 LWW（平局保留本地；墓碑与 LWW 胜出的版本比较） ----
+    let mut local: HashMap<String, String> = repo::list_timestamps(conn)?
+        .into_iter()
+        .map(|(id, ts)| (id, canon_ts(Some(&ts), tz)))
+        .collect();
+    for list in doc.lists() {
+        let Some(id) = list_record_id(list) else {
+            stats.records_skipped += 1;
+            debug!(target: "minitodo_cloud::sync", "skip remote list without an integer id");
+            continue;
+        };
+        let remote_ts = record_ts(list, tz);
+        let local_ts = local.get(&id).cloned();
+        let remote_wins = local_ts.as_ref().is_none_or(|l| remote_ts > *l);
+        let winner_ts = if remote_wins {
+            remote_ts.clone()
+        } else {
+            local_ts.unwrap_or_default()
+        };
+        let suppressed = id != default_id
+            && tombs
+                .get(&id)
+                .is_some_and(|deleted_at| deleted_at.as_str() >= winner_ts.as_str());
+        if suppressed || !remote_wins {
+            // 被压制的远端版本丢弃；本地副本在下面清扫时删除
+            continue;
+        }
+        let mut body = list.clone();
+        if let Some(obj) = body.as_object_mut() {
+            // 只有 createdAt / updatedAt 两个时间字段：与子任务同一套仅格式的规范化
+            canonicalize_record_times(obj, false, tz);
+        }
+        repo::upsert_list(conn, &id, &body.to_string(), &remote_ts)?;
+        local.insert(id, remote_ts);
+        stats.lists_upserted += 1;
+    }
+
+    // ---- 墓碑清扫：删除本地 updatedAt <= deletedAt 的清单（待办不改写，读侧兜底） ----
+    let mut sweep: Vec<(&String, &String)> = tombs.iter().collect();
+    sweep.sort();
+    for (id, deleted_at) in sweep {
+        if local.get(id).is_some_and(|l| deleted_at >= l) && repo::delete_list(conn, id)? {
+            stats.lists_deleted += 1;
+        }
+    }
+
+    repo::purge_list_tombstones_before(conn, retention_cutoff)?;
+    Ok(())
 }
 
 /// 合并之后，远端文档是否仍缺少本地已有的内容（与 PC 端"需要上传"的判定一致）：
@@ -241,6 +346,9 @@ pub fn apply_remote_doc(
 /// - 本地墓碑（`deletedAt >= recheck_cutoff`）远端没有，或远端同键的 `deletedAt` 更早。
 ///   远端是旧协议文档（没有 `tombstones` 键，旧版 PC 写的）时不比较墓碑——旧版 PC
 ///   不认识墓碑，每次都会把它们丢掉，比较会导致每轮都重推。
+/// - 清单与清单墓碑按同样的规则比较（远端没有 `todoLists` 键时本地的每个清单都算缺失）；
+///   还是初始值的默认清单不算（每个写入方都会按同样的值补建它）。旧协议文档同样不比较清单：
+///   写它的旧版 PC 也不会原样带回不认识的顶层键，比较会导致每轮都重推。
 ///
 /// 典型场景：别的写入方在忽略前置条件的服务端（nginx dav / Caddy webdav）上用自己的旧
 /// 快照整包覆盖了云端刚写入的记录或墓碑。调用方（pull）为真时标脏，让 push 把并集写回去，
@@ -292,6 +400,9 @@ pub fn remote_lacks_local_state(
     if !doc.has_tombstones_key() {
         return Ok(false);
     }
+    if remote_lacks_local_lists(conn, doc, tz, recheck_cutoff)? {
+        return Ok(true);
+    }
     // 墓碑按数值 id 比较：写出的墓碑 `entityId` 一律是整数（`Tombstone::to_value`），
     // 本地 id 不是整数的墓碑根本导不出去，算进来会让每次 pull 都判定"远端缺墓碑"而无限重推
     let (remote_tombs, _) = doc.tombstones(tz);
@@ -322,6 +433,57 @@ pub fn remote_lacks_local_state(
             .is_none_or(|remote| local > *remote)
         {
             debug!(target: "minitodo_cloud::sync", "remote lacks local tombstone {}:{}", typ, id);
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// `remote_lacks_local_state` 的清单部分（规则见那里）。
+fn remote_lacks_local_lists(
+    conn: &Connection,
+    doc: &RemoteDoc,
+    tz: Tz,
+    recheck_cutoff: &str,
+) -> rusqlite::Result<bool> {
+    let remote_lists: HashMap<String, String> = doc
+        .lists()
+        .iter()
+        .filter_map(|l| list_record_id(l).map(|id| (id, record_ts(l, tz))))
+        .collect();
+    for (id, ts) in repo::exportable_list_timestamps(conn)? {
+        let local = canon_ts(Some(&ts), tz);
+        if is_pristine_default_list(&id, &local) {
+            continue;
+        }
+        if remote_lists
+            .get(&id)
+            .is_none_or(|remote_ts| local > *remote_ts)
+        {
+            debug!(target: "minitodo_cloud::sync", "remote lacks local list {}", id);
+            return Ok(true);
+        }
+    }
+
+    let (remote_tombs, _) = doc.list_tombstones(tz);
+    let mut remote_deleted: HashMap<String, String> = HashMap::new();
+    for t in remote_tombs {
+        let entry = remote_deleted.entry(t.entity_id).or_default();
+        if t.deleted_at > *entry {
+            *entry = t.deleted_at;
+        }
+    }
+    for (id, deleted_at) in repo::all_list_tombstones(conn)? {
+        // 与 `ListTombstone::to_value` 的判定一致：导不出去的墓碑不算
+        if id.parse::<i64>().is_err() {
+            continue;
+        }
+        let local = canon_ts(Some(&deleted_at), tz);
+        if local.is_empty() || local.as_str() < recheck_cutoff {
+            continue;
+        }
+        if remote_deleted.get(&id).is_none_or(|remote| local > *remote) {
+            debug!(target: "minitodo_cloud::sync", "remote lacks local list tombstone {}", id);
             return Ok(true);
         }
     }
@@ -881,6 +1043,312 @@ mod tests {
             ],
         );
         assert!(!lacks(&db, &with_tomb, CUTOFF));
+    }
+
+    // ---------------------------------------------------------------- 清单（契约 §4）
+
+    fn list_value(id: i64, name: &str, updated_at: &str) -> Value {
+        json!({"id": id, "name": name, "sortOrder": 1, "createdAt": "2026-11-01 08:00:00",
+               "updatedAt": updated_at})
+    }
+
+    fn lists_doc(lists: Vec<Value>, list_tombs: Vec<Value>) -> RemoteDoc {
+        RemoteDoc::from_value(json!({
+            "version": "4.0", "todos": [], "tombstones": [],
+            "todoLists": lists, "listTombstones": list_tombs
+        }))
+        .unwrap()
+    }
+
+    fn list_tomb(id: i64, deleted_at: &str) -> Value {
+        json!({"entityId": id, "deletedAt": deleted_at})
+    }
+
+    fn list_name(db: &Db, id: &str) -> Option<String> {
+        db.with_conn(|conn| {
+            repo::all_list_rows(conn)
+                .unwrap()
+                .into_iter()
+                .find(|r| r.id == id)
+                .map(|r| {
+                    serde_json::from_str::<Value>(&r.data_json).unwrap()["name"]
+                        .as_str()
+                        .unwrap()
+                        .to_string()
+                })
+        })
+    }
+
+    fn list_tombstones(db: &Db) -> Vec<(String, String)> {
+        let mut v = db.with_conn(|c| repo::all_list_tombstones(c).unwrap());
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn lists_lww_union_and_tie_keeps_local() {
+        let (db, _tmp) = fresh_db();
+        let stats = merge(
+            &db,
+            &lists_doc(vec![list_value(5, "工作", "2026-11-01 10:00:00")], vec![]),
+        );
+        assert_eq!(stats.lists_upserted, 1);
+        assert_eq!(list_name(&db, "5").as_deref(), Some("工作"));
+
+        // 远端更旧 / 平局：保留本地
+        let stats = merge(
+            &db,
+            &lists_doc(vec![list_value(5, "旧名", "2026-11-01T09:00:00")], vec![]),
+        );
+        assert_eq!(stats.lists_upserted, 0);
+        merge(
+            &db,
+            &lists_doc(vec![list_value(5, "平局", "2026-11-01 10:00")], vec![]),
+        );
+        assert_eq!(list_name(&db, "5").as_deref(), Some("工作"));
+        // 远端更新：采用；时间统一成规范格式
+        merge(
+            &db,
+            &lists_doc(vec![list_value(5, "工作2", "2026-11-01T11:00:00")], vec![]),
+        );
+        assert_eq!(list_name(&db, "5").as_deref(), Some("工作2"));
+        let row = db.with_conn(|c| {
+            repo::all_list_rows(c)
+                .unwrap()
+                .into_iter()
+                .find(|r| r.id == "5")
+                .unwrap()
+        });
+        assert_eq!(row.updated_at, "2026-11-01 11:00:00");
+        assert!(row
+            .data_json
+            .contains("\"updatedAt\":\"2026-11-01 11:00:00\""));
+
+        // 只在一侧存在：并集；远端没有 todoLists 键：本地清单一条都不删
+        merge(&db, &lists_doc(vec![], vec![]));
+        merge(&db, &doc(vec![], vec![]));
+        assert_eq!(list_name(&db, "5").as_deref(), Some("工作2"));
+        assert_eq!(list_name(&db, "1").as_deref(), Some("待办清单"));
+    }
+
+    /// 墓碑压制同键且 `updatedAt <= deletedAt` 的清单；删除后又被编辑的保留；
+    /// 收到清单墓碑时不改写待办（读侧兜底）。
+    #[test]
+    fn list_tombstones_delete_and_suppress_but_edit_after_delete_survives() {
+        let (db, _tmp) = fresh_db();
+        merge(
+            &db,
+            &lists_doc(
+                vec![
+                    list_value(5, "工作", "2026-11-01 10:00:00"),
+                    list_value(6, "生活", "2026-11-01 10:00:00"),
+                ],
+                vec![],
+            ),
+        );
+        db.with_conn(|c| {
+            repo::upsert_todo(
+                c,
+                "1",
+                r#"{"id":1,"title":"t","listId":5}"#,
+                "2026-11-01 10:00:00",
+            )
+            .unwrap()
+        });
+        let stats = merge(
+            &db,
+            &lists_doc(
+                vec![list_value(6, "生活-改", "2026-11-01 12:00:00")],
+                vec![
+                    list_tomb(5, "2026-11-01 10:00:00"),
+                    list_tomb(6, "2026-11-01 11:00:00"),
+                    list_tomb(7, "2026-11-01 11:00:00"),
+                ],
+            ),
+        );
+        assert_eq!(
+            stats.lists_deleted, 1,
+            "deletedAt >= updatedAt（含相等）即删除"
+        );
+        assert_eq!(stats.list_tombstones_applied, 3);
+        assert!(list_name(&db, "5").is_none());
+        assert_eq!(
+            list_name(&db, "6").as_deref(),
+            Some("生活-改"),
+            "删除后又被编辑 → 保留"
+        );
+        let todo = db.with_conn(|c| repo::get_todo(c, "1").unwrap().unwrap());
+        assert!(
+            todo.data_json.contains("\"listId\":5"),
+            "清单墓碑不改写待办：{}",
+            todo.data_json
+        );
+
+        // 远端陈旧副本被本地墓碑压制
+        let stats = merge(
+            &db,
+            &lists_doc(vec![list_value(7, "陈旧", "2026-11-01 09:00:00")], vec![]),
+        );
+        assert_eq!(stats.lists_upserted, 0);
+        assert!(list_name(&db, "7").is_none());
+        assert_eq!(
+            list_tombstones(&db),
+            vec![
+                ("5".to_string(), "2026-11-01 10:00:00".to_string()),
+                ("6".to_string(), "2026-11-01 11:00:00".to_string()),
+                ("7".to_string(), "2026-11-01 11:00:00".to_string()),
+            ]
+        );
+    }
+
+    /// 默认清单：远端的 id 1 墓碑一律忽略；改名照常按 LWW 生效；本地没有时补建。
+    #[test]
+    fn default_list_tombstone_is_ignored_and_rename_wins() {
+        let (db, _tmp) = fresh_db();
+        let stats = merge(
+            &db,
+            &lists_doc(vec![], vec![list_tomb(1, "2999-01-01 00:00:00")]),
+        );
+        assert_eq!(stats.list_tombstones_applied, 0);
+        assert_eq!(stats.records_skipped, 0);
+        assert!(list_tombstones(&db).is_empty(), "不存");
+        assert_eq!(list_name(&db, "1").as_deref(), Some("待办清单"));
+
+        merge(
+            &db,
+            &lists_doc(
+                vec![list_value(1, "收件箱", "2026-11-01 10:00:00")],
+                vec![list_tomb(1, "2999-01-01 00:00:00")],
+            ),
+        );
+        assert_eq!(list_name(&db, "1").as_deref(), Some("收件箱"));
+
+        // 本地默认清单被（异常地）删掉了：合并时按固定初始值补建
+        db.with_conn(|c| c.execute("DELETE FROM todo_lists WHERE id = '1'", []))
+            .unwrap();
+        merge(&db, &doc(vec![], vec![]));
+        assert_eq!(list_name(&db, "1").as_deref(), Some("待办清单"));
+    }
+
+    #[test]
+    fn bad_remote_lists_are_skipped_and_counted_never_deleted() {
+        let (db, _tmp) = fresh_db();
+        merge(
+            &db,
+            &lists_doc(vec![list_value(5, "工作", "2026-11-01 10:00:00")], vec![]),
+        );
+        let stats = merge(
+            &db,
+            &lists_doc(
+                vec![
+                    json!({"name": "no id"}),
+                    json!({"id": "5", "name": "string id"}),
+                    json!("garbage"),
+                    list_value(8, "ok", "2026-11-01 10:00:00"),
+                ],
+                vec![json!({"entityId": "x", "deletedAt": "2026-11-01 10:00:00"})],
+            ),
+        );
+        assert_eq!(stats.records_skipped, 4);
+        assert_eq!(list_name(&db, "5").as_deref(), Some("工作"));
+        assert_eq!(list_name(&db, "8").as_deref(), Some("ok"));
+    }
+
+    /// 远端缺本地清单 / 清单墓碑（或版本更旧）→ 落后；初始值的默认清单不算；旧协议文档不比较。
+    #[test]
+    fn remote_lacks_local_lists_and_list_tombstones() {
+        let (db, _tmp) = fresh_db();
+        // 只有初始值的默认清单：远端没有任何清单信息也不算落后
+        assert!(!lacks(&db, &doc(vec![], vec![]), CUTOFF));
+        assert!(!lacks(&db, &lists_doc(vec![], vec![]), CUTOFF));
+
+        let full = lists_doc(
+            vec![
+                list_value(1, "收件箱", "2026-11-01 09:00:00"),
+                list_value(5, "工作", "2026-11-01 10:00:00"),
+            ],
+            vec![list_tomb(6, "2026-11-01 11:00:00")],
+        );
+        merge(&db, &full);
+        assert!(!lacks(&db, &full, CUTOFF), "完全一致");
+        // 缺清单 5
+        assert!(lacks(
+            &db,
+            &lists_doc(
+                vec![list_value(1, "收件箱", "2026-11-01 09:00:00")],
+                vec![list_tomb(6, "2026-11-01 11:00:00")]
+            ),
+            CUTOFF
+        ));
+        // 改过名的默认清单不再是初始值：远端缺它同样算落后
+        assert!(lacks(
+            &db,
+            &lists_doc(
+                vec![list_value(5, "工作", "2026-11-01 10:00:00")],
+                vec![list_tomb(6, "2026-11-01 11:00:00")]
+            ),
+            CUTOFF
+        ));
+        // 远端版本更旧；平局不算
+        assert!(lacks(
+            &db,
+            &lists_doc(
+                vec![
+                    list_value(1, "收件箱", "2026-11-01 09:00:00"),
+                    list_value(5, "工作", "2026-11-01T09:30:00"),
+                ],
+                vec![list_tomb(6, "2026-11-01 11:00:00")]
+            ),
+            CUTOFF
+        ));
+        // 缺清单墓碑 / 远端的更早
+        let without_tomb = lists_doc(
+            vec![
+                list_value(1, "收件箱", "2026-11-01 09:00:00"),
+                list_value(5, "工作", "2026-11-01 10:00"),
+            ],
+            vec![],
+        );
+        assert!(lacks(&db, &without_tomb, CUTOFF));
+        assert!(
+            !lacks(&db, &without_tomb, "2026-11-02 00:00:00"),
+            "快过期的清单墓碑不要求远端保留"
+        );
+        // 远端没有 todoLists 键：本地清单都算缺失
+        assert!(lacks(&db, &doc(vec![], vec![]), CUTOFF));
+        // 旧协议文档（没有 tombstones 键）不比较清单
+        assert!(!lacks(&db, &legacy_doc(vec![]), CUTOFF));
+    }
+
+    #[test]
+    fn list_tombstone_union_takes_max_and_respects_retention() {
+        let (db, _tmp) = fresh_db();
+        db.with_conn(|c| {
+            repo::add_list_tombstone(c, "5", "2026-09-20 10:00:00").unwrap();
+            repo::add_list_tombstone(c, "6", "2026-09-25 10:00:00").unwrap();
+            repo::add_list_tombstone(c, "7", "2026-08-01 10:00:00").unwrap(); // 本地过期
+        });
+        merge_with_cutoff(
+            &db,
+            &lists_doc(
+                vec![],
+                vec![
+                    list_tomb(5, "2026-09-21 10:00:00"),
+                    list_tomb(6, "2026-09-24 10:00:00"),
+                    list_tomb(8, "2026-08-15 10:00:00"), // 远端过期：不导入
+                    list_tomb(9, "2026-09-30 10:00:00"),
+                ],
+            ),
+            "2026-09-01 00:00:00",
+        );
+        assert_eq!(
+            list_tombstones(&db),
+            vec![
+                ("5".to_string(), "2026-09-21 10:00:00".to_string()),
+                ("6".to_string(), "2026-09-25 10:00:00".to_string()),
+                ("9".to_string(), "2026-09-30 10:00:00".to_string()),
+            ]
+        );
     }
 
     /// 墓碑集合：同键取较大 deletedAt；保留期外的远端墓碑不导入，本地过期墓碑被清理。

@@ -76,6 +76,20 @@ def client_for(server: FakeServer, sleeps: list[float] | None = None) -> minitod
     return minitodo.Client(server.url, "k" * 32, timeout=5, sleep=record.append)
 
 
+def run_cli(srv: FakeServer, argv: list[str]) -> tuple[int, str, str]:
+    """用临时 config.toml 跑一次 CLI，返回 (退出码, stdout, stderr)；die() 的 SystemExit 折算成退出码。"""
+    with tempfile.TemporaryDirectory() as d:
+        cfg = Path(d) / "config.toml"
+        cfg.write_text(f'endpoint = "{srv.url}"\napi_key = "{"k" * 32}"\n', encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()) as out, \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            try:
+                code = minitodo.main(["--config", str(cfg), *argv])
+            except SystemExit as e:
+                code = e.code if isinstance(e.code, int) else 1
+    return code, out.getvalue(), err.getvalue()
+
+
 class NormalizeTests(unittest.TestCase):
     def test_canonical_forms(self) -> None:
         n = minitodo.normalize_datetime
@@ -245,13 +259,7 @@ class ClientTests(unittest.TestCase):
 
 class CliTests(unittest.TestCase):
     def _run(self, srv: FakeServer, argv: list[str]) -> tuple[int, str, str]:
-        with tempfile.TemporaryDirectory() as d:
-            cfg = Path(d) / "config.toml"
-            cfg.write_text(f'endpoint = "{srv.url}"\napi_key = "{"k" * 32}"\n', encoding="utf-8")
-            with contextlib.redirect_stdout(io.StringIO()) as out, \
-                    contextlib.redirect_stderr(io.StringIO()) as err:
-                code = minitodo.main(["--config", str(cfg), *argv])
-        return code, out.getvalue(), err.getvalue()
+        return run_cli(srv, argv)
 
     def test_partial_sync_failure_exits_4(self) -> None:
         # POST /sync 部分失败回 207（2xx）：详情照常输出，但退出码必须让脚本发现失败
@@ -299,6 +307,115 @@ class CliTests(unittest.TestCase):
             self.assertIn(f"dueDateAfter={today}", srv.requests[0]["path"])
         finally:
             srv.close()
+
+
+WORK = {"id": 1762650000000123, "name": "工作", "sortOrder": 1,
+        "createdAt": "2026-11-09 10:00:00", "updatedAt": "2026-11-09 10:00:00"}
+# "工作" 的 URL 编码
+WORK_PATH = "/lists/%E5%B7%A5%E4%BD%9C"
+
+
+class ListsTests(unittest.TestCase):
+    """多清单：`lists` 子命令与待办相关命令的 `--list`。"""
+
+    def _run(self, srv: FakeServer, argv: list[str]) -> tuple[int, str, str]:
+        return run_cli(srv, argv)
+
+    def test_lists_subcommands_hit_the_list_endpoints(self) -> None:
+        default = {"id": 1, "name": "待办清单", "sortOrder": 0}
+        srv = FakeServer([
+            (200, [default, WORK]),
+            (201, WORK),
+            (200, {**WORK, "name": "生活"}),
+            (200, {"deleted": WORK["id"], "name": "生活", "movedTodos": 3, "movedTo": 1}),
+            (200, [default]),
+        ])
+        try:
+            code, out, _ = self._run(srv, ["lists"])
+            self.assertEqual(code, 0)
+            self.assertIn("待办清单", out)
+            self.assertIn("NAME", out)
+            self.assertEqual(self._run(srv, ["lists", "add", "工作", "--sort-order", "3"])[0], 0)
+            code, out, _ = self._run(srv, ["lists", "rename", "工作", "生活"])
+            self.assertEqual(code, 0)
+            self.assertIn("生活", out)
+            code, out, _ = self._run(srv, ["lists", "delete", "生活"])
+            self.assertEqual(code, 0)
+            self.assertIn("moved 3 todo(s)", out)
+            code, out, _ = self._run(srv, ["lists", "list", "--json"])
+            self.assertEqual(json.loads(out), [default])
+            self.assertEqual(
+                [(r["method"], r["path"], r["body"]) for r in srv.requests],
+                [
+                    ("GET", "/lists", None),
+                    ("POST", "/lists", {"name": "工作", "sortOrder": 3}),
+                    ("PATCH", WORK_PATH, {"name": "生活"}),
+                    ("DELETE", "/lists/%E7%94%9F%E6%B4%BB", None),
+                    ("GET", "/lists", None),
+                ],
+            )
+        finally:
+            srv.close()
+
+    def test_list_flag_resolves_name_then_writes_or_filters_by_list_id(self) -> None:
+        todo = {"id": 7, "seq": 3, "title": "写周报", "listId": WORK["id"]}
+        srv = FakeServer([
+            (200, WORK), (201, todo),           # add --list
+            (200, WORK), (200, [todo]),         # list --pending --list
+            (200, WORK), (200, todo),           # update C3 --list（只移动）
+            (200, WORK), (200, todo),           # update C3 title=x --list
+            (200, WORK), (200, [todo]),         # search --list
+            (200, WORK), (200, []), (200, []), (200, []),  # today --list
+        ])
+        try:
+            wid = WORK["id"]
+            self.assertEqual(self._run(srv, ["add", "写周报", "--list", "工作"])[0], 0)
+            self.assertEqual(self._run(srv, ["list", "--pending", "--list", "工作"])[0], 0)
+            self.assertEqual(self._run(srv, ["update", "C3", "--list", "工作"])[0], 0)
+            self.assertEqual(self._run(srv, ["update", "C3", "title=x", "--list", "工作"])[0], 0)
+            self.assertEqual(self._run(srv, ["search", "周报", "--list", "工作"])[0], 0)
+            self.assertEqual(self._run(srv, ["today", "--list", "工作"])[0], 0)
+            reqs = srv.requests
+            # 每次先 GET /lists/<名称> 解析成 id，之后只用 listId
+            for i in (0, 2, 4, 6, 8, 10):
+                self.assertEqual((reqs[i]["method"], reqs[i]["path"]), ("GET", WORK_PATH), i)
+            self.assertEqual(reqs[1]["body"], {"title": "写周报", "listId": wid})
+            self.assertEqual(reqs[3]["path"], f"/todos?completed=false&listId={wid}")
+            self.assertEqual((reqs[5]["method"], reqs[5]["path"]), ("PATCH", "/todos/C3"))
+            self.assertEqual(reqs[5]["body"], {"listId": wid})
+            self.assertEqual(reqs[7]["body"], {"title": "x", "listId": wid})
+            self.assertIn(f"listId={wid}", reqs[9]["path"])
+            self.assertTrue(reqs[9]["path"].startswith("/todos?q="))
+            for r in reqs[11:14]:
+                self.assertIn(f"listId={wid}", r["path"])
+            self.assertEqual(len(reqs), 14)
+        finally:
+            srv.close()
+
+    def test_unresolvable_list_stops_before_writing(self) -> None:
+        srv = FakeServer([(409, {"error": "conflict", "detail": "有 2 个清单都叫「工作」，请改用清单 id"})])
+        try:
+            code, _, err = self._run(srv, ["add", "x", "--list", "工作"])
+            self.assertEqual(code, 4)
+            self.assertIn("请改用清单 id", err)
+            self.assertEqual([r["method"] for r in srv.requests], ["GET"], "解析失败不能再写入")
+        finally:
+            srv.close()
+
+    def test_update_needs_fields_or_list(self) -> None:
+        srv = FakeServer([])
+        try:
+            code, _, err = self._run(srv, ["update", "C3"])
+            self.assertEqual(code, 2)
+            self.assertIn("--list", err)
+            self.assertEqual(srv.requests, [])
+        finally:
+            srv.close()
+        # listId 也可以直接写成 key=value（按整数发送）
+        self.assertEqual(minitodo.build_update_body(["listId=42"]), {"listId": 42})
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as cm:
+            minitodo.list_ref_path("  ")
+        self.assertEqual(cm.exception.code, 2)
 
 
 if __name__ == "__main__":

@@ -9,11 +9,18 @@ Usage examples:
   python minitodo.py today
   python minitodo.py today --json
   python minitodo.py add "Buy groceries" --priority high --due 2026-05-20
+  python minitodo.py add "写周报" --list 工作
   python minitodo.py list --pending
+  python minitodo.py list --pending --list 工作
   python minitodo.py done C3
   python minitodo.py search "milk"
   python minitodo.py show C3
   python minitodo.py update C3 title="Renamed" endTime="2026-05-20 18:00"
+  python minitodo.py update C3 --list 生活
+  python minitodo.py lists
+  python minitodo.py lists add 工作
+  python minitodo.py lists rename 工作 "工作（2026）"
+  python minitodo.py lists delete 工作
 
 Exit codes: 0 ok (including a degraded /health) · 2 config / usage error ·
 3 network error · 4 HTTP error from the server, or `sync` partially failed
@@ -30,6 +37,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import quote
 
 try:
     import requests
@@ -262,6 +270,39 @@ class Client:
 
 
 # =============================================================================
+# 清单（多清单：每个待办属于一个清单，默认清单 id 1）
+# =============================================================================
+
+
+def list_ref_path(ref: str) -> str:
+    """`/lists/<ref>`：ref 是清单 id 或名称，URL 编码（名称里可能有空格、/ 等）。"""
+    ref = ref.strip()
+    if not ref:
+        die("清单名称或 id 不能为空")
+    return "/lists/" + quote(ref, safe="")
+
+
+def resolve_list(client: Client, ref: str) -> dict[str, Any]:
+    """把 `--list` 的名称或 id 解析成清单对象（`GET /lists/<ref>`）。
+
+    服务端的规则：先按数字 id 找，没有这个 id 再按名称（去首尾空白、不区分大小写）精确匹配；
+    找不到 404、同名多个 409（错误详情会列出候选 id）——都按 HTTP 错误退出（退出码 4）。
+    """
+    result = client.get(list_ref_path(ref))
+    if not isinstance(result, dict) or "id" not in result:
+        die(f"无法解析清单: {ref}", 4)
+    return result
+
+
+def list_filter_params(client: Client, args: argparse.Namespace) -> dict[str, Any]:
+    """待办查询的清单过滤：给了 `--list` 时解析成 `listId=`（服务端按有效清单过滤）。"""
+    ref = getattr(args, "list", None)
+    if ref is None:
+        return {}
+    return {"listId": resolve_list(client, ref)["id"]}
+
+
+# =============================================================================
 # 子命令
 # =============================================================================
 
@@ -271,6 +312,7 @@ def cmd_today(client: Client, args: argparse.Namespace) -> Any:
     today = today_in(getattr(args, "tz", None))
     today_str = today.isoformat()
     yesterday_str = (today - dt.timedelta(days=1)).isoformat()
+    by_list = list_filter_params(client, args)
 
     # 服务端把时间参数规范化后按 `YYYY-MM-DD HH:MM:SS` 字符串比较；仅日期的
     # dueDateAfter 视为当天 00:00:00，dueDateBefore 视为当天 23:59:59（含当天）。
@@ -279,16 +321,18 @@ def cmd_today(client: Client, args: argparse.Namespace) -> Any:
         params={
             "dueDateAfter": today_str,
             "dueDateBefore": today_str + " 23:59:59",
+            **by_list,
         },
     )
     # 今天开始
-    start_today = client.get("/todos", params={"startDate": today_str})
+    start_today = client.get("/todos", params={"startDate": today_str, **by_list})
     # 已逾期未完成（截止时间在昨天 23:59:59 及以前）
     overdue = client.get(
         "/todos",
         params={
             "completed": "false",
             "dueDateBefore": yesterday_str + " 23:59:59",
+            **by_list,
         },
     )
 
@@ -327,7 +371,12 @@ def build_add_body(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def cmd_add(client: Client, args: argparse.Namespace) -> Any:
-    return client.post("/todos", json_body=build_add_body(args))
+    body = build_add_body(args)
+    ref = getattr(args, "list", None)
+    if ref is not None:
+        # 不给时服务端放进默认清单（id 1）
+        body["listId"] = resolve_list(client, ref)["id"]
+    return client.post("/todos", json_body=body)
 
 
 def cmd_done(client: Client, args: argparse.Namespace) -> Any:
@@ -348,11 +397,12 @@ def cmd_list(client: Client, args: argparse.Namespace) -> Any:
         params["limit"] = args.limit
     if args.sort:
         params["sort"] = args.sort
+    params.update(list_filter_params(client, args))
     return client.get("/todos", params=params)
 
 
 def cmd_search(client: Client, args: argparse.Namespace) -> Any:
-    return client.get("/todos", params={"q": args.keyword})
+    return client.get("/todos", params={"q": args.keyword, **list_filter_params(client, args)})
 
 
 def cmd_show(client: Client, args: argparse.Namespace) -> Any:
@@ -362,7 +412,7 @@ def cmd_show(client: Client, args: argparse.Namespace) -> Any:
     return client.get(f"/todos/{args.id}", params=params)
 
 
-def build_update_body(assignments: list[str]) -> dict[str, Any]:
+def build_update_body(assignments: list[str], allow_empty: bool = False) -> dict[str, Any]:
     body: dict[str, Any] = {}
     for assignment in assignments:
         if "=" not in assignment:
@@ -373,13 +423,18 @@ def build_update_body(assignments: list[str]) -> dict[str, Any]:
             body[key] = _quadrant_to_int(value.strip())
         else:
             body[key] = _coerce_field(key, value)
-    if not body:
-        die("update 至少需要一个 key=value")
+    if not body and not allow_empty:
+        die("update 至少需要一个 key=value（或 --list）")
     return body
 
 
 def cmd_update(client: Client, args: argparse.Namespace) -> Any:
-    return client.patch(f"/todos/{args.id}", json_body=build_update_body(args.fields))
+    ref = getattr(args, "list", None)
+    body = build_update_body(args.fields, allow_empty=ref is not None)
+    if ref is not None:
+        # 移到另一个清单
+        body["listId"] = resolve_list(client, ref)["id"]
+    return client.patch(f"/todos/{args.id}", json_body=body)
 
 
 def cmd_delete(client: Client, args: argparse.Namespace) -> Any:
@@ -409,18 +464,35 @@ def cmd_sync(client: Client, args: argparse.Namespace) -> Any:
     return client.post("/sync", timeout=timeout)
 
 
+def cmd_lists(client: Client, args: argparse.Namespace) -> Any:
+    """清单：列出（默认）/ 新建 / 改名 / 删除。删除时其下待办由服务端移到默认清单。"""
+    action = getattr(args, "lists_action", None) or "list"
+    if action == "add":
+        body: dict[str, Any] = {"name": args.name}
+        if args.sort_order is not None:
+            body["sortOrder"] = args.sort_order
+        return client.post("/lists", json_body=body)
+    if action == "rename":
+        return client.patch(list_ref_path(args.ref), json_body={"name": args.name})
+    if action == "delete":
+        return client.delete(list_ref_path(args.ref))
+    return client.get("/lists")
+
+
 # =============================================================================
 # 输出
 # =============================================================================
 
 
-def print_result(result: Any, as_json: bool) -> None:
+def print_result(result: Any, as_json: bool, kind: str = "todo") -> None:
     if as_json:
         json.dump(result, sys.stdout, ensure_ascii=False, indent=2, default=str)
         sys.stdout.write("\n")
         return
     if result is None:
         sys.stdout.write("(no content)\n")
+        return
+    if kind == "list" and print_list_result(result):
         return
     if isinstance(result, list):
         print_todo_table(result)
@@ -455,6 +527,44 @@ def print_todo_table(items: list[dict[str, Any]]) -> None:
         sys.stdout.write(_format_row(list(r), widths) + "\n")
 
 
+def print_list_result(result: Any) -> bool:
+    """`lists` 子命令的表格输出；不认识的形态返回 False（交给通用输出）。"""
+    if isinstance(result, list):
+        if not result:
+            sys.stdout.write("(no lists)\n")
+            return True
+        rows = [
+            (str(item.get("id", "?")), str(item.get("sortOrder", "")), str(item.get("name") or ""))
+            for item in result
+        ]
+        headers = ["ID", "ORDER", "NAME"]
+        widths = [max(len(r[i]) for r in rows + [tuple(headers)]) for i in range(3)]
+        sys.stdout.write(_format_row(headers, widths) + "\n")
+        sys.stdout.write("-" * (sum(widths) + len(widths) * 2) + "\n")
+        for r in rows:
+            sys.stdout.write(_format_row(list(r), widths) + "\n")
+        return True
+    if isinstance(result, dict) and "deleted" in result:
+        sys.stdout.write(
+            f"Deleted list \"{result.get('name')}\" (id {result.get('deleted')}); "
+            f"moved {result.get('movedTodos', 0)} todo(s) to the default list "
+            f"(id {result.get('movedTo', 1)})\n"
+        )
+        return True
+    if isinstance(result, dict) and "name" in result:
+        for k, v in [
+            ("ID", result.get("id")),
+            ("Name", result.get("name")),
+            ("Order", result.get("sortOrder")),
+            ("Created", result.get("createdAt")),
+            ("Updated", result.get("updatedAt")),
+        ]:
+            if v is not None and v != "":
+                sys.stdout.write(f"{k:10} {v}\n")
+        return True
+    return False
+
+
 def _ref_short(t: dict[str, Any]) -> str:
     """优先展示 cloud 短码 `C{seq}`；缺 seq 时降级为完整 i64 id（截断）。"""
     seq = t.get("seq")
@@ -470,6 +580,7 @@ def print_todo_detail(t: dict[str, Any]) -> None:
         ("Ref", seq_display),
         ("ID", t.get("id")),
         ("Title", t.get("title")),
+        ("List", t.get("listId")),
         ("Completed", t.get("completed")),
         ("Priority", t.get("priority")),
         ("Quadrant", t.get("quadrant")),
@@ -657,11 +768,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true", help="输出原始 JSON 而非表格")
     sub = p.add_subparsers(dest="command", required=True)
 
-    sub.add_parser(
+    list_ref_help = "清单名称或 id（先按 id 找，再按名称不区分大小写匹配；同名多个时会报错，改用 id）"
+
+    sp = sub.add_parser(
         "today",
         help="今日相关待办（今天按 config 的 timezone 计算，缺省本机时区）",
         parents=[common],
     )
+    sp.add_argument("--list", help="只看这个清单：" + list_ref_help)
 
     sp = sub.add_parser("add", help="新增待办", parents=[common])
     sp.add_argument("title")
@@ -677,6 +791,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.add_argument("--quadrant", help="1-4 或 urgent_important 等别名")
     sp.add_argument("--color", help="HEX 颜色 (e.g. #EF4444)，与 --priority 同时给时以颜色为准")
+    sp.add_argument("--list", help="建到这个清单（不给时进默认清单）：" + list_ref_help)
 
     sp = sub.add_parser("done", help="标记完成", parents=[common])
     sp.add_argument("id", help="完整 i64 id 或 C{seq} 短码（cloud 端反查），大小写不敏感")
@@ -688,9 +803,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--quadrant")
     sp.add_argument("--limit", type=int)
     sp.add_argument("--sort", help="例如 -dueDate / +priority")
+    sp.add_argument("--list", help="只看这个清单：" + list_ref_help)
 
     sp = sub.add_parser("search", help="关键词搜索（标题 + 描述）", parents=[common])
     sp.add_argument("keyword")
+    sp.add_argument("--list", help="只搜这个清单：" + list_ref_help)
 
     sp = sub.add_parser("show", help="查看详情", parents=[common])
     sp.add_argument("id", help="完整 i64 id 或 C{seq} 短码")
@@ -700,8 +817,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("id", help="完整 i64 id 或 C{seq} 短码")
     sp.add_argument(
         "fields",
-        nargs="+",
+        nargs="*",
         help="key=value，可多个；quadrant 接受别名；时间用 'YYYY-MM-DD HH:MM:SS'；未知字段会被服务端拒绝",
+    )
+    sp.add_argument(
+        "--list",
+        help="移到这个清单（写在 key=value 之后；只移动时可以不写 key=value）：" + list_ref_help,
     )
 
     sp = sub.add_parser("delete", help="删除", parents=[common])
@@ -711,6 +832,26 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("sync", help="手动触发 WebDAV 同步", parents=[common])
     sp.add_argument("mode", nargs="?", choices=["pull", "push"], help="仅 pull 或仅 push；省略则两者都做")
+
+    sp = sub.add_parser(
+        "lists",
+        help="待办清单：不带动作时列出全部清单；add / rename / delete 新建、改名、删除",
+        parents=[common],
+    )
+    lists_sub = sp.add_subparsers(dest="lists_action")
+    lists_sub.add_parser("list", help="列出全部清单（默认动作）", parents=[common])
+    lp = lists_sub.add_parser("add", help="新建清单", parents=[common])
+    lp.add_argument("name", help="清单名称（去首尾空白，不能为空、不超过 50 个字、不能与已有清单重名）")
+    lp.add_argument("--sort-order", type=int, help="排序（越小越靠前）；不给时排最后")
+    lp = lists_sub.add_parser("rename", help="改名（默认清单也可以改名）", parents=[common])
+    lp.add_argument("ref", help=list_ref_help)
+    lp.add_argument("name", help="新名称")
+    lp = lists_sub.add_parser(
+        "delete",
+        help="删除清单：其下待办全部移到默认清单（默认清单不能删除）",
+        parents=[common],
+    )
+    lp.add_argument("ref", help=list_ref_help)
 
     return p
 
@@ -739,13 +880,14 @@ def main(argv: list[str] | None = None) -> int:
         "delete": cmd_delete,
         "health": cmd_health,
         "sync": cmd_sync,
+        "lists": cmd_lists,
     }
     handler = handlers.get(args.command)
     if not handler:
         die(f"未知子命令: {args.command}")
     assert handler is not None
     result = handler(client, args)
-    print_result(result, args.json)
+    print_result(result, args.json, kind="list" if args.command == "lists" else "todo")
     if args.command == "sync" and sync_failed(result):
         # `POST /sync` 部分失败时服务端回 207（2xx），详情已经输出；退出码要能让脚本 / cron
         # 发现失败（与 `sync pull` / `sync push` 失败时的 HTTP 500 → 4 一致）

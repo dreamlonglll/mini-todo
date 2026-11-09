@@ -2341,8 +2341,35 @@ struct PcTodo {
     repeat_weekdays: Option<String>,
     #[serde(default)]
     repeat_month_day: Option<i32>,
+    /// 多清单（PC v31 起）：缺失 = 默认清单 1。
+    #[serde(default = "pc_default_list_id")]
+    list_id: i64,
     #[serde(default)]
     subtasks: Vec<PcSubTask>,
+}
+
+/// 同步文档顶层 `todoLists` 的元素（PC v31 起，契约 §1）。
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+struct PcTodoList {
+    id: i64,
+    name: String,
+    #[serde(default)]
+    sort_order: i32,
+    #[serde(default)]
+    created_at: String,
+    #[serde(default)]
+    updated_at: String,
+}
+
+/// 同步文档顶层 `listTombstones` 的元素。
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+struct PcListTombstone {
+    entity_id: i64,
+    deleted_at: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -2371,6 +2398,9 @@ fn pc_default_quadrant() -> i32 {
     4
 }
 fn pc_default_repeat_interval() -> i32 {
+    1
+}
+fn pc_default_list_id() -> i64 {
     1
 }
 
@@ -2414,12 +2444,22 @@ async fn pushed_records_deserialize_into_pc_model() {
         repo::delete_meta(c, repo::meta_keys::CACHE_NORMALIZED).unwrap();
     });
 
-    // AI 通过 API 写入各种形态
+    // AI 通过 API 写入各种形态（含清单：建一个放待办，再建一个删掉，留下清单墓碑）
+    let work = create_list(&fx, json!({"name": " 工作 "})).await;
+    let work_id = work["id"].as_i64().unwrap();
+    let doomed = create_list(&fx, json!({"name": "临时"})).await;
+    let (status, _, _) = send(
+        &fx.router,
+        req(Method::DELETE, &format!("/lists/{}", doomed["id"]), None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
     let t = create_todo(
         &fx,
         json!({"title": "ai", "priority": "low", "dueDate": "2026-05-30", "notes": "n",
                "repeatEnabled": true, "repeatType": "WEEKLY", "repeatWeekdays": [5, 1],
-               "notifyAt": "2026-05-25T07:30", "quadrant": "important_not_urgent"}),
+               "notifyAt": "2026-05-25T07:30", "quadrant": "important_not_urgent",
+               "listId": work_id}),
     )
     .await;
     let (status, _, _) = send(
@@ -2473,6 +2513,7 @@ async fn pushed_records_deserialize_into_pc_model() {
     assert_eq!(ai["repeatType"], "weekly");
     assert_eq!(ai["repeatWeekdays"], "1,5");
     assert_eq!(ai["quadrant"], 2);
+    assert_eq!(ai["listId"], work_id);
     let pc = todos.iter().find(|x| x["id"] == 1).unwrap();
     assert_eq!(
         pc["notifyAt"], "2026-05-20 09:00:00",
@@ -2481,6 +2522,39 @@ async fn pushed_records_deserialize_into_pc_model() {
     assert_eq!(
         pc["updatedAt"], "2026-05-01 08:00:00",
         "仅格式修正不刷新 updatedAt"
+    );
+    assert!(
+        pc.get("listId").is_none(),
+        "PC 来的记录不替它补 listId（PC 缺省就是 1）"
+    );
+    let pc: PcTodo = serde_json::from_value(pc.clone()).unwrap();
+    assert_eq!(pc.list_id, 1);
+
+    // 清单与清单墓碑：PC 的强类型模型能反序列化，时间是规范格式，默认清单总在
+    let lists: Vec<PcTodoList> = serde_json::from_value(remote["todoLists"].clone())
+        .unwrap_or_else(|e| panic!("PC 无法反序列化 todoLists {}: {}", remote["todoLists"], e));
+    let names: Vec<(i64, &str)> = lists.iter().map(|l| (l.id, l.name.as_str())).collect();
+    assert_eq!(names, vec![(1, "待办清单"), (work_id, "工作")]);
+    for l in &lists {
+        assert_canonical_time(&Some(l.created_at.clone()), "list.createdAt");
+        assert_canonical_time(&Some(l.updated_at.clone()), "list.updatedAt");
+    }
+    assert_eq!(lists[1].sort_order, 1);
+    let stones: Vec<PcListTombstone> =
+        serde_json::from_value(remote["listTombstones"].clone()).unwrap();
+    assert_eq!(stones.len(), 1);
+    assert_eq!(stones[0].entity_id, doomed["id"].as_i64().unwrap());
+    assert_canonical_time(
+        &Some(stones[0].deleted_at.clone()),
+        "listTombstones.deletedAt",
+    );
+    assert!(
+        remote["tombstones"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|t| t["entityType"] == "todo" || t["entityType"] == "subtask"),
+        "清单墓碑不进共用的 tombstones"
     );
 }
 
@@ -2844,4 +2918,579 @@ async fn manual_pull_bypasses_nginx_same_second_etag_blind_spot() {
         .iter()
         .filter(|r| r.method == "GET" && r.path == SYNC_DATA_FILE)
         .all(|r| r.if_none_match.is_none()));
+}
+
+// =============================================================================
+// 多清单：/lists 与 todo 的 listId（契约 .trellis/tasks/11-09-multi-list-windows/contract.md §10）
+// =============================================================================
+
+async fn create_list(fx: &Fixture, body: Value) -> Value {
+    let (status, _, raw) = send(&fx.router, req(Method::POST, "/lists", Some(body))).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "{}",
+        String::from_utf8_lossy(&raw)
+    );
+    json_body(&raw)
+}
+
+/// `/lists/<URL 编码的 id 或名称>`
+fn list_path(name_or_id: &str) -> String {
+    format!("/lists/{}", urlencoding::encode(name_or_id))
+}
+
+fn enc(s: &str) -> String {
+    urlencoding::encode(s).into_owned()
+}
+
+#[tokio::test]
+async fn lists_crud_and_name_rules() {
+    let fx = fixture();
+    let (status, _, raw) = send(&fx.router, req(Method::GET, "/lists", None)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json_body(&raw),
+        json!([{"id": 1, "name": "待办清单", "sortOrder": 0,
+                "createdAt": "2000-01-01 00:00:00", "updatedAt": "2000-01-01 00:00:00"}]),
+        "默认清单总在"
+    );
+
+    let work = create_list(&fx, json!({"name": "  工作  "})).await;
+    assert_eq!(work["name"], "工作", "去首尾空白");
+    assert_eq!(work["sortOrder"], 1, "新清单排最后");
+    assert!(work["id"].as_i64().unwrap() > 1_000_000_000_000_000);
+    assert_eq!(work["createdAt"], work["updatedAt"]);
+    assert!(work.get("seq").is_none(), "清单不分配短码");
+    assert!(is_dirty(&fx));
+    let en = create_list(&fx, json!({"name": "Work"})).await;
+    assert_eq!(en["sortOrder"], 2);
+
+    for (body, status, needle) in [
+        (
+            json!({"name": "work "}),
+            StatusCode::CONFLICT,
+            "已有同名清单「Work」",
+        ),
+        (
+            json!({"name": " 待办清单"}),
+            StatusCode::CONFLICT,
+            "已有同名清单「待办清单」",
+        ),
+        (
+            json!({"name": "  "}),
+            StatusCode::BAD_REQUEST,
+            "清单名称不能为空",
+        ),
+        (
+            json!({"name": "x".repeat(51)}),
+            StatusCode::BAD_REQUEST,
+            "清单名称不能超过 50 个字",
+        ),
+        (
+            json!({"sortOrder": 1}),
+            StatusCode::BAD_REQUEST,
+            "name: is required",
+        ),
+        (
+            json!({"name": 5}),
+            StatusCode::BAD_REQUEST,
+            "name: must be a string",
+        ),
+        (
+            json!({"name": "x", "color": "#FFFFFF"}),
+            StatusCode::BAD_REQUEST,
+            "unknown field(s): color",
+        ),
+    ] {
+        let (s, _, raw) = send(&fx.router, req(Method::POST, "/lists", Some(body.clone()))).await;
+        assert_eq!(s, status, "{}", body);
+        let v = json_body(&raw);
+        assert!(
+            v["detail"].as_str().unwrap().contains(needle),
+            "{} -> {}",
+            body,
+            v
+        );
+    }
+    let fifty = create_list(&fx, json!({"name": "清".repeat(50)})).await;
+    assert_eq!(fifty["sortOrder"], 3);
+    let first = create_list(
+        &fx,
+        json!({"name": "置顶", "sortOrder": -3, "id": 5, "createdAt": "x"}),
+    )
+    .await;
+    assert_eq!(first["sortOrder"], -3);
+    assert_ne!(first["id"], 5, "id 由服务端分配");
+
+    let (_, _, raw) = send(&fx.router, req(Method::GET, "/lists", None)).await;
+    let names: Vec<String> = json_body(&raw)
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["name"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            "置顶".to_string(),
+            "待办清单".to_string(),
+            "工作".to_string(),
+            "Work".to_string(),
+            "清".repeat(50)
+        ],
+        "按 (sortOrder, id) 排序"
+    );
+
+    // :id 接受数字 id 或 URL 编码的名称（去首尾空白、不区分大小写）
+    for r in [work["id"].to_string(), "工作".into(), " 工作 ".into()] {
+        let (s, _, raw) = send(&fx.router, req(Method::GET, &list_path(&r), None)).await;
+        assert_eq!(s, StatusCode::OK, "{}", r);
+        assert_eq!(json_body(&raw)["id"], work["id"]);
+    }
+    let (s, _, raw) = send(&fx.router, req(Method::GET, &list_path("WORK"), None)).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(json_body(&raw)["id"], en["id"]);
+    // 名称里的 `/`、`?`、空格编码后照样能寻址（Skill 用 urllib.parse.quote(ref, safe="")）
+    let odd = create_list(&fx, json!({"name": "A/B? c"})).await;
+    let (s, _, raw) = send(&fx.router, req(Method::GET, &list_path("a/b? C"), None)).await;
+    assert_eq!(s, StatusCode::OK, "{}", list_path("a/b? C"));
+    assert_eq!(json_body(&raw)["id"], odd["id"]);
+    for missing in ["不存在", "999"] {
+        let (s, _, raw) = send(&fx.router, req(Method::GET, &list_path(missing), None)).await;
+        assert_eq!(s, StatusCode::NOT_FOUND, "{}", missing);
+        let v = json_body(&raw);
+        assert_eq!(v["error"], "not_found");
+        assert!(v["detail"].as_str().unwrap().contains("清单不存在"));
+    }
+}
+
+#[tokio::test]
+async fn patch_list_renames_and_bumps_only_on_change() {
+    let fx = fixture();
+    let work = create_list(&fx, json!({"name": "工作"})).await;
+    let en = create_list(&fx, json!({"name": "Work"})).await;
+    mark_clean(&fx);
+
+    // 读出来原样写回：不刷新 updatedAt、不标脏
+    let (s, _, raw) = send(
+        &fx.router,
+        req(Method::PATCH, &list_path("工作"), Some(work.clone())),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(json_body(&raw)["updatedAt"], work["updatedAt"]);
+    assert!(!is_dirty(&fx));
+
+    let (s, _, raw) = send(
+        &fx.router,
+        req(
+            Method::PATCH,
+            &list_path("工作"),
+            Some(json!({"name": " 工作2 "})),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let v = json_body(&raw);
+    assert_eq!(v["name"], "工作2");
+    assert!(
+        v["updatedAt"].as_str().unwrap() > work["updatedAt"].as_str().unwrap(),
+        "改名的版本严格晚于旧版本"
+    );
+    assert_eq!(v["createdAt"], work["createdAt"]);
+    assert!(is_dirty(&fx));
+
+    // 只改大小写：与自己不算重名；改成别的清单的名字 → 409
+    let (s, _, raw) = send(
+        &fx.router,
+        req(
+            Method::PATCH,
+            &list_path("work"),
+            Some(json!({"name": "WORK"})),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(json_body(&raw)["name"], "WORK");
+    let (s, _, raw) = send(
+        &fx.router,
+        req(
+            Method::PATCH,
+            &list_path("工作2"),
+            Some(json!({"name": "work"})),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    assert_eq!(json_body(&raw)["error"], "conflict");
+
+    let (s, _, raw) = send(
+        &fx.router,
+        req(
+            Method::PATCH,
+            &format!("/lists/{}", en["id"]),
+            Some(json!({"sortOrder": 9})),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(json_body(&raw)["sortOrder"], 9);
+
+    // 默认清单可以改名
+    let (s, _, raw) = send(
+        &fx.router,
+        req(Method::PATCH, "/lists/1", Some(json!({"name": "收件箱"}))),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let v = json_body(&raw);
+    assert_eq!(v["name"], "收件箱");
+    assert_eq!(v["createdAt"], "2000-01-01 00:00:00");
+    assert!(v["updatedAt"].as_str().unwrap() > "2000-01-01 00:00:00");
+
+    for body in [json!({"name": ""}), json!({"foo": 1}), json!(["x"])] {
+        let (s, _, _) = send(&fx.router, req(Method::PATCH, "/lists/1", Some(body))).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+    }
+    let (s, _, _) = send(
+        &fx.router,
+        req(
+            Method::PATCH,
+            &list_path("不存在"),
+            Some(json!({"name": "x"})),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+/// 契约 §5：删除清单 = 其下待办移到默认清单（刷新 updatedAt）+ 删清单 + 清单墓碑；默认清单不可删。
+#[tokio::test]
+async fn delete_list_moves_its_todos_to_the_default_list() {
+    let fx = fixture();
+    let work = create_list(&fx, json!({"name": "工作"})).await;
+    let wid = work["id"].as_i64().unwrap();
+    let t1 = create_todo(&fx, json!({"title": "周报", "listId": wid})).await;
+    let t2 = create_todo(
+        &fx,
+        json!({"title": "已完成", "listId": wid, "completed": true}),
+    )
+    .await;
+    let t3 = create_todo(&fx, json!({"title": "默认"})).await;
+    mark_clean(&fx);
+
+    let (s, _, raw) = send(&fx.router, req(Method::DELETE, &list_path("工作"), None)).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&raw));
+    assert_eq!(
+        json_body(&raw),
+        json!({"deleted": wid, "name": "工作", "movedTodos": 2, "movedTo": 1})
+    );
+    assert!(is_dirty(&fx));
+    for t in [&t1, &t2] {
+        let stored = stored_todo(&fx, &todo_id_path(t));
+        assert_eq!(stored["listId"], 1);
+        assert!(
+            stored["updatedAt"].as_str().unwrap() > t["updatedAt"].as_str().unwrap(),
+            "移动要刷新 updatedAt（随同步传播）"
+        );
+    }
+    assert_eq!(
+        stored_todo(&fx, &todo_id_path(&t3))["updatedAt"],
+        t3["updatedAt"],
+        "其它待办不动"
+    );
+    let stones = fx
+        .state
+        .db
+        .with_conn(|c| repo::all_list_tombstones(c).unwrap());
+    assert_eq!(stones.len(), 1);
+    assert_eq!(stones[0].0, wid.to_string());
+    assert!(stones[0].1.as_str() >= work["updatedAt"].as_str().unwrap());
+    assert!(
+        fx.state
+            .db
+            .with_conn(|c| repo::list_tombstones(c).unwrap())
+            .is_empty(),
+        "清单墓碑不进 todo / subtask 的墓碑表"
+    );
+
+    for method in [Method::GET, Method::DELETE] {
+        let (s, _, _) = send(&fx.router, req(method, &format!("/lists/{}", wid), None)).await;
+        assert_eq!(s, StatusCode::NOT_FOUND);
+    }
+    for r in ["1", "待办清单"] {
+        let (s, _, raw) = send(&fx.router, req(Method::DELETE, &list_path(r), None)).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{}", r);
+        assert!(json_body(&raw)["detail"]
+            .as_str()
+            .unwrap()
+            .contains("默认清单不能删除"));
+    }
+}
+
+/// 同步造成的重名（两台设备离线各建了一个"工作"）是容忍的：按名称找时 409 并列出候选，按 id 照常可用。
+#[tokio::test]
+async fn ambiguous_list_names_return_409_with_candidates() {
+    let fx = fixture();
+    fx.state.db.with_conn(|c| {
+        for (id, name) in [("11", "工作"), ("12", " 工作")] {
+            repo::upsert_list(
+                c,
+                id,
+                &json!({"id": id.parse::<i64>().unwrap(), "name": name, "sortOrder": 1,
+                        "createdAt": "2026-11-01 10:00:00", "updatedAt": "2026-11-01 10:00:00"})
+                .to_string(),
+                "2026-11-01 10:00:00",
+            )
+            .unwrap();
+        }
+    });
+    for uri in [list_path("工作"), format!("/todos?list={}", enc("工作"))] {
+        let (s, _, raw) = send(&fx.router, req(Method::GET, &uri, None)).await;
+        assert_eq!(s, StatusCode::CONFLICT, "{}", uri);
+        let v = json_body(&raw);
+        assert_eq!(v["error"], "conflict");
+        let ids: Vec<i64> = v["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(ids, vec![11, 12]);
+    }
+    let (s, _, _) = send(&fx.router, req(Method::DELETE, &list_path("工作"), None)).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    let (s, _, raw) = send(&fx.router, req(Method::GET, "/lists/12", None)).await;
+    assert_eq!(s, StatusCode::OK, "id 照常可用");
+    assert_eq!(json_body(&raw)["name"], " 工作");
+    let (s, _, _) = send(
+        &fx.router,
+        req(Method::POST, "/lists", Some(json!({"name": "工作"}))),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn todo_list_id_is_validated_and_defaults_to_the_default_list() {
+    let fx = fixture();
+    let work = create_list(&fx, json!({"name": "工作"})).await;
+    let wid = work["id"].as_i64().unwrap();
+    let t = create_todo(&fx, json!({"title": "x"})).await;
+    assert_eq!(t["listId"], 1, "不带 listId 时进默认清单");
+    let t2 = create_todo(&fx, json!({"title": "y", "listId": wid})).await;
+    assert_eq!(t2["listId"], wid);
+    assert_eq!(stored_todo(&fx, &todo_id_path(&t2))["listId"], wid);
+
+    let (s, _, raw) = send(
+        &fx.router,
+        req(
+            Method::POST,
+            "/todos",
+            Some(json!({"title": "z", "listId": 999})),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let v = json_body(&raw);
+    assert!(
+        v["detail"].as_str().unwrap().contains("清单不存在"),
+        "{}",
+        v
+    );
+    assert_eq!(v["invalidFields"]["listId"], "清单不存在");
+    for bad in [json!(0), json!("1"), json!(1.5), json!(null)] {
+        let (s, _, raw) = send(
+            &fx.router,
+            req(
+                Method::POST,
+                "/todos",
+                Some(json!({"title": "z", "listId": bad.clone()})),
+            ),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{}", bad);
+        assert!(json_body(&raw)["invalidFields"].get("listId").is_some());
+    }
+    let (_, _, raw) = send(&fx.router, req(Method::GET, "/todos", None)).await;
+    assert_eq!(
+        json_body(&raw).as_array().unwrap().len(),
+        2,
+        "被拒绝的请求不落库"
+    );
+
+    // PATCH 移动；移到不存在的清单 → 400 且不落库
+    let id = todo_id_path(&t);
+    let (s, _, raw) = send(
+        &fx.router,
+        req(
+            Method::PATCH,
+            &format!("/todos/{}", id),
+            Some(json!({"listId": wid})),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(json_body(&raw)["listId"], wid);
+    let (s, _, _) = send(
+        &fx.router,
+        req(
+            Method::PATCH,
+            &format!("/todos/{}", id),
+            Some(json!({"listId": 999})),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(stored_todo(&fx, &id)["listId"], wid);
+
+    // 清单被别的设备删除（收到清单墓碑，待办不改写）：读出来原样写回仍然可以
+    fx.state.db.with_conn(|c| {
+        assert!(repo::delete_list(c, &wid.to_string()).unwrap());
+        repo::add_list_tombstone(c, &wid.to_string(), "2026-11-01 10:00:00").unwrap();
+    });
+    let (_, _, raw) = send(
+        &fx.router,
+        req(Method::GET, &format!("/todos/{}", id), None),
+    )
+    .await;
+    let mut v = json_body(&raw);
+    assert_eq!(v["listId"], wid, "响应是存储的原值");
+    v["title"] = json!("renamed");
+    let (s, _, raw) = send(
+        &fx.router,
+        req(Method::PATCH, &format!("/todos/{}", id), Some(v)),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&raw));
+    assert_eq!(json_body(&raw)["title"], "renamed");
+    let (s, _, _) = send(
+        &fx.router,
+        req(
+            Method::POST,
+            "/todos",
+            Some(json!({"title": "w", "listId": wid})),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "新写入不能指向已删除的清单");
+}
+
+/// `GET /todos` 的 `listId=` / `list=` 按有效清单过滤：缺 listId、指向已删除清单、类型不对的
+/// 待办都算在默认清单里（契约 §3）。
+#[tokio::test]
+async fn list_filters_use_the_effective_list() {
+    let fx = fixture();
+    let work = create_list(&fx, json!({"name": "工作"})).await;
+    let wid = work["id"].as_i64().unwrap();
+    let _ = create_todo(&fx, json!({"title": "a"})).await;
+    let _ = create_todo(&fx, json!({"title": "b", "listId": wid})).await;
+    let _ = create_todo(&fx, json!({"title": "f", "listId": wid, "completed": true})).await;
+    let now = now_local_string(fx.state.config.timezone);
+    fx.state.db.with_conn(|c| {
+        // 旧设备上传的（没有 listId）、指向已删除清单的、类型不对的
+        repo::upsert_todo(c, "7", r#"{"id":7,"title":"c"}"#, &now).unwrap();
+        repo::upsert_todo(c, "8", r#"{"id":8,"title":"d","listId":777}"#, &now).unwrap();
+        repo::upsert_todo(c, "9", r#"{"id":9,"title":"e","listId":"abc"}"#, &now).unwrap();
+    });
+    let titles = |raw: &[u8]| -> Vec<String> {
+        let mut t: Vec<String> = json_body(raw)
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["title"].as_str().unwrap().to_string())
+            .collect();
+        t.sort();
+        t
+    };
+    for (uri, expected) in [
+        ("/todos?listId=1".to_string(), vec!["a", "c", "d", "e"]),
+        (format!("/todos?listId={}", wid), vec!["b", "f"]),
+        (format!("/todos?listId={}&completed=false", wid), vec!["b"]),
+        (format!("/todos?list={}", enc("工作")), vec!["b", "f"]),
+        (format!("/todos?list={}", enc(" 工作 ")), vec!["b", "f"]),
+        (
+            format!("/todos?list={}", enc("待办清单")),
+            vec!["a", "c", "d", "e"],
+        ),
+        (
+            format!("/todos?listId={}&list={}", wid, enc("工作")),
+            vec!["b", "f"],
+        ),
+    ] {
+        let (s, _, raw) = send(&fx.router, req(Method::GET, &uri, None)).await;
+        assert_eq!(s, StatusCode::OK, "{}", uri);
+        assert_eq!(titles(&raw), expected, "{}", uri);
+    }
+    for (uri, status) in [
+        ("/todos?listId=999".to_string(), StatusCode::NOT_FOUND),
+        ("/todos?listId=abc".to_string(), StatusCode::BAD_REQUEST),
+        (
+            format!("/todos?list={}", enc("不存在")),
+            StatusCode::NOT_FOUND,
+        ),
+        ("/todos?list=".to_string(), StatusCode::BAD_REQUEST),
+        (
+            format!("/todos?listId=1&list={}", enc("工作")),
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let (s, _, _) = send(&fx.router, req(Method::GET, &uri, None)).await;
+        assert_eq!(s, status, "{}", uri);
+    }
+}
+
+/// 经 `/sync*` 真走一遍：清单写入、删除随推送出去；PC 改名经 `/sync/pull` 合并回来。
+#[tokio::test]
+async fn list_writes_round_trip_through_mock_webdav() {
+    use crate::sync::mock_dav::MockDav;
+    let mock = MockDav::start();
+    let fx = fixture_with_webdav(Some(&mock.base_url));
+    let work = create_list(&fx, json!({"name": "工作"})).await;
+    let life = create_list(&fx, json!({"name": "生活"})).await;
+    let t = create_todo(&fx, json!({"title": "买菜", "listId": life["id"]})).await;
+    let (status, _, body) = send(&fx.router, req(Method::POST, "/sync", None)).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let remote = mock.doc().unwrap();
+    assert_eq!(remote["todoLists"].as_array().unwrap().len(), 3);
+
+    let (status, _, _) = send(&fx.router, req(Method::DELETE, &list_path("生活"), None)).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, body) = send(&fx.router, req(Method::POST, "/sync/push", None)).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let mut remote = mock.doc().unwrap();
+    let ids: Vec<Value> = remote["todoLists"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["id"].clone())
+        .collect();
+    assert_eq!(ids, vec![json!(1), work["id"].clone()]);
+    assert_eq!(remote["listTombstones"][0]["entityId"], life["id"]);
+    let moved = remote["todos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["id"] == t["id"])
+        .unwrap();
+    assert_eq!(moved["listId"], 1);
+
+    // PC 改了"工作"的名字 → /sync/pull 合并回来
+    for l in remote["todoLists"].as_array_mut().unwrap() {
+        if l["id"] == work["id"] {
+            l["name"] = json!("工作-PC");
+            l["updatedAt"] = json!("2999-01-01 00:00:00");
+        }
+    }
+    mock.put_doc(&remote);
+    let (status, _, body) = send(&fx.router, req(Method::POST, "/sync/pull", None)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json_body(&body)["listsUpserted"], 1);
+    let (_, _, raw) = send(
+        &fx.router,
+        req(Method::GET, &format!("/lists/{}", work["id"]), None),
+    )
+    .await;
+    assert_eq!(json_body(&raw)["name"], "工作-PC");
 }
