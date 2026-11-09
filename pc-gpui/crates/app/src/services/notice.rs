@@ -107,7 +107,7 @@ fn notice(kind: MessageKind, text: impl Into<SharedString>, topic: Option<Topic>
 
 fn post(cx: &mut App, notice: Notice, preferred: Option<BlockKey>) {
     match target(cx, preferred) {
-        // 延后：调用方可能正在别的窗口（设置窗口）的事件处理里
+        // 延后：调用方可能正在某个窗口的更新里（目标窗口自己正被借用时 update_window 会失败，提示就丢了）
         Some(handle) => cx.defer(move |cx| message::show_in(handle, cx, notice.kind, notice.text)),
         None => {
             log::info!(
