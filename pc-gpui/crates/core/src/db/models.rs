@@ -380,11 +380,15 @@ fn default_notification_type() -> String {
 /// v4.0 起不再包含 agent_configs / workflow_steps / task_dependencies / prompt_templates /
 /// agent_executions 等 AI Agent 相关字段；反序列化保持向后兼容，旧 v3.0 备份中的这些字段
 /// 在解析时通过 `#[serde(default)]` 静默跳过。
+/// v4.1 起带顶层 `todoLists`、每条待办带 `listId`；不导出清单墓碑与窗口属性。旧版本导入 4.1 时忽略 `todoLists`。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportData {
     pub version: String,
     pub exported_at: String,
+    /// 待办清单（4.1 起）。`None` = 3.0 / 4.0 备份，没有清单信息：导入时现有清单不动
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub todo_lists: Option<Vec<TodoList>>,
     pub todos: Vec<Todo>,
     pub settings: AppSettings,
 }
