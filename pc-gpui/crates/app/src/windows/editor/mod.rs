@@ -13,6 +13,10 @@
 //! 只读详情点 [编辑] 原地切换（不重新加载、不重拍快照），没有切回只读的入口。保存规则（只在变化时发送提醒时间、
 //! 描述总是发送、新建时第二次 update 写重复设置、新建后续步骤失败时原地切成编辑该待办……）见 [`save`]。
 //! 快捷键：Esc 关闭（有未保存修改时确认）、Ctrl/Cmd+Enter 保存（只读时无效），子任务窗口打开期间全部失效。
+//!
+//! 「清单」下拉（PRD R8，表单里在「四象限」下面）：新建预选打开方的清单（清单窗口的 FAB = 本清单，托盘 / 日历 = 默认清单），
+//! 建到选中的清单；编辑已有待办预选它的有效清单，只有用户改了选择才提交 `list_id`（契约 §12-6）；清单增删改名时选项跟着刷新。
+//! 只读详情显示「所属清单」。
 
 mod desc_dialog;
 mod form;
@@ -32,13 +36,13 @@ use gpui_kit::{
     InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, ScrollHandle,
     Styled as _, Subscription, WeakEntity, Window, div, prelude::FluentBuilder as _, relative,
 };
-use mini_todo_core::db::Todo;
+use mini_todo_core::db::{Todo, TodoList};
 
 use super::block::DEFAULT_LIST_ID;
 use super::subtask::{DraftSubtasks, SubtaskMode};
 use super::{ChildOf, WindowKind, WindowManager, WindowSpec, logical_size};
 use crate::db::spawn_db;
-use crate::state::DEFAULT_TODO_COLOR;
+use crate::state::{AppState, DEFAULT_TODO_COLOR};
 use crate::theme::{self, hex};
 use crate::ui::ep_color_picker::{EpColorPicker, EpColorPickerEvent};
 use crate::ui::ep_date_picker::{EpDatePicker, EpDatePickerEvent};
@@ -192,6 +196,35 @@ pub const WEEKDAYS: [(u8, &str); 7] = [
     (7, "周日"),
 ];
 
+/// 清单（id、名称），按 `AppState::lists` 的顺序（`sortOrder`、id）
+fn list_entries(lists: &[TodoList]) -> Vec<(i64, String)> {
+    lists.iter().map(|l| (l.id, l.name.clone())).collect()
+}
+
+/// 「清单」下拉的选项
+fn list_options(lists: &[(i64, String)]) -> Vec<EpSelectOption<i64>> {
+    lists
+        .iter()
+        .map(|(id, name)| EpSelectOption::new(*id, name.clone()))
+        .collect()
+}
+
+/// 清单列表变了之后「清单」下拉的（选择, 预选）：预选的清单不在了（被删除）→ 默认清单（它的待办已移到 / 兜底到
+/// 默认清单）；选中的清单不在了 → 回到预选。都还在就不动
+pub(crate) fn reconcile_list_choice(
+    selected: i64,
+    original: i64,
+    exists: impl Fn(i64) -> bool,
+) -> (i64, i64) {
+    let original = if exists(original) {
+        original
+    } else {
+        DEFAULT_LIST_ID
+    };
+    let selected = if exists(selected) { selected } else { original };
+    (selected, original)
+}
+
 /// `"1,3,5"` → `[1, 3, 5]`（只留 1..=7）
 pub fn parse_weekdays(value: Option<&str>) -> Vec<u8> {
     value
@@ -207,8 +240,6 @@ pub struct EditorWindow {
     // ---- 身份与模式 ----
     /// 可变：新建后若后续步骤失败会原地切成该 id（§3.8）
     todo_id: Option<i64>,
-    /// 新建时待办建到哪个清单（打开方清单窗口的清单；托盘「添加待办项」/ 调试 = 默认清单）
-    new_list_id: i64,
     is_view_mode: bool,
     /// 已加载的待办（子任务列表与完成状态的来源）
     todo: Option<Todo>,
@@ -221,6 +252,15 @@ pub struct EditorWindow {
     color: Option<String>,
     color_picker: Entity<EpColorPicker>,
     quadrant: i32,
+    /// 「清单」下拉（选项 = `AppState` 的清单，按清单顺序；清单增删改名时跟着刷新，见 [`Self::on_app_state_changed`]）
+    list_select: Entity<EpSelect<i64>>,
+    /// 下拉现在选的清单（新建时建到它）
+    list_id: i64,
+    /// 预选的清单：新建 = 打开方（清单窗口的 FAB：本清单；托盘 / 日历：默认清单），已有待办 = 加载时的有效清单。
+    /// 保存已有待办时只有选择与它不同才带 `list_id`（契约 §12-6：归属未知的待办预选默认清单，没改就不能写成 1）
+    original_list_id: i64,
+    /// 下拉选项对应的清单（id、名称），判断清单列表有没有变
+    known_lists: Vec<(i64, String)>,
     notify_before: i32,
     is_custom_notify_before: bool,
     notify_before_select: Entity<EpSelect<i32>>,
@@ -318,6 +358,22 @@ impl EditorWindow {
             cx.new(|cx| EpInputNumber::new("editor-repeat-interval", 1, 1, 99, window, cx));
         let repeat_month_day =
             cx.new(|cx| EpInputNumber::new("editor-repeat-day", 1, 1, 31, window, cx));
+        let app_state = AppState::global(cx);
+        let (known_lists, list_id) = {
+            let state = app_state.read(cx);
+            let known_lists = list_entries(&state.lists);
+            // 已有待办：先按本地副本里的有效清单（加载完成后 `fill_form` 再按库里的定一次）；
+            // 新建：打开方的清单，它已经不在了（刚被删除）时建到默认清单
+            let list_id = match todo_id.and_then(|id| state.todo(id)) {
+                Some(todo) => state.effective_list_id(todo),
+                None if known_lists.iter().any(|(id, _)| *id == new_list_id) => new_list_id,
+                None => DEFAULT_LIST_ID,
+            };
+            (known_lists, list_id)
+        };
+        let list_select = cx.new(|cx| {
+            EpSelect::new("editor-list", window, cx).with_options(list_options(&known_lists))
+        });
         let drafts = cx.new(|_| DraftSubtasks::default());
         let add_input = cx.new(|cx| InputState::new(window, cx).placeholder("添加子任务..."));
 
@@ -376,6 +432,19 @@ impl EditorWindow {
                 },
             ),
             cx.subscribe_in(
+                &list_select,
+                window,
+                |this, _, event: &EpSelectEvent<i64>, _, cx| {
+                    if let EpSelectEvent::Change(Some(value)) = event {
+                        this.list_id = *value;
+                        cx.notify();
+                    }
+                },
+            ),
+            cx.observe(&app_state, |this, state, cx| {
+                this.on_app_state_changed(state, cx)
+            }),
+            cx.subscribe_in(
                 &repeat_interval,
                 window,
                 |_, _, _: &EpInputNumberEvent, _, cx| cx.notify(),
@@ -430,7 +499,6 @@ impl EditorWindow {
         let is_view_mode = mode == EditorMode::View && todo_id.is_some();
         let mut this = Self {
             todo_id,
-            new_list_id,
             is_view_mode,
             todo: None,
             images_dir,
@@ -440,6 +508,10 @@ impl EditorWindow {
             color: Some(DEFAULT_TODO_COLOR.to_string()),
             color_picker,
             quadrant: 4,
+            list_select,
+            list_id,
+            original_list_id: list_id,
+            known_lists,
             notify_before: 15,
             is_custom_notify_before: false,
             notify_before_select,
@@ -578,6 +650,8 @@ impl EditorWindow {
             self.description_value(cx),
             self.color,
             self.quadrant,
+            // 清单只看"改没改"：预选的清单被删除、两者一起回到默认清单时不算修改
+            self.list_change(),
             self.form_notify_at(cx),
             if self.is_custom_notify_before {
                 self.custom_before(cx)
@@ -605,6 +679,46 @@ impl EditorWindow {
         self.form_snapshot(cx) != self.clean_snapshot
     }
 
+    /// 用户改了「清单」下拉：改到的清单（与预选相同时 `None`）
+    fn list_change(&self) -> Option<i64> {
+        save::list_change(self.list_id, self.original_list_id)
+    }
+
+    /// 清单列表或待办变了：刷新「清单」下拉的选项，选中 / 预选的清单被删除时按 [`reconcile_list_choice`] 退回；
+    /// 只读详情跟着待办现在的有效清单（别的窗口「移动到」、同步改了归属）
+    fn on_app_state_changed(&mut self, state: Entity<AppState>, cx: &mut Context<Self>) {
+        let (lists, live) = {
+            let state = state.read(cx);
+            let live = self
+                .todo_id
+                .filter(|_| self.is_view_mode)
+                .and_then(|id| state.todo(id))
+                .map(|todo| state.effective_list_id(todo));
+            (list_entries(&state.lists), live)
+        };
+        let (selected, original) = match live {
+            Some(live) => (live, live),
+            None => reconcile_list_choice(self.list_id, self.original_list_id, |id| {
+                lists.iter().any(|(l, _)| *l == id)
+            }),
+        };
+        let lists_changed = lists != self.known_lists;
+        if !lists_changed && selected == self.list_id && original == self.original_list_id {
+            return;
+        }
+        if lists_changed {
+            let options = list_options(&lists);
+            self.list_select
+                .update(cx, |select, cx| select.set_options(options, cx));
+            self.known_lists = lists;
+        }
+        self.list_id = selected;
+        self.original_list_id = original;
+        self.list_select
+            .update(cx, |select, cx| select.set_value(Some(selected), cx));
+        cx.notify();
+    }
+
     /// 把表单值推到各控件（加载后 / 初始化）
     fn sync_controls(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let color = self.color.clone();
@@ -620,6 +734,9 @@ impl EditorWindow {
         let repeat_index = self.repeat_type.index();
         self.repeat_type_select
             .update(cx, |select, cx| select.set_value(Some(repeat_index), cx));
+        let list_id = self.list_id;
+        self.list_select
+            .update(cx, |select, cx| select.set_value(Some(list_id), cx));
         let _ = window;
     }
 
@@ -696,6 +813,10 @@ impl EditorWindow {
             .update(cx, |d, cx| d.set_value(&description, window, cx));
         self.color = Some(todo.color.clone());
         self.quadrant = todo.quadrant;
+        // 有效清单（归属未知 / 清单不存在 → 默认清单）；没改就不提交（契约 §12-6）
+        let list_id = AppState::global(cx).read(cx).effective_list_id(todo);
+        self.list_id = list_id;
+        self.original_list_id = list_id;
         self.notify_before = todo.notify_before;
         self.original_notify_at = todo.notify_at.clone();
         self.original_start_time = todo.start_time.clone();
@@ -760,9 +881,10 @@ impl EditorWindow {
         self.sync_controls(window, cx);
     }
 
-    /// 旧 `enterEditState`：新建 / 保存成功后视为"编辑该待办"
+    /// 旧 `enterEditState`：新建 / 保存成功后视为"编辑该待办"（它已经在选中的清单里，再保存不重复提交清单）
     fn enter_edit_state(&mut self, todo: Todo) {
         self.todo_id = Some(todo.id);
+        self.original_list_id = self.list_id;
         self.original_notify_at = todo.notify_at.clone();
         self.original_start_time = todo.start_time.clone();
         self.original_end_time = todo.end_time.clone();
@@ -808,6 +930,10 @@ impl EditorWindow {
                 closed = true;
             }
         }
+        if self.list_select.read(cx).is_open() {
+            self.list_select.update(cx, |s, cx| s.close(cx));
+            closed = true;
+        }
         if self.color_picker.read(cx).is_open() {
             self.color_picker.update(cx, |p, cx| p.close(cx));
             closed = true;
@@ -828,6 +954,7 @@ impl EditorWindow {
             || self.end_time.read(cx).is_open()
             || self.notify_before_select.read(cx).is_open()
             || self.repeat_type_select.read(cx).is_open()
+            || self.list_select.read(cx).is_open()
             || self.color_picker.read(cx).is_open()
     }
 
@@ -1036,7 +1163,7 @@ impl Render for EditorWindow {
 }
 
 /// 打开编辑窗口。`parent`：打开方（清单 / 日历窗口 `ChildOf::window(window, cx)`；托盘 `ChildOf::handle(默认清单窗口, cx).unowned()`；
-/// 截图调试 `None`）。`todo_id = None` 为新建（建到默认清单；从清单窗口的 FAB 新建用 [`open_new`]）。
+/// 截图调试 `None`）。`todo_id = None` 为新建（「清单」下拉预选默认清单；从清单窗口的 FAB 新建用 [`open_new`]）。
 /// 打开方已有模态子窗口时只把它带到前台、返回 `None`。
 pub fn open(
     cx: &mut App,
@@ -1047,7 +1174,7 @@ pub fn open(
     open_with(cx, parent, todo_id, DEFAULT_LIST_ID, mode)
 }
 
-/// 新建待办，建到清单 `list_id`（清单窗口的 FAB：本清单）
+/// 新建待办，「清单」下拉预选 `list_id`（清单窗口的 FAB：本清单）
 pub fn open_new(cx: &mut App, parent: Option<ChildOf>, list_id: i64) -> Option<AnyWindowHandle> {
     open_with(cx, parent, None, list_id, EditorMode::Edit)
 }
@@ -1101,6 +1228,27 @@ mod tests {
             Some("#6366F1")
         );
         assert_eq!(resolve_quadrant_color(None, 2, 1), None);
+    }
+
+    #[test]
+    fn list_choice_falls_back_when_its_list_is_deleted() {
+        let exists = |ids: &'static [i64]| move |id| ids.contains(&id);
+        // 都还在：不动（含用户改过的选择）
+        assert_eq!(reconcile_list_choice(7, 8, exists(&[1, 7, 8])), (7, 8));
+        // 选中的清单被删：回到预选
+        assert_eq!(reconcile_list_choice(7, 8, exists(&[1, 8])), (8, 8));
+        // 预选的清单被删（它的待办移到默认清单）：预选改成默认清单，没改过的选择跟着回去
+        assert_eq!(reconcile_list_choice(8, 8, exists(&[1, 7])), (1, 1));
+        // 用户改到的清单还在：保留
+        assert_eq!(reconcile_list_choice(7, 8, exists(&[1, 7])), (7, 1));
+    }
+
+    #[test]
+    fn list_options_keep_the_list_order() {
+        let lists = vec![(1, "待办清单".to_string()), (7, "工作".to_string())];
+        let options = list_options(&lists);
+        assert_eq!(options.len(), 2);
+        assert_eq!((options[1].value, options[1].label.as_ref()), (7, "工作"));
     }
 
     #[test]

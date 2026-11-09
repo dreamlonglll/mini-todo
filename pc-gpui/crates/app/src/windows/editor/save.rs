@@ -20,6 +20,8 @@ pub(super) struct FormValues {
     pub description: String,
     pub color: Option<String>,
     pub quadrant: i32,
+    /// 「清单」下拉选的清单
+    pub list_id: i64,
     pub notify_at: Option<String>,
     pub notify_before: i32,
     pub start_time: Option<String>,
@@ -31,18 +33,26 @@ pub(super) struct FormValues {
     pub repeat_month_day: i32,
 }
 
-/// 加载时的原值（判断"清除"与"提醒时间没改"）
+/// 加载时的原值（判断"清除"、"提醒时间没改"与"清单没改"）
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(super) struct Originals {
     pub notify_at: Option<String>,
     pub start_time: Option<String>,
     pub end_time: Option<String>,
     pub repeat_enabled: bool,
+    /// 「清单」下拉预选的清单（加载时的有效清单）
+    pub list_id: i64,
+}
+
+/// 编辑已有待办时要提交的清单：用户改了下拉（选择与预选不同）才带上，否则 `None` 不动归属。归属未知的待办预选的是
+/// 默认清单，没改就带 `Some(1)` 会把未知写成已知、以最新的版本盖掉别的设备上真实的归属（契约 §12-6 / §13）
+pub(super) fn list_change(selected: i64, original: i64) -> Option<i64> {
+    (selected != original).then_some(selected)
 }
 
 /// `create_todo` 请求（`color` 为空时返回 `None`：旧版反序列化失败报"创建待办失败"）。新建总是写具体的清单
-/// （`list_id`：打开方清单窗口的清单，托盘新建是默认清单；契约 §12-6）
-pub(super) fn build_create_request(form: &FormValues, list_id: i64) -> Option<CreateTodoRequest> {
+/// （「清单」下拉选的；预选打开方清单窗口的清单，托盘 / 日历新建是默认清单；契约 §12-6）
+pub(super) fn build_create_request(form: &FormValues) -> Option<CreateTodoRequest> {
     Some(CreateTodoRequest {
         title: form.title.clone(),
         description: (!form.description.is_empty()).then(|| form.description.clone()),
@@ -56,8 +66,7 @@ pub(super) fn build_create_request(form: &FormValues, list_id: i64) -> Option<Cr
         }),
         start_time: form.start_time.clone(),
         end_time: form.end_time.clone(),
-        // 编辑表单的「清单」下拉在任务第 5 步：现在按打开方定
-        list_id: Some(list_id),
+        list_id: Some(form.list_id),
     })
 }
 
@@ -108,6 +117,7 @@ pub(super) fn build_update_request(form: &FormValues, original: &Originals) -> U
             .then_some(weekdays),
         repeat_month_day: (repeat && form.repeat_type == RepeatType::Monthly)
             .then_some(form.repeat_month_day),
+        list_id: list_change(form.list_id, original.list_id),
         ..update_request()
     }
 }
@@ -119,6 +129,7 @@ impl EditorWindow {
             description: self.description_value(cx),
             color: self.color.clone(),
             quadrant: self.quadrant,
+            list_id: self.list_id,
             notify_at: self.form_notify_at(cx),
             notify_before: self.notify_before,
             start_time: self.form_start_time(cx),
@@ -137,6 +148,7 @@ impl EditorWindow {
             start_time: self.original_start_time.clone(),
             end_time: self.original_end_time.clone(),
             repeat_enabled: self.todo.as_ref().is_some_and(|t| t.repeat_enabled),
+            list_id: self.original_list_id,
         }
     }
 
@@ -169,7 +181,7 @@ impl EditorWindow {
     /// 旧 `saveNewTodo()`
     fn save_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let form = self.form_values(cx);
-        let Some(request) = build_create_request(&form, self.new_list_id) else {
+        let Some(request) = build_create_request(&form) else {
             self.saving = false;
             message::error_with(window, cx, "创建待办失败", "颜色不能为空");
             cx.notify();
@@ -192,7 +204,12 @@ impl EditorWindow {
             // create_todo 不接受重复字段：再 update 一次（成功后以更新结果为准，与旧版 `created = await update_todo` 一致：
             // 后续子任务落库失败、原地切成编辑态时，`repeat_enabled` 等原值要来自这次更新）
             if form.repeat_enabled {
-                let request = build_update_request(&form, &Originals::default());
+                // 刚建好的待办已经在选中的清单里：这次只补重复设置，不再提交清单
+                let originals = Originals {
+                    list_id: form.list_id,
+                    ..Originals::default()
+                };
+                let request = build_update_request(&form, &originals);
                 let id = created.id;
                 let task = cx.update(|_, cx| {
                     AppState::global(cx).update(cx, |state, cx| state.update_todo(id, request, cx))
@@ -391,6 +408,7 @@ mod tests {
             description: String::new(),
             color: Some("#10B981".into()),
             quadrant: 4,
+            list_id: 1,
             notify_at: None,
             notify_before: 15,
             start_time: None,
@@ -406,7 +424,7 @@ mod tests {
     #[test]
     fn create_request_omits_empty_description_and_zeroes_before_for_repeat() {
         let mut f = form();
-        let request = build_create_request(&f, 1).unwrap();
+        let request = build_create_request(&f).unwrap();
         assert_eq!(request.title, " 标题 ");
         assert_eq!(request.description, None);
         assert_eq!(request.notify_before, Some(15));
@@ -414,12 +432,37 @@ mod tests {
         assert_eq!(request.list_id, Some(1));
         f.repeat_enabled = true;
         f.description = "x".into();
-        let request = build_create_request(&f, 1_731_000_000_000_123).unwrap();
+        f.list_id = 1_731_000_000_000_123;
+        let request = build_create_request(&f).unwrap();
         assert_eq!(request.description.as_deref(), Some("x"));
         assert_eq!(request.notify_before, Some(0));
         assert_eq!(request.list_id, Some(1_731_000_000_000_123));
         f.color = None;
-        assert!(build_create_request(&f, 1).is_none());
+        assert!(build_create_request(&f).is_none());
+    }
+
+    #[test]
+    fn update_sends_the_list_only_when_the_user_changed_it() {
+        assert_eq!(list_change(7, 7), None);
+        assert_eq!(list_change(7, 1), Some(7));
+        // 归属未知的待办预选默认清单：没改就不提交（不把未知写成 1）
+        let mut f = form();
+        let original = Originals {
+            list_id: 1,
+            ..Default::default()
+        };
+        assert_eq!(build_update_request(&f, &original).list_id, None);
+        // 改到「工作」再改回默认清单：也算没改
+        f.list_id = 7;
+        assert_eq!(build_update_request(&f, &original).list_id, Some(7));
+        f.list_id = 1;
+        assert_eq!(build_update_request(&f, &original).list_id, None);
+        // 从别的清单改到默认清单：提交 1
+        let original = Originals {
+            list_id: 7,
+            ..Default::default()
+        };
+        assert_eq!(build_update_request(&f, &original).list_id, Some(1));
     }
 
     #[test]
@@ -463,6 +506,7 @@ mod tests {
             start_time: Some("2026-10-19 00:00:00".into()),
             end_time: None,
             repeat_enabled: true,
+            list_id: 1,
         };
         let request = build_update_request(&f, &original);
         assert!(request.clear_notify_at);

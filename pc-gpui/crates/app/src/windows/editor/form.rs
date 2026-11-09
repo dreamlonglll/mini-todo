@@ -1,4 +1,4 @@
-//! 编辑表单（§3.6）与底部栏（§3.7）。
+//! 编辑表单（§3.6）与底部栏（§3.7）。「四象限」下面是「清单」下拉（PRD R8，`EpSelect`，宽度同「提前提醒」）。
 //!
 //! `el-form label-position="top"`：每项 `margin-bottom:18px`；label 14px `#606266`、行高 22、下边距 8（必填项前
 //! 红色 `*`）；内容区 `flex-wrap`、行高 32。时间选择器宽 220（实测参考截图：日期与时间框都是 EP 默认宽度），
@@ -81,6 +81,10 @@ impl EditorWindow {
             .child(form_item(desc_label, description))
             .child(form_item("颜色", colors))
             .child(form_item("四象限", quadrants))
+            .child(form_item(
+                "清单",
+                div().w_full().child(self.list_select.clone()),
+            ))
             .child(form_item(
                 "时间范围",
                 div()
