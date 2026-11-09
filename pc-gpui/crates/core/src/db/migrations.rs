@@ -207,8 +207,6 @@ fn migration_v31(conn: &Connection) -> Result<()> {
             entity_id   INTEGER PRIMARY KEY,
             deleted_at  TEXT    NOT NULL
         );
-        ALTER TABLE todos ADD COLUMN list_id INTEGER NOT NULL DEFAULT 1;
-        CREATE INDEX IF NOT EXISTS idx_todos_list_id ON todos(list_id);
         CREATE TABLE IF NOT EXISTS window_prefs (
             window_key      TEXT    PRIMARY KEY,
             hidden          INTEGER NOT NULL DEFAULT 0,
@@ -230,6 +228,19 @@ fn migration_v31(conn: &Connection) -> Result<()> {
             PRIMARY KEY (window_key, screen_config_id)
         );
         CREATE INDEX IF NOT EXISTS idx_window_layouts_screen ON window_layouts(screen_config_id);",
+    )?;
+    // 整个迁移可以重跑（同 v18 / v19 的写法）：外部工具回退过版本号、但表和列还在的库（e2e 用最新库逆向造旧库）
+    // 不会因"列已存在"启动失败；表 / 触发器都是 IF NOT EXISTS，种子都是 INSERT OR IGNORE
+    let has_list_id = conn.prepare("SELECT list_id FROM todos LIMIT 0").is_ok();
+    if !has_list_id {
+        conn.execute(
+            "ALTER TABLE todos ADD COLUMN list_id INTEGER NOT NULL DEFAULT 1",
+            [],
+        )?;
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_todos_list_id ON todos(list_id)",
+        [],
     )?;
     conn.execute(
         "INSERT OR IGNORE INTO todo_lists (id, name, sort_order, created_at, updated_at)
@@ -1951,6 +1962,35 @@ mod tests {
                 layout("list:1", "2_a", (-1920, 0, 362, 700), 0),
             ]
         );
+    }
+
+    /// v31 可以重跑：版本号被回退、表和列还在的库（e2e 用最新库逆向造旧库）不报"列已存在"，已有数据与窗口属性不被种子覆盖
+    #[test]
+    fn v31_reruns_cleanly_on_a_database_that_already_has_its_tables() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).expect("迁移失败");
+        conn.execute_batch(
+            "UPDATE todo_lists SET name = '收件箱' WHERE id = 1;
+             UPDATE window_prefs SET dark = 1 WHERE window_key = 'list:1';
+             DELETE FROM migrations WHERE version = 31;",
+        )
+        .unwrap();
+        assert_eq!(max_version(&conn), 30);
+
+        migrate(&conn).expect("重跑 v31 不应失败");
+        assert_eq!(max_version(&conn), 31);
+        let rows = lists(&conn);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1, "收件箱", "种子不覆盖已有的默认清单");
+        assert_eq!(window_prefs(&conn)[1].2, 1, "种子不覆盖已有的窗口属性");
+        let triggers: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'trg_todo_lists_%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(triggers, 3);
     }
 
     /// v31：全新安装（没有屏幕配置、默认设置）也有两个窗口的属性记录
