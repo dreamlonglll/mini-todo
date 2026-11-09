@@ -2,25 +2,23 @@
 //! 待办可在象限内排序、拖到别的象限（颜色仍是旧象限默认色时跟随新象限）。
 //!
 //! "观察到的实际效果"按旧版真实渲染还原（以参考截图为准）：
-//! - 非日历模式下网格高度由内容决定（两行等高 = 最高的格子），不撑满窗口；整个主内容区滚动
-//! - 日历分栏模式下撑满左栏，各格内部滚动
+//! - 网格高度由内容决定（两行等高 = 最高的格子），不撑满窗口；整个主内容区滚动（以前开着日历分栏时撑满左栏、各格内部滚动，
+//!   日历拆成独立窗口后没有这种形态了）
 //! - 空象限看不到"暂无待办"（原版被 `min-height: 100%` 的列表挤出可视区），只占位 60px
 
 use gpui_kit::{
-    Context, DragMoveEvent, InteractiveElement as _, IntoElement, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, Window, canvas, div, prelude::FluentBuilder as _,
-    px, relative,
+    Context, DragMoveEvent, InteractiveElement as _, IntoElement, ParentElement as _, Styled as _,
+    Window, canvas, div, prelude::FluentBuilder as _, px, relative,
 };
 
 use super::todo_item::{RowPlace, rows_of};
-use super::{DragKind, DraggedTodo, MainWindow, RenderCtx, RowData, logic};
+use super::{DragKind, DraggedTodo, ListWindow, RenderCtx, RowData, logic};
 use crate::theme;
 
-impl MainWindow {
+impl ListWindow {
     pub(super) fn render_quadrant(
         &mut self,
         rc: &RenderCtx,
-        fill: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -36,27 +34,16 @@ impl MainWindow {
         };
         let mut cells = Vec::with_capacity(4);
         for (index, rows) in lists.iter().enumerate() {
-            cells.push(self.render_quadrant_cell(index, rows, rc, fill, window, cx));
+            cells.push(self.render_quadrant_cell(index, rows, rc, window, cx));
         }
-        div()
-            .id("quadrant-view")
-            .w_full()
-            .p(px(8.))
-            .when(fill, |this| this.h_full())
-            .child(
-                div()
-                    .grid()
-                    .grid_cols(2)
-                    .gap(px(8.))
-                    .map(|this| {
-                        if fill {
-                            this.grid_rows(2).h_full()
-                        } else {
-                            this.grid_rows_min_content(2)
-                        }
-                    })
-                    .children(cells),
-            )
+        div().id("quadrant-view").w_full().p(px(8.)).child(
+            div()
+                .grid()
+                .grid_cols(2)
+                .gap(px(8.))
+                .grid_rows_min_content(2)
+                .children(cells),
+        )
     }
 
     fn render_quadrant_cell(
@@ -64,7 +51,6 @@ impl MainWindow {
         index: usize,
         rows: &[RowData],
         rc: &RenderCtx,
-        fill: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
@@ -141,7 +127,7 @@ impl MainWindow {
             .p(px(4.))
             .children(items)
             // 空象限："暂无待办"被挤出可视区，只剩它的 min-height 60px 撑高格子
-            .when(count == 0 && !fill, |this| this.child(div().h(px(60.))));
+            .when(count == 0, |this| this.child(div().h(px(60.))));
 
         div()
             .id(("quadrant-cell", index))
@@ -171,7 +157,6 @@ impl MainWindow {
                     .flex_1()
                     .min_h_0()
                     .overflow_x_hidden()
-                    .when(fill, |this| this.overflow_y_scroll())
                     .child(list),
             )
             .into_any_element()

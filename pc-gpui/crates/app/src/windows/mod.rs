@@ -3,9 +3,10 @@
 //!
 //! | 模块 | 窗口 |
 //! |---|---|
-//! | `block.rs` | 桌面块（清单窗口 / 日历窗口）的标识 `BlockKey`（现在只有主窗口 = 默认清单窗口） |
+//! | `block.rs` | 桌面块（清单窗口 / 日历窗口）的标识 `BlockKey` 与自绘移动 / 缩放 `BlockDrag` |
 //! | `drag.rs` / `snap.rs` | 自绘移动 / 缩放与吸附对齐的公共纯逻辑（收纳箱与清单 / 日历窗口共用；跨窗口运行时在 `services::snap`） |
-//! | `main_window`（`main_window.rs` + `main_window/`） | 主窗口（透明、无系统标题栏）：标题栏、列表 / 四象限 / 日历、FAB、遮罩 |
+//! | `list_window`（`list_window.rs` + `list_window/`） | 待办清单窗口（每个清单一个，透明、无系统标题栏；默认清单窗口 = 以前的主窗口）：标题栏、列表 / 四象限、FAB、遮罩 |
+//! | `calendar_window`（`calendar_window.rs` + `calendar_window/`） | 日历窗口（单例，透明、无系统标题栏）：月份导航、6 周网格、跨天条 |
 //! | `editor/` | 待办详情 / 编辑（只读 ⇄ 编辑、表单、子任务面板、描述放大编辑） |
 //! | `subtask.rs` | 子任务查看 / 编辑 |
 //! | `completed.rs` | 已完成 |
@@ -16,22 +17,27 @@
 //!
 //! ## 模态子窗口（旧版 `isModalOpen` 语义）
 //!
-//! 每个打开方（主窗口、已完成窗口、编辑窗口）同一时刻只允许一个子窗口：再请求时直接把已有子窗口带到前台、
+//! 每个打开方（清单窗口、日历窗口、已完成窗口、编辑窗口）同一时刻只允许一个子窗口：再请求时直接把已有子窗口带到前台、
 //! 不再打开。打开期间打开方显示 [`modal_overlay`]（满窗遮罩，点击把子窗口带到前台），打开方获得焦点时
 //! 调 [`WindowManager::forward_activation`] 把焦点交给子窗口。子窗口关闭后 [`WindowManager`] 全局变化
 //! （打开方 `cx.observe_global::<WindowManager>` 重绘），并执行打开时登记的关闭回调（刷新数据等）。
+//! 打开方是清单 / 日历窗口（以前的主窗口）时，子窗口关闭后自动重新拉待办，设置窗口另外重读设置并重建自动同步。
 //!
 //! Windows 上子窗口以打开方为 owner（始终在打开方之上、不单独占任务栏按钮），与旧版 Tauri `parent` 一致；
-//! 托盘「添加待办项」打开的编辑窗口仍以主窗口为模态打开方，但没有 owner（[`ChildOf::unowned`]）。macOS 上没有 owner
+//! 托盘「添加待办项」打开的编辑窗口仍以默认清单窗口为模态打开方，但没有 owner（[`ChildOf::unowned`]）。macOS 上没有 owner
 //! 关系（`platform::set_owner` 是 no-op），模态语义只靠遮罩与 [`WindowManager::forward_activation`]。
+//!
+//! 清单 / 日历窗口登记为 [`WindowKind::List`] / [`WindowKind::Calendar`]，key 与 core 窗口属性表相同（`list:<清单 id>` /
+//! `calendar`，[`BlockKey::registry_key`]）；开 / 关 / 显示 / 隐藏在 `services::block_windows`。
 
 pub mod block;
+pub mod calendar_window;
 pub mod completed;
 pub mod drag;
 pub mod editor;
 pub mod fence;
 pub mod gallery;
-pub mod main_window;
+pub mod list_window;
 pub mod notification;
 pub mod settings;
 pub mod snap;
@@ -55,7 +61,10 @@ use crate::theme;
 /// 窗口种类
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WindowKind {
-    Main,
+    /// 待办清单窗口（每个清单一个；登记 key `list:<清单 id>`）
+    List,
+    /// 日历窗口（单例；登记 key `calendar`）
+    Calendar,
     Editor,
     Subtask,
     Settings,
@@ -311,7 +320,6 @@ type CloseCallback = Box<dyn FnOnce(&mut App)>;
 /// 全部窗口与模态关系（Global）
 #[derive(Default)]
 pub struct WindowManager {
-    main: Option<AnyWindowHandle>,
     windows: HashMap<WindowId, Registered>,
     /// 打开方 → 它的模态子窗口
     modal_children: HashMap<WindowId, AnyWindowHandle>,
@@ -334,9 +342,6 @@ impl WindowManager {
     fn handle_closed(cx: &mut App, id: WindowId) {
         let callbacks = cx.update_global::<WindowManager, _>(|manager, _| {
             manager.windows.remove(&id);
-            if manager.main.is_some_and(|m| m.window_id() == id) {
-                manager.main = None;
-            }
             manager
                 .modal_children
                 .retain(|_, child| child.window_id() != id);
@@ -348,12 +353,9 @@ impl WindowManager {
         }
     }
 
-    /// 登记窗口（`key`：收纳箱 `fence-{id}`、通知 `notification_{n}` 等，可为空）
+    /// 登记窗口（`key`：清单 / 日历窗口 `list:<id>` / `calendar`、收纳箱 `fence-{id}`、通知 `notification_{n}` 等，可为空）
     pub fn register(cx: &mut App, kind: WindowKind, key: Option<String>, handle: AnyWindowHandle) {
         cx.update_global::<WindowManager, _>(|manager, _| {
-            if kind == WindowKind::Main {
-                manager.main = Some(handle);
-            }
             manager
                 .windows
                 .insert(handle.window_id(), Registered { kind, key, handle });
@@ -375,8 +377,19 @@ impl WindowManager {
         });
     }
 
-    pub fn main(cx: &App) -> Option<AnyWindowHandle> {
-        cx.try_global::<WindowManager>().and_then(|m| m.main)
+    /// 清单 / 日历窗口 `key` 的句柄（含原生隐藏着的；还没开窗 / Linux 上已关掉时 `None`）
+    pub fn block_window(cx: &App, key: BlockKey) -> Option<AnyWindowHandle> {
+        let kind = match key {
+            BlockKey::List(_) => WindowKind::List,
+            BlockKey::Calendar => WindowKind::Calendar,
+        };
+        Self::find(cx, kind, &key.registry_key())
+    }
+
+    /// 默认清单窗口（以前的主窗口）：托盘「添加待办项」/「打开设置」的打开方、整个应用的提示（导入成功、自动同步失败……）
+    /// 显示在这里
+    pub fn default_list(cx: &App) -> Option<AnyWindowHandle> {
+        Self::block_window(cx, BlockKey::DEFAULT_LIST)
     }
 
     pub fn kind_of(cx: &App, id: WindowId) -> Option<WindowKind> {
@@ -424,14 +437,22 @@ impl WindowManager {
     pub fn block_key_of(cx: &App, id: WindowId) -> Option<BlockKey> {
         let registered = cx.try_global::<WindowManager>()?.windows.get(&id)?;
         match registered.kind {
-            WindowKind::Main => Some(BlockKey::DEFAULT_LIST),
+            WindowKind::List | WindowKind::Calendar => {
+                registered.key.as_deref().and_then(BlockKey::parse)
+            }
             _ => None,
         }
     }
 
-    /// 是否有清单 / 日历窗口开着模态子窗口（5s 轮询、同步后刷新据此跳过）
+    /// 是否有清单 / 日历窗口开着模态子窗口（5s 轮询、同步后刷新据此跳过：以前是"主窗口有模态子窗口"）
     pub fn any_block_has_modal_child(cx: &App) -> bool {
-        Self::main(cx).is_some_and(|main| Self::has_modal_child(cx, main.window_id()))
+        cx.try_global::<WindowManager>().is_some_and(|m| {
+            m.modal_children.keys().any(|opener| {
+                m.windows
+                    .get(opener)
+                    .is_some_and(|r| matches!(r.kind, WindowKind::List | WindowKind::Calendar))
+            })
+        })
     }
 
     /// 把打开方的模态子窗口带到前台；没有返回 false
@@ -454,8 +475,8 @@ impl WindowManager {
     /// 打开子窗口（`parent` 为 `None` 时是独立窗口）：
     /// - 打开方已有模态子窗口 → 带到前台，返回 `None`
     /// - 在打开方所在显示器居中（`spec.bounds` 只用其尺寸）、登记、设 owner、记录模态关系
-    /// - 打开方是主窗口时，子窗口关闭后自动 `AppState::reload_todos`；设置窗口另外重读设置并重建自动同步
-    ///   （旧 MainView 的 `tauri://destroyed` 处理）。其它刷新用 [`Self::on_closed`] 自己登记
+    /// - 打开方是清单 / 日历窗口（以前的主窗口）时，子窗口关闭后自动 `AppState::reload_todos`；设置窗口另外重读设置并重建
+    ///   自动同步（旧 MainView 的 `tauri://destroyed` 处理）。其它刷新用 [`Self::on_closed`] 自己登记
     pub fn open_child<V: Render>(
         cx: &mut App,
         parent: Option<&ChildOf>,
@@ -499,8 +520,9 @@ impl WindowManager {
                     platform::set_owner(window, cx, Some(owner));
                 });
             }
-            // 旧 MainView：主窗口的子窗口销毁后 fetchTodos()；设置窗口另外 reloadAppSettings() + startAutoSync()
-            if Self::main(cx).is_some_and(|main| main.window_id() == opener_id) {
+            // 旧 MainView：主窗口（现在是任一清单 / 日历窗口）的子窗口销毁后 fetchTodos()；设置窗口另外
+            // reloadAppSettings() + startAutoSync()
+            if Self::block_key_of(cx, opener_id).is_some() {
                 Self::on_closed(cx, handle, move |cx| {
                     let state = crate::state::AppState::global(cx);
                     state.update(cx, |state, cx| {
@@ -524,7 +546,7 @@ impl WindowManager {
     }
 }
 
-/// 打开方的模态遮罩（旧版 `.modal-overlay`）：满窗 `rgba(0,0,0,alpha)`（主窗口 / 已完成 0.3、编辑窗口 0.15），
+/// 打开方的模态遮罩（旧版 `.modal-overlay`）：满窗 `rgba(0,0,0,alpha)`（清单 / 日历窗口、已完成 0.3，编辑窗口 0.15），
 /// `cursor: not-allowed`，按下把子窗口带到前台。打开方 render 的**最后一个**子元素；没有模态子窗口时返回 `None`。
 pub fn modal_overlay(window: &Window, cx: &App, alpha: f32) -> Option<AnyElement> {
     let opener = window.window_handle().window_id();
@@ -555,7 +577,12 @@ pub fn logical_size(width: f32, height: f32) -> Size<Pixels> {
 /// `MINI_TODO_DEBUG_OPEN` 里的一项
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DebugOpen {
+    /// 默认清单窗口（`main`，以前的主窗口；启动时总是打开，这一项只把它带到前面）
     Main,
+    /// 显示清单 `id` 的窗口（`list:<id>`；没开过就开窗）
+    List(i64),
+    /// 新建一个清单并进入改名（`list:new`，与托盘「新增待办清单」相同）
+    NewList,
     Editor {
         todo_id: Option<i64>,
         mode: editor::EditorMode,
@@ -570,19 +597,19 @@ pub enum DebugOpen {
         todo_id: Option<i64>,
     },
     Fence(i64),
-    /// 在主窗口里弹一条 ElMessage（`toast:<success|info|warning|error>:<文字>`）
+    /// 在默认清单窗口里弹一条 ElMessage（`toast:<success|info|warning|error>:<文字>`）
     Toast(crate::ui::message::MessageKind, String),
-    /// 在主窗口里弹 ElMessageBox.confirm（`confirm:<标题>:<内容>`，warning 图标、`确定` / `取消`）
+    /// 在默认清单窗口里弹 ElMessageBox.confirm（`confirm:<标题>:<内容>`，warning 图标、`确定` / `取消`）
     Confirm(String, String),
     /// 控件样例窗口（`gallery`）
     Gallery,
-    /// 运行时打开日历（`calendar`：与设置里打开「展示日历」相同，主窗口按公式加宽）
+    /// 显示日历窗口（`calendar`：与设置里打开「展示日历」、托盘勾选「显示日历」相同）
     Calendar,
     /// 新建一个收纳箱（`fence:new`，与托盘「新增收纳箱」相同）
     NewFence,
 }
 
-/// 解析 `main,editor:1:view,editor:new,subtask:3:edit,settings:general,completed,notification:1,fence:1`；
+/// 解析 `main,list:3,list:new,editor:1:view,editor:new,subtask:3:edit,settings:general,completed,notification:1,fence:1`；
 /// 无法识别的项记 warning 并跳过
 pub fn parse_debug_open(spec: &str) -> Vec<DebugOpen> {
     spec.split(',')
@@ -592,6 +619,8 @@ pub fn parse_debug_open(spec: &str) -> Vec<DebugOpen> {
             let parts: Vec<&str> = item.split(':').map(str::trim).collect();
             let parsed = match parts.as_slice() {
                 ["main"] => Some(DebugOpen::Main),
+                ["list", "new"] => Some(DebugOpen::NewList),
+                ["list", id] => id.parse().ok().map(DebugOpen::List),
                 ["editor"] | ["editor", "new"] => Some(DebugOpen::Editor {
                     todo_id: None,
                     mode: editor::EditorMode::Edit,
@@ -653,16 +682,15 @@ pub fn parse_debug_open(spec: &str) -> Vec<DebugOpen> {
         .collect()
 }
 
-/// 打开 `MINI_TODO_DEBUG_OPEN` 指定的窗口（不走模态关系，主窗口不显示遮罩，便于截图）
+/// 打开 `MINI_TODO_DEBUG_OPEN` 指定的窗口（不走模态关系，清单窗口不显示遮罩，便于截图）
 pub fn open_debug(cx: &mut App, items: &[DebugOpen]) {
+    use crate::services::block_windows;
     for item in items {
         log::info!("[debug] MINI_TODO_DEBUG_OPEN 打开 {item:?}");
         match item {
-            DebugOpen::Main => {
-                if WindowManager::main(cx).is_none() {
-                    main_window::open(cx);
-                }
-            }
+            DebugOpen::Main => block_windows::show_list(cx, block::DEFAULT_LIST_ID),
+            DebugOpen::List(id) => block_windows::show_list(cx, *id),
+            DebugOpen::NewList => block_windows::create_list(cx),
             DebugOpen::Editor { todo_id, mode } => {
                 editor::open(cx, None, *todo_id, *mode);
             }
@@ -673,7 +701,7 @@ pub fn open_debug(cx: &mut App, items: &[DebugOpen]) {
                 settings::open(cx, None, *tab);
             }
             DebugOpen::Completed => {
-                completed::open(cx, None);
+                completed::open(cx, None, block::DEFAULT_LIST_ID);
             }
             DebugOpen::Notification { todo_id } => {
                 let todo = todo_id.and_then(|id| {
@@ -702,23 +730,17 @@ pub fn open_debug(cx: &mut App, items: &[DebugOpen]) {
             DebugOpen::Gallery => {
                 gallery::open(cx);
             }
-            DebugOpen::Calendar => {
-                crate::state::AppState::global(cx)
-                    .update(cx, |state, cx| {
-                        state.set_window_hidden(BlockKey::Calendar, false, cx)
-                    })
-                    .detach();
-            }
+            DebugOpen::Calendar => block_windows::set_calendar_visible(cx, true),
             DebugOpen::NewFence => {
                 fence::tray_create_fence(cx);
             }
             DebugOpen::Toast(kind, text) => {
-                if let Some(main) = WindowManager::main(cx) {
+                if let Some(main) = WindowManager::default_list(cx) {
                     crate::ui::message::show_in(main, cx, *kind, text.clone());
                 }
             }
             DebugOpen::Confirm(title, message) => {
-                if let Some(main) = WindowManager::main(cx) {
+                if let Some(main) = WindowManager::default_list(cx) {
                     let options =
                         crate::ui::message_box::ConfirmOptions::new(title.clone(), message.clone());
                     let _ = cx.update_window(main, |_, window, cx| {
@@ -790,6 +812,14 @@ mod tests {
         assert_eq!(
             parse_debug_open("fence:new,fence:3"),
             vec![DebugOpen::NewFence, DebugOpen::Fence(3)]
+        );
+        assert_eq!(
+            parse_debug_open("list:new,list:1731000000000123,list:x,calendar"),
+            vec![
+                DebugOpen::NewList,
+                DebugOpen::List(1_731_000_000_000_123),
+                DebugOpen::Calendar
+            ]
         );
         assert_eq!(
             parse_debug_open(

@@ -68,11 +68,12 @@ pub fn run() {
         windows::WindowManager::init(cx);
         let state = AppState::init(cx);
 
-        // 重复启动：与托盘左键相同，唤起所有登记的窗口（主窗口不在则重新打开）
+        // 重复启动：与托盘左键相同，唤起所有清单窗口（含隐藏的）与显示中的日历窗口
         services::single_instance::listen(cx, services::window_mode::bring_all_to_front);
 
-        // Linux（只用于 CI 与截图）没有托盘：最后一个窗口关掉就退出。Windows / macOS 由托盘（菜单栏图标）常驻，
-        // 主窗口关掉后从托盘 / Dock 再唤起
+        // Linux（只用于 CI 与截图）没有托盘、不能程序化隐藏窗口：清单 / 日历窗口关闭就真的关掉，最后一个窗口关掉就退出。
+        // Windows / macOS 由托盘（菜单栏图标）常驻：关闭清单 / 日历窗口只是隐藏，所有窗口都关了也不退出（托盘「退出」/ ⌘Q 才退出），
+        // 从托盘 / 单实例 / Dock 再唤起
         #[cfg(target_os = "linux")]
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
@@ -81,7 +82,8 @@ pub fn run() {
         })
         .detach();
 
-        windows::main_window::open(cx);
+        // 清单窗口（默认清单窗口总是显示）与日历窗口；之后观察清单列表开 / 关窗口、5 秒变更轮询、检查更新
+        services::block_windows::start(cx);
 
         // 后台服务：托盘（Windows / macOS）、自动同步定时器、提醒调度、恢复收纳箱窗口（Windows / macOS）
         services::tray::start(cx);

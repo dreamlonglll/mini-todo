@@ -97,7 +97,7 @@ fn run_auto_sync(cx: &mut App) {
                         state.auto_sync_failing = true;
                         first
                     });
-                    if first && let Some(main) = WindowManager::main(cx) {
+                    if first && let Some(main) = WindowManager::default_list(cx) {
                         let detail = message::error_detail(&e);
                         let text = if detail.is_empty() {
                             "自动同步失败".to_string()

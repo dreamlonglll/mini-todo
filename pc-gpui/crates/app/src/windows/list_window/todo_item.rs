@@ -9,7 +9,7 @@ use gpui_kit::{
 };
 
 use super::{
-    DragKind, DraggedTodo, MainWindow, RenderCtx, RowData, SUBTASK_ANIMATION, above_fab, logic,
+    DragKind, DraggedTodo, ListWindow, RenderCtx, RowData, SUBTASK_ANIMATION, above_fab, logic,
 };
 use crate::assets::EpIcon;
 use crate::state;
@@ -32,7 +32,7 @@ pub(crate) enum RowPlace {
 /// 颜色圆点在行内的位置：命中区 24×24 的左上角（圆点 8×8 在 (12, 14)，命中区四周外扩 8px）
 const HANDLE_ORIGIN: (f32, f32) = (4., 6.);
 
-impl MainWindow {
+impl ListWindow {
     pub(crate) fn render_row(
         &mut self,
         row: &RowData,
@@ -563,7 +563,7 @@ impl MainWindow {
                     let result = task.await;
                     let _ = this.update(cx, |this, cx| {
                         if let Err(e) = result {
-                            log::error!("[main] 保存排序失败: {e}");
+                            log::error!("[list] 保存排序失败: {e}");
                             crate::ui::message::show_in(
                                 handle,
                                 cx,
@@ -619,7 +619,7 @@ impl MainWindow {
                             state.update_todo_quadrant(id, quadrant, Some(color), cx)
                         });
                         if let Err(e) = task.await {
-                            log::error!("[main] 更新待办失败: {e}");
+                            log::error!("[list] 更新待办失败: {e}");
                             let _ = this.update(cx, |this, cx| {
                                 crate::ui::message::show_in(
                                     handle,
@@ -638,7 +638,7 @@ impl MainWindow {
                     let result = task.await;
                     let _ = this.update(cx, |this, cx| {
                         if let Err(e) = result {
-                            log::error!("[main] 保存排序失败: {e}");
+                            log::error!("[list] 保存排序失败: {e}");
                             crate::ui::message::show_in(
                                 handle,
                                 cx,

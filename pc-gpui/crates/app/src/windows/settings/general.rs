@@ -18,7 +18,6 @@ use crate::ui::ep_radio::EpRadioButtons;
 use crate::ui::ep_slider::EpSlider;
 use crate::ui::ep_switch::EpSwitch;
 use crate::ui::message;
-use crate::windows::block::BlockKey;
 
 /// `AppState` 上的布尔设置写入方法（`set_auto_hide_enabled` 等）：先改内存、后台写库，失败回滚并返回提示文本
 type SettingSetter =
@@ -300,14 +299,13 @@ impl SettingsWindow {
             .child(settings_row(
                 EpIcon::Calendar,
                 "展示日历",
-                Some("开启后主界面将显示日历视图"),
-                toggle(
-                    "show-calendar",
-                    show_calendar,
-                    false,
-                    Rc::new(|state, show, cx| state.set_window_hidden(BlockKey::Calendar, !show, cx)),
-                    cx,
-                ),
+                Some("开启后在独立的日历窗口中显示所有清单的待办"),
+                // 与托盘「显示日历」同一个状态（日历窗口的隐藏属性）：显示 / 隐藏日历窗口并回写托盘勾选
+                EpSwitch::new("show-calendar")
+                    .checked(show_calendar)
+                    .on_change(cx.listener(|_, value: &bool, _, cx| {
+                        crate::services::block_windows::set_calendar_visible(cx, *value)
+                    })),
                 false,
             ))
             .child(settings_row(

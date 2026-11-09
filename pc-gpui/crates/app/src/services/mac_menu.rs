@@ -106,10 +106,10 @@ pub fn on_reopen(cx: &mut App) {
     window_mode::bring_all_to_front(cx);
 }
 
-/// 设置窗口（与托盘「打开设置」相同：先唤起主窗口，以它为模态打开方；主窗口不在就先打开）
+/// 设置窗口（与托盘「打开设置」相同：先唤起默认清单窗口，以它为模态打开方；它不在就先打开）
 fn open_settings(cx: &mut App, tab: SettingsTab) {
     window_mode::bring_to_front(cx, BlockKey::DEFAULT_LIST);
-    let parent = WindowManager::main(cx).map(|main| ChildOf::handle(main, cx));
+    let parent = WindowManager::default_list(cx).map(|main| ChildOf::handle(main, cx));
     settings::open(cx, parent, tab);
 }
 
@@ -136,15 +136,18 @@ fn minimize_window(window: &mut Window, cx: &mut App) {
     }
 }
 
-/// ⌘W：与点系统关闭按钮一样（主窗口先按关闭请求保存几何）；收纳箱不能关（删除收纳箱才关窗）
+/// ⌘W：与点系统关闭按钮一样——清单 / 日历窗口 = 隐藏（保存几何、记住隐藏，`block_windows::request_close`；有模态子窗口时
+/// 不关、把子窗口带到前台）；收纳箱不能关（删除收纳箱才关窗）；其它窗口关掉
 fn close_window(window: &mut Window, cx: &mut App) {
     let id = window.window_handle().window_id();
-    match WindowManager::kind_of(cx, id) {
-        Some(crate::windows::WindowKind::Fence) => {}
-        Some(crate::windows::WindowKind::Main) => {
-            window_mode::on_close_requested(window, cx, BlockKey::DEFAULT_LIST);
+    if let Some(key) = WindowManager::block_key_of(cx, id) {
+        if crate::services::block_windows::request_close(window, cx, key) {
             window.remove_window();
         }
+        return;
+    }
+    match WindowManager::kind_of(cx, id) {
+        Some(crate::windows::WindowKind::Fence) => {}
         _ => window.remove_window(),
     }
 }

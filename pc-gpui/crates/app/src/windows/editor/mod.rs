@@ -34,6 +34,7 @@ use gpui_kit::{
 };
 use mini_todo_core::db::Todo;
 
+use super::block::DEFAULT_LIST_ID;
 use super::subtask::{DraftSubtasks, SubtaskMode};
 use super::{ChildOf, WindowKind, WindowManager, WindowSpec, logical_size};
 use crate::db::spawn_db;
@@ -206,6 +207,8 @@ pub struct EditorWindow {
     // ---- 身份与模式 ----
     /// 可变：新建后若后续步骤失败会原地切成该 id（§3.8）
     todo_id: Option<i64>,
+    /// 新建时待办建到哪个清单（打开方清单窗口的清单；托盘「添加待办项」/ 调试 = 默认清单）
+    new_list_id: i64,
     is_view_mode: bool,
     /// 已加载的待办（子任务列表与完成状态的来源）
     todo: Option<Todo>,
@@ -267,6 +270,7 @@ pub struct EditorWindow {
 impl EditorWindow {
     pub fn new(
         todo_id: Option<i64>,
+        new_list_id: i64,
         mode: EditorMode,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -426,6 +430,7 @@ impl EditorWindow {
         let is_view_mode = mode == EditorMode::View && todo_id.is_some();
         let mut this = Self {
             todo_id,
+            new_list_id,
             is_view_mode,
             todo: None,
             images_dir,
@@ -1030,12 +1035,28 @@ impl Render for EditorWindow {
     }
 }
 
-/// 打开编辑窗口。`parent`：打开方（主窗口 `ChildOf::window(window, cx)`；托盘 `ChildOf::handle(main, cx).unowned()`；
-/// 截图调试 `None`）。`todo_id = None` 为新建。打开方已有模态子窗口时只把它带到前台、返回 `None`。
+/// 打开编辑窗口。`parent`：打开方（清单 / 日历窗口 `ChildOf::window(window, cx)`；托盘 `ChildOf::handle(默认清单窗口, cx).unowned()`；
+/// 截图调试 `None`）。`todo_id = None` 为新建（建到默认清单；从清单窗口的 FAB 新建用 [`open_new`]）。
+/// 打开方已有模态子窗口时只把它带到前台、返回 `None`。
 pub fn open(
     cx: &mut App,
     parent: Option<ChildOf>,
     todo_id: Option<i64>,
+    mode: EditorMode,
+) -> Option<AnyWindowHandle> {
+    open_with(cx, parent, todo_id, DEFAULT_LIST_ID, mode)
+}
+
+/// 新建待办，建到清单 `list_id`（清单窗口的 FAB：本清单）
+pub fn open_new(cx: &mut App, parent: Option<ChildOf>, list_id: i64) -> Option<AnyWindowHandle> {
+    open_with(cx, parent, None, list_id, EditorMode::Edit)
+}
+
+fn open_with(
+    cx: &mut App,
+    parent: Option<ChildOf>,
+    todo_id: Option<i64>,
+    new_list_id: i64,
     mode: EditorMode,
 ) -> Option<AnyWindowHandle> {
     editor_shortcuts::init(cx);
@@ -1054,7 +1075,7 @@ pub fn open(
         WindowKind::Editor,
         None,
         spec,
-        |window, cx| cx.new(|cx| EditorWindow::new(todo_id, mode, window, cx)),
+        |window, cx| cx.new(|cx| EditorWindow::new(todo_id, new_list_id, mode, window, cx)),
     )
 }
 

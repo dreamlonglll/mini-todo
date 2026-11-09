@@ -1,10 +1,12 @@
 //! 系统托盘 / 菜单栏图标（Windows 与 macOS：`tray-icon` + 其自带的 muda 菜单；旧版 `lib.rs` L256-426）。
 //!
-//! 菜单（旧版顺序与文案）：添加待办项、分隔、新增收纳箱、显示/隐藏所有收纳箱、重置收纳箱位置、分隔、
-//! 固定模式（勾选）、重置位置、打开设置、开机自启动（勾选）、分隔、退出。收纳箱三项（连同其后的分隔）Windows 与 macOS 都有
-//! （2.5.0 的 mac 托盘没有收纳箱；3.0 起 mac 也有桌面收纳箱）。左键单击 300ms 去抖后唤起所有登记的窗口（现在只有主窗口，
-//! `window_mode::bring_all_to_front`）；右键弹菜单；开发隔离时 tooltip 为 `Mini Todo（开发版）`。「固定模式」与「重置位置」
-//! 作用于默认清单窗口（= 主窗口）/ 所有窗口（任务 `11-09-multi-list-windows` 第 5 步改菜单）。
+//! 菜单（旧版顺序与文案，加上多清单的两项）：添加待办项、新增待办清单、显示日历（勾选）、分隔、新增收纳箱、显示/隐藏所有收纳箱、
+//! 重置收纳箱位置、分隔、固定模式（勾选）、重置位置、打开设置、开机自启动（勾选）、分隔、退出。收纳箱三项（连同其后的分隔）
+//! Windows 与 macOS 都有（2.5.0 的 mac 托盘没有收纳箱；3.0 起 mac 也有桌面收纳箱）。左键单击 300ms 去抖后唤起所有清单窗口
+//! （含隐藏的）与显示中的日历窗口（`window_mode::bring_all_to_front`）；右键弹菜单；开发隔离时 tooltip 为
+//! `Mini Todo（开发版）`。「添加待办项」建到默认清单；「新增待办清单」/「显示日历」见 `services::block_windows`
+//! （「显示日历」与设置 → 常规「展示日历」是同一个状态：日历窗口的隐藏属性）。「固定模式」与「重置位置」作用于默认清单窗口 /
+//! 所有窗口（任务 `11-09-multi-list-windows` 第 5 步改这两项）。
 //! 图标：Windows 取 exe 资源 ID 1；macOS 用单色模板图标（`tray/mac_icon.rs`，随菜单栏深浅色自动着色）。
 //!
 //! 托盘 / 菜单事件在窗口过程（Windows）/ AppKit 事件（macOS，主线程）里触发：回调里**不碰** GPUI `App`，只把事件投进
@@ -33,9 +35,16 @@ pub fn set_auto_start_checked(cx: &mut App, checked: bool) {
     imp::set_auto_start_checked(cx, checked)
 }
 
+/// 回写"显示日历"勾选（`services::block_windows` 在日历窗口显示 / 隐藏时调用）
+pub fn set_calendar_checked(cx: &mut App, checked: bool) {
+    imp::set_calendar_checked(cx, checked)
+}
+
 /// 托盘菜单项 id
 pub mod menu_id {
     pub const ADD_TODO: &str = "add_todo";
+    pub const NEW_LIST: &str = "new_list";
+    pub const SHOW_CALENDAR: &str = "show_calendar";
     pub const NEW_FENCE: &str = "new_fence";
     pub const TOGGLE_FENCES: &str = "toggle_fences";
     pub const RESET_FENCES: &str = "reset_fences";
@@ -57,7 +66,7 @@ pub fn tooltip_text() -> &'static str {
 
 /// 处理一个菜单项（前台、App 未被窗口借用）
 pub fn handle_menu(cx: &mut App, id: &str) {
-    use crate::services::window_mode;
+    use crate::services::{block_windows, window_mode};
     use crate::windows::block::BlockKey;
     use crate::windows::{ChildOf, WindowManager, editor, settings};
 
@@ -65,9 +74,24 @@ pub fn handle_menu(cx: &mut App, id: &str) {
     match id {
         menu_id::ADD_TODO => {
             activate_app(cx);
-            // 以主窗口为模态打开方，但不设 owner（独立顶层窗口）
-            let parent = WindowManager::main(cx).map(|main| ChildOf::handle(main, cx).unowned());
+            // 建到默认清单；以默认清单窗口为模态打开方，但不设 owner（独立顶层窗口）
+            let parent =
+                WindowManager::default_list(cx).map(|main| ChildOf::handle(main, cx).unowned());
             editor::open(cx, parent, None, editor::EditorMode::Edit);
+        }
+        menu_id::NEW_LIST => {
+            activate_app(cx);
+            block_windows::create_list(cx);
+        }
+        menu_id::SHOW_CALENDAR => {
+            // muda 点击时自己翻转了勾选；按 AppState 的状态切换，set_calendar_visible 回写真实状态
+            let visible = crate::state::AppState::global(cx)
+                .read(cx)
+                .calendar_visible();
+            if !visible {
+                activate_app(cx);
+            }
+            block_windows::set_calendar_visible(cx, !visible);
         }
         menu_id::NEW_FENCE => fences::create(cx),
         menu_id::TOGGLE_FENCES => fences::toggle_visibility(cx),
@@ -82,7 +106,7 @@ pub fn handle_menu(cx: &mut App, id: &str) {
         menu_id::OPEN_SETTINGS => {
             activate_app(cx);
             window_mode::bring_to_front(cx, BlockKey::DEFAULT_LIST);
-            if let Some(main) = WindowManager::main(cx) {
+            if let Some(main) = WindowManager::default_list(cx) {
                 let parent = ChildOf::handle(main, cx);
                 settings::open(cx, Some(parent), settings::SettingsTab::General);
             }
@@ -161,9 +185,10 @@ mod imp {
 
     use super::menu_id;
 
-    /// 托盘与两个勾选项（主线程持有；drop 即移除托盘图标）
+    /// 托盘与三个勾选项（主线程持有；drop 即移除托盘图标）
     struct Tray {
         _icon: TrayIcon,
+        calendar: CheckMenuItem,
         fixed: CheckMenuItem,
         auto_start: CheckMenuItem,
     }
@@ -192,6 +217,17 @@ mod imp {
             return;
         }
         let auto_start_enabled = crate::services::autostart::is_enabled().unwrap_or(false);
+        // 启动时 `block_windows::start` 已读出窗口属性（在托盘之前）
+        let calendar_visible = crate::state::AppState::global(cx)
+            .read(cx)
+            .calendar_visible();
+        let calendar = CheckMenuItem::with_id(
+            menu_id::SHOW_CALENDAR,
+            "显示日历",
+            true,
+            calendar_visible,
+            None,
+        );
         let fixed = CheckMenuItem::with_id(menu_id::TOGGLE_FIXED, "固定模式", true, false, None);
         let auto_start = CheckMenuItem::with_id(
             menu_id::AUTO_START,
@@ -208,6 +244,13 @@ mod imp {
                 true,
                 None,
             )),
+            Box::new(MenuItem::with_id(
+                menu_id::NEW_LIST,
+                "新增待办清单",
+                true,
+                None,
+            )),
+            Box::new(calendar.clone()),
             Box::new(PredefinedMenuItem::separator()),
             // 收纳箱三项：Windows 与 macOS（菜单栏图标）都有（这个模块只在这两个平台编译）
             Box::new(MenuItem::with_id(
@@ -289,6 +332,7 @@ mod imp {
         };
         cx.set_global(Tray {
             _icon: icon,
+            calendar,
             fixed,
             auto_start,
         });
@@ -322,6 +366,12 @@ mod imp {
             tray.auto_start.set_checked(checked);
         }
     }
+
+    pub fn set_calendar_checked(cx: &mut App, checked: bool) {
+        if let Some(tray) = cx.try_global::<Tray>() {
+            tray.calendar.set_checked(checked);
+        }
+    }
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
@@ -331,6 +381,7 @@ mod imp {
     pub fn start(_cx: &mut App) {}
     pub fn set_fixed_checked(_cx: &mut App, _checked: bool) {}
     pub fn set_auto_start_checked(_cx: &mut App, _checked: bool) {}
+    pub fn set_calendar_checked(_cx: &mut App, _checked: bool) {}
 }
 
 #[cfg(test)]

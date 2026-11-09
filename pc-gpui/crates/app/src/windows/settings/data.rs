@@ -382,7 +382,7 @@ impl SettingsWindow {
                             state.reload_app_settings(cx).detach();
                             state.reload_todos(cx);
                         });
-                        if let Some(main) = WindowManager::main(cx) {
+                        if let Some(main) = WindowManager::default_list(cx) {
                             message::show_in(main, cx, MessageKind::Success, "数据导入成功");
                         }
                         window.remove_window();

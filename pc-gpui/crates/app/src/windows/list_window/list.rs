@@ -7,12 +7,12 @@ use gpui_kit::{
 };
 
 use super::todo_item::{RowPlace, rows_of};
-use super::{DragKind, DraggedTodo, MainWindow, RenderCtx, logic};
+use super::{DragKind, DraggedTodo, ListWindow, RenderCtx, logic};
 use crate::assets::EpIcon;
 use crate::theme::Palette;
 use crate::ui::icon::icon;
 
-impl MainWindow {
+impl ListWindow {
     pub(super) fn render_list(
         &mut self,
         rc: &RenderCtx,

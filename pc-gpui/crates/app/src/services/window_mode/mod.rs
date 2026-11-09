@@ -1,7 +1,7 @@
-//! 桌面块窗口（清单窗口 / 日历窗口；现在只有主窗口 = 默认清单窗口 [`BlockKey::DEFAULT_LIST`]）的窗口模式与几何
+//! 桌面块窗口（每个清单一个清单窗口 + 单例日历窗口；默认清单窗口 [`BlockKey::DEFAULT_LIST`] = 以前的主窗口）的窗口模式与几何
 //! （旧版 `commands/window.rs` 的主窗口部分 + 前端 `appStore` 的 `applyFixedMode` / `applyNormalMode` / `saveWindowState` /
 //! `initSettings` 定位），**按窗口**：每个登记的窗口一份模式状态（[`machine::ModeState`]，纯状态机）与一份登记（句柄 /
-//! 原生窗口 / 根视图 / 保存防抖）。
+//! 原生窗口 / 根视图 / 保存防抖）。窗口的开 / 关 / 显示 / 隐藏在 `services::block_windows`：关闭 = 原生隐藏，窗口仍登记在这里。
 //!
 //! | 模式 | `classic_fixed` | `desktop` | owner | ex style | `WS_MINIMIZEBOX` | 几何锁定 | 置顶 |
 //! |---|---|---|---|---|---|---|---|
@@ -15,8 +15,8 @@
 //!   （[`on_embed_preference_changed`] / [`apply_runtime_prefs`]），不靠各窗口各自观察（N 个窗口不会重复切换）。
 //! - **200ms 轮询遍历所有登记的窗口**：Explorer 重启重挂、经典固定的最小化守护、贴边隐藏（状态机按窗口各一份），以及廉价的
 //!   样式自愈（防御）。GPUI 建窗后不再改写 ex style，旧版为对抗 tao `apply_diff` 写的排队重申不再需要。
-//! - **唤起与重置作用于所有登记的窗口**：托盘左键 / 单实例 / Dock 唤起 / 贴边隐藏中被激活 → [`bring_all_to_front`]；
-//!   托盘「重置位置」→ [`reset_all`]（错开排列、解除锁定）。
+//! - **唤起与重置作用于所有登记的窗口**：托盘左键 / 单实例 / Dock 唤起 / 贴边隐藏中被激活 → [`bring_all_to_front`]（隐藏的清单窗口
+//!   一起显示、清掉隐藏；还没开过窗的清单先开窗；日历只在「显示日历」开着时）；托盘「重置位置」→ [`reset_all`]（错开排列、解除锁定）。
 //! - **几何与锁定按屏幕组合持久化**，经 [`store`]（core 的窗口属性表 `window_layouts`；默认清单窗口另外登记屏幕组合）。
 //!
 //! macOS 走同一套状态机与 200ms 轮询（`platform::Hwnd` 是 NSWindow 窗口号）：几何锁定 = `setMovable:NO` + 去掉可缩放，
@@ -524,29 +524,31 @@ fn monitor_for_rect(monitors: &[MonitorInfo], rect: PhysRect) -> Option<MonitorI
 // 唤起 / 重置（作用于所有登记的窗口）
 // ----------------------------------------------------------------------
 
-/// 托盘左键、单实例唤起、macOS Dock 唤起、贴边隐藏中被激活（旧 `bring_main_window_to_front`）：显示并激活所有登记的窗口。
-/// 每个窗口按自己的模式：嵌入桌面只显示 + 聚焦；其它模式贴边隐藏开着时给 3s 宽限并拉回 → 还原 → 临时置顶 600ms（贴边唤起态
-/// 需要保持置顶时不撤）→ 激活。默认清单窗口最后激活（在最上面、拿到焦点）；它不在（关掉了）时重新打开
+/// 托盘左键、单实例唤起、macOS Dock 唤起、贴边隐藏中被激活（旧 `bring_main_window_to_front`）：显示并激活所有清单窗口
+/// （隐藏的一起显示并清掉隐藏、还没开过窗的先开窗，见 `block_windows::prepare_wake_all`）与显示中的日历窗口。
+/// 每个窗口按自己的模式：嵌入桌面只显示 + 聚焦；其它模式贴边隐藏开着时给 3s 宽限并拉回 → 还原（隐藏的窗口在这一步显示）→
+/// 临时置顶 600ms（贴边唤起态需要保持置顶时不撤）→ 激活。默认清单窗口最后激活（在最上面、拿到焦点）
 pub fn bring_all_to_front(cx: &mut App) {
     // macOS：从菜单栏图标 / 单实例 / Dock 唤起时本应用多半不在前台，先切到前台，否则窗口会落在当前前台应用的
     // 窗口之后（重复调用无害）。Windows 由窗口自己 SetForegroundWindow
     #[cfg(target_os = "macos")]
     cx.activate(true);
-    let opened = ensure_default_list(cx);
+    let opened = crate::services::block_windows::prepare_wake_all(cx);
     let mut keys: Vec<BlockKey> = registered(cx)
         .into_iter()
-        .filter(|key| !(opened && *key == BlockKey::DEFAULT_LIST))
+        .filter(|key| !opened.contains(key))
+        .filter(|key| crate::services::block_windows::should_wake(cx, *key))
         .collect();
     keys.reverse();
     wake(cx, keys);
 }
 
-/// 只唤起一个窗口（托盘「打开设置」/ 应用菜单「设置…」先把作为打开方的默认清单窗口带到前面）；
-/// 默认清单窗口不在时重新打开
+/// 只唤起一个窗口（托盘「打开设置」/ 应用菜单「设置…」先把作为打开方的默认清单窗口带到前面；「显示日历」打开已建过的
+/// 日历窗口）。隐藏着的窗口在这一步显示出来；默认清单窗口不在时重新打开
 pub fn bring_to_front(cx: &mut App, key: BlockKey) {
     #[cfg(target_os = "macos")]
     cx.activate(true);
-    if key == BlockKey::DEFAULT_LIST && ensure_default_list(cx) {
+    if key == BlockKey::DEFAULT_LIST && crate::services::block_windows::ensure_default_list(cx) {
         return;
     }
     if is_registered(cx, key) {
@@ -554,13 +556,18 @@ pub fn bring_to_front(cx: &mut App, key: BlockKey) {
     }
 }
 
-/// 默认清单窗口（原主窗口）不在（关掉了）时重新打开；返回是否刚打开（刚打开的不用再唤起）
-fn ensure_default_list(cx: &mut App) -> bool {
-    if is_registered(cx, BlockKey::DEFAULT_LIST) {
-        return false;
+/// 窗口 `key` 现在的客户区（物理像素；没登记 / 取不到时 `None`）。Windows / macOS 读原生窗口（只读，不发窗口消息，随时可调）；
+/// Linux 没有原生句柄，读 GPUI 窗口（窗口正被借用时取不到）
+pub fn client_rect(cx: &mut App, key: BlockKey) -> Option<PhysRect> {
+    let (handle, hwnd) = block(cx, key).map(|b| (b.handle, b.hwnd))?;
+    if let Some(rect) = hwnd.and_then(Hwnd::client_rect) {
+        return Some(rect);
     }
-    crate::windows::main_window::open(cx);
-    true
+    cx.update_window(handle?, |_, window, _| {
+        platform::client_rect_physical(window)
+    })
+    .ok()
+    .flatten()
 }
 
 /// 按顺序唤起 `keys`（后面的在上面）：一次唤起只开一个代次，600ms 后各窗口按自己的贴边状态决定撤不撤置顶
@@ -635,14 +642,12 @@ pub fn on_activated(cx: &mut App, key: BlockKey) {
 
 /// 托盘「重置位置」（旧 `reset_window_impl` + 前端 `tray-reset-window`）：所有登记的窗口清贴边状态、撤置顶，在主显示器左上起
 /// 错开排列（第一个 = 以前的主窗口：10% 边距、380×600 逻辑，见 [`machine::reset_rect`]）；锁定的退回普通模式；然后保存。
-/// 默认清单窗口不在（关掉了）时只重新打开它。
+/// 默认清单窗口不在（Linux 上被关掉了）时先打开它。隐藏着的窗口照样挪（任务第 5 步改成一并取消隐藏）。
 ///
 /// 屏幕组合 ID 只在启动时算（旧版也是：运行中插拔显示器不切换配置），旧版在重置后重跑 `initSettings` 重算；这里在保存
 /// 之前重算，重置后的几何写进**当前**屏幕组合的记录（不会写到启动时那个已经过时的组合上）
 pub fn reset_all(cx: &mut App) {
-    if ensure_default_list(cx) {
-        return;
-    }
+    crate::services::block_windows::ensure_default_list(cx);
     let primary = platform::primary_monitor(cx);
     let keys = registered(cx);
     cx.spawn(async move |cx| {

@@ -72,16 +72,15 @@ fn to_px(r: PhysRect) -> PxRect {
     }
 }
 
-/// 拖动 / 缩放开始时的吸附快照：除 `exclude`（拖动中的窗口自己）外，当前显示中的参与者（含锁定的）屏幕上的可见客户区
-/// （物理像素；折叠的收纳箱只有标题栏），按 [`SnapKey`] 排序，加上各显示器
-pub fn scene(cx: &App, exclude: SnapKey) -> SnapScene {
+/// 当前显示中的参与者（除 `exclude`；含锁定的，不含隐藏 / 最小化 / 暂不算目标的）屏幕上的可见客户区，按 [`SnapKey`] 排序
+fn visible_targets(cx: &App, exclude: Option<SnapKey>) -> Vec<SnapTarget> {
     let Some(rt) = cx.try_global::<SnapRuntime>() else {
-        return SnapScene::default();
+        return Vec::new();
     };
     let mut targets: Vec<SnapTarget> = rt
         .members
         .iter()
-        .filter(|(key, _)| **key != exclude)
+        .filter(|(key, _)| Some(**key) != exclude)
         .filter(|(key, member)| !(member.suppressed)(cx, **key))
         .filter_map(|(key, member)| {
             let h = member.hwnd?;
@@ -96,6 +95,24 @@ pub fn scene(cx: &App, exclude: SnapKey) -> SnapScene {
         .collect();
     // HashMap 的顺序不确定：按 key 排，同距离时取哪个才是确定的
     targets.sort_by_key(|t| t.key);
+    targets
+}
+
+/// 吸附组里所有显示中的窗口（清单 / 日历窗口、收纳箱）屏幕上的可见客户区（物理像素）：新清单窗口找空位时避开它们
+pub fn visible_rects(cx: &App) -> Vec<PxRect> {
+    visible_targets(cx, None)
+        .into_iter()
+        .map(|t| t.rect)
+        .collect()
+}
+
+/// 拖动 / 缩放开始时的吸附快照：除 `exclude`（拖动中的窗口自己）外，当前显示中的参与者（含锁定的）屏幕上的可见客户区
+/// （物理像素；折叠的收纳箱只有标题栏），按 [`SnapKey`] 排序，加上各显示器
+pub fn scene(cx: &App, exclude: SnapKey) -> SnapScene {
+    if cx.try_global::<SnapRuntime>().is_none() {
+        return SnapScene::default();
+    }
+    let targets = visible_targets(cx, Some(exclude));
     let monitors = platform::monitors(cx)
         .into_iter()
         .map(|m| SnapMonitor {

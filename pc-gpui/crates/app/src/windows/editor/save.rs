@@ -40,8 +40,9 @@ pub(super) struct Originals {
     pub repeat_enabled: bool,
 }
 
-/// `create_todo` 请求（`color` 为空时返回 `None`：旧版反序列化失败报"创建待办失败"）
-pub(super) fn build_create_request(form: &FormValues) -> Option<CreateTodoRequest> {
+/// `create_todo` 请求（`color` 为空时返回 `None`：旧版反序列化失败报"创建待办失败"）。新建总是写具体的清单
+/// （`list_id`：打开方清单窗口的清单，托盘新建是默认清单；契约 §12-6）
+pub(super) fn build_create_request(form: &FormValues, list_id: i64) -> Option<CreateTodoRequest> {
     Some(CreateTodoRequest {
         title: form.title.clone(),
         description: (!form.description.is_empty()).then(|| form.description.clone()),
@@ -55,8 +56,8 @@ pub(super) fn build_create_request(form: &FormValues) -> Option<CreateTodoReques
         }),
         start_time: form.start_time.clone(),
         end_time: form.end_time.clone(),
-        // 编辑表单还没有「清单」下拉：一律建到默认清单
-        list_id: None,
+        // 编辑表单的「清单」下拉在任务第 5 步：现在按打开方定
+        list_id: Some(list_id),
     })
 }
 
@@ -168,7 +169,7 @@ impl EditorWindow {
     /// 旧 `saveNewTodo()`
     fn save_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let form = self.form_values(cx);
-        let Some(request) = build_create_request(&form) else {
+        let Some(request) = build_create_request(&form, self.new_list_id) else {
             self.saving = false;
             message::error_with(window, cx, "创建待办失败", "颜色不能为空");
             cx.notify();
@@ -405,17 +406,20 @@ mod tests {
     #[test]
     fn create_request_omits_empty_description_and_zeroes_before_for_repeat() {
         let mut f = form();
-        let request = build_create_request(&f).unwrap();
+        let request = build_create_request(&f, 1).unwrap();
         assert_eq!(request.title, " 标题 ");
         assert_eq!(request.description, None);
         assert_eq!(request.notify_before, Some(15));
+        // 新建总是写具体的清单（默认清单也写 1）
+        assert_eq!(request.list_id, Some(1));
         f.repeat_enabled = true;
         f.description = "x".into();
-        let request = build_create_request(&f).unwrap();
+        let request = build_create_request(&f, 1_731_000_000_000_123).unwrap();
         assert_eq!(request.description.as_deref(), Some("x"));
         assert_eq!(request.notify_before, Some(0));
+        assert_eq!(request.list_id, Some(1_731_000_000_000_123));
         f.color = None;
-        assert!(build_create_request(&f).is_none());
+        assert!(build_create_request(&f, 1).is_none());
     }
 
     #[test]
