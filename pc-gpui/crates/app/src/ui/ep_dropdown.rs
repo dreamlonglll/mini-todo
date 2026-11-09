@@ -39,6 +39,8 @@ pub struct EpDropdownItem {
     pub label: SharedString,
     pub icon: Option<EpIcon>,
     pub divided: bool,
+    /// `disabled`：文字与图标 `--el-text-color-disabled`、`cursor: not-allowed`、没有悬停底色，点击不回调
+    pub disabled: bool,
 }
 
 impl EpDropdownItem {
@@ -48,7 +50,13 @@ impl EpDropdownItem {
             label: label.into(),
             icon: None,
             divided: false,
+            disabled: false,
         }
+    }
+
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
     }
 
     pub fn icon(mut self, icon: EpIcon) -> Self {
@@ -124,6 +132,12 @@ impl RenderOnce for EpDropdownMenu {
                         .border_color(ep.border_lighter)
                         .into_any_element()
                 });
+                let disabled = item.disabled;
+                let color = if disabled {
+                    ep.text_disabled
+                } else {
+                    ep.text_regular
+                };
                 let row = div()
                     .id(("item", index))
                     .group(group.clone())
@@ -134,18 +148,25 @@ impl RenderOnce for EpDropdownMenu {
                     .text_size(px(14.))
                     .line_height(px(22.))
                     .whitespace_nowrap()
-                    .text_color(ep.text_regular)
-                    .cursor_pointer()
-                    .hover(move |s| s.bg(ep.primary_light_9).text_color(ep.primary))
-                    .when_some(item.icon, |this, source| {
-                        this.child(
-                            div().mr(px(5.)).flex().items_center().child(
-                                icon(source, 14., ep.text_regular)
-                                    .group_hover(group.clone(), move |s| s.text_color(ep.primary)),
-                            ),
-                        )
+                    .text_color(color)
+                    .when(disabled, |this| {
+                        this.cursor(gpui_kit::CursorStyle::OperationNotAllowed)
                     })
-                    .when_some(on_select, |this, handler| {
+                    .when(!disabled, |this| {
+                        this.cursor_pointer()
+                            .hover(move |s| s.bg(ep.primary_light_9).text_color(ep.primary))
+                    })
+                    .when_some(item.icon, |this, source| {
+                        let glyph = icon(source, 14., color);
+                        this.child(div().mr(px(5.)).flex().items_center().child(if disabled {
+                            glyph.into_any_element()
+                        } else {
+                            glyph
+                                .group_hover(group.clone(), move |s| s.text_color(ep.primary))
+                                .into_any_element()
+                        }))
+                    })
+                    .when_some(on_select.filter(|_| !disabled), |this, handler| {
                         this.on_click(move |_, window, cx| handler(&command, window, cx))
                     })
                     .child(item.label)

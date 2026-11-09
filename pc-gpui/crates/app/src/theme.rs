@@ -657,11 +657,13 @@ pub fn fab_shadow(hovered: bool) -> Vec<BoxShadow> {
     }
 }
 
-/// 主窗口尺寸 token
+/// 主窗口（清单 / 日历窗口）尺寸 token
 pub mod main_window {
     /// 标题栏按钮 28×28、图标 16
     pub const TITLE_BUTTON: f32 = 28.;
     pub const TITLE_ICON: f32 = 16.;
+    /// 清单名就地改名的输入框宽度（标题栏放不下时收缩）
+    pub const LIST_NAME_INPUT_WIDTH: f32 = 160.;
     /// FAB 48×48，距右下 20
     pub const FAB_SIZE: f32 = 48.;
     pub const FAB_INSET: f32 = 20.;

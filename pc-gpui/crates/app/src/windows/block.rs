@@ -144,13 +144,25 @@ struct BlockTitleDrag;
 #[derive(Clone, Copy)]
 struct BlockResizeDrag(ResizeDir);
 
-/// 标题栏按下（还没超过 3px，不一定是拖动）
+/// 标题栏按下（还没超过 3px，不一定是拖动：也可能是单击 / 双击改名）
 #[derive(Debug, Clone, Copy)]
 struct TitlePress {
     /// 按下点（窗口逻辑坐标；判断阈值时窗口还没动）
     position: Point<Pixels>,
     /// 按下时的光标（`drag::cursor_point`）
     cursor: (f64, f64),
+    /// 是双击的第二下（系统的 `click_count >= 2`，且上一次按下没有拖动窗口）：松手时没移动超过 3px 就算双击
+    /// （[`BlockDrag::is_double_click_release`]，同收纳箱的 `TitlePress.double`）
+    double: bool,
+}
+
+impl TitlePress {
+    /// `position`（窗口逻辑坐标）离按下点超过了 [`TITLE_DRAG_THRESHOLD`]
+    fn moved_beyond_threshold(&self, position: Point<Pixels>) -> bool {
+        let dx = f64::from(f32::from(position.x - self.position.x));
+        let dy = f64::from(f32::from(position.y - self.position.y));
+        drag::exceeds_drag_threshold(dx, dy, TITLE_DRAG_THRESHOLD)
+    }
 }
 
 /// 进行中的移动
@@ -199,6 +211,8 @@ pub struct BlockDrag {
     /// 最小客户区（逻辑像素）
     min_size: (f64, f64),
     press: Option<TitlePress>,
+    /// 上一次标题栏按下拖动了窗口（这次按下即使 `click_count >= 2` 也不算双击）
+    last_press_dragged: bool,
     moving: Option<MoveSession>,
     resizing: Option<ResizeSession>,
     pending: Option<PendingPlacement>,
@@ -215,6 +229,7 @@ impl BlockDrag {
             key,
             min_size: (min_width, min_height),
             press: None,
+            last_press_dragged: false,
             moving: None,
             resizing: None,
             pending: None,
@@ -235,6 +250,17 @@ impl BlockDrag {
         self.press.is_some() || self.moving.is_some() || self.resizing.is_some()
     }
 
+    /// 标题栏上的元素（清单名）松手时调用：这次按下是双击的第二下、没有拖动窗口、松手点离按下点不超过 3px。
+    /// 标题栏挂了 `on_drag`（移动超过 2px 就开始拖动、这次按下不再算单击），双击不能靠 GPUI 的 `on_click`
+    /// （第二下手抖 2~3px 就收不到，gpui-conventions §2.3）；锁定时不挂拖动，照样能判断。
+    /// 元素的 `on_mouse_up` 先于标题栏自己的（冒泡阶段子元素在前），这时按下还没被清掉
+    pub fn is_double_click_release(&self, position: Point<Pixels>) -> bool {
+        self.moving.is_none()
+            && self
+                .press
+                .is_some_and(|p| p.double && !p.moved_beyond_threshold(position))
+    }
+
     /// 标题栏挂上移动手势：按下记点（不立即拖）；`can_move`（未锁定）时挂 GPUI 拖动（超过 3px 才动）；
     /// 松手在不在标题栏上都收尾（窗口跟手有一帧延迟、吸附时窗口与光标有偏移）
     pub fn title_bar<V: BlockDragHost>(
@@ -246,11 +272,13 @@ impl BlockDrag {
         let bar = bar.on_mouse_down(
             MouseButton::Left,
             cx.listener(|this: &mut V, event: &MouseDownEvent, window, _| {
-                let press = TitlePress {
+                let block = this.block_drag();
+                let after_drag = std::mem::take(&mut block.last_press_dragged);
+                block.press = Some(TitlePress {
                     position: event.position,
                     cursor: drag::cursor_point(event.position, window).0,
-                };
-                this.block_drag().press = Some(press);
+                    double: event.click_count >= 2 && !after_drag,
+                });
             }),
         );
         let bar = if can_move {
@@ -412,6 +440,8 @@ fn begin_move_if_dragged<V: BlockDragHost>(
         return false;
     }
     drag.press = None;
+    // 拖过的按下之后紧跟的一下不算双击（同收纳箱）
+    drag.last_press_dragged = true;
     let key = drag.key;
     // 按住期间被锁定了（托盘「固定模式」）：不拖
     if window_mode::is_fixed(cx, key) {
@@ -599,6 +629,26 @@ fn to_px(r: platform::PhysRect) -> PxRect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui_kit::{point, px};
+
+    #[test]
+    fn only_an_unmoved_second_press_counts_as_a_double_click() {
+        let mut drag = BlockDrag::new(BlockKey::List(7), 320., 400.);
+        let press = |double: bool| TitlePress {
+            position: point(px(10.), px(10.)),
+            cursor: (10., 10.),
+            double,
+        };
+        // 没有按下（拖动开始时已清掉）/ 单击：不算
+        assert!(!drag.is_double_click_release(point(px(10.), px(10.))));
+        drag.press = Some(press(false));
+        assert!(!drag.is_double_click_release(point(px(10.), px(10.))));
+        // 双击的第二下：手抖 2~3px 照样算（GPUI 的 on_click 在 2px 时就不算单击了），超过 3px 不算
+        drag.press = Some(press(true));
+        assert!(drag.is_double_click_release(point(px(12.), px(11.))));
+        assert!(drag.is_double_click_release(point(px(13.), px(10.))));
+        assert!(!drag.is_double_click_release(point(px(14.), px(10.))));
+    }
 
     #[test]
     fn keys_order_the_default_list_first_and_the_calendar_last() {
