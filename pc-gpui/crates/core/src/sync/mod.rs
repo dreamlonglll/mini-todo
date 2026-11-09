@@ -43,7 +43,7 @@ use crate::db::settings_kv::{
     get_bool_setting, get_setting, get_setting_or, set_bool_setting, set_setting,
 };
 use crate::db::sync_store::{
-    self, EntityKind, ListTombstoneIndex, LocalRecords, MergeStats, TombstoneIndex,
+    self, EntityKind, ListAssignment, ListTombstoneIndex, LocalRecords, MergeStats, TombstoneIndex,
 };
 use crate::db::time::{normalize_datetime, now_local, DefaultTime};
 use crate::db::{AppSettings, Database};
@@ -745,7 +745,6 @@ impl SyncEngine<'_> {
                     tx,
                     parsed_lists.as_deref(),
                     list_tombstones,
-                    cutoff,
                 )?);
                 window_prefs::prune_orphans(tx)?;
                 let applied = apply_remote_settings_if_newer(tx, remote, first_sync)?;
@@ -766,7 +765,8 @@ impl SyncEngine<'_> {
             .map_err(|e| format!("读取本地数据失败: {}", e))
     }
 
-    /// 同步成功收尾：记基准、synced_seq、设置基准、同步时间，清理过期墓碑
+    /// 同步成功收尾：记基准、synced_seq、设置基准、同步时间，清理过期的待办 / 子任务墓碑
+    /// （清单墓碑永不过期，契约 §13-10）
     fn finish(
         &self,
         base: &RemoteVersion,
@@ -787,7 +787,6 @@ impl SyncEngine<'_> {
                 set_setting(tx, KEY_LAST_SYNC_AT, &at)?;
                 sync_store::set_synced_seq(tx, synced_seq)?;
                 sync_store::purge_tombstones_before(tx, cutoff)?;
-                sync_store::purge_list_tombstones_before(tx, cutoff)?;
                 Ok(())
             })
             .map_err(|e| format!("保存同步状态失败: {}", e))?;
@@ -984,7 +983,6 @@ impl SyncEngine<'_> {
                     tx,
                     parsed_lists.as_deref(),
                     list_tombstones,
-                    &cutoff,
                 )?);
                 window_prefs::prune_orphans(tx)?;
                 // 没有 settingsUpdatedAt 的 settings（旧版写入方 / cloud 占位）不应用
@@ -1348,34 +1346,49 @@ fn list_versions(lists: &[Value]) -> BTreeMap<i64, String> {
     versions
 }
 
-fn list_tombstone_set(tombstones: &[ListTombstone], cutoff: &str) -> BTreeSet<(i64, String)> {
+/// 清单墓碑集合（永不过期，契约 §13-10：不按保留期过滤）
+fn list_tombstone_set(tombstones: &[ListTombstone]) -> BTreeSet<(i64, String)> {
     tombstones
         .iter()
-        .filter(|t| t.deleted_at.as_str() >= cutoff)
         .map(|t| (t.entity_id, t.deleted_at.clone()))
         .collect()
 }
 
-/// 远端是否丢了本机知道的 `listId`（契约 §12-8：需要补传一次，修复文档）。
+/// 文档里每条待办 id → 归属（[`ListAssignment`]；同 id 出现多次取最新的）。畸形记录（`listId` 类型不对、
+/// `updatedAt` 无法识别）不参与（契约 §13-11）
+fn doc_assignments(todos: &[Value]) -> HashMap<i64, ListAssignment> {
+    let mut out: HashMap<i64, ListAssignment> = HashMap::new();
+    for todo in todos {
+        let (Some(id), Some(assignment)) =
+            (sync_store::value_id(todo), ListAssignment::from_value(todo))
+        else {
+            continue;
+        };
+        let newest = match out.remove(&id) {
+            Some(seen) => seen.newest(assignment),
+            None => assignment,
+        };
+        out.insert(id, newest);
+    }
+    out
+}
+
+/// 远端那一版的归属是否比上传文档里的旧（契约 §13-6：需要补传一次，修复文档）。
 ///
-/// 旧版本（≤ 3.0.x）是强类型的、不认识 `listId`：它每次上传都按自己的本地版本重新序列化待办——平局保留本地，连它
-/// 没改过的待办也会丢掉 `listId`。新版本合并时把缺 `listId` 当作"未知"、沿用本地的归属，自己不受影响；但 cloud 与
-/// 还没同步过的设备看到的是归属未知的版本。所以：远端某条待办的 `listId` 缺失或为 `null`、而上传文档里同一条带着
-/// 已知的 `listId`（任何值，含默认清单 1）时上传一次。本机未知的待办在文档里本来就不写 `listId`，不会触发；新版本的
-/// 写入方都会写出已知值，两台新设备之间不会因此来回上传；旧设备只在自己有变更时才上传，补回之后不会再触发
-fn remote_lost_list_ids(doc: &SyncData, remote: &SyncData) -> bool {
-    let unknown_on_remote: HashSet<i64> = remote
-        .todos
-        .iter()
-        .filter(|t| t.is_object() && t.get("listId").is_none_or(Value::is_null))
-        .filter_map(sync_store::value_id)
-        .collect();
-    if unknown_on_remote.is_empty() {
+/// 合并时归属取所有可见版本里最新的那个、且不改记录的 `updatedAt`（§13-5），所以只比记录版本（[`record_versions`]）
+/// 发现不了"本机的归属比远端新"：旧版本（≤ 3.0.x，不认识清单）上传的待办全都缺 `listId`；落后的副本带着陈旧的归属
+/// 写了更新的记录版本（F1）；降级再升级回来的设备留下的旧归属（F3）。上传文档里的待办（本机合并后的版本，或本机看不懂、
+/// 原样带回的远端版本）与远端同 id 的版本逐条比较归属，文档里的严格更新就上传一次。合并之后两端的归属一致，
+/// 两台新设备之间不会因此来回上传；旧设备只在自己有变更时才上传，补回之后不会再触发
+fn remote_assignments_stale(doc: &SyncData, remote: &SyncData) -> bool {
+    let theirs = doc_assignments(&remote.todos);
+    if theirs.is_empty() {
         return false;
     }
-    doc.todos.iter().any(|t| {
-        sync_store::value_id(t).is_some_and(|id| unknown_on_remote.contains(&id))
-            && t.get("listId").and_then(Value::as_i64).is_some()
+    doc_assignments(&doc.todos).iter().any(|(id, ours)| {
+        theirs
+            .get(id)
+            .is_some_and(|theirs| ours.is_newer_than(theirs))
     })
 }
 
@@ -1388,16 +1401,16 @@ fn doc_list_versions(doc: &SyncData) -> BTreeMap<i64, String> {
     }
 }
 
-/// 上传文档与远端是否不等价：记录（待办 / 子任务 / 清单）版本、墓碑与清单墓碑（保留期内）、设置版本任一不同，
-/// 或远端丢了本机知道的 `listId`（见 [`remote_lost_list_ids`]），即需上传
+/// 上传文档与远端是否不等价：记录（待办 / 子任务 / 清单）版本、墓碑（保留期内）与清单墓碑（全部）、设置版本任一不同，
+/// 或远端那一版待办的归属比文档里的旧（见 [`remote_assignments_stale`]），即需上传
 fn doc_differs(doc: &SyncData, remote: &SyncData, cutoff: &str) -> bool {
     record_versions(&doc.todos) != record_versions(&remote.todos)
         || tombstone_set(&doc.tombstones, cutoff) != tombstone_set(&remote.tombstones, cutoff)
         || doc.settings_updated_at != remote.settings_updated_at
         || doc_list_versions(doc) != doc_list_versions(remote)
-        || list_tombstone_set(doc.list_tombstones.as_deref().unwrap_or(&[]), cutoff)
-            != list_tombstone_set(remote.list_tombstones.as_deref().unwrap_or(&[]), cutoff)
-        || remote_lost_list_ids(doc, remote)
+        || list_tombstone_set(doc.list_tombstones.as_deref().unwrap_or(&[]))
+            != list_tombstone_set(remote.list_tombstones.as_deref().unwrap_or(&[]))
+        || remote_assignments_stale(doc, remote)
 }
 
 /// 生成上传文档（K2）。`images` 由调用方在上传图片后填写。
@@ -1448,7 +1461,8 @@ fn build_sync_doc(
             .is_none_or(|updated_at| deleted_at.as_str() < updated_at.as_str())
     });
 
-    // 清单（契约 §1 / §4）：每次都写出全部未删除的清单（含默认清单）与保留期内的全部清单墓碑，规则同待办
+    // 清单（契约 §1 / §4）：每次都写出全部未删除的清单（含默认清单）与全部清单墓碑（永不过期，契约 §13-10），
+    // 其余规则同待办
     let mut list_tombs: BTreeMap<i64, String> = BTreeMap::new();
     let all_list_tombstones = local.records.list_tombstones.iter().chain(
         remote
@@ -1456,7 +1470,7 @@ fn build_sync_doc(
             .unwrap_or(&[]),
     );
     for t in all_list_tombstones {
-        if t.entity_id == DEFAULT_LIST_ID || t.deleted_at.as_str() < cutoff {
+        if t.entity_id == DEFAULT_LIST_ID {
             continue;
         }
         let entry = list_tombs.entry(t.entity_id).or_default();

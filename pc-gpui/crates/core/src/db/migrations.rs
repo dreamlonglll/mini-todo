@@ -181,11 +181,14 @@ pub(crate) fn run_migrations_to(conn: &Connection, target: i32) -> Result<()> {
 ///   它永远学不到真实归属，之后一上传还会把文档里的 `listId` 全改成 1。未知时界面按默认清单显示，合并时从远端学到真实归属。
 ///   新建 / 导入旧备份一律写具体值。`ALTER TABLE` 不触发 UPDATE 触发器，也不算本地变更。不加外键：指向不存在（含已删除）
 ///   的清单时由读侧兜底按默认清单显示，记录不改写
+/// - `todos.list_updated_at TEXT`（可空，契约 §13）：`list_id` 这一个字段自己的版本，归属按它做字段级 LWW（过时的副本
+///   不会把旧归属带进新版本、吞掉别处的「移到清单」）。只有显式设置清单时才写；存量行是 NULL
 /// - 作废 WebDAV 基准 ETag（`webdav_remote_etag`）：升级后第一次同步一定是无条件 GET——远端没变时条件 GET 只会得到 304，
 ///   存量待办就迟迟学不到归属
 /// - `list_tombstones(entity_id, deleted_at)`：清单删除墓碑，同步文档里是独立顶层键 `listTombstones`——不进共用的
 ///   `tombstones`：v2.5.0 / 3.0.x 丢弃未知 `entityType` 后按本地表重建 `tombstones`，会把它抹掉，已删的清单随后复活。
-///   与 `tombstones` 一样不接触发器（合并远端墓碑不是本地变更；本地删除清单时 `todo_lists` 的 DELETE 已经计数）
+///   与 `tombstones` 一样不接触发器（合并远端墓碑不是本地变更；本地删除清单时 `todo_lists` 的 DELETE 已经计数）；
+///   与 `tombstones` 不同的是永不过期（契约 §13-10）
 ///
 /// 设备本地（不同步、不导出、不接 `local_seq`，性质同 `screen_configs` / 收纳箱表）：
 /// - `window_prefs`：每个窗口（清单窗口 `list:<清单 id>`、日历窗口 `calendar`）的隐藏 / 深色 / 视图模式 /
@@ -236,10 +239,16 @@ fn migration_v31(conn: &Connection) -> Result<()> {
     )?;
     // 整个迁移可以重跑（同 v18 / v19 的写法）：外部工具回退过版本号、但表和列还在的库（e2e 用最新库逆向造旧库）
     // 不会因"列已存在"启动失败；表 / 触发器都是 IF NOT EXISTS，种子都是 INSERT OR IGNORE
-    let has_list_id = conn.prepare("SELECT list_id FROM todos LIMIT 0").is_ok();
-    if !has_list_id {
+    let has_column = |column: &str| {
+        conn.prepare(&format!("SELECT {column} FROM todos LIMIT 0"))
+            .is_ok()
+    };
+    if !has_column("list_id") {
         // 不给默认值：存量行是 NULL（未知），见上
         conn.execute("ALTER TABLE todos ADD COLUMN list_id INTEGER", [])?;
+    }
+    if !has_column("list_updated_at") {
+        conn.execute("ALTER TABLE todos ADD COLUMN list_updated_at TEXT", [])?;
     }
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_todos_list_id ON todos(list_id)",
@@ -1836,14 +1845,18 @@ mod tests {
                 "2000-01-01 00:00:00".to_string()
             )]
         );
-        let list_ids: Vec<Option<i64>> = conn
-            .prepare("SELECT list_id FROM todos ORDER BY id")
+        let assignments: Vec<(Option<i64>, Option<String>)> = conn
+            .prepare("SELECT list_id, list_updated_at FROM todos ORDER BY id")
             .unwrap()
-            .query_map([], |r| r.get(0))
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
             .unwrap()
             .collect::<Result<_>>()
             .unwrap();
-        assert_eq!(list_ids, vec![None, None], "存量待办的归属未知");
+        assert_eq!(
+            assignments,
+            vec![(None, None), (None, None)],
+            "存量待办的归属未知，归属的版本（契约 §13）也是 NULL"
+        );
         assert_eq!(
             setting_of(&conn, "webdav_remote_etag").as_deref(),
             Some(""),

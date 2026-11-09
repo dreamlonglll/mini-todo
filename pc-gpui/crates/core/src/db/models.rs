@@ -1,12 +1,13 @@
 use rusqlite::Row;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 pub const SUBTASK_COLUMNS: &str =
     "id, parent_id, title, content, completed, sort_order, created_at, updated_at";
 
 pub const TODO_COLUMNS: &str = "id, title, description, color, quadrant, notify_at, notify_before,
      notified, completed, sort_order, start_time, end_time, created_at, updated_at,
-     repeat_enabled, repeat_type, repeat_interval, repeat_weekdays, repeat_month_day, list_id";
+     repeat_enabled, repeat_type, repeat_interval, repeat_weekdays, repeat_month_day, list_id,
+     list_updated_at";
 
 pub fn subtask_from_row(row: &Row) -> rusqlite::Result<SubTask> {
     Ok(SubTask {
@@ -22,6 +23,7 @@ pub fn subtask_from_row(row: &Row) -> rusqlite::Result<SubTask> {
 }
 
 pub fn todo_from_row(row: &Row) -> rusqlite::Result<Todo> {
+    let list_id: Option<i64> = row.get(19)?;
     Ok(Todo {
         id: row.get(0)?,
         title: row.get(1)?,
@@ -43,8 +45,23 @@ pub fn todo_from_row(row: &Row) -> rusqlite::Result<Todo> {
         repeat_interval: row.get(16).unwrap_or(1),
         repeat_weekdays: row.get(17).unwrap_or(None),
         repeat_month_day: row.get(18).unwrap_or(None),
-        list_id: row.get(19)?,
+        // 归属未知时它的版本也没有意义（两个键都不写出，契约 §13-7）
+        list_updated_at: if list_id.is_some() {
+            row.get(20)?
+        } else {
+            None
+        },
+        list_id,
         subtasks: Vec::new(),
+    })
+}
+
+/// `listUpdatedAt`：字符串照收（能否识别留给合并时判断：无法识别 = 已知但没有版本，契约 §13-3）；
+/// `null` 与其它类型都当作缺失，不因为这个字段让整条记录变成"无法识别"
+fn de_lenient_time<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    Ok(match serde_json::Value::deserialize(d)? {
+        serde_json::Value::String(s) => Some(s),
+        _ => None,
     })
 }
 
@@ -136,11 +153,20 @@ pub struct Todo {
     pub repeat_month_day: Option<i32>,
     /// 所属清单（v31）。`None` = **未知**（契约 §12）：写这条记录的一方不认识清单——旧版本上传的、迁移前的存量待办
     /// （`todos.list_id` 为 NULL）——**不等于**默认清单。未知时界面按默认清单显示（`lists::effective_list_id`），
-    /// 合并时不覆盖别处的已知值、也会从远端学到已知值，上传 / 导出时不写 `listId` 键；已知值（含 1）照常写出。
-    /// 缺失与 `null` 都是未知；类型错误（如字符串）与其它字段一样按无法识别的记录处理。
-    /// 指向不存在（含已删除）的清单时同样按默认清单显示，存储与同步的仍是原值
+    /// 上传 / 导出时不写 `listId` 键；已知值（含 1）照常写出。合并时与 [`Todo::list_updated_at`] 一起按归属做字段级 LWW
+    /// （契约 §13，`db::sync_store::ListAssignment`）。缺失与 `null` 都是未知；类型错误（如字符串）与其它字段一样按
+    /// 无法识别的记录处理。指向不存在（含已删除）的清单时同样按默认清单显示，存储与同步的仍是原值
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub list_id: Option<i64>,
+    /// `listId` 这一个字段自己的版本（契约 §13，规范时间）：归属按 `(listId, listUpdatedAt)` 做字段级 LWW，
+    /// 与整条记录的 `updatedAt` 无关。只有显式设置清单（新建、移到清单、编辑时改了清单、删除清单时移进默认清单、导入）
+    /// 才刷新它。`None` = 缺失（已知但没有版本，比任何有版本的都旧）；归属未知时恒为 `None`、也不写出
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "de_lenient_time"
+    )]
+    pub list_updated_at: Option<String>,
     #[serde(default)]
     pub subtasks: Vec<SubTask>,
 }
@@ -188,8 +214,9 @@ pub struct Tombstone {
 
 /// 清单删除墓碑（v31 `list_tombstones`，同步文档顶层 `listTombstones`）。
 ///
-/// 规则与 [`Tombstone`] 相同（`deletedAt >= 清单 updatedAt` 即删除 / 压制、并集取较大、保留 30 天），但单独成键：
-/// 旧版本会丢弃 `tombstones` 里未知 `entityType` 的墓碑。默认清单（id 1）不可删除，它的墓碑一律忽略（不存、不传播）
+/// 规则与 [`Tombstone`] 相同（`deletedAt >= 清单 updatedAt` 即删除 / 压制、并集取较大），但**永不过期**（契约 §13-10：
+/// 清单很少，已删的清单不能因墓碑过期而在长期离线的设备回来时复活），且单独成键：旧版本会丢弃 `tombstones` 里未知
+/// `entityType` 的墓碑。默认清单（id 1）不可删除，它的墓碑一律忽略（不存、不传播）
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListTombstone {
@@ -563,6 +590,32 @@ mod tests {
             let out = serde_json::to_value(todo_with(json!({"listId": known})).unwrap()).unwrap();
             assert_eq!(out["listId"], known);
         }
+    }
+
+    /// 契约 §13-1 / 7：`listUpdatedAt` 是归属自己的版本。字符串照收（能否识别留给合并时判断：识别不了 = 没有版本），
+    /// `null` 与其它类型当作缺失、不让整条记录作废；写出时有就写，没有不写
+    #[test]
+    fn list_updated_at_is_lenient_and_only_written_when_present() {
+        let todo = todo_with(json!({"listId": 7, "listUpdatedAt": "2026-11-09 10:00:00"})).unwrap();
+        assert_eq!(todo.list_updated_at.as_deref(), Some("2026-11-09 10:00:00"));
+        let out = serde_json::to_value(&todo).unwrap();
+        assert_eq!(
+            (&out["listId"], &out["listUpdatedAt"]),
+            (&json!(7), &json!("2026-11-09 10:00:00"))
+        );
+        for odd in [json!(null), json!(20261109), json!({"at": 1})] {
+            let t = todo_with(json!({"listId": 7, "listUpdatedAt": odd.clone()})).unwrap();
+            assert_eq!(t.list_updated_at, None, "{odd}");
+        }
+        assert_eq!(
+            todo_with(json!({"listId": 7, "listUpdatedAt": "昨天"}))
+                .unwrap()
+                .list_updated_at
+                .as_deref(),
+            Some("昨天")
+        );
+        let bare = serde_json::to_value(todo_with(json!({"listId": 7})).unwrap()).unwrap();
+        assert!(bare.get("listUpdatedAt").is_none(), "{bare}");
     }
 
     /// 清单记录：驼峰字段；`id` / `name` 必填，其余缺失取默认；未知字段丢弃

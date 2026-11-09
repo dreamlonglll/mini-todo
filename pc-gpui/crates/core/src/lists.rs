@@ -15,7 +15,7 @@
 
 use crate::db::models::{todo_list_from_row, TodoList, DEFAULT_LIST_CREATED_AT, TODO_LIST_COLUMNS};
 use crate::db::sync_store;
-use crate::db::time::{now_local, SQL_SET_UPDATED_AT};
+use crate::db::time::{now_local, SQL_SET_LIST_UPDATED_AT, SQL_SET_UPDATED_AT};
 use crate::db::Database;
 use crate::{ids, window_prefs};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -110,7 +110,8 @@ pub fn rename(db: &Database, id: i64, name: &str) -> Result<TodoList, String> {
     .map_err(|e| e.to_string())?
 }
 
-/// 删除清单（契约 §5，单事务）：其下待办（含已完成）全部移到默认清单并刷新 `updated_at`，写清单墓碑，删清单，
+/// 删除清单（契约 §5，单事务）：其下待办（含已完成）全部移到默认清单并刷新 `updated_at` 与归属的版本
+/// `list_updated_at`（契约 §13-2），写清单墓碑，删清单，
 /// 再删掉它的窗口属性 / 布局并从日历筛选里移出。返回移到默认清单的待办数。
 /// 默认清单报 `默认清单不能删除`；不存在报 [`LIST_NOT_FOUND`]
 pub fn delete(db: &Database, id: i64) -> Result<usize, String> {
@@ -129,8 +130,12 @@ pub fn delete(db: &Database, id: i64) -> Result<usize, String> {
         let Some(updated_at) = updated_at else {
             return Ok(Err(LIST_NOT_FOUND.to_string()));
         };
+        // 移进默认清单是显式设置清单：归属的版本一并刷新（契约 §13-2）
         let moved = tx.execute(
-            &format!("UPDATE todos SET list_id = ?1, {SQL_SET_UPDATED_AT} WHERE list_id = ?2"),
+            &format!(
+                "UPDATE todos SET list_id = ?1, {SQL_SET_LIST_UPDATED_AT}, {SQL_SET_UPDATED_AT}
+                 WHERE list_id = ?2"
+            ),
             params![DEFAULT_LIST_ID, id],
         )?;
         sync_store::record_list_tombstone(tx, id, &sync_store::deletion_time(&now, &updated_at))?;
@@ -262,6 +267,18 @@ mod tests {
         .unwrap()
     }
 
+    /// 待办归属的版本 `list_updated_at`（契约 §13）
+    fn list_version(db: &Database, id: i64) -> Option<String> {
+        db.with_connection(|c| {
+            c.query_row(
+                "SELECT list_updated_at FROM todos WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+        })
+        .unwrap()
+    }
+
     #[test]
     fn default_list_exists_and_new_lists_go_last_with_time_based_ids() {
         let db = db();
@@ -380,8 +397,14 @@ mod tests {
         insert_todo(&db, 3, Some(other.id), "2026-01-01 00:00:00");
         insert_todo(&db, 4, Some(DEFAULT_LIST_ID), "2026-01-01 00:00:00");
         insert_todo(&db, 5, None, "2026-01-01 00:00:00");
-        db.with_connection(|c| c.execute("UPDATE todos SET completed = 1 WHERE id = 2", []))
-            .unwrap();
+        db.with_connection(|c| {
+            c.execute(
+                "UPDATE todos SET completed = 1, list_updated_at = '2099-01-01 09:00:00'
+                 WHERE id = 2",
+                [],
+            )
+        })
+        .unwrap();
         assert_eq!(todo_count(&db, work.id).unwrap(), 2);
 
         let before = now_local();
@@ -396,6 +419,12 @@ mod tests {
             todo_row(&db, 2),
             (Some(DEFAULT_LIST_ID), "2099-01-01 08:00:01".to_string())
         );
+        // 移进默认清单是显式设置清单：归属的版本同样 max(now, 旧值 + 1 秒)（契约 §13-2）
+        let moved_version = list_version(&db, 1).expect("移动后归属有版本");
+        assert!(moved_version >= before, "{moved_version}");
+        assert_eq!(list_version(&db, 2).as_deref(), Some("2099-01-01 09:00:01"));
+        assert_eq!(list_version(&db, 4), None, "没移动的不刷新");
+        assert_eq!(list_version(&db, 5), None);
         assert_eq!(todo_row(&db, 3).0, Some(other.id), "其它清单的待办不动");
         assert_eq!(
             todo_row(&db, 4),

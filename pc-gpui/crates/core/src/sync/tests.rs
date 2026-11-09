@@ -1720,7 +1720,12 @@ fn lists_and_list_deletions_sync_in_both_directions() {
     life["sortOrder"] = json!(2);
     other["todoLists"].as_array_mut().unwrap().push(life);
     let todo = other["todos"][0].clone();
+    assert!(
+        todo["listUpdatedAt"].is_string(),
+        "移到清单写出归属的版本（契约 §13）"
+    );
     other["todos"][0]["listId"] = json!(LIFE);
+    other["todos"][0]["listUpdatedAt"] = json!(later_than(&todo["listUpdatedAt"]));
     other["todos"][0]["updatedAt"] = json!(later_than(&todo["updatedAt"]));
     fx.other_device_writes(&other);
     let report = fx.engine().sync(false).unwrap();
@@ -2023,7 +2028,7 @@ fn force_push_and_force_pull_cover_lists() {
     );
     let tombs = fx
         .db
-        .with_connection(|c| sync_store::load_list_tombstones(c, "2000-01-01 00:00:00"))
+        .with_connection(sync_store::load_list_tombstones)
         .unwrap();
     assert!(tombs.is_empty(), "清单墓碑表替换为远端");
 
