@@ -26,7 +26,6 @@ use crate::ui::icon::icon;
 use crate::ui::input::EpInput;
 use crate::ui::message::{self, MessageKind};
 use crate::ui::message_box::{self, BoxKind, ConfirmOptions};
-use crate::windows::WindowManager;
 
 const ZIP_FILTER: FileFilter = FileFilter {
     name: "ZIP 压缩包",
@@ -377,14 +376,18 @@ impl SettingsWindow {
                 this.importing = false;
                 match result {
                     Ok(()) => {
-                        // 替代 `data-imported`：重新加载设置（含运行时偏好）与待办，主窗口提示后关闭设置窗口
+                        // 替代 `data-imported`：重新加载设置（含运行时偏好）与待办，提示后关闭设置窗口。提示显示在打开设置的
+                        // 清单 / 日历窗口（看不见时换一个看得见的，`services::notice`）
                         AppState::global(cx).update(cx, |state, cx| {
                             state.reload_app_settings(cx).detach();
                             state.reload_todos(cx);
                         });
-                        if let Some(main) = WindowManager::default_list(cx) {
-                            message::show_in(main, cx, MessageKind::Success, "数据导入成功");
-                        }
+                        services::notice::show_from(
+                            cx,
+                            this.target,
+                            MessageKind::Success,
+                            "数据导入成功",
+                        );
                         window.remove_window();
                     }
                     Err(e) => {

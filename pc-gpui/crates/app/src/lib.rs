@@ -67,6 +67,8 @@ pub fn run() {
         db::Db::init(cx, database);
         windows::WindowManager::init(cx);
         let state = AppState::init(cx);
+        // 整个应用的提示（加载待办失败等）显示在看得见的清单 / 日历窗口里（在加载数据之前订阅）
+        services::notice::start(cx);
 
         // 重复启动：与托盘左键相同，唤起所有清单窗口（含隐藏的）与显示中的日历窗口
         services::single_instance::listen(cx, services::window_mode::bring_all_to_front);

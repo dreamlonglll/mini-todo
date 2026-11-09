@@ -41,7 +41,7 @@ use super::snap::SnapKey;
 use super::{ChildOf, WindowManager, modal_overlay};
 use crate::assets::EpIcon;
 use crate::services::{block_windows, window_mode};
-use crate::state::{AppState, AppStateEvent, ViewMode};
+use crate::state::{AppState, ViewMode};
 use crate::theme::{self, MainColors, Palette, main_window as dims};
 use crate::ui::icon::icon;
 use crate::ui::message::{self, MessageKind};
@@ -223,18 +223,7 @@ impl ListWindow {
                 }
             }),
         ];
-        // 整个应用的提示（加载待办失败）只在默认清单窗口里显示一次
-        if list_id == DEFAULT_LIST_ID {
-            subscriptions.push(cx.subscribe_in(
-                &state,
-                window,
-                |_, _, event: &AppStateEvent, window, cx| match event {
-                    AppStateEvent::Message { kind, text } => {
-                        message::show(window, cx, *kind, text.clone())
-                    }
-                },
-            ));
-        }
+        // 整个应用的提示（加载待办失败）不在这里订阅：`services::notice` 挑一个看得见的清单 / 日历窗口显示
         // 关闭（Alt+F4 / ⌘W）= 隐藏并记住，不删清单、不退出（Linux 上真的关窗）
         window.on_window_should_close(cx, move |window, cx| {
             block_windows::request_close(window, cx, block)

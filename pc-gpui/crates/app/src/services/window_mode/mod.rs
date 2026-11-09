@@ -220,6 +220,20 @@ pub fn is_edge_hidden(cx: &App, key: BlockKey) -> bool {
     block(cx, key).is_some_and(|b| b.state.is_edge_hidden())
 }
 
+/// 窗口 `key` 看得见：已开窗、原生窗口显示中且没最小化、没藏在屏幕边缘（整个应用的提示据此挑窗口，`services::notice`）。
+/// Linux 没有原生句柄：开着就算（关闭即真的关窗）。只读查询，随时可调
+pub fn is_shown(cx: &App, key: BlockKey) -> bool {
+    let Some(block) = block(cx, key) else {
+        return false;
+    };
+    if block.handle.is_none() || block.state.is_edge_hidden() {
+        return false;
+    }
+    block
+        .hwnd
+        .is_none_or(|hwnd| hwnd.is_visible() && !hwnd.is_minimized())
+}
+
 // ----------------------------------------------------------------------
 // 模式切换
 // ----------------------------------------------------------------------
@@ -623,11 +637,12 @@ fn wake(cx: &mut App, keys: Vec<BlockKey>) {
     .detach();
 }
 
-/// 窗口被激活时调用（窗口自己的 `observe_window_activation` 里 `cx.defer`）。macOS：贴边隐藏中的窗口被点 Dock 图标 /
-/// ⌘Tab 切回来激活时按托盘唤起处理（拉回锚点、临时置顶，[`bring_all_to_front`]）——GPUI 只在没有可见窗口时才回调 Dock 唤起
-/// （`mac_menu::on_reopen`），藏在屏幕边缘的窗口仍算可见，不处理的话窗口成了 key 窗口却停在屏幕外。
-/// Windows 的经典固定没有任务栏 / Alt+Tab 入口，什么都不做
+/// 窗口被激活时调用（窗口自己的 `observe_window_activation` 里 `cx.defer`）：记下最近激活的窗口、补上没地方显示而存着的整个应用
+/// 的提示（`services::notice`）。macOS：贴边隐藏中的窗口被点 Dock 图标 / ⌘Tab 切回来激活时按托盘唤起处理（拉回锚点、临时置顶，
+/// [`bring_all_to_front`]）——GPUI 只在没有可见窗口时才回调 Dock 唤起（`mac_menu::on_reopen`），藏在屏幕边缘的窗口仍算可见，
+/// 不处理的话窗口成了 key 窗口却停在屏幕外。Windows 的经典固定没有任务栏 / Alt+Tab 入口，这一步什么都不做
 pub fn on_activated(cx: &mut App, key: BlockKey) {
+    crate::services::notice::on_block_activated(cx, key);
     if !cfg!(target_os = "macos") {
         return;
     }

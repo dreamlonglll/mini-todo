@@ -589,7 +589,8 @@ pub fn reconcile(cx: &mut App) {
 // ----------------------------------------------------------------------
 
 /// 托盘「新增待办清单」（调试 `list:new`）：自动取名"清单 / 清单 2…"新建清单（`AppState::create_list`，同时建好显示中的
-/// 窗口记录），在光标所在显示器上找空位开 380×600 的窗口，建好后直接进入改名（PRD R6 / R9）。失败在默认清单窗口里提示。
+/// 窗口记录），在光标所在显示器上找空位开 380×600 的窗口，建好后直接进入改名（PRD R6 / R9）。失败提示经 `services::notice`
+/// 显示在看得见的清单 / 日历窗口里。
 ///
 /// 清单建好时 `lists_revision` 变化，对账（[`reconcile`]）先于这里的回调开窗：位置事先放进 `creating`，两条路径开在
 /// 同一个位置，谁先开都一样（`open_list` 不重复开窗）
@@ -614,14 +615,11 @@ pub fn create_list(cx: &mut App) {
                 }
                 Err(e) => {
                     log::error!("[block] 新建清单失败: {e}");
-                    if let Some(handle) = WindowManager::default_list(cx) {
-                        crate::ui::message::show_in(
-                            handle,
-                            cx,
-                            crate::ui::message::MessageKind::Error,
-                            crate::ui::message::error_text("新建清单失败", &e),
-                        );
-                    }
+                    crate::services::notice::show(
+                        cx,
+                        crate::ui::message::MessageKind::Error,
+                        crate::ui::message::error_text("新建清单失败", &e),
+                    );
                 }
             }
         });
