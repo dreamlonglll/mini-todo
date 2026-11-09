@@ -29,14 +29,21 @@ HTTP 客户端的工具）通过本服务读写用户待办，数据最终回写
 * **记录级合并**（与 PC 同一套规则）：按 `updatedAt` 逐条 LWW，平局保留本地；只在一侧存在的记录保留；
   删除靠墓碑（`tombstones`，随 sync-data 双向传播，保留 30 天）。
 * **待办清单**（PC 3.1 起的多清单）：清单在 sync-data 顶层的 `todoLists`，清单删除墓碑在独立的
-  `listTombstones`（不进 `tombstones`：旧版本会丢掉不认识的墓碑类型），合并规则与 todo 完全相同；
-  默认清单 id 1（"待办清单"）可改名、不可删除，它的墓碑一律忽略。远端没有 `todoLists`（旧格式）时
-  本地清单一条都不删。待办的 `listId` 指向已删除的清单时按默认清单显示 / 过滤（读侧兜底，记录不改写）。
-  契约见 `.trellis/tasks/11-09-multi-list-windows/contract.md`。
+  `listTombstones`（不进 `tombstones`：旧版本会丢掉不认识的墓碑类型），合并规则与 todo 相同，只是
+  **清单墓碑永不过期**（清单很少；这样长期离线的设备带不回已删的清单）；默认清单 id 1（"待办清单"）可改名、
+  不可删除，它的墓碑一律忽略。远端没有 `todoLists`（旧格式）时本地清单一条都不删。待办的 `listId` 指向已删除的
+  清单时按默认清单显示 / 过滤（读侧兜底，记录不改写）。契约见 `.trellis/tasks/11-09-multi-list-windows/contract.md`。
 * **`listId` 缺失 = 未知**（契约 §12）：旧版本 PC 每次上传都会丢掉全部待办的 `listId`，所以缺失（或 `null`）
-  表示"写入方不认识清单"，**不等于**默认清单——只在显示 / 过滤时算默认清单，从不写回成 1。合并时远端胜出但
-  缺 `listId` → 沿用本地已知的值；远端有、本地未知 → 不论谁胜都采纳远端的值（不改 `updatedAt`、不标脏）；
-  远端缺本地已知的 `listId` → 补传一次修复文档。上传时未知不写 `listId` 键，cloud 也不替缺 `listId` 的记录补值。
+  表示"写入方不认识清单"，**不等于**默认清单——只在显示 / 过滤时算默认清单，从不写回成 1。上传时未知不写
+  `listId` / `listUpdatedAt`，cloud 也不替缺 `listId` 的记录补值。
+* **清单归属字段级合并**（契约 §13）：`listId` 有自己的版本 `listUpdatedAt`，归属 `(listId, listUpdatedAt)`
+  不跟着整条记录的 `updatedAt` 走。新旧：未知 < 已知但没有时间 < 已知有时间（按时间），一样新时取较大的 `listId`。
+  记录本身照旧按 `updatedAt` LWW 与墓碑决定；结果记录存在时，归属取所有看得到的版本（本地合并前的版本、远端版本，
+  含被墓碑压制的）里最新的，采纳不改 `updatedAt`、不标脏；合并后远端那一版的归属比本地旧 → 补传一次。
+  畸形记录（`listId` 类型不对、`updatedAt` 无法解析）不参与归属合并。`listUpdatedAt` 只在显式设置清单时刷新
+  （新建、`PATCH` 改了 `listId`、删除清单把待办移进默认清单），由服务端维护。
+* **不支持与 ≤ 2.4.x 混用**：那些版本的写入方不带回不认识的顶层键、也没有墓碑，上传一次就会抹掉
+  `todoLists` / `listTombstones` 与全部归属。
 * **时间戳单调**：改写已有记录时 `updatedAt = max(now, 旧值 + 1 秒)`，同一秒内两次修改也不会丢；
   删除的墓碑 `deletedAt = max(now, 记录的 updatedAt)`，保证压得住被删的版本。
 * **WebDAV 请求**：写前总是先 GET 合并；条件 PUT 只用 `If-Match`（去掉 `W/`），从不用
@@ -175,6 +182,7 @@ PC 端与 cloud 同时填写 `https://yourhost:8443`、`webdavuser`、原始密�
 - [x] `/todos` `/subtasks` `/images` REST CRUD（filter / sort / pagination / merge PATCH / cascade DELETE）
 - [x] `/lists` 待办清单 CRUD（按 id 或名称寻址、重名 409、删除时其下待办移到默认清单）；
       todo 的 `listId` 写入校验与 `listId=` / `list=` 过滤；`todoLists` / `listTombstones` 随 sync-data 双向同步
+- [x] 待办的清单归属按 `listUpdatedAt` 做字段级合并（契约 §13）；远端那一版的归属比本地旧时补推；清单墓碑永不过期
 
 Skill / AI 集成：
 
@@ -232,7 +240,11 @@ todo 字段契约（以 `src/model.rs` 的 `TODO_FIELDS` 为准，与 PC 端模�
 
 别名：`dueDate` → `endTime`（仅日期补 23:59:00）；`priority`（`high`/`medium`/`low`）→ `color`
 （#EF4444 / #F59E0B / #10B981，同时给了 `color` 时以 `color` 为准）；`notes` → `description`。
-`id` / `createdAt` / `updatedAt` / `seq` / `subtasks` 写入时忽略；其它未知字段或类型错误返回 400，错误信息列出允许的字段。
+`id` / `createdAt` / `updatedAt` / `listUpdatedAt` / `seq` / `subtasks` 写入时忽略；其它未知字段或类型错误返回 400，错误信息列出允许的字段。
+
+`listUpdatedAt`（契约 §13）是 `listId` 自己的版本，服务端维护、只读，响应里照常返回（清单未知时不带）：`POST` 时 = 新建时刻；
+`PATCH` 带了 `listId` 且值变了（含未知 → 已知）时 = `max(now, 旧值 + 1 秒)`；`DELETE /lists/:id` 把待办移进默认清单时同样刷新。
+只改其它字段、原样写回 `listId` 时不动；存量"已知但没有 `listUpdatedAt`"的记录不补时间。同步合并时用它比较归属的新旧（见上文）。
 响应附派生字段 `priority`（自定义颜色时为 null），派生字段不入库。
 
 排序字段白名单：`dueDate`/`startTime`/`priority`/`quadrant`/`sortOrder`/`updatedAt`/`createdAt`/`title`，
@@ -255,8 +267,8 @@ todo 字段契约（以 `src/model.rs` 的 `TODO_FIELDS` 为准，与 PC 端模�
 * `GET /todos?listId=<n>` / `?list=<名称>` 按**有效清单**过滤：待办的 `listId` 指向一个未删除的清单时就是它，
   否则（未知 = 缺失或 null、类型不对、清单已被删除）算在默认清单 1 里；响应里的 `listId` 是存储的原值。清单不存在 → 404，
   名称重名 → 409，两个参数都给了却指向不同的清单 → 400
-* `DELETE /lists/:id`：单事务里把 `listId` 等于它的待办改到默认清单（刷新 `updatedAt`，随同步传播），删清单，
-  写清单墓碑 `deletedAt = max(now, 清单的 updatedAt)`；默认清单 → 400 `默认清单不能删除`
+* `DELETE /lists/:id`：单事务里把 `listId` 等于它的待办改到默认清单（刷新 `updatedAt` 与 `listUpdatedAt`，随同步传播），
+  删清单，写清单墓碑 `deletedAt = max(now, 清单的 updatedAt)`（永不过期）；默认清单 → 400 `默认清单不能删除`
 * 收到别的设备的清单墓碑时不改写待办（读侧兜底显示在默认清单）
 
 ```bash
