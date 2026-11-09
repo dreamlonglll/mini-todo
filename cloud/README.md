@@ -31,8 +31,12 @@ HTTP 客户端的工具）通过本服务读写用户待办，数据最终回写
 * **待办清单**（PC 3.1 起的多清单）：清单在 sync-data 顶层的 `todoLists`，清单删除墓碑在独立的
   `listTombstones`（不进 `tombstones`：旧版本会丢掉不认识的墓碑类型），合并规则与 todo 完全相同；
   默认清单 id 1（"待办清单"）可改名、不可删除，它的墓碑一律忽略。远端没有 `todoLists`（旧格式）时
-  本地清单一条都不删。待办的 `listId` 指向已删除的清单或缺失时按默认清单显示 / 过滤（读侧兜底，
-  记录不改写）。契约见 `.trellis/tasks/11-09-multi-list-windows/contract.md`。
+  本地清单一条都不删。待办的 `listId` 指向已删除的清单时按默认清单显示 / 过滤（读侧兜底，记录不改写）。
+  契约见 `.trellis/tasks/11-09-multi-list-windows/contract.md`。
+* **`listId` 缺失 = 未知**（契约 §12）：旧版本 PC 每次上传都会丢掉全部待办的 `listId`，所以缺失（或 `null`）
+  表示"写入方不认识清单"，**不等于**默认清单——只在显示 / 过滤时算默认清单，从不写回成 1。合并时远端胜出但
+  缺 `listId` → 沿用本地已知的值；远端有、本地未知 → 不论谁胜都采纳远端的值（不改 `updatedAt`、不标脏）；
+  远端缺本地已知的 `listId` → 补传一次修复文档。上传时未知不写 `listId` 键，cloud 也不替缺 `listId` 的记录补值。
 * **时间戳单调**：改写已有记录时 `updatedAt = max(now, 旧值 + 1 秒)`，同一秒内两次修改也不会丢；
   删除的墓碑 `deletedAt = max(now, 记录的 updatedAt)`，保证压得住被删的版本。
 * **WebDAV 请求**：写前总是先 GET 合并；条件 PUT 只用 `If-Match`（去掉 `W/`），从不用
@@ -224,7 +228,7 @@ todo 字段契约（以 `src/model.rs` 的 `TODO_FIELDS` 为准，与 PC 端模�
 | `notified` / `completed` | bool |
 | `sortOrder` | 整数 |
 | `repeatEnabled` / `repeatType` / `repeatInterval` / `repeatWeekdays` / `repeatMonthDay` | bool / `daily`\|`weekly`\|`monthly` / ≥ 1 / 如 `"1,3,5"` / 1–31 |
-| `listId` | 所属清单的 id（整数 ≥ 1，必须是未删除的清单，否则 400 `清单不存在`）；`POST` 不带时为 1（默认清单）。PATCH 原样写回当前值时不校验 |
+| `listId` | 所属清单的 id（整数 ≥ 1，必须是未删除的清单，否则 400 `清单不存在`）；`POST` 不带时为 1（默认清单）。PATCH 原样写回当前值时不校验，不带时清单不变。旧版本设备写的记录没有 `listId`（未知），响应里也不带 |
 
 别名：`dueDate` → `endTime`（仅日期补 23:59:00）；`priority`（`high`/`medium`/`low`）→ `color`
 （#EF4444 / #F59E0B / #10B981，同时给了 `color` 时以 `color` 为准）；`notes` → `description`。
@@ -249,7 +253,7 @@ todo 字段契约（以 `src/model.rs` 的 `TODO_FIELDS` 为准，与 PC 端模�
 * `/lists/:id` 的 `:id`：先当数字 id 找；没有这个 id 再按名称（去首尾空白、不区分大小写）精确匹配。
   同名的有多个（两台设备各建了一个，同步不处理重名）→ 409，错误体带 `candidates: [{id, name}]`，改用 id 即可；找不到 → 404
 * `GET /todos?listId=<n>` / `?list=<名称>` 按**有效清单**过滤：待办的 `listId` 指向一个未删除的清单时就是它，
-  否则（缺失、类型不对、清单已被删除）算在默认清单 1 里；响应里的 `listId` 是存储的原值。清单不存在 → 404，
+  否则（未知 = 缺失或 null、类型不对、清单已被删除）算在默认清单 1 里；响应里的 `listId` 是存储的原值。清单不存在 → 404，
   名称重名 → 409，两个参数都给了却指向不同的清单 → 400
 * `DELETE /lists/:id`：单事务里把 `listId` 等于它的待办改到默认清单（刷新 `updatedAt`，随同步传播），删清单，
   写清单墓碑 `deletedAt = max(now, 清单的 updatedAt)`；默认清单 → 400 `默认清单不能删除`

@@ -2341,9 +2341,9 @@ struct PcTodo {
     repeat_weekdays: Option<String>,
     #[serde(default)]
     repeat_month_day: Option<i32>,
-    /// 多清单（PC v31 起）：缺失 = 默认清单 1。
-    #[serde(default = "pc_default_list_id")]
-    list_id: i64,
+    /// 多清单（PC v31 起）：缺失或 null = 未知（契约 §12），不是默认清单。
+    #[serde(default)]
+    list_id: Option<i64>,
     #[serde(default)]
     subtasks: Vec<PcSubTask>,
 }
@@ -2398,9 +2398,6 @@ fn pc_default_quadrant() -> i32 {
     4
 }
 fn pc_default_repeat_interval() -> i32 {
-    1
-}
-fn pc_default_list_id() -> i64 {
     1
 }
 
@@ -2525,10 +2522,16 @@ async fn pushed_records_deserialize_into_pc_model() {
     );
     assert!(
         pc.get("listId").is_none(),
-        "PC 来的记录不替它补 listId（PC 缺省就是 1）"
+        "PC 来的记录缺 listId = 未知：不替它补值（契约 §12）"
     );
     let pc: PcTodo = serde_json::from_value(pc.clone()).unwrap();
-    assert_eq!(pc.list_id, 1);
+    assert_eq!(pc.list_id, None);
+    assert!(
+        legacy.get("listId").is_none(),
+        "旧版 API 写的记录同样是未知"
+    );
+    let ai: PcTodo = serde_json::from_value(ai.clone()).unwrap();
+    assert_eq!(ai.list_id, Some(work_id), "cloud 新建的待办总是已知");
 
     // 清单与清单墓碑：PC 的强类型模型能反序列化，时间是规范格式，默认清单总在
     let lists: Vec<PcTodoList> = serde_json::from_value(remote["todoLists"].clone())
@@ -3439,6 +3442,73 @@ async fn list_filters_use_the_effective_list() {
         let (s, _, _) = send(&fx.router, req(Method::GET, &uri, None)).await;
         assert_eq!(s, status, "{}", uri);
     }
+}
+
+/// 契约 §12：缓存里缺 listId（或为 null）的待办是"未知"——cloud 不替它补值，响应里不带，
+/// 不带 listId 的 PATCH 不改变它；只有显式给了 listId 的写入才让它变成已知。按有效清单过滤时算默认清单。
+#[tokio::test]
+async fn unknown_list_id_is_never_filled_in() {
+    let fx = fixture();
+    let work = create_list(&fx, json!({"name": "工作"})).await;
+    let wid = work["id"].as_i64().unwrap();
+    let now = now_local_string(fx.state.config.timezone);
+    fx.state.db.with_conn(|c| {
+        repo::upsert_todo(c, "7", r#"{"id":7,"title":"old pc"}"#, &now).unwrap();
+        repo::upsert_todo(c, "8", r#"{"id":8,"title":"null","listId":null}"#, &now).unwrap();
+    });
+    for id in ["7", "8"] {
+        let (_, _, raw) = send(
+            &fx.router,
+            req(Method::GET, &format!("/todos/{}", id), None),
+        )
+        .await;
+        assert!(
+            json_body(&raw).get("listId").is_none(),
+            "未知不带出: {}",
+            id
+        );
+    }
+    let (_, _, raw) = send(&fx.router, req(Method::GET, "/todos?listId=1", None)).await;
+    let ids: Vec<i64> = json_body(&raw)
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids, vec![7, 8], "有效清单：未知算默认清单");
+
+    // 只改其它字段：仍是未知（不写成 1）
+    for id in ["7", "8"] {
+        let (s, _, raw) = send(
+            &fx.router,
+            req(
+                Method::PATCH,
+                &format!("/todos/{}", id),
+                Some(json!({"title": "edited"})),
+            ),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert!(json_body(&raw).get("listId").is_none());
+        assert!(
+            stored_todo(&fx, id).get("listId").is_none(),
+            "PATCH 不带 listId：未知还是未知"
+        );
+    }
+    // 显式设置清单才变成已知；之后只改其它字段保持已知
+    let (s, _, _) = send(
+        &fx.router,
+        req(Method::PATCH, "/todos/7", Some(json!({"listId": wid}))),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, _, raw) = send(
+        &fx.router,
+        req(Method::PATCH, "/todos/7", Some(json!({"completed": true}))),
+    )
+    .await;
+    assert_eq!(json_body(&raw)["listId"], wid);
+    assert_eq!(stored_todo(&fx, "7")["listId"], wid);
 }
 
 /// 经 `/sync*` 真走一遍：清单写入、删除随推送出去；PC 改名经 `/sync/pull` 合并回来。

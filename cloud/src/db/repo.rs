@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 
-use crate::model;
+use crate::model::{self, ListIdState};
 
 /// `meta` 表里用到的键。集中在一处，避免 worker / API / 健康检查各写各的字符串。
 pub mod meta_keys {
@@ -393,7 +393,8 @@ pub struct ListTodosFilter {
     pub due_date_after: Option<String>,
     pub start_date: Option<String>,
     pub q: Option<String>,
-    /// 按**有效清单**过滤（契约 §3）：`listId` 指向未删除的清单时就是它，否则算默认清单 1。
+    /// 按**有效清单**过滤（契约 §3 / §12-4）：`listId` 指向未删除的清单时就是它，否则（含未知）
+    /// 算默认清单 1。
     pub list_id: Option<i64>,
     /// `(field, asc)`。例如 `("dueDate", true)` 对应 `+dueDate`，`("priority", false)` 对应 `-priority`。
     pub sort: Option<(String, bool)>,
@@ -504,8 +505,8 @@ const DUE_EXPR: &str = "COALESCE(NULLIF(json_extract(data_json, '$.endTime'), ''
 /// PC 呈现的颜色（大写）：缺失 / null 时 PC 用 `#F59E0B`。优先级由它派生。
 const COLOR_EXPR: &str = "UPPER(COALESCE(json_extract(data_json, '$.color'), '#F59E0B'))";
 
-/// 待办的**有效清单**（契约 §3，读侧兜底）：`listId` 是整数且指向一个未删除的清单时就是它，
-/// 否则（缺失 / 类型不对 / 清单已删除）是默认清单 1。记录本身不改写。外层 CASE 先挡掉坏 JSON
+/// 待办的**有效清单**（契约 §3 / §12-4，读侧兜底）：`listId` 是整数且指向一个未删除的清单时就是它，
+/// 否则（未知 = 缺失或 null / 类型不对 / 清单已删除）是默认清单 1。记录本身不改写。外层 CASE 先挡掉坏 JSON
 /// （json_type / json_extract 遇到坏 JSON 会让整条查询报错）；子查询里的列都写全表名
 /// （todo_lists 也有 data_json 列）。
 const EFFECTIVE_LIST_EXPR: &str = "(CASE WHEN json_valid(todos.data_json) THEN \
@@ -667,6 +668,42 @@ pub fn todo_timestamps(conn: &Connection) -> rusqlite::Result<HashMap<String, St
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?;
     rows.collect()
+}
+
+/// 同步合并用：每条 todo 存储的 `listId` 的状态（契约 §12：缺失或 null = 未知）。
+/// data_json 不是合法 JSON 的行算 `Invalid`（不碰它）。
+pub fn todo_list_id_states(conn: &Connection) -> rusqlite::Result<HashMap<String, ListIdState>> {
+    let mut stmt = conn.prepare(
+        "SELECT id,
+                json_valid(data_json),
+                CASE WHEN json_valid(data_json) THEN json_type(data_json, '$.listId') END,
+                CASE WHEN json_valid(data_json) THEN json_extract(data_json, '$.listId') END
+         FROM todos",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let id: String = row.get(0)?;
+        let valid: bool = row.get(1)?;
+        let typ: Option<String> = row.get(2)?;
+        let state = match (valid, typ.as_deref()) {
+            (false, _) => ListIdState::Invalid,
+            (true, None | Some("null")) => ListIdState::Unknown,
+            (true, Some("integer")) => ListIdState::Known(row.get(3)?),
+            (true, Some(_)) => ListIdState::Invalid,
+        };
+        Ok((id, state))
+    })?;
+    rows.collect()
+}
+
+/// 只把 todo 的 `listId` 设成 `list_id`，`updated_at` 与其它字段都不动（契约 §12-3：远端有
+/// `listId`、本地是未知时采纳远端的值，不算一次新的编辑）。
+pub fn set_todo_list_id(conn: &Connection, id: &str, list_id: i64) -> rusqlite::Result<bool> {
+    let n = conn.execute(
+        "UPDATE todos SET data_json = json_set(data_json, '$.listId', ?2)
+         WHERE id = ?1 AND json_valid(data_json)",
+        params![id, list_id],
+    )?;
+    Ok(n > 0)
 }
 
 /// 同步合并用：`id → (todo_id, updated_at)`。
