@@ -1269,6 +1269,10 @@ fn sync_data_serialization_keeps_extra_keys_and_omits_missing_settings_version()
     assert!(text.contains(r#""futureKey":{"a":1}"#));
     assert!(!text.contains("settingsUpdatedAt"));
     assert!(text.contains(r#""tombstones":[]"#));
+    assert!(
+        !text.contains("todoLists") && !text.contains("listTombstones"),
+        "没有清单信息的文档原样写回也没有：不凭空造出\"远端清单为空\""
+    );
     data.settings_updated_at = Some("2026-05-01 10:00:00".to_string());
     assert!(serde_json::to_string(&data)
         .unwrap()
@@ -1574,4 +1578,479 @@ fn only_one_sync_at_a_time() {
     );
     drop(first);
     assert!(SyncGuard::acquire().is_ok());
+}
+
+// ------------------------------------------------------------------
+// 待办清单（v31，契约 .trellis/tasks/11-09-multi-list-windows/contract.md）
+// ------------------------------------------------------------------
+
+use crate::lists;
+use crate::window_prefs::{self, UpdateWindowPrefs, WindowKey};
+
+const LIFE: i64 = 1_731_000_000_000_456;
+
+fn list_json(id: i64, name: &str, updated_at: &str) -> Value {
+    json!({"id": id, "name": name, "sortOrder": 1,
+           "createdAt": "2026-01-01 00:00:00", "updatedAt": updated_at})
+}
+
+fn list_names(db: &Database) -> Vec<String> {
+    lists::list(db)
+        .unwrap()
+        .into_iter()
+        .map(|l| l.name)
+        .collect()
+}
+
+fn list_ids_of(doc: &Value) -> Vec<i64> {
+    let mut ids: Vec<i64> = doc["todoLists"]
+        .as_array()
+        .expect("todoLists 是数组")
+        .iter()
+        .filter_map(|l| l["id"].as_i64())
+        .collect();
+    ids.sort();
+    ids
+}
+
+fn list_tombstone_ids(doc: &Value) -> Vec<i64> {
+    let mut ids: Vec<i64> = doc["listTombstones"]
+        .as_array()
+        .expect("listTombstones 是数组")
+        .iter()
+        .map(|t| t["entityId"].as_i64().expect("entityId 是整数"))
+        .collect();
+    ids.sort();
+    ids
+}
+
+fn todo_of(doc: &Value, id: i64) -> Value {
+    doc["todos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == id)
+        .cloned()
+        .unwrap_or_else(|| panic!("远端没有待办 #{id}"))
+}
+
+fn local_list_id(db: &Database, todo_id: i64) -> i64 {
+    db.with_connection(|c| {
+        c.query_row("SELECT list_id FROM todos WHERE id = ?1", [todo_id], |r| {
+            r.get(0)
+        })
+    })
+    .unwrap()
+}
+
+/// 比 `previous` 严格更新的版本时间（模拟另一台设备在之后改过）
+fn later_than(previous: &Value) -> String {
+    crate::db::time::superseding(&now_local(), previous.as_str().unwrap())
+}
+
+/// 上传文档带上全部清单与清单墓碑，待办带 listId；远端还没有清单信息、本机只有没改过的默认清单时不为它多传一次
+#[test]
+fn sync_uploads_lists_and_only_adds_list_info_when_it_carries_something() {
+    let fx = Fixture::new("lists-upload");
+    // 旧版本写的远端（没有 todoLists）、本机刚升级、没有本地变更：不必上传
+    add_local_todo(&fx.db, 1, "本地", "2026-09-01 10:00:00");
+    fx.engine().sync(false).expect("首次同步");
+    let first = fx.remote();
+    assert_eq!(
+        first["todoLists"],
+        json!([{"id": 1, "name": "待办清单", "sortOrder": 0,
+                "createdAt": "2000-01-01 00:00:00", "updatedAt": "2000-01-01 00:00:00"}])
+    );
+    assert_eq!(first["listTombstones"], json!([]));
+    assert_eq!(todo_of(&first, 1)["listId"], 1);
+    let mut old = first.clone();
+    old.as_object_mut().unwrap().remove("todoLists");
+    old.as_object_mut().unwrap().remove("listTombstones");
+    fx.set_remote(&old);
+    fx.clear_log();
+    assert_eq!(
+        fx.engine().sync(false).unwrap().status,
+        SyncStatus::NoChanges
+    );
+    assert_eq!(fx.count(PUT_DOC), 0, "默认清单的种子状态不算要补的信息");
+
+    // 本机有清单：照常上传
+    let work = lists::create(&fx.db, "工作").unwrap();
+    assert_eq!(fx.engine().sync(false).unwrap().status, SyncStatus::Pushed);
+    assert_eq!(list_ids_of(&fx.remote()), vec![1, work.id]);
+
+    // 远端被不认识清单的写入方整个覆盖掉（例如旧版本对看不懂的远端强制推送）：本机没有变更也补传
+    let mut lost = fx.remote();
+    lost.as_object_mut().unwrap().remove("todoLists");
+    lost.as_object_mut().unwrap().remove("listTombstones");
+    fx.set_remote(&lost);
+    fx.clear_log();
+    assert_eq!(fx.engine().sync(false).unwrap().status, SyncStatus::Pushed);
+    assert_eq!(list_ids_of(&fx.remote()), vec![1, work.id]);
+    fx.clear_log();
+    assert_eq!(
+        fx.engine().sync(false).unwrap().status,
+        SyncStatus::NoChanges
+    );
+    assert_eq!(fx.count(PUT_DOC), 0);
+}
+
+/// 清单的新建 / 改名 / 删除双向传播；同步来的删除清掉本机的窗口记录、不把清单传回去
+#[test]
+fn lists_and_list_deletions_sync_in_both_directions() {
+    let fx = Fixture::new("lists-both-ways");
+    let work = lists::create(&fx.db, "工作").unwrap();
+    add_local_todo(&fx.db, 1, "工作待办", "2026-09-01 10:00:00");
+    crate::todo::move_to_list(&fx.db, 1, work.id).unwrap();
+    fx.engine().sync(false).unwrap();
+    let remote = fx.remote();
+    assert_eq!(list_ids_of(&remote), vec![1, work.id]);
+    assert_eq!(todo_of(&remote, 1)["listId"], work.id);
+
+    // 另一台设备：新建"生活"、把待办移过去、给默认清单改名
+    let mut other = fx.remote();
+    let renamed_at = later_than(&other["todoLists"][0]["updatedAt"]);
+    other["todoLists"][0]["name"] = json!("收件箱");
+    other["todoLists"][0]["updatedAt"] = json!(renamed_at);
+    let mut life = list_json(LIFE, "生活", "2026-10-01 10:00:00");
+    life["sortOrder"] = json!(2);
+    other["todoLists"].as_array_mut().unwrap().push(life);
+    let todo = other["todos"][0].clone();
+    other["todos"][0]["listId"] = json!(LIFE);
+    other["todos"][0]["updatedAt"] = json!(later_than(&todo["updatedAt"]));
+    fx.other_device_writes(&other);
+    let report = fx.engine().sync(false).unwrap();
+    assert_eq!((report.lists_inserted, report.lists_updated), (1, 1));
+    assert!(report.lists_changed() && report.local_changed());
+    assert_eq!(report.status, SyncStatus::Pulled);
+    assert_eq!(list_names(&fx.db), vec!["收件箱", "工作", "生活"]);
+    assert_eq!(local_list_id(&fx.db, 1), LIFE);
+
+    // 另一台设备删除"工作"：本机随之删除，窗口记录一并清理；远端已是结果，不再上传
+    window_prefs::update_prefs(
+        &fx.db,
+        WindowKey::List(work.id),
+        &UpdateWindowPrefs {
+            dark: Some(true),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .unwrap();
+    let mut other = fx.remote();
+    other["todoLists"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|l| l["id"] != work.id);
+    other["listTombstones"] = json!([{"entityId": work.id, "deletedAt": now_local()}]);
+    fx.other_device_writes(&other);
+    fx.clear_log();
+    let report = fx.engine().sync(false).unwrap();
+    assert_eq!(report.lists_deleted, 1);
+    assert!(lists::get(&fx.db, work.id).is_err());
+    assert_eq!(
+        window_prefs::get_prefs(&fx.db, WindowKey::List(work.id)).unwrap(),
+        None,
+        "同步来的清单删除：删窗口记录"
+    );
+    assert_eq!(fx.count(PUT_DOC), 0);
+
+    // 本机删除"生活"：待办移到默认清单，清单墓碑随上传传播；已删的"工作"不会复活
+    assert_eq!(lists::delete(&fx.db, LIFE).unwrap(), 1);
+    assert_eq!(fx.engine().sync(false).unwrap().status, SyncStatus::Pushed);
+    let remote = fx.remote();
+    assert_eq!(list_ids_of(&remote), vec![1]);
+    let mut deleted = vec![work.id, LIFE];
+    deleted.sort();
+    assert_eq!(list_tombstone_ids(&remote), deleted);
+    assert_eq!(todo_of(&remote, 1)["listId"], 1);
+    assert_eq!(
+        remote["tombstones"],
+        json!([]),
+        "清单墓碑不进共用的 tombstones"
+    );
+}
+
+/// 混跑旧版本：旧设备（≤ 3.0.x，强类型、不认识清单）同步一次——todoLists / listTombstones 经它的 extra 原样带回，
+/// 清单不丢、已删清单不复活；它改过的待办以缺 listId 的形式上传，落进默认清单（接受的退化）；它没改过的待办也被
+/// 它去掉了 listId（平局保留它自己的版本），新设备不受影响，并上传一次把远端补回来
+#[test]
+fn old_devices_keep_list_keys_and_only_their_edits_fall_back_to_the_default_list() {
+    #[derive(Serialize, Deserialize)]
+    struct OldSyncData {
+        #[serde(default)]
+        todos: Vec<Value>,
+        #[serde(default)]
+        tombstones: Vec<Value>,
+        #[serde(flatten)]
+        extra: Map<String, Value>,
+    }
+
+    let fx = Fixture::new("lists-old-device");
+    let work = lists::create(&fx.db, "工作").unwrap();
+    let gone = lists::create(&fx.db, "已删").unwrap();
+    for id in [1, 2] {
+        add_local_todo(&fx.db, id, "工作待办", "2026-09-01 10:00:00");
+        crate::todo::move_to_list(&fx.db, id, work.id).unwrap();
+    }
+    lists::delete(&fx.db, gone.id).unwrap();
+    fx.engine().sync(false).unwrap();
+
+    // 旧设备：未知顶层键进 extra；待办按旧模型重新序列化（没有 listId），其中一条它真的改过
+    let mut old: OldSyncData = serde_json::from_value(fx.remote()).unwrap();
+    assert!(
+        old.extra.contains_key("todoLists") && old.extra.contains_key("listTombstones"),
+        "新顶层键在旧版本里是未知键"
+    );
+    for todo in &mut old.todos {
+        todo.as_object_mut().unwrap().remove("listId");
+        if todo["id"] == 2 {
+            todo["title"] = json!("旧设备改的标题");
+            todo["updatedAt"] = json!(later_than(&todo["updatedAt"]));
+        }
+    }
+    fx.other_device_writes(&serde_json::to_value(&old).unwrap());
+
+    fx.clear_log();
+    let report = fx.engine().sync(false).unwrap();
+    assert_eq!(report.lists_deleted, 0, "清单定义没被旧设备抹掉");
+    assert_eq!(
+        list_names(&fx.db),
+        vec!["待办清单", "工作"],
+        "已删清单没复活"
+    );
+    assert_eq!(
+        local_list_id(&fx.db, 1),
+        work.id,
+        "旧设备没改过：留在原清单"
+    );
+    assert_eq!(local_list_id(&fx.db, 2), 1, "旧设备改过：落进默认清单");
+
+    // 远端丢了 #1 的 listId：本机上传一次补回；之后不再来回
+    assert_eq!(fx.count(PUT_DOC), 1);
+    let remote = fx.remote();
+    assert_eq!(todo_of(&remote, 1)["listId"], work.id);
+    assert_eq!(todo_of(&remote, 2)["listId"], 1);
+    assert_eq!(list_ids_of(&remote), vec![1, work.id]);
+    assert_eq!(list_tombstone_ids(&remote), vec![gone.id]);
+    fx.clear_log();
+    assert_eq!(
+        fx.engine().sync(false).unwrap().status,
+        SyncStatus::NoChanges
+    );
+    assert_eq!(fx.count(PUT_DOC), 0);
+}
+
+/// 两台设备离线各建一个清单（甚至同名）：id 不撞，同步后两边都有两个（同步造成的重名容忍）
+#[test]
+fn two_devices_creating_lists_offline_keep_both() {
+    let fx = Fixture::new("lists-two-devices");
+    let other_db = Database::new_in_memory().unwrap();
+    let other = SyncEngine {
+        db: &other_db,
+        client: &fx.client,
+        images_dir: fx.dir.clone(),
+        device_id: "test-pc-2".to_string(),
+        retry_delay: fx.retry_delay,
+    };
+    let a = lists::create(&fx.db, "工作").unwrap();
+    // 不同毫秒：毫秒分量不同，id 一定不同（同一毫秒靠随机后缀，测试里不赌概率）
+    std::thread::sleep(std::time::Duration::from_millis(3));
+    let b = lists::create(&other_db, "工作").unwrap();
+    assert_ne!(a.id, b.id);
+
+    fx.engine().sync(false).unwrap();
+    other.sync(false).unwrap();
+    fx.engine().sync(false).unwrap();
+    for db in [&fx.db, &other_db] {
+        let mut ids: Vec<i64> = lists::list(db).unwrap().iter().map(|l| l.id).collect();
+        ids.sort();
+        let mut expected = vec![1, a.id, b.id];
+        expected.sort();
+        assert_eq!(ids, expected);
+        assert_eq!(list_names(db).iter().filter(|n| *n == "工作").count(), 2);
+    }
+}
+
+#[test]
+fn force_push_and_force_pull_cover_lists() {
+    let fx = Fixture::new("lists-force");
+    let mut remote = doc(vec![]);
+    remote["todoLists"] = json!([
+        list_json(1, "远端默认", "2026-09-01 10:00:00"),
+        list_json(LIFE, "远端独有", "2026-09-01 10:00:00")
+    ]);
+    fx.set_remote(&remote);
+    let work = lists::create(&fx.db, "本地清单").unwrap();
+
+    // 强制推送：远端独有的清单写墓碑；本地清单（含默认清单）胜出
+    assert_eq!(fx.engine().force_push().unwrap().status, SyncStatus::Pushed);
+    let pushed = fx.remote();
+    assert_eq!(list_ids_of(&pushed), vec![1, work.id]);
+    assert_eq!(list_tombstone_ids(&pushed), vec![LIFE]);
+    let default_list = &pushed["todoLists"][0];
+    assert_eq!(default_list["name"], "待办清单");
+    assert!(default_list["updatedAt"].as_str().unwrap() > "2026-09-01 10:00:00");
+
+    // 强制拉取：本地清单 = 远端（本地独有的删掉、不写墓碑，窗口记录一并清理）
+    window_prefs::update_prefs(
+        &fx.db,
+        WindowKey::List(work.id),
+        &UpdateWindowPrefs {
+            hidden: Some(true),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .unwrap();
+    let mut cloud = doc(vec![]);
+    cloud["todoLists"] = json!([
+        list_json(1, "云端默认", "2026-09-05 10:00:00"),
+        list_json(55, "云端", "2026-09-05 10:00:00")
+    ]);
+    cloud["listTombstones"] = json!([]);
+    fx.set_remote(&cloud);
+    let report = fx.engine().force_pull().unwrap();
+    assert_eq!(
+        (
+            report.lists_inserted,
+            report.lists_updated,
+            report.lists_deleted
+        ),
+        (1, 1, 1)
+    );
+    assert_eq!(list_names(&fx.db), vec!["云端默认", "云端"]);
+    assert_eq!(
+        window_prefs::get_prefs(&fx.db, WindowKey::List(work.id)).unwrap(),
+        None
+    );
+    let tombs = fx
+        .db
+        .with_connection(|c| sync_store::load_list_tombstones(c, "2000-01-01 00:00:00"))
+        .unwrap();
+    assert!(tombs.is_empty(), "清单墓碑表替换为远端");
+
+    // 远端没有清单信息：强制拉取不动本地清单
+    fx.set_remote(&doc(vec![]));
+    fx.engine().force_pull().unwrap();
+    assert_eq!(list_names(&fx.db), vec!["云端默认", "云端"]);
+}
+
+#[test]
+fn decode_reads_list_keys_as_fields_not_extra() {
+    let parsed = decode_sync_doc(
+        br#"{"todos": [], "futureKey": 1,
+             "todoLists": [{"id": 1, "name": "x", "updatedAt": "2026-05-01 10:00:00"}, "garbage"],
+             "listTombstones": [{"entityId": 1, "deletedAt": "2026-05-01"},
+                                {"entityId": 5, "deletedAt": "2026-05-01T10:00"},
+                                {"bogus": true}]}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        parsed.todo_lists.as_ref().map(Vec::len),
+        Some(2),
+        "原样保留，坏记录在合并时计数"
+    );
+    assert_eq!(
+        parsed.list_tombstones,
+        Some(vec![ListTombstone {
+            entity_id: 5,
+            deleted_at: "2026-05-01 10:00:00".to_string()
+        }]),
+        "默认清单的墓碑与看不懂的墓碑丢弃"
+    );
+    assert!(!parsed.extra.contains_key("todoLists"));
+    assert!(!parsed.extra.contains_key("listTombstones"));
+    assert_eq!(parsed.extra.get("futureKey"), Some(&json!(1)));
+
+    let missing = decode_sync_doc(br#"{"todos": [], "todoLists": null}"#).unwrap();
+    assert_eq!(missing.todo_lists, None, "null 同缺失：远端没有清单信息");
+    assert_eq!(missing.list_tombstones, None);
+    for bad in [
+        &br#"{"todoLists": "x"}"#[..],
+        br#"{"todoLists": {"id": 1}}"#,
+        br#"{"listTombstones": {}}"#,
+    ] {
+        assert!(
+            decode_sync_doc(bad).is_err(),
+            "{}",
+            String::from_utf8_lossy(bad)
+        );
+    }
+}
+
+#[test]
+fn doc_differs_covers_lists_and_list_tombstones() {
+    let db = Database::new_in_memory().unwrap();
+    let cutoff = "2000-01-01 00:00:00";
+    let local = local_state(&db);
+    let uploaded = build_sync_doc(&local, None, DocMode::Merge, "pc", cutoff);
+    let remote: SyncData =
+        serde_json::from_value(serde_json::to_value(&uploaded).unwrap()).unwrap();
+    let again = build_sync_doc(&local, Some(&remote), DocMode::Merge, "pc", cutoff);
+    assert!(!doc_differs(&again, &remote, cutoff));
+
+    // 远端没有清单信息、本机只有种子状态的默认清单：等价
+    let mut old = remote.clone();
+    old.todo_lists = None;
+    old.list_tombstones = None;
+    let doc = build_sync_doc(&local, Some(&old), DocMode::Merge, "pc", cutoff);
+    assert!(!doc_differs(&doc, &old, cutoff));
+
+    // 远端缺本机的清单 → 需要上传
+    lists::create(&db, "工作").unwrap();
+    let doc = build_sync_doc(
+        &local_state(&db),
+        Some(&remote),
+        DocMode::Merge,
+        "pc",
+        cutoff,
+    );
+    assert!(doc_differs(&doc, &remote, cutoff));
+
+    // 本机多了清单墓碑 → 需要上传
+    let db = Database::new_in_memory().unwrap();
+    db.with_transaction(|tx| sync_store::record_list_tombstone(tx, 42, "2026-09-01 00:00:00"))
+        .unwrap();
+    let doc = build_sync_doc(
+        &local_state(&db),
+        Some(&remote),
+        DocMode::Merge,
+        "pc",
+        cutoff,
+    );
+    assert!(doc_differs(&doc, &remote, cutoff));
+    assert_eq!(
+        doc.list_tombstones,
+        Some(vec![ListTombstone {
+            entity_id: 42,
+            deleted_at: "2026-09-01 00:00:00".to_string()
+        }])
+    );
+}
+
+#[test]
+fn list_value_merge_follows_lww_tombstones_and_union() {
+    let mut tombs = ListTombstoneIndex::new();
+    tombs.insert(4, "2026-09-04 00:00:00".to_string());
+    let local = vec![list_json(1, "本地较新", "2026-09-05 00:00:00")];
+    let remote = vec![
+        list_json(1, "远端较旧", "2026-09-01 00:00:00"),
+        json!({"id": 2, "name": 123, "updatedAt": "2026-09-01 00:00:00"}),
+        json!("无 id 的垃圾"),
+        list_json(4, "已删除", "2026-09-03 00:00:00"),
+        list_json(5, "远端新增", "2026-09-03 00:00:00"),
+    ];
+    let merged = merge_list_values(local, &remote, &tombs);
+    let names: Vec<Value> = merged.iter().map(|l| l["name"].clone()).collect();
+    assert_eq!(
+        names,
+        vec![
+            json!("本地较新"),
+            json!(123),
+            Value::Null,
+            json!("远端新增")
+        ],
+        "看不懂的远端记录原样带上，被墓碑压制的丢掉"
+    );
 }

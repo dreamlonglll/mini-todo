@@ -192,6 +192,17 @@ pub struct Tombstone {
     pub deleted_at: String,
 }
 
+/// 清单删除墓碑（v31 `list_tombstones`，同步文档顶层 `listTombstones`）。
+///
+/// 规则与 [`Tombstone`] 相同（`deletedAt >= 清单 updatedAt` 即删除 / 压制、并集取较大、保留 30 天），但单独成键：
+/// 旧版本会丢弃 `tombstones` 里未知 `entityType` 的墓碑。默认清单（id 1）不可删除，它的墓碑一律忽略（不存、不传播）
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListTombstone {
+    pub entity_id: i64,
+    pub deleted_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateTodoRequest {

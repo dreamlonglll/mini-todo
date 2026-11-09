@@ -326,6 +326,25 @@ pub(crate) fn forget_list(conn: &Connection, list_id: i64) -> rusqlite::Result<(
     prune_calendar_filter(conn, &list_ids(conn)?)
 }
 
+/// 清掉已不存在的清单的窗口记录与日历筛选项（同步合并 / 强制拉取 / 导入备份可能一次删掉多个清单，之后调用）。
+/// 默认清单的窗口记录永远保留
+pub(crate) fn prune_orphans(conn: &Connection) -> rusqlite::Result<()> {
+    let existing = list_ids(conn)?;
+    let keys: Vec<String> = {
+        let mut stmt = conn.prepare("SELECT window_key FROM window_prefs")?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    for key in keys {
+        if let Some(WindowKey::List(id)) = WindowKey::parse(&key) {
+            if id != DEFAULT_LIST_ID && !existing.contains(&id) {
+                delete_window_rows(conn, WindowKey::List(id))?;
+            }
+        }
+    }
+    prune_calendar_filter(conn, &existing)
+}
+
 /// 删除某个屏幕组合下全部窗口的布局（删除屏幕配置时连带）
 pub(crate) fn delete_layouts_for_screen(
     conn: &Connection,
@@ -727,6 +746,39 @@ mod tests {
             Some(vec![1]),
             "默认清单可以单独选"
         );
+    }
+
+    #[test]
+    fn prune_orphans_drops_windows_and_filter_entries_of_deleted_lists() {
+        let db = db();
+        let work = lists::create(&db, "工作").unwrap();
+        let life = lists::create(&db, "生活").unwrap();
+        for id in [work.id, life.id] {
+            save_layout(
+                &db,
+                &layout(WindowKey::List(id), "1_1920x1080@100", 0, false),
+            )
+            .unwrap();
+        }
+        set_calendar_filter(&db, Some(&[work.id, life.id])).unwrap();
+        // 模拟同步删掉了"工作"（合并时直接删行，最后整体清理）
+        db.with_transaction(|tx| -> rusqlite::Result<()> {
+            tx.execute("DELETE FROM todo_lists WHERE id = ?1", [work.id])?;
+            prune_orphans(tx)
+        })
+        .unwrap();
+
+        assert_eq!(get_prefs(&db, WindowKey::List(work.id)).unwrap(), None);
+        assert!(get_prefs(&db, WindowKey::List(life.id)).unwrap().is_some());
+        assert!(get_prefs(&db, WindowKey::List(1)).unwrap().is_some());
+        assert_eq!(
+            get_prefs(&db, WindowKey::Calendar)
+                .unwrap()
+                .unwrap()
+                .calendar_filter,
+            Some(vec![life.id])
+        );
+        assert_eq!(layouts_for_screen(&db, "1_1920x1080@100").unwrap().len(), 1);
     }
 
     #[test]

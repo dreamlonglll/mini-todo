@@ -28,14 +28,12 @@ pub const MAX_LIST_NAME_CHARS: usize = 50;
 /// 清单不存在（新建 / 移动待办的目标清单、改名 / 删除的清单）
 pub const LIST_NOT_FOUND: &str = "清单不存在";
 
-/// 列表顺序（契约 §8）：编辑表单下拉、右键「移动到」、日历筛选都按它
-const LIST_ORDER: &str = "sort_order ASC, id ASC";
-
-/// 全部清单，按 `(sortOrder, id)` 升序（含默认清单；默认清单缺失时先补建）
+/// 全部清单，按 `(sortOrder, id)` 升序（契约 §8：编辑表单下拉、右键「移动到」、日历筛选都按它）；
+/// 含默认清单，默认清单缺失时先补建
 pub fn list(db: &Database) -> Result<Vec<TodoList>, String> {
     db.with_connection(|conn| {
         ensure_default_list(conn)?;
-        load_lists(conn)
+        sync_store::load_lists(conn)
     })
     .map_err(|e| e.to_string())
 }
@@ -167,14 +165,6 @@ pub fn effective_list_id(list_id: i64, lists: &[TodoList]) -> i64 {
 // ============================================================================
 // 内部
 // ============================================================================
-
-pub(crate) fn load_lists(conn: &Connection) -> rusqlite::Result<Vec<TodoList>> {
-    let mut stmt = conn.prepare_cached(&format!(
-        "SELECT {TODO_LIST_COLUMNS} FROM todo_lists ORDER BY {LIST_ORDER}"
-    ))?;
-    let rows = stmt.query_map([], todo_list_from_row)?;
-    rows.collect()
-}
 
 pub(crate) fn load_list(conn: &Connection, id: i64) -> rusqlite::Result<Option<TodoList>> {
     conn.prepare_cached(&format!(
