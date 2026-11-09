@@ -665,6 +665,37 @@ pub fn apply_todo_patch(obj: &mut Map<String, Value>, patch: &Map<String, Value>
 }
 
 // =============================================================================
+// 待办清单（多清单；契约 .trellis/tasks/11-09-multi-list-windows/contract.md）
+// =============================================================================
+
+/// 默认清单的 id（契约 §2）：固定为 1，可改名、不可删除；`entityId = 1` 的清单墓碑一律忽略。
+pub const DEFAULT_LIST_ID: i64 = 1;
+/// 默认清单的初始名字（与 PC 迁移 v31 建出的一致）。
+pub const DEFAULT_LIST_NAME: &str = "待办清单";
+/// 默认清单的初始 `createdAt` / `updatedAt`：固定的早时间，两端各自建出的 id 1 不互相"抢"，
+/// 任何一次改名（新的 `updatedAt` 一定晚于它）都胜出。
+pub const DEFAULT_LIST_TIME: &str = "2000-01-01 00:00:00";
+
+/// 清单记录的完整形态（同步文档 `todoLists` 的元素）：`{id, name, sortOrder, createdAt, updatedAt}`。
+pub fn new_list_record(id: i64, name: &str, sort_order: i64, now: &str) -> Map<String, Value> {
+    json!({
+        "id": id,
+        "name": name,
+        "sortOrder": sort_order,
+        "createdAt": now,
+        "updatedAt": now,
+    })
+    .as_object()
+    .cloned()
+    .unwrap_or_default()
+}
+
+/// 默认清单的初始记录：`name = "待办清单"`、`sortOrder = 0`、时间都是 [`DEFAULT_LIST_TIME`]。
+pub fn default_list_record() -> Map<String, Value> {
+    new_list_record(DEFAULT_LIST_ID, DEFAULT_LIST_NAME, 0, DEFAULT_LIST_TIME)
+}
+
+// =============================================================================
 // 存量数据归一化
 // =============================================================================
 

@@ -1,13 +1,16 @@
 //! 仓储层：list / upsert / patch / delete / meta KV / settings KV / tombstones。
 //!
 //! Schema 是 KV-style（`todos(id, data_json, updated_at)` /
-//! `subtasks(id, todo_id, data_json, updated_at)` / `settings(key, value)` /
-//! `meta(key, value)`）。所有过滤 / 排序通过 SQLite JSON1 函数对 `data_json`
-//! 做提取。
+//! `subtasks(id, todo_id, data_json, updated_at)` / `todo_lists(id, data_json, updated_at)` /
+//! `settings(key, value)` / `meta(key, value)`）。所有过滤 / 排序通过 SQLite JSON1 函数对
+//! `data_json` 做提取。
 
 use std::collections::{HashMap, HashSet};
 
 use rusqlite::{params, Connection, OptionalExtension};
+use serde_json::Value;
+
+use crate::model;
 
 /// `meta` 表里用到的键。集中在一处，避免 worker / API / 健康检查各写各的字符串。
 pub mod meta_keys {
@@ -846,6 +849,122 @@ pub fn purge_tombstones_before(conn: &Connection, cutoff_local: &str) -> rusqlit
     Ok(n)
 }
 
+// =============================================================================
+// 待办清单 / 清单墓碑（多清单；契约 .trellis/tasks/11-09-multi-list-windows/contract.md）
+// =============================================================================
+
+/// 单条清单在 SQLite 中的快照：`data_json` 是同步文档 `todoLists` 里的清单对象原样存储。
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub struct ListRow {
+    pub id: String,
+    pub data_json: String,
+    pub updated_at: String,
+}
+
+/// 默认清单 id 1 的主键形式。
+fn default_list_key() -> String {
+    model::DEFAULT_LIST_ID.to_string()
+}
+
+/// 默认清单（id 1）不存在时按固定初始值补建（契约 §2）；已存在（含已改名）则不动。
+/// 返回是否补建了。
+pub fn ensure_default_list(conn: &Connection) -> rusqlite::Result<bool> {
+    let record = Value::Object(model::default_list_record()).to_string();
+    let n = conn.execute(
+        "INSERT INTO todo_lists (id, data_json, updated_at) VALUES (?1, ?2, ?3)
+         ON CONFLICT(id) DO NOTHING",
+        params![default_list_key(), record, model::DEFAULT_LIST_TIME],
+    )?;
+    Ok(n > 0)
+}
+
+/// 全部清单行（未排序；按 `(sortOrder, id)` 排序由调用方做，见 `sync::doc` / `api::lists`）。
+#[cfg(test)]
+pub fn all_list_rows(conn: &Connection) -> rusqlite::Result<Vec<ListRow>> {
+    let mut stmt = conn.prepare("SELECT id, data_json, updated_at FROM todo_lists")?;
+    let rows = stmt.query_map([], |row| {
+        Ok(ListRow {
+            id: row.get(0)?,
+            data_json: row.get(1)?,
+            updated_at: row.get(2)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// 直接 upsert 清单（无 LWW）。同步合并与 REST 改写用。
+pub fn upsert_list(
+    conn: &Connection,
+    id: &str,
+    data_json: &str,
+    updated_at: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO todo_lists (id, data_json, updated_at) VALUES (?1, ?2, ?3)
+         ON CONFLICT(id) DO UPDATE SET
+            data_json = excluded.data_json,
+            updated_at = excluded.updated_at",
+        params![id, data_json, updated_at],
+    )?;
+    Ok(())
+}
+
+/// 删除清单行（不写墓碑，墓碑由调用方维护）。默认清单不可删除：传 `"1"` 返回 `false`。
+pub fn delete_list(conn: &Connection, id: &str) -> rusqlite::Result<bool> {
+    if id == default_list_key() {
+        return Ok(false);
+    }
+    let n = conn.execute("DELETE FROM todo_lists WHERE id = ?1", [id])?;
+    Ok(n > 0)
+}
+
+/// 同步合并用：`id → updated_at`（原样，比较前由调用方规范化）。
+pub fn list_timestamps(conn: &Connection) -> rusqlite::Result<HashMap<String, String>> {
+    let mut stmt = conn.prepare("SELECT id, updated_at FROM todo_lists")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    rows.collect()
+}
+
+/// 写入清单墓碑；同键已存在时保留较大的 `deleted_at`。默认清单的墓碑不存（契约 §2）。
+/// `deleted_at` 必须是规范格式，字符串比较即时间比较。
+pub fn add_list_tombstone(
+    conn: &Connection,
+    entity_id: &str,
+    deleted_at: &str,
+) -> rusqlite::Result<()> {
+    if entity_id == default_list_key() {
+        return Ok(());
+    }
+    conn.execute(
+        "INSERT INTO list_tombstones (entity_id, deleted_at) VALUES (?1, ?2)
+         ON CONFLICT(entity_id) DO UPDATE
+         SET deleted_at = MAX(list_tombstones.deleted_at, excluded.deleted_at)",
+        params![entity_id, deleted_at],
+    )?;
+    Ok(())
+}
+
+/// 全部清单墓碑 `(entity_id, deleted_at)`。
+pub fn all_list_tombstones(conn: &Connection) -> rusqlite::Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare("SELECT entity_id, deleted_at FROM list_tombstones")?;
+    let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    rows.collect()
+}
+
+/// 清理早于 `cutoff_local` 的清单墓碑（与 todo 墓碑同一个保留期截止口径）。
+pub fn purge_list_tombstones_before(
+    conn: &Connection,
+    cutoff_local: &str,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        "DELETE FROM list_tombstones WHERE deleted_at < ?1",
+        [cutoff_local],
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1325,6 +1444,48 @@ mod tests {
 
     fn tombstone_free(c: &Connection) -> bool {
         list_tombstones(c).unwrap().is_empty()
+    }
+
+    #[test]
+    fn list_rows_and_list_tombstones() {
+        let c = fresh();
+        // schema::init 已补建默认清单；再调一次不重复插入
+        assert!(!ensure_default_list(&c).unwrap());
+        upsert_list(&c, "5", r#"{"id":5,"name":"工作"}"#, "2026-11-01 10:00:00").unwrap();
+        let mut ids: Vec<String> = all_list_rows(&c)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        ids.sort();
+        assert_eq!(ids, vec!["1", "5"]);
+        assert_eq!(
+            list_timestamps(&c).unwrap().get("5").map(String::as_str),
+            Some("2026-11-01 10:00:00")
+        );
+        assert!(!delete_list(&c, "1").unwrap(), "默认清单不可删除");
+        assert!(delete_list(&c, "5").unwrap());
+        assert!(!delete_list(&c, "5").unwrap());
+
+        add_list_tombstone(&c, "5", "2026-11-02 10:00:00").unwrap();
+        add_list_tombstone(&c, "5", "2026-11-01 10:00:00").unwrap();
+        add_list_tombstone(&c, "1", "2026-11-03 10:00:00").unwrap();
+        add_list_tombstone(&c, "6", "2026-10-01 10:00:00").unwrap();
+        let mut stones = all_list_tombstones(&c).unwrap();
+        stones.sort();
+        assert_eq!(
+            stones,
+            vec![
+                ("5".to_string(), "2026-11-02 10:00:00".to_string()),
+                ("6".to_string(), "2026-10-01 10:00:00".to_string()),
+            ],
+            "同键取较大 deletedAt；默认清单的墓碑不存"
+        );
+        assert_eq!(
+            purge_list_tombstones_before(&c, "2026-10-15 00:00:00").unwrap(),
+            1
+        );
+        assert_eq!(all_list_tombstones(&c).unwrap().len(), 1);
     }
 
     #[test]

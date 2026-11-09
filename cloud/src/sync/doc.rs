@@ -7,10 +7,17 @@
 //!   "settings": { /* PC AppSettings，cloud 原样透传 */ },
 //!   "settingsUpdatedAt": "YYYY-MM-DD HH:MM:SS",               // 可缺省，cloud 原样透传
 //!   "images": ["name.png"],
-//!   "tombstones": [ { "entityType": "todo" | "subtask", "entityId": 123, "deletedAt": "…" } ]
+//!   "tombstones": [ { "entityType": "todo" | "subtask", "entityId": 123, "deletedAt": "…" } ],
+//!   "todoLists": [ { "id": 1, "name": "待办清单", "sortOrder": 0, "createdAt": "…", "updatedAt": "…" } ],
+//!   "listTombstones": [ { "entityId": 1731000000000123, "deletedAt": "…" } ]
 //!   // 其它任何顶层键：原样保留（前向兼容）
 //! }
 //! ```
+//!
+//! `todoLists` / `listTombstones`（多清单，契约 `.trellis/tasks/11-09-multi-list-windows/contract.md`）
+//! 是独立的顶层键：清单墓碑不进共用的 `tombstones`（旧版本丢弃未知 entityType 的墓碑、上传时
+//! 又按本地表重建它），旧版本经 `#[serde(flatten)] extra` 把这两个键原样带回。远端没有
+//! `todoLists` 键 = 远端没有清单信息，本地清单一条都不删。
 //!
 //! 云端上传时**以远端文档为底**：除 `todos / images / tombstones / updatedAt /
 //! version / deviceId` 外的顶层键（含 `settings`、`settingsUpdatedAt` 与未知键）
@@ -34,8 +41,12 @@ use crate::time::{normalize_datetime, now_iso_string};
 pub const SYNC_FORMAT_VERSION: &str = "4.0";
 /// 云端写出文档时的 `deviceId`。
 pub const CLOUD_DEVICE_ID: &str = "minitodo-cloud";
-/// 墓碑保留期（天）。写出时丢弃更早的墓碑，本地墓碑表同样按此清理。
+/// 墓碑保留期（天）。写出时丢弃更早的墓碑，本地墓碑表同样按此清理（清单墓碑同一口径）。
 pub const TOMBSTONE_RETENTION_DAYS: i64 = 30;
+/// 顶层键：全部未删除的清单（含默认清单 id 1）。
+pub const KEY_TODO_LISTS: &str = "todoLists";
+/// 顶层键：清单删除墓碑。
+pub const KEY_LIST_TOMBSTONES: &str = "listTombstones";
 
 /// 墓碑的实体类型。todo 与 subtask 的 id 是两个独立命名空间。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -75,11 +86,7 @@ impl Tombstone {
     /// 从远端 JSON 解析。不合法（类型未知 / id 不是整数 / 时间无法解析）→ `None`。
     pub fn from_value(v: &Value, tz: Tz) -> Option<Self> {
         let entity_type = EntityType::parse(v.get("entityType")?.as_str()?)?;
-        let entity_id = match v.get("entityId")? {
-            Value::Number(n) => n.as_i64()?,
-            Value::String(s) => s.trim().parse::<i64>().ok()?,
-            _ => return None,
-        };
+        let entity_id = entity_id_of(v)?;
         let deleted_at = normalize_datetime(v.get("deletedAt")?.as_str()?, tz, NaiveTime::MIN)?;
         Some(Tombstone {
             entity_type,
@@ -97,6 +104,45 @@ impl Tombstone {
             "deletedAt": self.deleted_at,
         }))
     }
+}
+
+/// 墓碑 / 清单墓碑的 `entityId`：整数，或可解析为整数的字符串（与 todo 墓碑同样宽松）。
+fn entity_id_of(v: &Value) -> Option<i64> {
+    match v.get("entityId")? {
+        Value::Number(n) => n.as_i64(),
+        Value::String(s) => s.trim().parse::<i64>().ok(),
+        _ => None,
+    }
+}
+
+/// 一条（已校验、时间已规范化的）清单墓碑（顶层 `listTombstones` 的元素）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListTombstone {
+    /// 十进制 i64 字符串（与本地 `list_tombstones.entity_id` / 清单主键一致）。
+    pub entity_id: String,
+    /// 规范格式 `YYYY-MM-DD HH:MM:SS`。
+    pub deleted_at: String,
+}
+
+impl ListTombstone {
+    /// 从远端 JSON 解析。不合法（id 不是整数 / 时间无法解析）→ `None`。
+    pub fn from_value(v: &Value, tz: Tz) -> Option<Self> {
+        let entity_id = entity_id_of(v)?;
+        let deleted_at = normalize_datetime(v.get("deletedAt")?.as_str()?, tz, NaiveTime::MIN)?;
+        Some(ListTombstone {
+            entity_id: entity_id.to_string(),
+            deleted_at,
+        })
+    }
+}
+
+/// 远端清单记录的 id：必须是 JSON 整数（PC 是 i64）。缺 id / 不是对象 / id 不是整数的记录
+/// 跳过并计数（契约 §4-5），绝不当作删除。
+pub fn list_record_id(v: &Value) -> Option<String> {
+    if !v.is_object() {
+        return None;
+    }
+    v.get("id").and_then(Value::as_i64).map(|id| id.to_string())
 }
 
 /// 解析后的远端文档。
@@ -117,7 +163,13 @@ impl RemoteDoc {
         let Value::Object(map) = v else {
             anyhow::bail!("sync-data 顶层不是 JSON 对象");
         };
-        for key in ["todos", "tombstones", "images"] {
+        for key in [
+            "todos",
+            "tombstones",
+            "images",
+            KEY_TODO_LISTS,
+            KEY_LIST_TOMBSTONES,
+        ] {
             if let Some(val) = map.get(key) {
                 if !val.is_array() && !val.is_null() {
                     anyhow::bail!("sync-data 的 `{}` 不是数组", key);
@@ -148,6 +200,39 @@ impl RemoteDoc {
         if let Some(arr) = self.map.get("tombstones").and_then(Value::as_array) {
             for v in arr {
                 match Tombstone::from_value(v, tz) {
+                    Some(t) => out.push(t),
+                    None => invalid += 1,
+                }
+            }
+        }
+        (out, invalid)
+    }
+
+    /// 远端清单记录（`todoLists`）。没有这个键（旧格式 / 还没有新版本写过）或为 null 时为空：
+    /// 远端没有清单信息，合并时本地清单一条都不动。
+    pub fn lists(&self) -> &[Value] {
+        self.map
+            .get(KEY_TODO_LISTS)
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// 合法的远端清单墓碑 + 被跳过的非法条目数。默认清单（`entityId = 1`）的墓碑直接忽略
+    /// （不存、不传播，也不算非法条目）。
+    pub fn list_tombstones(&self, tz: Tz) -> (Vec<ListTombstone>, usize) {
+        let mut out = Vec::new();
+        let mut invalid = 0;
+        let default_id = crate::model::DEFAULT_LIST_ID.to_string();
+        if let Some(arr) = self.map.get(KEY_LIST_TOMBSTONES).and_then(Value::as_array) {
+            for v in arr {
+                match ListTombstone::from_value(v, tz) {
+                    Some(t) if t.entity_id == default_id => {
+                        debug!(
+                            target: "minitodo_cloud::sync",
+                            "ignore remote list tombstone for the default list"
+                        );
+                    }
                     Some(t) => out.push(t),
                     None => invalid += 1,
                 }
@@ -364,9 +449,61 @@ mod tests {
         assert!(RemoteDoc::parse("[1,2]").is_err());
         assert!(RemoteDoc::parse(r#"{"todos": {"a": 1}}"#).is_err());
         assert!(RemoteDoc::parse(r#"{"tombstones": "x"}"#).is_err());
-        let ok = RemoteDoc::parse(r#"{"todos": null}"#).unwrap();
+        assert!(RemoteDoc::parse(r#"{"todoLists": {"id": 1}}"#).is_err());
+        assert!(RemoteDoc::parse(r#"{"listTombstones": 5}"#).is_err());
+        let ok = RemoteDoc::parse(r#"{"todos": null, "todoLists": null}"#).unwrap();
         assert!(ok.todos().is_empty());
+        assert!(ok.lists().is_empty(), "null 与缺键一样：远端没有清单信息");
         assert!(!ok.has_tombstones_key());
+    }
+
+    #[test]
+    fn list_tombstones_parse_skip_invalid_and_ignore_default_list() {
+        let doc = RemoteDoc::from_value(json!({
+            "todoLists": [{"id": 1, "name": "待办清单"}],
+            "listTombstones": [
+                {"entityId": 1731000000000123_i64, "deletedAt": "2026-11-01T10:00:00"},
+                {"entityId": "42", "deletedAt": "2026-11-01 10:00:00"},
+                {"entityId": 1, "deletedAt": "2026-11-01 10:00:00"},
+                {"entityId": "abc", "deletedAt": "2026-11-01 10:00:00"},
+                {"entityId": 7, "deletedAt": "yesterday"},
+                {"entityId": 1.5, "deletedAt": "2026-11-01 10:00:00"},
+                "list:9"
+            ]
+        }))
+        .unwrap();
+        assert_eq!(doc.lists().len(), 1);
+        let (stones, invalid) = doc.list_tombstones(tz());
+        assert_eq!(
+            stones,
+            vec![
+                ListTombstone {
+                    entity_id: "1731000000000123".into(),
+                    deleted_at: "2026-11-01 10:00:00".into()
+                },
+                ListTombstone {
+                    entity_id: "42".into(),
+                    deleted_at: "2026-11-01 10:00:00".into()
+                },
+            ]
+        );
+        assert_eq!(invalid, 4, "默认清单的墓碑被忽略，不算非法条目");
+    }
+
+    #[test]
+    fn list_record_id_requires_an_integer_id_on_an_object() {
+        assert_eq!(
+            list_record_id(&json!({"id": 1731000000000123_i64})).as_deref(),
+            Some("1731000000000123")
+        );
+        for bad in [
+            json!({"id": "5"}),
+            json!({"id": 1.5}),
+            json!({"name": "x"}),
+            json!(5),
+        ] {
+            assert_eq!(list_record_id(&bad), None, "{}", bad);
+        }
     }
 
     #[test]
