@@ -3,15 +3,17 @@
 //!
 //! | 子模块 | 内容 |
 //! |---|---|
-//! | [`title_bar`] | 标题栏：月份导航、今天、日 / 夜、锁、设置 |
+//! | [`title_bar`] | 标题栏：月份导航、今天、清单筛选、日 / 夜、锁、设置 |
+//! | [`filter`] | 清单筛选（下拉多选：全部 / 一组清单，跟随本窗口的日 / 夜） |
 //! | [`grid`] | 6 周网格、农历 / 节气 / 节日、节假日、跨天条，节假日后台加载 |
 //! | [`logic`] | 纯逻辑（日历网格、跨天条、第一次显示的位置，带单测） |
 //!
-//! - 显示**所有清单**的待办（含已完成），按日历的清单筛选（`window_prefs.calendar_filter`，`AppState::calendar_todos`；
-//!   筛选下拉在任务第 5 步）；点击待办条打开只读详情；不能新建待办
+//! - 显示**所有清单**的待办（含已完成），按日历的清单筛选（[`filter`]：`window_prefs.calendar_filter`，
+//!   `AppState::calendar_todos`）；点击待办条打开只读详情；不能新建待办
 //! - 是否显示 = 日历窗口的属性 `!hidden`（设置 → 常规「显示日历」、托盘「显示日历」勾选）；关闭 = 隐藏 = 关掉「显示日历」。
 //!   生命周期在 `services::block_windows`
 
+pub mod filter;
 pub mod grid;
 pub mod logic;
 pub mod title_bar;
@@ -28,6 +30,7 @@ use super::{ChildOf, WindowManager, modal_overlay};
 use crate::services::{block_windows, window_mode};
 use crate::state::AppState;
 use crate::theme::{self, MainColors, Palette};
+use crate::ui::ep_popper::Anchor;
 use crate::windows::editor;
 
 /// 渲染一帧用到的颜色（按本窗口的日 / 夜）
@@ -43,6 +46,10 @@ pub struct CalendarWindow {
     window_drag: BlockDrag,
     pub(crate) state: Entity<AppState>,
     pub(crate) calendar: grid::CalendarState,
+    /// 清单筛选的下拉开着
+    filter_open: bool,
+    /// 筛选按钮的位置（下拉挂在它下面）
+    filter_anchor: Anchor,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -55,6 +62,8 @@ impl CalendarWindow {
             cx.observe_global::<WindowManager>(|_, cx| cx.notify()),
             cx.observe_window_activation(window, |this, window, cx| {
                 if !window.is_window_active() {
+                    // 切到别的窗口：收起筛选下拉
+                    this.close_filter_menu(cx);
                     return;
                 }
                 // macOS：贴边隐藏中被 Dock / ⌘Tab 激活时拉回（Windows 上是空操作）
@@ -87,6 +96,8 @@ impl CalendarWindow {
             ),
             state,
             calendar,
+            filter_open: false,
+            filter_anchor: Anchor::new(),
             _subscriptions: subscriptions,
         }
     }
@@ -129,6 +140,8 @@ impl Render for CalendarWindow {
             .child(self.render_calendar(&rc, window, cx))
             .into_any_element();
         let border = if classic_fixed { 0. } else { 1. };
+        // 清单筛选的下拉（画在本帧最后的浮层；跟随本窗口的日 / 夜）
+        let filter_menu = self.render_filter_menu(palette.is_dark, window, cx);
         let overlay: Option<AnyElement> = modal_overlay(window, cx, 0.3).map(|overlay| {
             div()
                 .absolute()
@@ -163,6 +176,7 @@ impl Render for CalendarWindow {
             // 缩放手柄在标题栏之上、内容之下（同清单窗口，见 `windows::block` 模块文档）
             .children(resize_handles)
             .child(body)
+            .children(filter_menu)
             .children(overlay)
             .when(!snap_edges.is_empty(), |this| {
                 let radius = if classic_fixed {

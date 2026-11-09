@@ -98,6 +98,8 @@ pub struct AppState {
     mutation_seq: u64,
     /// 本地写窗口属性的计数：拉取期间写过窗口属性时，这次读到的窗口属性不覆盖内存副本
     prefs_mutation_seq: u64,
+    /// 写日历筛选的计数：只有最后一次写入的结果（core 规范化后的值 / 失败回滚）落到内存副本
+    calendar_filter_seq: u64,
     fetch_task: Option<Shared<Task<bool>>>,
     fetch_in_flight: bool,
     fetch_queued: bool,
@@ -231,6 +233,7 @@ impl AppState {
             loaded_change_seq: None,
             mutation_seq: 0,
             prefs_mutation_seq: 0,
+            calendar_filter_seq: 0,
             fetch_task: None,
             fetch_in_flight: false,
             fetch_queued: false,
@@ -323,13 +326,20 @@ impl AppState {
         groups
     }
 
-    /// 日历窗口显示的待办：所有清单（含已完成），按日历的清单筛选（"全部"时不过滤）
+    /// 日历窗口显示的待办：所有清单（含已完成），按日历的清单筛选（[`Self::calendar_filter`]；"全部"时不过滤）
     pub fn calendar_todos(&self) -> Vec<&Todo> {
-        let filter = self.window_prefs(BlockKey::Calendar).calendar_filter;
+        let filter = self.calendar_filter();
         self.todos
             .iter()
             .filter(|t| in_calendar_filter(t, &self.lists, filter.as_deref()))
             .collect()
+    }
+
+    /// 日历的清单筛选（PRD R7；`None` = 全部，含以后新建的清单）：只算现有的清单，空了按"全部"
+    /// （[`effective_calendar_filter`]；本地 / 同步删除清单后 core 也会清理存储的筛选，内存副本可能晚一步）
+    pub fn calendar_filter(&self) -> Option<Vec<i64>> {
+        let prefs = self.window_prefs.get(&BlockKey::Calendar)?;
+        effective_calendar_filter(prefs.calendar_filter.as_deref(), &self.lists)
     }
 
     pub fn todo(&self, id: i64) -> Option<&Todo> {
@@ -921,6 +931,12 @@ impl AppState {
             let _ = this.update(cx, |this, cx| {
                 this.lists.retain(|l| l.id != id);
                 this.window_prefs.remove(&BlockKey::List(id));
+                // 同 core `lists::delete`：从日历筛选里移出，空了回到"全部"
+                let lists = &this.lists;
+                if let Some(prefs) = this.window_prefs.get_mut(&BlockKey::Calendar) {
+                    prefs.calendar_filter =
+                        effective_calendar_filter(prefs.calendar_filter.as_deref(), lists);
+                }
                 this.lists_revision += 1;
                 this.reload_todos(cx);
                 cx.notify();
@@ -1006,13 +1022,16 @@ impl AppState {
         )
     }
 
-    /// 日历的清单筛选（`None` = 全部）；core 去掉不存在的清单、去重排序，空了回到全部。错误文本 `保存日历筛选失败：…`
+    /// 日历的清单筛选（`None` = 全部）；core 去掉不存在的清单、去重排序，空了回到全部。错误文本 `保存日历筛选失败：…`。
+    /// 连续点筛选时只有最后一次的结果落到内存副本（前一次写库的结果晚到不覆盖后一次的选择）
     pub fn set_calendar_filter(
         &mut self,
         filter: Option<Vec<i64>>,
         cx: &mut Context<Self>,
     ) -> Task<Result<(), String>> {
         self.prefs_mutation_seq += 1;
+        self.calendar_filter_seq += 1;
+        let seq = self.calendar_filter_seq;
         let key = BlockKey::Calendar;
         let previous = self.window_prefs.get(&key).cloned();
         let mut next = self.window_prefs(key);
@@ -1025,18 +1044,22 @@ impl AppState {
         cx.spawn(async move |this, cx| match task.await {
             Ok(saved) => {
                 let _ = this.update(cx, |this, cx| {
-                    if let Some(prefs) = this.window_prefs.get_mut(&key) {
+                    if this.calendar_filter_seq == seq
+                        && let Some(prefs) = this.window_prefs.get_mut(&key)
+                    {
                         prefs.calendar_filter = saved;
+                        cx.notify();
                     }
-                    cx.notify();
                 });
                 Ok(())
             }
             Err(e) => {
                 log::error!("[window-prefs] 保存日历筛选失败: {e}");
                 let _ = this.update(cx, |this, cx| {
-                    restore_prefs(&mut this.window_prefs, key, previous);
-                    cx.notify();
+                    if this.calendar_filter_seq == seq {
+                        restore_prefs(&mut this.window_prefs, key, previous);
+                        cx.notify();
+                    }
                 });
                 Err(crate::ui::message::error_text("保存日历筛选失败", &e))
             }
@@ -1276,6 +1299,17 @@ pub fn todos_in_list<'a>(
 /// 日历的清单筛选（契约 / PRD R7）：`None` = 全部；否则待办的有效清单在筛选里（兜底到默认清单的待办按默认清单参与）
 pub fn in_calendar_filter(todo: &Todo, lists: &[TodoList], filter: Option<&[i64]>) -> bool {
     filter.is_none_or(|ids| ids.contains(&lists::effective_list_id(todo.list_id, lists)))
+}
+
+/// 实际生效的日历筛选（PRD R7）：去掉已不存在（被删除）的清单，空了回到"全部"（`None`）；"全部"保持"全部"
+/// （以后新建的清单也在里面），具体的一组清单不会自动加上新清单
+pub fn effective_calendar_filter(filter: Option<&[i64]>, lists: &[TodoList]) -> Option<Vec<i64>> {
+    let kept: Vec<i64> = filter?
+        .iter()
+        .copied()
+        .filter(|id| lists.iter().any(|l| l.id == *id))
+        .collect();
+    (!kept.is_empty()).then_some(kept)
 }
 
 /// 新清单的默认名称："清单" 没被占用就用它，否则从 2 开始找第一个空闲序号（去首尾空白后不区分大小写比较，同
@@ -1598,6 +1632,52 @@ mod tests {
         assert!(in_calendar_filter(&unknown, &lists, Some(&[1])));
         assert!(in_calendar_filter(&deleted, &lists, Some(&[1])));
         assert!(!in_calendar_filter(&work, &lists, Some(&[1])));
+    }
+
+    #[test]
+    fn calendar_filter_drops_deleted_lists_and_falls_back_to_all() {
+        let lists = vec![list(1, "待办清单"), list(7, "工作"), list(8, "生活")];
+        assert_eq!(effective_calendar_filter(None, &lists), None, "全部");
+        assert_eq!(
+            effective_calendar_filter(Some(&[7, 99]), &lists),
+            Some(vec![7]),
+            "被删除的清单移出"
+        );
+        assert_eq!(
+            effective_calendar_filter(Some(&[99]), &lists),
+            None,
+            "空了回到全部"
+        );
+
+        let mut state = AppState::new();
+        state.lists = lists;
+        state.todos = vec![
+            Todo {
+                list_id: Some(7),
+                ..todo(1, false, 0, 1)
+            },
+            Todo {
+                list_id: Some(8),
+                ..todo(2, false, 0, 1)
+            },
+        ];
+        let shown = |state: &AppState| -> Vec<i64> {
+            state.calendar_todos().iter().map(|t| t.id).collect()
+        };
+        assert_eq!(state.calendar_filter(), None, "没有日历的记录：全部");
+        assert_eq!(shown(&state), vec![1, 2]);
+        state.window_prefs.insert(
+            BlockKey::Calendar,
+            WindowPrefs {
+                calendar_filter: Some(vec![8]),
+                ..WindowPrefs::new(BlockKey::Calendar.window_key())
+            },
+        );
+        assert_eq!(shown(&state), vec![2]);
+        // 「生活」被删（内存里的筛选还没清理）：筛选空了，按全部显示
+        state.lists.retain(|l| l.id != 8);
+        assert_eq!(state.calendar_filter(), None);
+        assert_eq!(shown(&state), vec![1, 2]);
     }
 
     #[test]

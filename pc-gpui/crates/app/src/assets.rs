@@ -104,6 +104,8 @@ icon_table!(EpIcon, "ep", EP_ICONS, {
     ZoomIn => "zoom-in",
     ZoomOut => "zoom-out",
     ScaleToOriginal => "scale-to-original",
+    // 多清单：日历窗口标题栏的清单筛选
+    Filter => "filter",
 });
 
 // 旧前端里的内联 SVG 与自绘小图形

@@ -1,5 +1,5 @@
-//! 日历窗口标题栏（PRD R6）：padding 12 16、高 52；左区月份导航（上一月 / 年月 / 下一月）+「今天」；右区 日夜 / 锁 / 设置
-//! （与清单窗口同一组按钮，`list_window::title_bar`）。清单筛选下拉留给任务第 5 步。
+//! 日历窗口标题栏（PRD R6）：padding 12 16、高 52；左区月份导航（上一月 / 年月 / 下一月）+「今天」；右区 清单筛选
+//! （[`super::filter`]）/ 日夜 / 锁 / 设置（与清单窗口同一组按钮，`list_window::title_bar`）。
 //!
 //! 移动是自绘的（`windows::block::BlockDrag::title_bar`），锁定时不挂拖动；按钮都 `.occlude()`，按它们不会开始拖动。
 
@@ -48,6 +48,7 @@ impl CalendarWindow {
                     .flex_none()
                     .items_center()
                     .gap(px(8.))
+                    .child(self.filter_button(&palette, cx))
                     .child(theme_button(block, is_dark, &palette))
                     .child(lock_button(block, is_fixed, &palette))
                     .child(settings_button(&palette)),
