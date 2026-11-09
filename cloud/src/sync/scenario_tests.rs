@@ -10,15 +10,16 @@ use chrono_tz::Tz;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
+use crate::api::lists;
 use crate::config::Config;
 use crate::db::repo::{self, meta_keys as mk};
 use crate::db::Db;
-use crate::model;
+use crate::model::{self, WriteMode};
 use crate::sync::doc::{placeholder_settings, CLOUD_DEVICE_ID};
 use crate::sync::mock_dav::{MockDav, XmlStyle};
 use crate::sync::push::PRECONDITION_RETRY_DELAY;
 use crate::sync::{gzip, images, pull, push, SyncCtx, SYNC_DATA_FILE};
-use crate::time::{bump_updated_at, deletion_time, now_local_string};
+use crate::time::now_local_string;
 
 struct Env {
     mock: MockDav,
@@ -1320,61 +1321,42 @@ fn local_todo(db: &Db, id: &str) -> Value {
     serde_json::from_str(&row.data_json).unwrap()
 }
 
-/// 与 API `POST /lists` 相同的落库动作（插入 + 标脏）。
-fn api_create_list(db: &Db, id: i64, name: &str) {
+/// API `POST /lists` 的落库动作（`api::lists::create_list_tx`：查重名、分配 id、插入、标脏），
+/// 返回新清单的 id。
+fn api_create_list(db: &Db, name: &str) -> i64 {
     let now = now_local_string(tz());
-    let record = Value::Object(model::new_list_record(id, name, 1, &now));
+    let patch = model::validate_list_input(&json!({ "name": name }), WriteMode::Create).unwrap();
     db.with_conn(|c| {
-        repo::upsert_list(c, &id.to_string(), &record.to_string(), &now).unwrap();
-        repo::mark_dirty(c).unwrap();
-    });
+        let tx = c.transaction().unwrap();
+        let record = lists::create_list_tx(&tx, &patch, &now).unwrap();
+        tx.commit().unwrap();
+        record["id"].as_i64().unwrap()
+    })
 }
 
-/// 与 API `PATCH /lists/:id` 改名相同的落库动作（`updatedAt = max(now, 旧值 + 1 秒)` + 标脏）。
+/// API `PATCH /lists/:id` 改名的落库动作（`updatedAt = max(now, 旧值 + 1 秒)` + 标脏）。
 fn api_rename_list(db: &Db, id: &str, name: &str) {
     let now = now_local_string(tz());
+    let patch = model::validate_list_input(&json!({ "name": name }), WriteMode::Update).unwrap();
     db.with_conn(|c| {
-        let row = repo::all_list_rows(c)
-            .unwrap()
-            .into_iter()
-            .find(|r| r.id == id)
-            .unwrap();
-        let mut obj: Value = serde_json::from_str(&row.data_json).unwrap();
-        let updated_at = bump_updated_at(&now, &[&row.updated_at], tz());
-        obj["name"] = json!(name);
-        obj["updatedAt"] = json!(updated_at);
-        repo::upsert_list(c, id, &obj.to_string(), &updated_at).unwrap();
-        repo::mark_dirty(c).unwrap();
+        let tx = c.transaction().unwrap();
+        let entry = lists::resolve_list_ref(&tx, id).unwrap();
+        lists::update_list_tx(&tx, &entry, &patch, &now, tz()).unwrap();
+        tx.commit().unwrap();
     });
 }
 
-/// 与 API `DELETE /lists/:id` 相同的落库动作（契约 §5）：其下待办移到默认清单并刷新
-/// `updatedAt`、删清单、写清单墓碑、标脏。
-fn api_delete_list(db: &Db, id: &str) {
+/// API `DELETE /lists/:id` 的落库动作（契约 §5）：其下待办移到默认清单并刷新 `updatedAt`、
+/// 删清单、写清单墓碑、标脏。返回移走的待办数。
+fn api_delete_list(db: &Db, id: &str) -> usize {
     let now = now_local_string(tz());
     db.with_conn(|c| {
         let tx = c.transaction().unwrap();
-        for row in repo::all_todos(&tx).unwrap() {
-            let mut obj: Value = serde_json::from_str(&row.data_json).unwrap();
-            if obj["listId"].as_i64().map(|n| n.to_string()).as_deref() != Some(id) {
-                continue;
-            }
-            let updated_at = bump_updated_at(&now, &[&row.updated_at], tz());
-            obj["listId"] = json!(model::DEFAULT_LIST_ID);
-            obj["updatedAt"] = json!(updated_at);
-            repo::upsert_todo(&tx, &row.id, &obj.to_string(), &updated_at).unwrap();
-        }
-        let row = repo::all_list_rows(&tx)
-            .unwrap()
-            .into_iter()
-            .find(|r| r.id == id)
-            .unwrap();
-        assert!(repo::delete_list(&tx, id).unwrap());
-        let deleted_at = deletion_time(&now, &[&row.updated_at], tz());
-        repo::add_list_tombstone(&tx, id, &deleted_at).unwrap();
-        repo::mark_dirty(&tx).unwrap();
+        let entry = lists::resolve_list_ref(&tx, id).unwrap();
+        let deleted = lists::delete_list_tx(&tx, &entry, &now, tz()).unwrap();
         tx.commit().unwrap();
-    });
+        deleted.moved_todos
+    })
 }
 
 /// 两端同时改同一个清单的名字：按 `updatedAt` 整条 LWW，较新的一方胜出、两端收敛。
@@ -1475,7 +1457,7 @@ fn list_deletion_propagates_both_ways_without_resurrection() {
         .as_str()
         .unwrap()
         .to_string();
-    api_delete_list(&e.db, "6");
+    assert_eq!(api_delete_list(&e.db, "6"), 1);
     push::push_once(&e.ctx).unwrap();
     let remote = e.mock.doc().unwrap();
     assert_eq!(
@@ -1615,7 +1597,8 @@ fn lists_survive_412_merge_and_retry() {
         vec![],
     ));
     pull::pull_once(&e.ctx).unwrap();
-    api_create_list(&e.db, 1731000000000777, "AI 建的");
+    // 新清单排最后：sortOrder = 现有最大值 + 1 = 2
+    let ai_list = api_create_list(&e.db, "AI 建的");
 
     let pc_v2 = pc_doc_lists(
         vec![],
@@ -1645,10 +1628,14 @@ fn lists_survive_412_merge_and_retry() {
         vec![
             (1, "待办清单".to_string()),
             (5, "工作-PC".to_string()),
-            (1731000000000777, "AI 建的".to_string()),
+            (ai_list, "AI 建的".to_string()),
             (8, "PC 新建".to_string()),
         ],
         "按 (sortOrder, id) 排序"
+    );
+    assert_eq!(
+        local_list_name(&e.db, &ai_list.to_string()).as_deref(),
+        Some("AI 建的")
     );
     assert_eq!(remote_list_tombstone_ids(&remote), vec![9]);
     assert_eq!(local_list_name(&e.db, "8").as_deref(), Some("PC 新建"));

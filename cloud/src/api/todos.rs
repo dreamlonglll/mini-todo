@@ -12,6 +12,11 @@
 //! 版本严格递增（`time::bump_updated_at`；新建记录直接用 now）；DELETE 的墓碑
 //! `deletedAt = max(now, 记录的 updatedAt)`（`time::deletion_time`），保证压得住被删的版本。
 //!
+//! 清单（契约 §3 / §10）：`listId` 必须指向未删除的清单（否则 400 `清单不存在`），新建时缺省为
+//! 默认清单 1；PATCH 原样写回当前的 `listId` 时不查（清单可能已被别的设备删除）。`GET /todos`
+//! 的 `listId=` / `list=<名称>` 按**有效清单**过滤：`listId` 指向已删除的清单或缺失的待办算在
+//! 默认清单里；响应里的 `listId` 是存储的原值。
+//!
 //! 读取：响应附加派生字段 `priority`（由 color 映射）与 cloud 短码 `seq`，都不入库。
 
 use std::collections::HashMap;
@@ -28,6 +33,7 @@ use serde_json::{json, Map, Value};
 
 use super::error::{ApiError, ApiJson};
 use super::ids::{insert_with_fresh_id, new_id};
+use super::lists::{find_list_by_name, load_lists};
 use super::AppState;
 use crate::db::repo::{self, ListTodosFilter, SubtaskRow};
 use crate::model::{self, Priority, WriteMode};
@@ -49,6 +55,10 @@ pub struct ListTodosQuery {
     pub due_date_after: Option<String>,
     pub start_date: Option<String>,
     pub q: Option<String>,
+    /// 按有效清单过滤：清单 id。
+    pub list_id: Option<String>,
+    /// 按有效清单过滤：清单名称（去首尾空白、不区分大小写精确匹配）。
+    pub list: Option<String>,
     pub sort: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
@@ -111,10 +121,11 @@ pub async fn list_todos(
     State(state): State<AppState>,
     Query(q): Query<ListTodosQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let filter = parse_list_filter(&q, state.config.timezone)?;
+    let mut filter = parse_list_filter(&q, state.config.timezone)?;
     let with_subtasks = parse_bool_flag(&q.with_subtasks);
 
-    let todos = state.db.with_conn(|conn| -> rusqlite::Result<Value> {
+    let todos = state.db.with_conn(|conn| -> Result<Value, ApiError> {
+        filter.list_id = resolve_list_filter(conn, filter.list_id, q.list.as_deref())?;
         let rows = repo::list_todos_filtered(conn, &filter)?;
         let ids: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
         // 每类附加信息一次查询（不随条数增长），避免 N+1
@@ -207,8 +218,9 @@ pub async fn create_todo(
     let (record, seq) =
         state
             .db
-            .with_conn(|conn| -> rusqlite::Result<(Map<String, Value>, i64)> {
+            .with_conn(|conn| -> Result<(Map<String, Value>, i64), ApiError> {
                 let tx = conn.transaction()?;
+                ensure_list_exists(&tx, &patch, None)?;
                 let mut record = Map::new();
                 let id = insert_with_fresh_id(new_id, |id| {
                     record = model::new_todo_record(id, &patch, &now);
@@ -247,7 +259,7 @@ pub async fn patch_todo(
 
     let updated = state
         .db
-        .with_conn(|conn| -> rusqlite::Result<Option<Value>> {
+        .with_conn(|conn| -> Result<Option<Value>, ApiError> {
             let tx = conn.transaction()?;
             let Some(id) = resolve_todo_ref(&tx, &raw_id)? else {
                 return Ok(None);
@@ -261,6 +273,7 @@ pub async fn patch_todo(
             };
             // 旧版 API 写进来的别名 / 错误类型先按 K6 修好，再应用补丁
             let normalized = model::normalize_stored_todo(&mut base, tz, &id, &row.updated_at);
+            ensure_list_exists(&tx, &patch, base.get("listId"))?;
             // 读出来改别名（priority / dueDate / notes）再整包写回时，别名的修改要生效
             let mut patch = patch.clone();
             model::apply_shadowed_aliases(&mut patch, &body, &base, tz);
@@ -420,6 +433,16 @@ fn parse_list_filter(q: &ListTodosQuery, tz: Tz) -> Result<ListTodosFilter, ApiE
     let sort = q.sort.as_deref().map(parse_sort);
     let limit = q.limit.filter(|&l| l > 0);
     let offset = q.offset.filter(|&o| o >= 0);
+    // listId 先只解析成整数；清单是否存在、`list=` 名称解析要查库（见 resolve_list_filter）
+    let list_id = q
+        .list_id
+        .as_deref()
+        .map(|s| {
+            s.trim().parse::<i64>().map_err(|_| {
+                ApiError::bad_request(format!("invalid listId: {} (expected a list id)", s))
+            })
+        })
+        .transpose()?;
 
     Ok(ListTodosFilter {
         completed,
@@ -429,10 +452,59 @@ fn parse_list_filter(q: &ListTodosQuery, tz: Tz) -> Result<ListTodosFilter, ApiE
         due_date_after,
         start_date,
         q: q.q.clone(),
+        list_id,
         sort,
         limit,
         offset,
     })
+}
+
+/// `GET /todos` 的 `listId=` / `list=` → 要过滤的有效清单 id（契约 §10）。清单不存在 → 404，
+/// 按名称找到多个 → 409，两个都给了却指向不同的清单 → 400。
+fn resolve_list_filter(
+    conn: &Connection,
+    list_id: Option<i64>,
+    list_name: Option<&str>,
+) -> Result<Option<i64>, ApiError> {
+    if let Some(id) = list_id {
+        if !repo::list_exists(conn, id)? {
+            return Err(ApiError::not_found(format!(
+                "{}：{}",
+                model::LIST_NOT_FOUND,
+                id
+            )));
+        }
+    }
+    let by_name = match list_name {
+        None => None,
+        Some(name) if name.trim().is_empty() => {
+            return Err(ApiError::bad_request("list 参数不能为空"));
+        }
+        Some(name) => Some(find_list_by_name(&load_lists(conn)?, name)?.id),
+    };
+    match (list_id, by_name) {
+        (Some(a), Some(b)) if a != b => Err(ApiError::bad_request(
+            "listId 与 list 指向不同的清单，只给一个即可",
+        )),
+        (a, b) => Ok(a.or(b)),
+    }
+}
+
+/// 写入的 `listId` 必须指向未删除的清单，否则 400 `清单不存在`（契约 §10）。与当前存储值相同
+/// （客户端原样写回读到的对象）时不查：那个清单可能已被别的设备删除，读侧按默认清单显示，
+/// 但原样写回不能因此失败。
+fn ensure_list_exists(
+    conn: &Connection,
+    patch: &Map<String, Value>,
+    current: Option<&Value>,
+) -> Result<(), ApiError> {
+    let Some(list_id) = patch.get("listId").and_then(Value::as_i64) else {
+        return Ok(());
+    };
+    if current.and_then(Value::as_i64) == Some(list_id) || repo::list_exists(conn, list_id)? {
+        return Ok(());
+    }
+    Err(ApiError::validation(model::list_not_found_error()))
 }
 
 fn normalize_param(

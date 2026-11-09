@@ -393,6 +393,8 @@ pub struct ListTodosFilter {
     pub due_date_after: Option<String>,
     pub start_date: Option<String>,
     pub q: Option<String>,
+    /// 按**有效清单**过滤（契约 §3）：`listId` 指向未删除的清单时就是它，否则算默认清单 1。
+    pub list_id: Option<i64>,
     /// `(field, asc)`。例如 `("dueDate", true)` 对应 `+dueDate`，`("priority", false)` 对应 `-priority`。
     pub sort: Option<(String, bool)>,
     pub limit: Option<i64>,
@@ -452,6 +454,10 @@ pub fn list_todos_filtered(
         args.push(Box::new(like.clone()));
         args.push(Box::new(like));
     }
+    if let Some(list_id) = filter.list_id {
+        sql.push_str(&format!(" AND {} = ?", EFFECTIVE_LIST_EXPR));
+        args.push(Box::new(list_id));
+    }
 
     let (sort_field_sql, asc) = match &filter.sort {
         Some((field, asc)) => (sort_expr(field.as_str()), *asc),
@@ -497,6 +503,17 @@ const DUE_EXPR: &str = "COALESCE(NULLIF(json_extract(data_json, '$.endTime'), ''
 
 /// PC 呈现的颜色（大写）：缺失 / null 时 PC 用 `#F59E0B`。优先级由它派生。
 const COLOR_EXPR: &str = "UPPER(COALESCE(json_extract(data_json, '$.color'), '#F59E0B'))";
+
+/// 待办的**有效清单**（契约 §3，读侧兜底）：`listId` 是整数且指向一个未删除的清单时就是它，
+/// 否则（缺失 / 类型不对 / 清单已删除）是默认清单 1。记录本身不改写。外层 CASE 先挡掉坏 JSON
+/// （json_type / json_extract 遇到坏 JSON 会让整条查询报错）；子查询里的列都写全表名
+/// （todo_lists 也有 data_json 列）。
+const EFFECTIVE_LIST_EXPR: &str = "(CASE WHEN json_valid(todos.data_json) THEN \
+       CASE WHEN json_type(todos.data_json, '$.listId') = 'integer' \
+             AND EXISTS (SELECT 1 FROM todo_lists \
+                         WHERE todo_lists.id = CAST(json_extract(todos.data_json, '$.listId') AS TEXT)) \
+            THEN json_extract(todos.data_json, '$.listId') ELSE 1 END \
+     ELSE 1 END)";
 
 fn sort_expr(field: &str) -> String {
     match field {
@@ -908,6 +925,53 @@ pub fn exportable_list_timestamps(conn: &Connection) -> rusqlite::Result<HashMap
         })
         .map(|r| (r.id, r.updated_at))
         .collect())
+}
+
+/// 是否有这个（未删除的）清单。默认清单总是存在。
+pub fn list_exists(conn: &Connection, id: i64) -> rusqlite::Result<bool> {
+    if id == model::DEFAULT_LIST_ID {
+        return Ok(true);
+    }
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM todo_lists WHERE id = ?1)",
+        [id.to_string()],
+        |row| row.get(0),
+    )
+}
+
+/// 新建清单：普通 INSERT。主键冲突返回 `Err`（调用方换一个 id 重试，见
+/// `api::ids::insert_with_fresh_id`），绝不静默覆盖已有清单。
+pub fn insert_list(
+    conn: &Connection,
+    id: &str,
+    data_json: &str,
+    updated_at: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO todo_lists (id, data_json, updated_at) VALUES (?1, ?2, ?3)",
+        params![id, data_json, updated_at],
+    )?;
+    Ok(())
+}
+
+/// 原始 `listId` 等于 `list_id`（JSON 整数）的全部待办——删除清单时要移到默认清单的那些
+/// （契约 §5）。坏 JSON 的行跳过。
+pub fn todos_in_list(conn: &Connection, list_id: i64) -> rusqlite::Result<Vec<TodoRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, data_json, updated_at FROM todos
+         WHERE CASE WHEN json_valid(data_json)
+                    THEN json_type(data_json, '$.listId') = 'integer'
+                         AND json_extract(data_json, '$.listId') = ?1
+                    ELSE 0 END",
+    )?;
+    let rows = stmt.query_map([list_id], |row| {
+        Ok(TodoRow {
+            id: row.get(0)?,
+            data_json: row.get(1)?,
+            updated_at: row.get(2)?,
+        })
+    })?;
+    rows.collect()
 }
 
 /// 直接 upsert 清单（无 LWW）。同步合并与 REST 改写用。
@@ -1461,6 +1525,58 @@ mod tests {
 
     fn tombstone_free(c: &Connection) -> bool {
         list_tombstones(c).unwrap().is_empty()
+    }
+
+    /// 有效清单（契约 §3）：listId 缺失 / 类型不对 / 指向已删除的清单 → 默认清单 1。
+    #[test]
+    fn effective_list_filter_falls_back_to_default_list() {
+        let c = fresh();
+        upsert_list(&c, "5", r#"{"id":5,"name":"工作"}"#, "t").unwrap();
+        insert_todo(&c, "1", r#"{"id":1,"listId":1}"#, "t");
+        insert_todo(&c, "2", r#"{"id":2,"listId":5}"#, "t");
+        insert_todo(&c, "3", r#"{"id":3}"#, "t");
+        insert_todo(&c, "4", r#"{"id":4,"listId":777}"#, "t");
+        insert_todo(&c, "5", r#"{"id":5,"listId":"5"}"#, "t");
+        insert_todo(&c, "6", r#"{"id":6,"listId":5.0}"#, "t");
+        let ids = |list_id: i64| -> Vec<String> {
+            list_todos_filtered(
+                &c,
+                &ListTodosFilter {
+                    list_id: Some(list_id),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect()
+        };
+        assert_eq!(ids(1), vec!["1", "3", "4", "5", "6"]);
+        assert_eq!(ids(5), vec!["2"]);
+        assert!(ids(777).is_empty(), "已删除的清单不是任何待办的有效清单");
+        assert!(list_exists(&c, 1).unwrap());
+        assert!(list_exists(&c, 5).unwrap());
+        assert!(!list_exists(&c, 777).unwrap());
+
+        // 删除清单时只移原始 listId 是这个整数的待办
+        let moving: Vec<String> = todos_in_list(&c, 5)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(moving, vec!["2"]);
+        upsert_todo(&c, "8", "not json", "t").unwrap();
+        assert_eq!(todos_in_list(&c, 5).unwrap().len(), 1, "坏 JSON 的行跳过");
+    }
+
+    #[test]
+    fn insert_list_never_overwrites() {
+        let c = fresh();
+        insert_list(&c, "5", r#"{"id":5,"name":"a"}"#, "t").unwrap();
+        let err = insert_list(&c, "5", r#"{"id":5,"name":"b"}"#, "t").unwrap_err();
+        assert!(is_primary_key_conflict(&err));
+        let err = insert_list(&c, "1", "{}", "t").unwrap_err();
+        assert!(is_primary_key_conflict(&err), "默认清单已存在");
     }
 
     /// 远端 404 时要不要重推：初始值的默认清单不算待同步内容，改过名的 / 其它清单 / 清单墓碑算。

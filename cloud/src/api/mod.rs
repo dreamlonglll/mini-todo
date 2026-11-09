@@ -4,7 +4,9 @@
 //! - `/health`
 //! - `/todos`、`/todos/:id`、`/todos/:id/subtasks`
 //! - `/subtasks/:id`
+//! - `/lists`、`/lists/:id`（`:id` 是数字 id 或 URL 编码的清单名）
 //! - `/images`、`/images/:name`
+//! - `/sync`、`/sync/pull`、`/sync/push`
 //!
 //! 中间件洋葱（外 → 内）：
 //! 1. 访问日志（tower-http `TraceLayer`）：方法、路径（不含 query）、状态码、耗时；
@@ -19,6 +21,7 @@ pub mod headers;
 pub mod health;
 pub mod ids;
 pub mod images;
+pub mod lists;
 pub mod subtasks;
 pub mod sync;
 pub mod todos;
@@ -71,6 +74,13 @@ pub fn build_router(state: AppState) -> Router {
         .route("/todos/:id/subtasks", post(subtasks::create_subtask))
         .route("/subtasks/:id", patch(subtasks::patch_subtask))
         .route("/subtasks/:id", delete(subtasks::delete_subtask))
+        .route("/lists", get(lists::list_lists).post(lists::create_list))
+        .route(
+            "/lists/:id",
+            get(lists::get_list)
+                .patch(lists::patch_list)
+                .delete(lists::delete_list),
+        )
         .route(
             "/images",
             // multipart 最大 32 MiB；只放宽图片上传这一条路由，
