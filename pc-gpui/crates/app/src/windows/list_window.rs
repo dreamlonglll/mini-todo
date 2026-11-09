@@ -580,8 +580,8 @@ impl Render for ListWindow {
         let body = self.render_main_body(&rc, window, cx).into_any_element();
         let border = if classic_fixed { 0. } else { 1. };
         let fab = self.render_fab(&palette, border).into_any_element();
-        // 清单名的右键菜单（画在本帧最后的浮层）
-        let name_menu = self.render_name_menu(window, cx);
+        // 清单名的右键菜单（画在本帧最后的浮层；跟随本窗口的日 / 夜）
+        let name_menu = self.render_name_menu(palette.is_dark, window, cx);
         // 遮罩是满窗口矩形（盖住描边与圆角外的透明角）
         let overlay: Option<AnyElement> = modal_overlay(window, cx, 0.3).map(|overlay| {
             div()

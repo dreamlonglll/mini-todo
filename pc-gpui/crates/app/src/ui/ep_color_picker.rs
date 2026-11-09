@@ -539,6 +539,7 @@ impl Render for EpColorPicker {
                     arrow: false,
                     width: PANEL_WIDTH,
                     height: panel_height(!self.predefine.is_empty()),
+                    dark: false,
                 },
                 self.render_panel(cx),
                 move |_, cx| {

@@ -394,6 +394,7 @@ impl Render for EpTimePicker {
                     arrow: true,
                     width: PANEL_WIDTH,
                     height: PANEL_HEIGHT,
+                    dark: false,
                 },
                 self.render_panel(cx),
                 move |window, cx| {

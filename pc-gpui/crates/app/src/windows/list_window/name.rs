@@ -1,6 +1,8 @@
 //! 清单窗口标题栏的清单名（PRD R6）：双击就地改名（同收纳箱：锁定中也允许）、右键菜单「重命名 / 删除清单」
 //! （默认清单的「删除清单」置灰）、删除前确认"N 项待办将移到「<默认清单>」"。
 //!
+//! 右键菜单跟随本窗口的日 / 夜（`EpDropdownMenu::dark`）。
+//!
 //! - **双击**：标题栏挂了自绘移动（`BlockDrag::title_bar`：按下记点、超过 3px 才拖），不能用 `on_click` 判断双击（第二下
 //!   手抖 2~3px 就收不到，gpui-conventions §2.3）。清单名的 `on_mouse_up` 问 `BlockDrag::is_double_click_release`：这次按下是
 //!   双击的第二下、没拖动窗口、离按下点不超过 3px。清单名不 `occlude()`，在它上面按下照样能拖动窗口
@@ -313,9 +315,10 @@ impl ListWindow {
             .into_any_element()
     }
 
-    /// 右键菜单（清单名下方、左对齐）；关闭时不渲染。默认清单的「删除清单」置灰
+    /// 右键菜单（清单名下方、左对齐，跟随本窗口的日 / 夜）；关闭时不渲染。默认清单的「删除清单」置灰
     pub(super) fn render_name_menu(
         &mut self,
+        dark: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
@@ -324,6 +327,7 @@ impl ListWindow {
         }
         let default_list = self.list_id() == DEFAULT_LIST_ID;
         let menu = EpDropdownMenu::new("list-name-menu")
+            .dark(dark)
             .item(EpDropdownItem::new("rename", "重命名").icon(EpIcon::EditPen))
             .item(
                 EpDropdownItem::new("delete", "删除清单")
@@ -344,6 +348,7 @@ impl ListWindow {
                 arrow: true,
                 width: MENU_WIDTH,
                 height: EpDropdownMenu::estimated_height(2, 0),
+                dark,
             },
             div().w(px(MENU_WIDTH)).child(menu),
             move |_, cx| {

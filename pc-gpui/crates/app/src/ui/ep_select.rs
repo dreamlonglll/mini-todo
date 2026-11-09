@@ -454,6 +454,7 @@ impl<V: SelectValue> EpSelect<V> {
                 arrow: true,
                 width,
                 height: body_height + 2.,
+                dark: false,
             },
             panel,
             move |_, cx| {
