@@ -268,10 +268,6 @@ pub fn apply_mode(cx: &mut App, key: BlockKey, target: TargetMode) -> Task<Resul
             block.handle?;
             let hwnd = block.hwnd;
             let ops = block.state.plan_mode(prefs, target);
-            if key == BlockKey::DEFAULT_LIST {
-                // 托盘「固定模式」勾选跟着默认清单窗口（两种固定都勾选；任务第 5 步去掉这一项）
-                crate::services::tray::set_fixed_checked(cx, target != TargetMode::Normal);
-            }
             Some((hwnd, ops))
         });
         let Some((hwnd, ops)) = planned else {
@@ -285,7 +281,7 @@ pub fn apply_mode(cx: &mut App, key: BlockKey, target: TargetMode) -> Task<Resul
     })
 }
 
-/// 锁定 / 解除锁定窗口 `key`（标题栏锁按钮、托盘「固定模式」、重置位置）：按"嵌入桌面"偏好进入经典固定 / 嵌入桌面，
+/// 锁定 / 解除锁定窗口 `key`（标题栏锁按钮、重置位置）：按"嵌入桌面"偏好进入经典固定 / 嵌入桌面，
 /// 或退回普通模式；切完保存窗口状态。失败在该窗口里提示 `切换固定模式失败：…`。窗口没登记 / 已是目标状态时什么都不做
 pub fn set_fixed(cx: &mut App, key: BlockKey, fixed: bool) {
     let changed = match block_mut(cx, key) {
