@@ -1697,3 +1697,175 @@ fn upgrade_from_cloud_without_lists_merges_remote_lists_before_first_push() {
     assert_eq!(remote_list_tombstone_ids(&remote), vec![9]);
     assert_eq!(local_list_name(&e.db, "5").as_deref(), Some("工作"));
 }
+
+// =============================================================================
+// 契约 §12 修订 1：待办的 listId 缺失 = 未知（旧版本每次上传都会丢掉全部 listId）
+// =============================================================================
+
+/// 与 API `PATCH /todos/:id {"title": …}`（不带 listId）相同的落库动作：只改标题、
+/// `updatedAt = max(now, 旧值 + 1 秒)`、标脏；清单状态不变。
+fn api_patch_title(db: &Db, id: &str, title: &str) {
+    let now = now_local_string(tz());
+    db.with_conn(|c| {
+        let row = repo::get_todo(c, id).unwrap().unwrap();
+        let mut obj: Value = serde_json::from_str(&row.data_json).unwrap();
+        let updated_at = crate::time::bump_updated_at(&now, &[&row.updated_at], tz());
+        obj["title"] = json!(title);
+        obj["updatedAt"] = json!(updated_at);
+        repo::upsert_todo(c, id, &obj.to_string(), &updated_at).unwrap();
+        repo::mark_dirty(c).unwrap();
+    });
+}
+
+/// 再跑两轮"全量拉取 + 推送"：结果稳定，不会来回推送。
+fn assert_stable_for_two_rounds(e: &Env) {
+    let before = e.mock.doc().unwrap();
+    for round in 0..2 {
+        e.mock.clear_log();
+        let r = pull::pull_once_with(&e.ctx, true).unwrap();
+        assert!(!r.repush_scheduled, "第 {} 轮不该再重推", round);
+        assert!(!is_dirty(&e.db), "第 {} 轮", round);
+        push::push_once(&e.ctx).unwrap();
+        assert_eq!(
+            e.mock.count("PUT", "sync-data"),
+            0,
+            "第 {} 轮来回推送",
+            round
+        );
+    }
+    assert_eq!(e.mock.doc().unwrap(), before, "远端文档不再变化");
+}
+
+/// 旧写入方（≤ 3.0.x）改了一条待办后整份上传：所有待办都没有 listId、版本更新。合并后这条的清单
+/// 保持不变（沿用本地已知值）；cloud 补传一次修复文档（不改 updatedAt），之后两轮往返都稳定。
+/// 一直未知的待办保持未知（不补成 1）。
+#[test]
+fn old_writer_upload_without_list_ids_keeps_the_known_list() {
+    let e = env(MockDav::start());
+    let t0 = "2026-11-01 10:00:00";
+    let lists = vec![pc_default_list(), pc_list(5, "工作", 1, t0)];
+    e.mock.put_doc(&pc_doc_lists(
+        vec![
+            pc_todo_in(1, "写周报", t0, 5),
+            pc_todo(2, "从没归过类", t0, vec![]),
+        ],
+        lists.clone(),
+        vec![],
+        vec![],
+    ));
+    pull::pull_once(&e.ctx).unwrap();
+    assert_eq!(local_todo(&e.db, "1")["listId"], 5);
+
+    // 旧版本设备改了 1 的标题后上传：它不认识清单，全部待办都丢了 listId（todoLists 经 extra 原样带回）
+    let edited = ts(-5);
+    e.mock.put_doc(&pc_doc_lists(
+        vec![
+            pc_todo(1, "写周报（改）", &edited, vec![]),
+            pc_todo(2, "从没归过类", t0, vec![]),
+        ],
+        lists,
+        vec![],
+        vec![],
+    ));
+    let r = pull::pull_once(&e.ctx).unwrap();
+    assert_eq!(r.stats.list_ids_carried, 1);
+    let local = local_todo(&e.db, "1");
+    assert_eq!(local["title"], "写周报（改）");
+    assert_eq!(local["listId"], 5, "清单保持不变");
+    assert_eq!(local["updatedAt"], json!(edited), "版本是旧设备的");
+    assert!(
+        local_todo(&e.db, "2").get("listId").is_none(),
+        "一直未知：不补成 1"
+    );
+    assert!(
+        r.repush_scheduled,
+        "远端缺本地已知的 listId → 补传一次修复文档（§12-8）"
+    );
+
+    push::push_once(&e.ctx).unwrap();
+    let remote = e.mock.doc().unwrap();
+    let fixed = remote_todo(&remote, 1).unwrap();
+    assert_eq!(fixed["listId"], 5);
+    assert_eq!(fixed["updatedAt"], json!(edited), "补传不改 updatedAt");
+    assert!(
+        remote_todo(&remote, 2).unwrap().get("listId").is_none(),
+        "未知不写 listId 键（§12-5）"
+    );
+    assert_stable_for_two_rounds(&e);
+}
+
+/// 新写入方（升级后的 PC）上传了真实归属：cloud 本地原本缺 listId（未知）的记录采纳远端的值。
+/// 版本相同（平局）时只补 listId，不改 updatedAt、不标脏、不为它推送。
+#[test]
+fn new_writer_list_ids_fill_unknown_cloud_records_without_a_push() {
+    let e = env(MockDav::start());
+    let t0 = "2026-11-01 10:00:00";
+    // 旧格式文档：cloud 学到的两条都不知道清单
+    e.mock.put_doc(&pc_doc(
+        vec![pc_todo(1, "A", t0, vec![]), pc_todo(2, "B", t0, vec![])],
+        vec![],
+    ));
+    pull::pull_once(&e.ctx).unwrap();
+    assert!(local_todo(&e.db, "1").get("listId").is_none());
+
+    // 升级后的 PC 学到了真实归属（§12-3 在 PC 上同样生效）后上传：版本都没变
+    e.mock.put_doc(&pc_doc_lists(
+        vec![pc_todo_in(1, "A", t0, 5), pc_todo_in(2, "B", t0, 1)],
+        vec![pc_default_list(), pc_list(5, "工作", 1, t0)],
+        vec![],
+        vec![],
+    ));
+    let r = pull::pull_once(&e.ctx).unwrap();
+    assert_eq!(r.stats.list_ids_adopted, 2);
+    assert_eq!(r.stats.todos_upserted, 0, "平局保留本地，只补 listId");
+    for (id, list) in [("1", 5), ("2", 1)] {
+        let t = local_todo(&e.db, id);
+        assert_eq!(t["listId"], list, "{}", id);
+        assert_eq!(t["updatedAt"], t0, "不改 updatedAt");
+    }
+    let row = e.db.with_conn(|c| repo::get_todo(c, "1")).unwrap().unwrap();
+    assert_eq!(row.updated_at, t0);
+    assert!(!r.repush_scheduled, "远端本来就有这些 listId");
+    assert!(!is_dirty(&e.db));
+    e.mock.clear_log();
+    push::push_once(&e.ctx).unwrap();
+    assert_eq!(e.mock.count("PUT", ""), 0, "不为采纳多推一次");
+    assert_stable_for_two_rounds(&e);
+}
+
+/// 本地较新（AI 刚改过、清单仍未知）也采纳远端的 listId：AI 的修改带着它推出去。
+#[test]
+fn new_writer_list_id_is_adopted_under_a_newer_local_edit() {
+    let e = env(MockDav::start());
+    let t0 = "2026-11-01 10:00:00";
+    e.mock
+        .put_doc(&pc_doc(vec![pc_todo(1, "A", t0, vec![])], vec![]));
+    pull::pull_once(&e.ctx).unwrap();
+    api_patch_title(&e.db, "1", "A-ai");
+    let ai_version = local_todo(&e.db, "1")["updatedAt"].clone();
+    assert!(
+        local_todo(&e.db, "1").get("listId").is_none(),
+        "PATCH 不带 listId：仍未知"
+    );
+
+    let new_pc = pc_doc_lists(
+        vec![pc_todo_in(1, "A", t0, 5)],
+        vec![pc_default_list(), pc_list(5, "工作", 1, t0)],
+        vec![],
+        vec![],
+    );
+    e.mock.put_doc(&new_pc);
+    let r = pull::pull_once(&e.ctx).unwrap();
+    assert_eq!(r.stats.list_ids_adopted, 1);
+    let t = local_todo(&e.db, "1");
+    assert_eq!(t["listId"], 5);
+    assert_eq!(t["title"], "A-ai", "本地较新的版本保留");
+    assert_eq!(t["updatedAt"], ai_version, "不改 updatedAt");
+
+    push::push_once(&e.ctx).unwrap();
+    let pushed = remote_todo(&e.mock.doc().unwrap(), 1).unwrap();
+    assert_eq!(pushed["title"], "A-ai");
+    assert_eq!(pushed["listId"], 5);
+    assert_eq!(pushed["updatedAt"], ai_version);
+    assert_stable_for_two_rounds(&e);
+}

@@ -93,7 +93,8 @@ pub fn derived_priority(todo: &Map<String, Value>) -> Option<Priority> {
     effective_color(todo).and_then(Priority::from_color)
 }
 
-/// API 响应里的 todo：附加派生字段 `priority` 与（有的话）`seq`。不改动其它字段。
+/// API 响应里的 todo：附加派生字段 `priority` 与（有的话）`seq`；`listId: null`（未知，契约 §12）
+/// 与缺失一样不带出。不改动其它字段。
 pub fn todo_view(mut v: Value, seq: Option<i64>) -> Value {
     if let Value::Object(obj) = &mut v {
         let p = derived_priority(obj).map(Priority::as_str);
@@ -101,8 +102,31 @@ pub fn todo_view(mut v: Value, seq: Option<i64>) -> Value {
         if let Some(seq) = seq {
             obj.insert("seq".into(), json!(seq));
         }
+        if obj.get("listId").is_some_and(Value::is_null) {
+            obj.remove("listId");
+        }
     }
     v
+}
+
+/// todo 记录里 `listId` 的状态（契约 §12 修订 1）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListIdState {
+    /// JSON 整数（含 1）。
+    Known(i64),
+    /// 缺失或 `null`：写入方不认识清单（旧版本设备 / 旧格式文档）。**不等于** 默认清单：读侧按
+    /// 默认清单显示 / 过滤，但从不写回成 1，合并时也不会覆盖别人已知的值。
+    Unknown,
+    /// 其它类型（字符串等）：PC 会把整条记录当作无法识别。
+    Invalid,
+}
+
+/// 读出记录 JSON 的 `listId` 状态。
+pub fn list_id_state(obj: &Map<String, Value>) -> ListIdState {
+    match obj.get("listId") {
+        None | Some(Value::Null) => ListIdState::Unknown,
+        Some(v) => v.as_i64().map_or(ListIdState::Invalid, ListIdState::Known),
+    }
 }
 
 /// 记录 JSON 里的 `updatedAt`（字符串时）。
@@ -240,7 +264,8 @@ enum Kind {
     PositiveInt,
     Weekdays,
     MonthDay,
-    /// 待办所属清单的 id（i64 ≥ 1；是否指向未删除的清单由 API 层查库判断）。
+    /// 待办所属清单的 id（i64 ≥ 1；是否指向未删除的清单由 API 层查库判断）。`null` 不接受：
+    /// 写入只能把清单设成已知（契约 §12-6），响应里也从不带出 `listId: null`。
     ListId,
     /// 64 位整数（清单的 `sortOrder`：PC 端是 i64）。
     LongInt,
@@ -458,7 +483,8 @@ fn allowed_list(
 /// - `id` / `createdAt` / `updatedAt` / `seq` / `subtasks` / `subtaskCount` 忽略
 /// - 创建时 `title` 必填
 /// - `listId` 只校验类型（整数 ≥ 1）；是否指向未删除的清单要查库，由 API 层判断
-///   （不存在 → [`list_not_found_error`]）
+///   （不存在 → [`list_not_found_error`]）。不带 `listId` 的 PATCH 不改变清单（已知还是已知、
+///   未知还是未知，契约 §12-6）
 pub fn validate_todo_input(
     body: &Value,
     mode: WriteMode,
@@ -1067,11 +1093,16 @@ impl Fixer<'_> {
         }
     }
 
-    /// `listId`：PC 是 i64（缺失与 null 都是默认清单 1，不用修）。字符串 / 小数 / 布尔会让 PC
-    /// 整条反序列化失败：读得出整数的改成整数，读不出的改成默认清单。
+    /// `listId`（契约 §12）：缺失 = 未知，不替它补值；`null` 也是未知，统一成缺失（仅格式）。
+    /// 字符串 / 小数 / 布尔会让 PC 整条反序列化失败：读得出整数的改成整数，读不出的去掉
+    /// （变成未知，**不**猜成默认清单）。
     fn list_id(&mut self) {
         let fixed = match self.obj.get("listId") {
-            None | Some(Value::Null) => return,
+            None => return,
+            Some(Value::Null) => {
+                self.remove("listId");
+                return;
+            }
             Some(v) if v.as_i64().is_some() => return,
             Some(Value::Number(n)) => n
                 .as_f64()
@@ -1080,7 +1111,13 @@ impl Fixer<'_> {
             Some(Value::String(s)) => s.trim().parse::<i64>().ok(),
             Some(_) => None,
         };
-        self.set("listId", json!(fixed.unwrap_or(DEFAULT_LIST_ID)), true);
+        match fixed {
+            Some(id) => self.set("listId", json!(id), true),
+            None => {
+                self.obj.remove("listId");
+                self.out.semantic = true;
+            }
+        }
     }
 }
 
@@ -1810,19 +1847,20 @@ mod tests {
         assert_eq!(e.message(), "listId: 清单不存在");
     }
 
-    /// 会让 PC 整条反序列化失败的 `listId` 在存量归一化时修好；整数、null 与缺失不动
-    /// （PC 把 null 与缺失都读成默认清单）。
+    /// 会让 PC 整条反序列化失败的 `listId` 在存量归一化时修好：读得出整数的改成整数，读不出的
+    /// 变成未知（去掉），绝不猜成默认清单；整数与缺失不动；null 统一成缺失（契约 §12）。
     #[test]
     fn list_id_types_are_repaired() {
         for (raw, fixed) in [
-            (json!("1731000000000123"), json!(1731000000000123_i64)),
-            (json!(5.0), json!(5)),
-            (json!("abc"), json!(1)),
-            (json!(true), json!(1)),
+            (json!("1731000000000123"), Some(json!(1731000000000123_i64))),
+            (json!(5.0), Some(json!(5))),
+            (json!("abc"), None),
+            (json!(true), None),
+            (json!([5]), None),
         ] {
             let (o, out) = norm_todo(json!({"id": 1, "title": "t", "listId": raw.clone()}));
             assert!(out.semantic, "{}", raw);
-            assert_eq!(o["listId"], fixed, "{}", raw);
+            assert_eq!(o.get("listId").cloned(), fixed, "{}", raw);
         }
         let (o, out) = norm_todo(json!({"id": 1, "title": "t", "listId": 999}));
         assert_eq!(
@@ -1832,7 +1870,46 @@ mod tests {
         );
         assert_eq!(o["listId"], 999);
         let (o, out) = norm_todo(json!({"id": 1, "title": "t", "listId": null}));
+        assert_eq!(
+            out,
+            NormalizeOutcome {
+                semantic: false,
+                format: true
+            },
+            "null 与缺失都是未知：只是表示形式"
+        );
+        assert!(o.get("listId").is_none());
+        let (o, out) = norm_todo(json!({"id": 1, "title": "t"}));
         assert_eq!(out, NormalizeOutcome::default());
-        assert_eq!(o["listId"], Value::Null);
+        assert!(o.get("listId").is_none(), "缺失（未知）不替它补值");
+    }
+
+    #[test]
+    fn list_id_state_and_view() {
+        assert_eq!(
+            list_id_state(&obj(json!({"listId": 5}))),
+            ListIdState::Known(5)
+        );
+        assert_eq!(
+            list_id_state(&obj(json!({"listId": 1}))),
+            ListIdState::Known(1)
+        );
+        assert_eq!(list_id_state(&obj(json!({}))), ListIdState::Unknown);
+        assert_eq!(
+            list_id_state(&obj(json!({"listId": null}))),
+            ListIdState::Unknown
+        );
+        assert_eq!(
+            list_id_state(&obj(json!({"listId": "5"}))),
+            ListIdState::Invalid
+        );
+        assert_eq!(
+            list_id_state(&obj(json!({"listId": 1.5}))),
+            ListIdState::Invalid
+        );
+        let v = todo_view(json!({"id": 1, "listId": null}), None);
+        assert!(v.get("listId").is_none(), "未知不带出");
+        let v = todo_view(json!({"id": 1, "listId": 7}), None);
+        assert_eq!(v["listId"], 7);
     }
 }

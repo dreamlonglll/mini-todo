@@ -322,7 +322,7 @@ fn cmp_records(a: &Value, b: &Value) -> Ordering {
 /// 用本地 SQLite 当前状态 + 基准信封构造要上传的文档（K2）。
 ///
 /// - `todos`：本地全部 todo（嵌套各自的 subtasks）。本地状态已经合并过基准版本，
-///   所以它就是"远端 ∪ 本地"按 K3 合并后的结果。
+///   所以它就是"远端 ∪ 本地"按 K3 合并后的结果。清单未知（缺失 / null）的不写 `listId`。
 /// - `tombstones`：本地墓碑表（已包含合并进来的远端墓碑），按保留期过滤。
 /// - `todoLists` / `listTombstones`：本地全部清单（总是含默认清单 id 1，本地缺它时按初始值补上）
 ///   与保留期内的全部清单墓碑（契约 §1），同样是合并后的结果。
@@ -350,6 +350,10 @@ pub fn build_outgoing_doc(
             warn!(target: "minitodo_cloud::push", "skip corrupt todo row {}", row.id);
             continue;
         };
+        // 未知的清单不写 listId 键（契约 §12-5：与旧写入方一样，未知永远不会覆盖别人的已知值）
+        if obj.get("listId").is_some_and(Value::is_null) {
+            obj.remove("listId");
+        }
         let mut subs = subs_by_todo.remove(&row.id).unwrap_or_default();
         subs.sort_by(cmp_records);
         obj.insert("subtasks".into(), Value::Array(subs));
@@ -740,6 +744,36 @@ mod tests {
         let doc = build_outgoing_doc(&c, &Map::new(), vec![], tz(), "2026-10-01 00:00:00").unwrap();
         assert_eq!(doc["todoLists"][0]["id"], json!(1));
         assert_eq!(doc["todoLists"][0]["name"], json!("待办清单"));
+    }
+
+    /// 契约 §12-5：清单未知（缺失 / null）的待办上传时不写 listId 键；已知（含 1）照常写。
+    #[test]
+    fn outgoing_doc_omits_unknown_list_ids() {
+        let c = mem_db();
+        for (id, data) in [
+            ("1", r#"{"id":1,"title":"missing"}"#),
+            ("2", r#"{"id":2,"title":"null","listId":null}"#),
+            ("3", r#"{"id":3,"title":"default","listId":1}"#),
+            ("4", r#"{"id":4,"title":"work","listId":1731000000000123}"#),
+        ] {
+            repo::upsert_todo(&c, id, data, "2026-11-01 10:00:00").unwrap();
+        }
+        let doc = build_outgoing_doc(&c, &Map::new(), vec![], tz(), "2000-01-01 00:00:00").unwrap();
+        let list_ids: Vec<Option<Value>> = doc["todos"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t.get("listId").cloned())
+            .collect();
+        assert_eq!(
+            list_ids,
+            vec![
+                None,
+                None,
+                Some(json!(1)),
+                Some(json!(1731000000000123_i64))
+            ]
+        );
     }
 
     #[test]

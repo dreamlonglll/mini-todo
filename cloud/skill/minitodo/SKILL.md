@@ -130,7 +130,7 @@ pip install tzdata           # 仅 Windows 且在 config.toml 里配置了 timez
 | 有哪些清单 | `python ~/.claude/skills/minitodo/minitodo.py lists --json` |
 | 工作清单里没完成的 | `python ~/.claude/skills/minitodo/minitodo.py list --pending --list 工作 --json` |
 | 把 C3 移到生活清单 | `python ~/.claude/skills/minitodo/minitodo.py update C3 --list 生活 --json` |
-| C3 在哪个清单 | `show C3 --json` 看 `listId`，再对照 `lists --json`（`listId` 指向已删除的清单时算默认清单） |
+| C3 在哪个清单 | `show C3 --json` 看 `listId`，再对照 `lists --json`（没有 `listId` 或指向已删除的清单时算默认清单） |
 
 ## 直接调用 HTTP API（fallback）
 
@@ -201,7 +201,7 @@ body 是 JSON（`Content-Type: application/json`）。
 | `repeatInterval` | 整数 ≥ 1 | 间隔；`weekly` + `interval=2` = 每两周 |
 | `repeatWeekdays` | `"1,3,5"` / null | 仅 `weekly`：星期几（1=周一 … 7=周日）；也接受数组 `[1,3,5]` |
 | `repeatMonthDay` | 1-31 / null | 仅 `monthly`：每月几号 |
-| `listId` | 整数 ≥ 1 | 所属清单的 id（见 `GET /lists`）；新建不给时为 1（默认清单）。必须是现有的清单，否则 400 `清单不存在`；把读到的对象原样写回时不校验。读到的是存储的原值：缺失（旧设备写的）或指向已删除的清单时，这条待办算在默认清单里 |
+| `listId` | 整数 ≥ 1 | 所属清单的 id（见 `GET /lists`）；新建不给时为 1（默认清单）。必须是现有的清单，否则 400 `清单不存在`；把读到的对象原样写回时不校验，PATCH 不带 `listId` 时清单不变。读到的是存储的原值：**没有 `listId` 表示清单未知**（旧版本设备写的，服务端不会替它补值），与指向已删除的清单一样，这条待办算在默认清单里 |
 
 只读 / 服务端维护的字段：`id`、`createdAt`、`updatedAt`、`seq`（cloud 短码）、`subtasks`、
 `subtaskCount`（列表不嵌套时附带）。写入时这些字段会被**忽略**，所以把读到的对象改几个字段
@@ -249,8 +249,9 @@ body 是 JSON（`Content-Type: application/json`）。
 - `/lists/:id` 的 `:id` 与 CLI 的 `<清单>` 同一套规则：先当数字 id 找，再按名称（去首尾空格、不区分大小写）精确匹配；
   找不到 → 404；同名的有多个（两台设备各建了一个同名清单，同步不处理重名）→ **409**，错误体里
   `candidates: [{id, name}]` 列出候选，改用 id
-- **有效清单**：待办的 `listId` 指向一个现有清单时就是它；缺失（旧版本设备写的）、类型不对或指向已删除的清单时，
-  这条待办算在默认清单里（PC 也这样显示）。`GET /todos?listId=` / `?list=` 按有效清单过滤
+- **有效清单**：待办的 `listId` 指向一个现有清单时就是它；没有 `listId`（未知：旧版本设备写的）、类型不对或指向已删除的
+  清单时，这条待办算在默认清单里（PC 也这样显示）。`GET /todos?listId=` / `?list=` 按有效清单过滤。未知的清单只有在
+  显式设置时才会变成已知（`update <ref> --list …` / `listId=`）；只改其它字段不会把它写成默认清单
 - 删除清单不会删除待办：其下待办全部移到默认清单（`listId` 改为 1，`updatedAt` 刷新）；默认清单不能删除（400）
 
 ### 图片
