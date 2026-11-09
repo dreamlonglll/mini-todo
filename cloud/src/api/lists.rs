@@ -129,23 +129,28 @@ pub(crate) fn resolve_list_ref(conn: &Connection, raw: &str) -> Result<ListEntry
     find_list_by_name(&lists, trimmed).cloned()
 }
 
-/// 与其它未删除的清单（`except` 除外）不区分大小写重名 → 409（契约 §6）。
+/// 与其它未删除的清单（`except` 除外）不区分大小写重名 → 409（契约 §6）。错误文案与 PC 一致：
+/// `已有同名清单「<已有清单的名称>」`。
 fn ensure_unique_name(
     lists: &[ListEntry],
     name: &str,
     except: Option<i64>,
 ) -> Result<(), ApiError> {
     let key = model::list_name_key(name);
-    let taken = lists.iter().any(|l| {
-        Some(l.id) != except && l.name().map(model::list_name_key).as_deref() == Some(key.as_str())
+    let taken = lists.iter().find_map(|l| {
+        l.name()
+            .filter(|existing| Some(l.id) != except && model::list_name_key(existing) == key)
     });
-    if taken {
-        return Err(ApiError::conflict(format!("已有同名清单「{}」", name)));
+    match taken {
+        Some(existing) => Err(ApiError::conflict(format!(
+            "已有同名清单「{}」",
+            existing.trim()
+        ))),
+        None => Ok(()),
     }
-    Ok(())
 }
 
-/// 新清单排最后：现有最大 `sortOrder` + 1（契约 §8；不超过 32 位整数范围，PC 端是 i32）。
+/// 新清单排最后：现有最大 `sortOrder` + 1（契约 §8；PC 端是 i64）。
 fn next_sort_order(lists: &[ListEntry]) -> i64 {
     lists
         .iter()
@@ -153,7 +158,6 @@ fn next_sort_order(lists: &[ListEntry]) -> i64 {
         .max()
         .unwrap_or(0)
         .saturating_add(1)
-        .min(i64::from(i32::MAX))
 }
 
 /// `POST /lists` 的落库动作（调用方负责事务）：校验重名、分配 id、插入、标脏。

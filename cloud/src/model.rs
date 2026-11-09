@@ -242,6 +242,8 @@ enum Kind {
     MonthDay,
     /// 待办所属清单的 id（i64 ≥ 1；是否指向未删除的清单由 API 层查库判断）。
     ListId,
+    /// 64 位整数（清单的 `sortOrder`：PC 端是 i64）。
+    LongInt,
     /// 清单名称（契约 §6：去首尾空白、非空、≤ 50 个字）。
     ListName,
 }
@@ -295,7 +297,7 @@ const SUBTASK_FIELDS: &[(&str, Kind)] = &[
 const SUBTASK_IGNORED: &[&str] = &["id", "createdAt", "updatedAt"];
 
 /// 清单可写字段（契约 §10）。
-const LIST_FIELDS: &[(&str, Kind)] = &[("name", Kind::ListName), ("sortOrder", Kind::Int)];
+const LIST_FIELDS: &[(&str, Kind)] = &[("name", Kind::ListName), ("sortOrder", Kind::LongInt)];
 
 const LIST_IGNORED: &[&str] = &["id", "createdAt", "updatedAt"];
 
@@ -418,6 +420,10 @@ fn coerce(kind: Kind, v: &Value, tz: Tz) -> Result<Value, String> {
             .filter(|id| *id >= 1)
             .map(|id| json!(id))
             .ok_or_else(|| "must be a list id: an integer >= 1 (see GET /lists)".into()),
+        Kind::LongInt => v
+            .as_i64()
+            .map(|n| json!(n))
+            .ok_or_else(|| "must be an integer".into()),
         Kind::ListName => match v.as_str() {
             Some(s) => normalize_list_name(s)
                 .map(|name| json!(name))
@@ -1061,11 +1067,11 @@ impl Fixer<'_> {
         }
     }
 
-    /// `listId`：PC 是 i64（缺省 1）。null / 字符串 / 小数会让 PC 整条反序列化失败：读得出
-    /// 整数的改成整数，读不出的改成默认清单。缺失不用修（PC 的 serde 默认值就是 1）。
+    /// `listId`：PC 是 i64（缺失与 null 都是默认清单 1，不用修）。字符串 / 小数 / 布尔会让 PC
+    /// 整条反序列化失败：读得出整数的改成整数，读不出的改成默认清单。
     fn list_id(&mut self) {
         let fixed = match self.obj.get("listId") {
-            None => return,
+            None | Some(Value::Null) => return,
             Some(v) if v.as_i64().is_some() => return,
             Some(Value::Number(n)) => n
                 .as_f64()
@@ -1752,6 +1758,11 @@ mod tests {
         .unwrap();
         assert_eq!(p, obj(json!({"name": "工作", "sortOrder": 3})));
         assert!(validate_list_input(&json!({"sortOrder": -1}), WriteMode::Update).is_ok());
+        assert!(
+            validate_list_input(&json!({"sortOrder": 3_000_000_000_i64}), WriteMode::Update)
+                .is_ok(),
+            "清单的 sortOrder 在 PC 端是 i64"
+        );
 
         let e = validate_list_input(&json!({"sortOrder": 1}), WriteMode::Create).unwrap_err();
         assert!(e.message().contains("name: is required"), "{}", e.message());
@@ -1799,11 +1810,11 @@ mod tests {
         assert_eq!(e.message(), "listId: 清单不存在");
     }
 
-    /// 会让 PC 整条反序列化失败的 `listId` 在存量归一化时修好；整数与缺失不动。
+    /// 会让 PC 整条反序列化失败的 `listId` 在存量归一化时修好；整数、null 与缺失不动
+    /// （PC 把 null 与缺失都读成默认清单）。
     #[test]
     fn list_id_types_are_repaired() {
         for (raw, fixed) in [
-            (json!(null), json!(1)),
             (json!("1731000000000123"), json!(1731000000000123_i64)),
             (json!(5.0), json!(5)),
             (json!("abc"), json!(1)),
@@ -1820,5 +1831,8 @@ mod tests {
             "指向已删除清单的整数也不改写（读侧兜底）"
         );
         assert_eq!(o["listId"], 999);
+        let (o, out) = norm_todo(json!({"id": 1, "title": "t", "listId": null}));
+        assert_eq!(out, NormalizeOutcome::default());
+        assert_eq!(o["listId"], Value::Null);
     }
 }

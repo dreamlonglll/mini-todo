@@ -2970,12 +2970,12 @@ async fn lists_crud_and_name_rules() {
         (
             json!({"name": "work "}),
             StatusCode::CONFLICT,
-            "已有同名清单「work」",
+            "已有同名清单「Work」",
         ),
         (
-            json!({"name": "待办清单"}),
+            json!({"name": " 待办清单"}),
             StatusCode::CONFLICT,
-            "已有同名清单",
+            "已有同名清单「待办清单」",
         ),
         (
             json!({"name": "  "}),
