@@ -7,11 +7,11 @@ use crate::db::sync_store;
 use crate::db::time::{normalize_datetime, now_local, DefaultTime, SQL_SET_UPDATED_AT};
 use crate::db::{
     subtask_from_row, todo_from_row, CreateSubTaskRequest, CreateTodoRequest, Database, SubTask,
-    Todo, UpdateSubTaskRequest, UpdateTodoRequest, SUBTASK_COLUMNS, TODO_COLUMNS,
+    Todo, UpdateSubTaskRequest, UpdateTodoRequest, DEFAULT_LIST_ID, SUBTASK_COLUMNS, TODO_COLUMNS,
 };
+use crate::lists::{self, LIST_NOT_FOUND};
 use rusqlite::{Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 /// 待办列表顺序：未完成在前，其次手动排序，最后新建的在前
 const TODO_LIST_ORDER: &str = "completed ASC, sort_order ASC, created_at DESC";
@@ -98,22 +98,26 @@ impl TodoTimes {
 }
 
 /// 新建待办：三个时间字段规范化（仅日期时提醒 09:00 / 开始 00:00 / 截止 23:59），
-/// 排在未完成待办的最后（`create_todo`）
+/// 排在未完成待办的最后；`list_id` 缺省进默认清单，指定的清单不存在报"清单不存在"（`create_todo`）
 pub fn create(db: &Database, data: &CreateTodoRequest) -> Result<Todo, String> {
     let times = TodoTimes::normalize(
         data.notify_at.as_deref(),
         data.start_time.as_deref(),
         data.end_time.as_deref(),
     )?;
-    db.with_transaction(|tx| -> rusqlite::Result<Option<Todo>> {
+    let list_id = data.list_id.unwrap_or(DEFAULT_LIST_ID);
+    db.with_transaction(|tx| -> rusqlite::Result<Result<Todo, String>> {
+        if !lists::is_valid_target(tx, list_id)? {
+            return Ok(Err(LIST_NOT_FOUND.to_string()));
+        }
         let max_order: i32 = tx.query_row(
             "SELECT COALESCE(MAX(sort_order), -1) FROM todos WHERE completed = 0",
             [],
             |row| row.get(0),
         )?;
         tx.execute(
-            "INSERT INTO todos (title, description, color, quadrant, notify_at, notify_before, start_time, end_time, sort_order)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO todos (title, description, color, quadrant, notify_at, notify_before, start_time, end_time, sort_order, list_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             rusqlite::params![
                 data.title,
                 data.description,
@@ -124,12 +128,13 @@ pub fn create(db: &Database, data: &CreateTodoRequest) -> Result<Todo, String> {
                 times.start_time,
                 times.end_time,
                 max_order + 1,
+                list_id,
             ],
         )?;
-        load_todo(tx, tx.last_insert_rowid())
+        Ok(load_todo(tx, tx.last_insert_rowid())?
+            .ok_or_else(|| "新建待办后读取失败".to_string()))
     })
     .map_err(|e| e.to_string())?
-    .ok_or_else(|| "新建待办后读取失败".to_string())
 }
 
 /// 只更新给出的字段（`clear_*` 标志清空；改提醒时间重置已通知；开启重复提醒时提前量归零），
@@ -229,6 +234,10 @@ pub fn update(db: &Database, id: i64, data: &UpdateTodoRequest) -> Result<Todo, 
             params.push(Box::new(month_day));
         }
     }
+    if let Some(list_id) = data.list_id {
+        updates.push("list_id = ?");
+        params.push(Box::new(list_id));
+    }
 
     if updates.is_empty() {
         return Err("No fields to update".to_string());
@@ -239,13 +248,37 @@ pub fn update(db: &Database, id: i64, data: &UpdateTodoRequest) -> Result<Todo, 
     let sql = format!("UPDATE todos SET {} WHERE id = ?", updates.join(", "));
     params.push(Box::new(id));
 
-    db.with_connection(|conn| {
+    db.with_connection(|conn| -> rusqlite::Result<Result<Option<Todo>, String>> {
+        if let Some(list_id) = data.list_id {
+            if !lists::is_valid_target(conn, list_id)? {
+                return Ok(Err(LIST_NOT_FOUND.to_string()));
+            }
+        }
         let params_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
         conn.execute(&sql, params_refs.as_slice())?;
-        load_todo(conn, id)
+        Ok(Ok(load_todo(conn, id)?))
+    })
+    .map_err(|e| e.to_string())??
+    .ok_or_else(|| "待办不存在".to_string())
+}
+
+/// 把待办移到另一个清单（右键「移动到」）：只改 `list_id`，`updated_at` 严格递增（随同步传播）；
+/// 存储的已经是这个清单时什么都不改。归属未知（契约 §12）时显式移动总会写成已知——目标是默认清单也一样。
+/// 目标清单不存在报"清单不存在"，待办不存在报"待办不存在"
+pub fn move_to_list(db: &Database, id: i64, list_id: i64) -> Result<Todo, String> {
+    db.with_connection(|conn| -> rusqlite::Result<Result<Todo, String>> {
+        if !lists::is_valid_target(conn, list_id)? {
+            return Ok(Err(LIST_NOT_FOUND.to_string()));
+        }
+        conn.execute(
+            &format!(
+                "UPDATE todos SET list_id = ?1, {SQL_SET_UPDATED_AT} WHERE id = ?2 AND list_id IS NOT ?1"
+            ),
+            rusqlite::params![list_id, id],
+        )?;
+        Ok(load_todo(conn, id)?.ok_or_else(|| "待办不存在".to_string()))
     })
     .map_err(|e| e.to_string())?
-    .ok_or_else(|| "待办不存在".to_string())
 }
 
 /// 删除待办及其全部子任务，并为它们写墓碑（同步时删除才能传播，不会被另一端复活）（`delete_todo`）
@@ -435,22 +468,9 @@ fn check_image_size(len: usize, max_bytes: usize) -> Result<(), String> {
 
 /// 6 位小写字母 / 数字的随机串（只求不撞名，不用于安全场景）
 fn random_suffix() -> String {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
-
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
     const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
 
-    // RandomState 每个实例的种子都不同（进程级随机 + 递增），再混入计数与纳秒
-    let mut hasher = RandomState::new().build_hasher();
-    hasher.write_u64(COUNTER.fetch_add(1, Ordering::Relaxed));
-    hasher.write_u128(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or_default(),
-    );
-    let mut n = hasher.finish();
+    let mut n = crate::ids::random_u64();
     (0..6)
         .map(|_| {
             let c = ALPHABET[(n % ALPHABET.len() as u64) as usize] as char;
@@ -723,11 +743,133 @@ mod tests {
             notify_before: None,
             start_time: None,
             end_time: None,
+            list_id: None,
         }
     }
 
     fn update_request() -> UpdateTodoRequest {
         serde_json::from_value(serde_json::json!({})).unwrap()
+    }
+
+    // ---- 清单（v31）----
+
+    /// 新建总是写具体的清单（契约 §12-6 / 7）：不指定时是默认清单 1，不是"未知"
+    #[test]
+    fn new_todos_go_to_the_default_list_unless_another_list_is_given() {
+        let db = db();
+        assert_eq!(
+            create(&db, &create_request("a")).unwrap().list_id,
+            Some(DEFAULT_LIST_ID)
+        );
+        let work = lists::create(&db, "工作").unwrap();
+        let mut req = create_request("b");
+        req.list_id = Some(work.id);
+        let todo = create(&db, &req).unwrap();
+        assert_eq!(todo.list_id, Some(work.id));
+        assert_eq!(get(&db, todo.id).unwrap().list_id, Some(work.id));
+
+        req.list_id = Some(12345);
+        assert_eq!(create(&db, &req).unwrap_err(), "清单不存在");
+        let count: i64 = db
+            .with_connection(|c| c.query_row("SELECT COUNT(*) FROM todos", [], |r| r.get(0)))
+            .unwrap();
+        assert_eq!(count, 2, "目标清单不存在时不建待办");
+    }
+
+    #[test]
+    fn moving_a_todo_between_lists_bumps_its_version_once() {
+        let db = db();
+        let work = lists::create(&db, "工作").unwrap();
+        let todo = create(&db, &create_request("a")).unwrap();
+        db.with_connection(|c| {
+            c.execute(
+                "UPDATE todos SET updated_at = '2026-01-01 00:00:00' WHERE id = ?1",
+                [todo.id],
+            )
+        })
+        .unwrap();
+
+        let moved = move_to_list(&db, todo.id, work.id).unwrap();
+        assert_eq!(moved.list_id, Some(work.id));
+        assert!(moved.updated_at.as_str() > "2026-01-01 00:00:00");
+
+        // 已在目标清单：什么都不改
+        let base = seq(&db);
+        let again = move_to_list(&db, todo.id, work.id).unwrap();
+        assert_eq!(again.updated_at, moved.updated_at);
+        assert_eq!(seq(&db), base);
+
+        assert_eq!(move_to_list(&db, todo.id, 999).unwrap_err(), "清单不存在");
+        assert_eq!(move_to_list(&db, 999, work.id).unwrap_err(), "待办不存在");
+
+        // 编辑表单的「清单」下拉走 update
+        let mut upd = update_request();
+        upd.list_id = Some(DEFAULT_LIST_ID);
+        assert_eq!(
+            update(&db, todo.id, &upd).unwrap().list_id,
+            Some(DEFAULT_LIST_ID)
+        );
+        upd.list_id = Some(999);
+        upd.title = Some("不该写进去".to_string());
+        assert_eq!(update(&db, todo.id, &upd).unwrap_err(), "清单不存在");
+        let current = get(&db, todo.id).unwrap();
+        assert_eq!(
+            (current.list_id, current.title.as_str()),
+            (Some(DEFAULT_LIST_ID), "a"),
+            "目标清单不存在时整条更新都不生效"
+        );
+
+        // 指向已删除清单的待办（读侧按默认清单显示）移到默认清单：落成真正的 1
+        db.with_connection(|c| {
+            c.execute("UPDATE todos SET list_id = 777 WHERE id = ?1", [todo.id])
+        })
+        .unwrap();
+        assert_eq!(
+            move_to_list(&db, todo.id, DEFAULT_LIST_ID).unwrap().list_id,
+            Some(DEFAULT_LIST_ID)
+        );
+    }
+
+    /// 契约 §12-6：只改其它字段时归属保持未知；只有显式设置清单（移动 / 编辑时改了清单）才让它变成已知
+    #[test]
+    fn unknown_list_stays_unknown_until_a_list_is_set_explicitly() {
+        let db = db();
+        let work = lists::create(&db, "工作").unwrap();
+        let todo = create(&db, &create_request("a")).unwrap();
+        // 迁移前的存量待办 / 旧版本写的：归属未知
+        db.with_connection(|c| {
+            c.execute("UPDATE todos SET list_id = NULL WHERE id = ?1", [todo.id])
+        })
+        .unwrap();
+        assert_eq!(get(&db, todo.id).unwrap().list_id, None);
+
+        let mut upd = update_request();
+        upd.title = Some("只改标题".to_string());
+        upd.completed = Some(true);
+        let edited = update(&db, todo.id, &upd).unwrap();
+        assert_eq!(
+            (edited.title.as_str(), edited.list_id),
+            ("只改标题", None),
+            "list_id = None 的更新不动归属"
+        );
+        db.with_transaction(|tx| apply_order(tx, OrderTable::Todos, &[todo.id]))
+            .unwrap();
+        assert_eq!(get(&db, todo.id).unwrap().list_id, None, "排序也不动归属");
+
+        // 显式移到默认清单：未知变成已知的 1（版本前进，随同步传播）
+        let before = get(&db, todo.id).unwrap().updated_at;
+        let moved = move_to_list(&db, todo.id, DEFAULT_LIST_ID).unwrap();
+        assert_eq!(moved.list_id, Some(DEFAULT_LIST_ID));
+        assert!(moved.updated_at > before);
+
+        // 编辑时改了清单：同样变成已知
+        db.with_connection(|c| {
+            c.execute("UPDATE todos SET list_id = NULL WHERE id = ?1", [todo.id])
+        })
+        .unwrap();
+        let mut upd = update_request();
+        upd.list_id = Some(work.id);
+        assert_eq!(update(&db, todo.id, &upd).unwrap().list_id, Some(work.id));
     }
 
     fn seq(db: &Database) -> i64 {

@@ -6,8 +6,11 @@
 //!
 //! | 模块 | 内容 |
 //! |---|---|
-//! | [`db`] | SQLite 连接、迁移 v1~v30、模型、设置键值、同步存储、时间格式、路径、备份 |
-//! | [`todo`](mod@todo) | 待办 / 子任务 CRUD、排序、图片保存、从文件导入子任务 |
+//! | [`db`] | SQLite 连接、迁移 v1~v31、模型、设置键值、同步存储、时间格式、路径、备份 |
+//! | [`todo`](mod@todo) | 待办 / 子任务 CRUD、排序、移到别的清单、图片保存、从文件导入子任务 |
+//! | [`lists`] | 待办清单（v31）：CRUD、名称校验、删除时待办移到默认清单、有效清单（读侧兜底） |
+//! | [`window_prefs`] | 清单窗口 / 日历窗口的设备本地属性与按屏幕组合的布局（v31，不同步） |
+//! | [`ids`] | 新建同步记录的 id（毫秒 × 1000 + 随机，与 cloud 同一算法） |
 //! | [`data`] | 导入导出（ZIP / JSON，格式 4.0）、应用设置块 |
 //! | [`sync`] | WebDAV 同步（智能同步 / 强制拉取 / 强制推送）与同步设置 |
 //! | [`settings`] | 单项设置、运行时偏好、屏幕组合 ID、屏幕配置 |
@@ -23,6 +26,8 @@ pub mod data;
 pub mod db;
 pub mod fence;
 pub mod holiday;
+pub mod ids;
+pub mod lists;
 pub mod lunar;
 pub mod reminder;
 pub mod services;
@@ -30,5 +35,6 @@ pub mod settings;
 pub mod sync;
 pub mod todo;
 pub mod window_logic;
+pub mod window_prefs;
 
 pub use db::Database;

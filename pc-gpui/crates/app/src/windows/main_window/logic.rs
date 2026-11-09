@@ -461,6 +461,7 @@ mod tests {
             repeat_interval: 1,
             repeat_weekdays: None,
             repeat_month_day: None,
+            list_id: Some(1),
             subtasks: vec![],
         }
     }

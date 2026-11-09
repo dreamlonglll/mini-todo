@@ -55,6 +55,8 @@ pub(super) fn build_create_request(form: &FormValues) -> Option<CreateTodoReques
         }),
         start_time: form.start_time.clone(),
         end_time: form.end_time.clone(),
+        // 编辑表单还没有「清单」下拉：一律建到默认清单
+        list_id: None,
     })
 }
 

@@ -6,7 +6,7 @@ pub const SUBTASK_COLUMNS: &str =
 
 pub const TODO_COLUMNS: &str = "id, title, description, color, quadrant, notify_at, notify_before,
      notified, completed, sort_order, start_time, end_time, created_at, updated_at,
-     repeat_enabled, repeat_type, repeat_interval, repeat_weekdays, repeat_month_day";
+     repeat_enabled, repeat_type, repeat_interval, repeat_weekdays, repeat_month_day, list_id";
 
 pub fn subtask_from_row(row: &Row) -> rusqlite::Result<SubTask> {
     Ok(SubTask {
@@ -43,8 +43,51 @@ pub fn todo_from_row(row: &Row) -> rusqlite::Result<Todo> {
         repeat_interval: row.get(16).unwrap_or(1),
         repeat_weekdays: row.get(17).unwrap_or(None),
         repeat_month_day: row.get(18).unwrap_or(None),
+        list_id: row.get(19)?,
         subtasks: Vec::new(),
     })
+}
+
+/// 默认清单的 id（v31 迁移建；可改名、不可删除）。归属未知或指向不存在（含已删除）的清单的待办都按它显示
+pub const DEFAULT_LIST_ID: i64 = 1;
+
+/// 默认清单的初始名称（= 3.0 主窗口标题栏写死的文字）
+pub const DEFAULT_LIST_NAME: &str = "待办清单";
+
+/// 默认清单的初始 `createdAt` / `updatedAt`（PC v31 迁移与 cloud 惰性补建用同一个值）：固定的早时间，
+/// 两台设备各自建出的 id 1 不会互相"抢"，任何一次改名都在 LWW 里胜出
+pub const DEFAULT_LIST_CREATED_AT: &str = "2000-01-01 00:00:00";
+
+/// todo_lists 查询列，与 [`todo_list_from_row`] 的下标一一对应
+pub const TODO_LIST_COLUMNS: &str = "id, name, sort_order, created_at, updated_at";
+
+pub fn todo_list_from_row(row: &Row) -> rusqlite::Result<TodoList> {
+    Ok(TodoList {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        sort_order: row.get(2)?,
+        created_at: row.get(3)?,
+        updated_at: row.get(4)?,
+    })
+}
+
+/// 待办清单（v31 `todo_lists`）：待办的分区，每个清单在桌面上是一个独立窗口。
+///
+/// 参与同步（同步文档顶层 `todoLists`，墓碑在 `listTombstones`）与导出（格式 4.1 起）。反序列化宽容规则同 [`Todo`]：
+/// `id` / `name` 必填；`updatedAt` 缺失时为空串，同步合并按"无法识别"跳过。PC 是强类型的，清单记录里的未知字段丢弃
+/// （cloud 原样保留）。`sortOrder` 用 i64：cloud 可经 `PATCH` 改它，读侧不因取值范围丢清单
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodoList {
+    pub id: i64,
+    pub name: String,
+    /// 显示顺序：列表一律按 `(sortOrder, id)` 升序；新清单排最后（现有最大值 + 1）
+    #[serde(default)]
+    pub sort_order: i64,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub updated_at: String,
 }
 
 /// 待办。
@@ -91,6 +134,13 @@ pub struct Todo {
     pub repeat_weekdays: Option<String>,
     #[serde(default)]
     pub repeat_month_day: Option<i32>,
+    /// 所属清单（v31）。`None` = **未知**（契约 §12）：写这条记录的一方不认识清单——旧版本上传的、迁移前的存量待办
+    /// （`todos.list_id` 为 NULL）——**不等于**默认清单。未知时界面按默认清单显示（`lists::effective_list_id`），
+    /// 合并时不覆盖别处的已知值、也会从远端学到已知值，上传 / 导出时不写 `listId` 键；已知值（含 1）照常写出。
+    /// 缺失与 `null` 都是未知；类型错误（如字符串）与其它字段一样按无法识别的记录处理。
+    /// 指向不存在（含已删除）的清单时同样按默认清单显示，存储与同步的仍是原值
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub list_id: Option<i64>,
     #[serde(default)]
     pub subtasks: Vec<SubTask>,
 }
@@ -136,6 +186,17 @@ pub struct Tombstone {
     pub deleted_at: String,
 }
 
+/// 清单删除墓碑（v31 `list_tombstones`，同步文档顶层 `listTombstones`）。
+///
+/// 规则与 [`Tombstone`] 相同（`deletedAt >= 清单 updatedAt` 即删除 / 压制、并集取较大、保留 30 天），但单独成键：
+/// 旧版本会丢弃 `tombstones` 里未知 `entityType` 的墓碑。默认清单（id 1）不可删除，它的墓碑一律忽略（不存、不传播）
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListTombstone {
+    pub entity_id: i64,
+    pub deleted_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateTodoRequest {
@@ -152,6 +213,9 @@ pub struct CreateTodoRequest {
     pub start_time: Option<String>,
     /// 截止时间（可为空）
     pub end_time: Option<String>,
+    /// 所属清单（v31）；`None` = 默认清单。必须是现有的清单，否则报"清单不存在"
+    #[serde(default)]
+    pub list_id: Option<i64>,
 }
 
 fn default_quadrant() -> i32 {
@@ -197,6 +261,9 @@ pub struct UpdateTodoRequest {
     /// 是否明确清除重复提醒
     #[serde(default)]
     pub clear_repeat: bool,
+    /// 移到另一个清单（v31）；必须是现有的清单，否则报"清单不存在"
+    #[serde(default)]
+    pub list_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -307,11 +374,16 @@ fn default_notification_type() -> String {
 /// v4.0 起不再包含 agent_configs / workflow_steps / task_dependencies / prompt_templates /
 /// agent_executions 等 AI Agent 相关字段；反序列化保持向后兼容，旧 v3.0 备份中的这些字段
 /// 在解析时通过 `#[serde(default)]` 静默跳过。
+/// v4.1 起带顶层 `todoLists`，归属已知的待办带 `listId`（未知的不写，契约 §12）；不导出清单墓碑与窗口属性。
+/// 旧版本导入 4.1 时忽略 `todoLists`。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportData {
     pub version: String,
     pub exported_at: String,
+    /// 待办清单（4.1 起）。`None` = 3.0 / 4.0 备份，没有清单信息：导入时现有清单不动
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub todo_lists: Option<Vec<TodoList>>,
     pub todos: Vec<Todo>,
     pub settings: AppSettings,
 }
@@ -442,4 +514,84 @@ pub struct SaveScreenConfigRequest {
     pub window_width: i32,
     pub window_height: i32,
     pub is_fixed: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn todo_with(extra: serde_json::Value) -> serde_json::Result<Todo> {
+        let mut v = json!({"id": 5, "title": "t", "description": null, "notifyAt": null,
+                           "startTime": null, "endTime": null});
+        v.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(v)
+    }
+
+    /// 契约 §12：旧版本 / 旧写入方的待办没有 `listId` = 归属未知（不是默认清单）；`null` 同缺失；
+    /// 显式值原样保留（不校验清单是否存在）；类型错误按无法识别处理
+    #[test]
+    fn missing_or_null_list_id_means_unknown() {
+        assert_eq!(todo_with(json!({})).unwrap().list_id, None);
+        assert_eq!(todo_with(json!({"listId": null})).unwrap().list_id, None);
+        assert_eq!(
+            todo_with(json!({"listId": 1_731_000_000_000_123_i64}))
+                .unwrap()
+                .list_id,
+            Some(1_731_000_000_000_123)
+        );
+        assert_eq!(
+            todo_with(json!({"listId": DEFAULT_LIST_ID}))
+                .unwrap()
+                .list_id,
+            Some(DEFAULT_LIST_ID)
+        );
+        assert!(
+            todo_with(json!({"listId": "工作"})).is_err(),
+            "类型错误与其它字段一样按无法识别处理"
+        );
+    }
+
+    /// 上传 / 导出：未知不写 `listId` 键（未知永远不会覆盖别人的已知值）；已知值（含默认清单 1）照常写出
+    #[test]
+    fn unknown_list_id_is_not_written_but_known_ones_are() {
+        let unknown = serde_json::to_value(todo_with(json!({})).unwrap()).unwrap();
+        assert!(unknown.get("listId").is_none(), "{unknown}");
+        for known in [DEFAULT_LIST_ID, 7] {
+            let out = serde_json::to_value(todo_with(json!({"listId": known})).unwrap()).unwrap();
+            assert_eq!(out["listId"], known);
+        }
+    }
+
+    /// 清单记录：驼峰字段；`id` / `name` 必填，其余缺失取默认；未知字段丢弃
+    #[test]
+    fn todo_list_serde_uses_the_contract_shape() {
+        let list: TodoList = serde_json::from_value(json!({
+            "id": 1_731_000_000_000_123_i64, "name": "工作", "sortOrder": 3,
+            "createdAt": "2026-11-01 08:00:00", "updatedAt": "2026-11-02 08:00:00",
+            "color": "#123456"
+        }))
+        .unwrap();
+        assert_eq!(
+            list,
+            TodoList {
+                id: 1_731_000_000_000_123,
+                name: "工作".to_string(),
+                sort_order: 3,
+                created_at: "2026-11-01 08:00:00".to_string(),
+                updated_at: "2026-11-02 08:00:00".to_string(),
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(&list).unwrap(),
+            json!({"id": 1_731_000_000_000_123_i64, "name": "工作", "sortOrder": 3,
+                   "createdAt": "2026-11-01 08:00:00", "updatedAt": "2026-11-02 08:00:00"})
+        );
+        let minimal: TodoList = serde_json::from_value(json!({"id": 2, "name": "x"})).unwrap();
+        assert_eq!((minimal.sort_order, minimal.updated_at.as_str()), (0, ""));
+        assert!(serde_json::from_value::<TodoList>(json!({"id": 2})).is_err());
+        assert!(serde_json::from_value::<TodoList>(json!({"name": "x"})).is_err());
+    }
 }
