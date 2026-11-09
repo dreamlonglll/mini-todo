@@ -10,7 +10,7 @@
 //! | [`tray`] | 系统托盘 / 菜单栏图标（Windows、macOS：菜单、单击唤起去抖、固定模式勾选、收纳箱三个入口） |
 //! | [`scheduler`] | 提醒调度（对齐整分钟、启动补发重复提醒，按通知方式投递） |
 //! | [`notify`] | 系统通知（Windows Toast，AppUserModelID 与旧版一致；macOS `UNUserNotificationCenter`，归属 bundle id） |
-//! | [`window_mode`] | 主窗口固定 / 嵌入桌面 / 贴边隐藏、位置与屏幕配置记忆、托盘唤起、重置位置、200ms 轮询 |
+//! | [`window_mode`] | 桌面块窗口（清单 / 日历；现在只有主窗口）按窗口的锁定 / 嵌入桌面 / 贴边隐藏、几何与锁定的持久化接缝（`store`）、唤起所有窗口、重置位置、200ms 轮询 |
 //! | [`update_check`] | GitHub 版本检查（启动检查 + 设置「关于 → 检查更新」共用） |
 //! | [`fences`] | 桌面收纳箱生命周期：恢复 / 新建 / 显示隐藏 / 重置位置、目录监听、嵌入守护（Windows）/ 桌面层（macOS）、屏幕组合检测 |
 //! | [`mac_menu`] | macOS 应用菜单（⌘Q / ⌘, / ⌘H / ⌘W / ⌘M、编辑菜单）与 Dock 唤起（全平台编译，只在 macOS 上调用） |

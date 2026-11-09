@@ -3,6 +3,7 @@
 //!
 //! | 模块 | 窗口 |
 //! |---|---|
+//! | `block.rs` | 桌面块（清单窗口 / 日历窗口）的标识 `BlockKey`（现在只有主窗口 = 默认清单窗口） |
 //! | `main_window`（`main_window.rs` + `main_window/`） | 主窗口（透明、无系统标题栏）：标题栏、列表 / 四象限 / 日历、FAB、遮罩 |
 //! | `editor/` | 待办详情 / 编辑（只读 ⇄ 编辑、表单、子任务面板、描述放大编辑） |
 //! | `subtask.rs` | 子任务查看 / 编辑 |
@@ -23,6 +24,7 @@
 //! 托盘「添加待办项」打开的编辑窗口仍以主窗口为模态打开方，但没有 owner（[`ChildOf::unowned`]）。macOS 上没有 owner
 //! 关系（`platform::set_owner` 是 no-op），模态语义只靠遮罩与 [`WindowManager::forward_activation`]。
 
+pub mod block;
 pub mod completed;
 pub mod editor;
 pub mod fence;

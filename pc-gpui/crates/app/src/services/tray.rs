@@ -2,8 +2,9 @@
 //!
 //! 菜单（旧版顺序与文案）：添加待办项、分隔、新增收纳箱、显示/隐藏所有收纳箱、重置收纳箱位置、分隔、
 //! 固定模式（勾选）、重置位置、打开设置、开机自启动（勾选）、分隔、退出。收纳箱三项（连同其后的分隔）Windows 与 macOS 都有
-//! （2.5.0 的 mac 托盘没有收纳箱；3.0 起 mac 也有桌面收纳箱）。左键单击 300ms 去抖后唤起主窗口；右键弹菜单；开发隔离时 tooltip
-//! 为 `Mini Todo（开发版）`。
+//! （2.5.0 的 mac 托盘没有收纳箱；3.0 起 mac 也有桌面收纳箱）。左键单击 300ms 去抖后唤起所有登记的窗口（现在只有主窗口，
+//! `window_mode::bring_all_to_front`）；右键弹菜单；开发隔离时 tooltip 为 `Mini Todo（开发版）`。「固定模式」与「重置位置」
+//! 作用于默认清单窗口（= 主窗口）/ 所有窗口（任务 `11-09-multi-list-windows` 第 5 步改菜单）。
 //! 图标：Windows 取 exe 资源 ID 1；macOS 用单色模板图标（`tray/mac_icon.rs`，随菜单栏深浅色自动着色）。
 //!
 //! 托盘 / 菜单事件在窗口过程（Windows）/ AppKit 事件（macOS，主线程）里触发：回调里**不碰** GPUI `App`，只把事件投进
@@ -57,7 +58,7 @@ pub fn tooltip_text() -> &'static str {
 /// 处理一个菜单项（前台、App 未被窗口借用）
 pub fn handle_menu(cx: &mut App, id: &str) {
     use crate::services::window_mode;
-    use crate::state::AppState;
+    use crate::windows::block::BlockKey;
     use crate::windows::{ChildOf, WindowManager, editor, settings};
 
     log::info!("[tray] 菜单: {id}");
@@ -72,16 +73,15 @@ pub fn handle_menu(cx: &mut App, id: &str) {
         menu_id::TOGGLE_FENCES => fences::toggle_visibility(cx),
         menu_id::RESET_FENCES => fences::reset_positions(cx),
         menu_id::TOGGLE_FIXED => {
-            let state = AppState::global(cx);
-            state.update(cx, |state, cx| state.toggle_fixed_mode(cx));
-            // muda 点击时自己翻转了勾选；按真实状态回写（主窗口不存在时切换会失败）
-            let fixed = state.read(cx).is_fixed;
+            window_mode::toggle_fixed(cx, BlockKey::DEFAULT_LIST);
+            // muda 点击时自己翻转了勾选；按真实状态回写（主窗口不存在时什么都不切换）
+            let fixed = window_mode::is_fixed(cx, BlockKey::DEFAULT_LIST);
             set_fixed_checked(cx, fixed);
         }
-        menu_id::RESET => window_mode::reset_main_window(cx),
+        menu_id::RESET => window_mode::reset_all(cx),
         menu_id::OPEN_SETTINGS => {
             activate_app(cx);
-            window_mode::bring_main_to_front(cx);
+            window_mode::bring_to_front(cx, BlockKey::DEFAULT_LIST);
             if let Some(main) = WindowManager::main(cx) {
                 let parent = ChildOf::handle(main, cx);
                 settings::open(cx, Some(parent), settings::SettingsTab::General);
@@ -114,14 +114,14 @@ pub fn handle_menu(cx: &mut App, id: &str) {
     }
 }
 
-/// 托盘左键单击（去抖后唤起主窗口）
+/// 托盘左键单击（去抖后唤起所有登记的窗口）
 pub fn handle_left_click(cx: &mut App) {
     use std::sync::Mutex;
     use std::time::Instant;
     static LAST_CLICK: Mutex<Option<Instant>> = Mutex::new(None);
     if mini_todo_core::window_logic::accept_tray_click(&LAST_CLICK, Instant::now()) {
         activate_app(cx);
-        crate::services::window_mode::bring_main_to_front(cx);
+        crate::services::window_mode::bring_all_to_front(cx);
     }
 }
 
@@ -293,8 +293,10 @@ mod imp {
             auto_start,
         });
         // 按真实状态初始化"固定模式"勾选（主窗口可能已按屏幕配置恢复为固定）
-        let fixed_now = crate::services::window_mode::is_window_fixed(cx)
-            || crate::state::AppState::global(cx).read(cx).is_fixed;
+        let fixed_now = crate::services::window_mode::is_fixed(
+            cx,
+            crate::windows::block::BlockKey::DEFAULT_LIST,
+        );
         set_fixed_checked(cx, fixed_now);
 
         cx.spawn(async move |cx| {

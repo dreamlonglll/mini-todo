@@ -14,6 +14,7 @@ use mini_todo_core::sync::SyncMode;
 use super::{MainWindow, RenderCtx};
 use crate::assets::{AppIcon, EpIcon};
 use crate::services::sync as sync_service;
+use crate::services::window_mode;
 use crate::state::{APP_VERSION, AppState, ViewMode};
 use crate::theme::{self, Palette, main_window as dims};
 use crate::ui::icon::{IconSource, icon, spinning};
@@ -73,10 +74,10 @@ impl MainWindow {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let draggable = !window_mode::is_fixed(cx, self.block);
         let state = self.state.read(cx);
         let palette = rc.palette;
         let show_calendar = state.show_calendar;
-        let draggable = !state.is_fixed;
 
         div()
             .id("title-bar")
@@ -279,10 +280,11 @@ impl MainWindow {
         palette: &Palette,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let block = self.block;
+        let is_fixed = window_mode::is_fixed(cx, block);
         let state = self.state.read(cx);
         let completed = state.todo_count().completed;
         let is_dark = state.is_dark_theme;
-        let is_fixed = state.is_fixed;
         let view_mode = state.view_mode;
         let syncing = state.syncing;
         let palette = *palette;
@@ -394,7 +396,7 @@ impl MainWindow {
                 },
                 is_fixed,
                 &palette,
-                |_, _, cx| AppState::global(cx).update(cx, |state, cx| state.toggle_fixed_mode(cx)),
+                move |_, _, cx| window_mode::toggle_fixed(cx, block),
             ))
             .child(sync_button)
             .child(title_button(

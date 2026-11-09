@@ -10,7 +10,8 @@
 //! | [`calendar`] | 日历（6 周网格、农历 / 节气 / 节日、节假日、跨天条） |
 //! | [`logic`] | 纯逻辑（重复文案、象限颜色、日历网格、版本比较……，带单测） |
 //!
-//! 窗口模式、几何保存 / 恢复、贴边隐藏、托盘唤起见 `services::window_mode`。
+//! 主窗口就是默认清单窗口（[`BlockKey::DEFAULT_LIST`]，任务 `11-09-multi-list-windows` 第 3 步的多窗口底座的唯一使用者）：
+//! 窗口模式（按窗口的锁定 / 嵌入桌面）、几何保存 / 恢复、贴边隐藏、托盘唤起见 `services::window_mode`。
 
 pub mod calendar;
 pub mod list;
@@ -31,8 +32,8 @@ use gpui_kit::{
     Task, Window, deferred, div, prelude::FluentBuilder as _, px, relative,
 };
 use mini_todo_core::db::Todo;
-use mini_todo_core::settings::RuntimePrefs;
 
+use super::block::BlockKey;
 use super::{ChildOf, WindowKind, WindowManager, WindowSpec, logical_size, modal_overlay};
 use crate::assets::EpIcon;
 use crate::services::window_mode;
@@ -160,6 +161,8 @@ pub(crate) struct ExpandAnim {
 }
 
 pub struct MainWindow {
+    /// 这个窗口在 `window_mode` 状态表 / 几何持久化 / 吸附组里的 key（主窗口 = 默认清单窗口）
+    pub(crate) block: BlockKey,
     pub(crate) state: Entity<AppState>,
     pub(crate) scroll: ScrollHandle,
     pub(crate) scrollbar: ScrollbarState,
@@ -187,20 +190,17 @@ pub struct MainWindow {
     last_expand_all: bool,
     last_view_mode: ViewMode,
     last_show_calendar: bool,
-    last_embed_desktop: bool,
-    last_prefs: RuntimePrefs,
     _subscriptions: Vec<Subscription>,
 }
 
 impl MainWindow {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let block = BlockKey::DEFAULT_LIST;
         let state = AppState::global(cx);
         let snapshot = state.read(cx);
         let last_expand_all = snapshot.subtask_expand_all;
         let last_view_mode = snapshot.view_mode;
         let last_show_calendar = snapshot.show_calendar;
-        let last_embed_desktop = snapshot.fixed_embed_desktop;
-        let last_prefs = snapshot.runtime_prefs;
         let subscriptions =
             vec![
                 cx.observe_in(&state, window, Self::on_state_changed),
@@ -217,16 +217,19 @@ impl MainWindow {
                         return;
                     }
                     // macOS：贴边隐藏中被 Dock / ⌘Tab 激活时拉回（Windows 上是空操作）
-                    cx.defer(window_mode::on_main_activated);
+                    let block = this.block;
+                    cx.defer(move |cx| window_mode::on_activated(cx, block));
                     this.calendar.refresh_today(cx);
                     if !WindowManager::forward_activation(window, cx) {
                         AppState::global(cx).update(cx, |state, cx| state.reload_todos(cx));
                     }
                 }),
-                cx.observe_window_bounds(window, |_, _, cx| window_mode::schedule_save(cx)),
+                cx.observe_window_bounds(window, |this, _, cx| {
+                    window_mode::schedule_save(cx, this.block)
+                }),
             ];
-        window.on_window_should_close(cx, |window, cx| {
-            window_mode::on_main_close_requested(window, cx);
+        window.on_window_should_close(cx, move |window, cx| {
+            window_mode::on_close_requested(window, cx, block);
             true
         });
         // 5s 变更轮询（模态子窗口打开期间跳过）
@@ -248,6 +251,7 @@ impl MainWindow {
         let mut calendar = calendar::CalendarState::new();
         calendar.start(cx);
         Self {
+            block,
             state,
             scroll: ScrollHandle::new(),
             scrollbar: ScrollbarState::new(),
@@ -270,13 +274,12 @@ impl MainWindow {
             last_expand_all,
             last_view_mode,
             last_show_calendar,
-            last_embed_desktop,
-            last_prefs,
             _subscriptions: subscriptions,
         }
     }
 
-    /// 观察全局状态：展开全部 / 视图切换 / 日历开关 / 嵌入偏好 / 运行时偏好的变化各自收尾
+    /// 观察全局状态：展开全部 / 视图切换 / 日历开关的变化各自收尾（嵌入偏好与运行时偏好由 `window_mode` 集中观察，
+    /// 对所有窗口收尾）
     fn on_state_changed(
         &mut self,
         state: Entity<AppState>,
@@ -284,12 +287,10 @@ impl MainWindow {
         cx: &mut Context<Self>,
     ) {
         let s = state.read(cx);
-        let (expand_all, view_mode, show_calendar, embed, prefs, initialized) = (
+        let (expand_all, view_mode, show_calendar, initialized) = (
             s.subtask_expand_all,
             s.view_mode,
             s.show_calendar,
-            s.fixed_embed_desktop,
-            s.runtime_prefs,
             s.initialized,
         );
         let animate_ids: Vec<i64> = if expand_all != self.last_expand_all {
@@ -326,16 +327,6 @@ impl MainWindow {
         }
         if initialized && !self.calendar_resize_ready {
             self.calendar_resize_ready = true;
-        }
-        if embed != self.last_embed_desktop {
-            self.last_embed_desktop = embed;
-            cx.defer(move |cx| window_mode::on_embed_preference_changed(cx, embed));
-        }
-        if prefs != self.last_prefs {
-            self.last_prefs = prefs;
-            cx.defer(move |cx| {
-                window_mode::apply_runtime_prefs(cx, prefs.top_on_wake, prefs.auto_hide_enabled)
-            });
         }
         cx.notify();
     }
@@ -649,9 +640,9 @@ impl Render for MainWindow {
         }
         self.actions_bounds.set(None);
 
+        let classic_fixed = window_mode::is_classic_fixed(cx, self.block);
         let state = self.state.read(cx);
         let palette = state.main_palette();
-        let classic_fixed = state.is_classic_fixed();
         let font_size = state.todo_font_size as f32;
         let rc = RenderCtx {
             palette,
@@ -712,10 +703,11 @@ pub(crate) fn above_fab(element: AnyElement, dimmed: bool) -> AnyElement {
     }
 }
 
-/// 打开主窗口：按当前屏幕组合恢复位置与尺寸（物理像素）与固定模式，没有记录则主显示器居中
+/// 打开主窗口（默认清单窗口）：按当前屏幕组合恢复位置与尺寸（物理像素）与固定模式，没有记录则主显示器居中
 /// 380×600（旧 `appStore.initSettings`）
 pub fn open(cx: &mut App) -> Option<AnyWindowHandle> {
-    let geometry = window_mode::read_startup_geometry(cx);
+    let block = BlockKey::DEFAULT_LIST;
+    let geometry = window_mode::read_startup_geometry(cx, block);
     let monitors = crate::platform::monitors(cx);
     let primary = crate::platform::primary_monitor(cx);
     let size = logical_size(DEFAULT_WIDTH, DEFAULT_HEIGHT);
@@ -743,7 +735,7 @@ pub fn open(cx: &mut App) -> Option<AnyWindowHandle> {
     // 两种情况都由 open_window 建窗后按客户区校正（GPUI 直接建出的客户区偏高半个底边框）
     spec.client_rect = geometry.saved;
 
-    // 状态先就位（窗口第一帧就按固定模式外观画）
+    // 全局偏好与锁定状态先就位（`open_window` 同步画第一帧：第一帧就按固定模式外观画）
     let runtime_prefs = {
         let db = crate::db::Db::get(cx);
         mini_todo_core::settings::runtime_prefs(&db)
@@ -751,26 +743,30 @@ pub fn open(cx: &mut App) -> Option<AnyWindowHandle> {
     let state = AppState::global(cx);
     state.update(cx, |state, cx| {
         state.current_screen_config_id = geometry.screen_config_id.clone();
-        state.is_fixed = geometry.is_fixed;
         state.fixed_embed_desktop = geometry.embed_desktop;
         state.runtime_prefs = runtime_prefs;
         state.auto_hide_enabled = runtime_prefs.auto_hide_enabled;
         state.top_on_wake = runtime_prefs.top_on_wake;
         cx.notify();
     });
+    window_mode::prepare(cx, block, geometry.is_fixed);
 
+    let mut view_slot = None;
     let handle: AnyWindowHandle = match super::open_window(cx, &spec, |window, cx| {
-        cx.new(|cx| MainWindow::new(window, cx))
+        let view = cx.new(|cx| MainWindow::new(window, cx));
+        view_slot = Some(view.entity_id());
+        view
     }) {
         Ok(handle) => handle.into(),
         Err(e) => {
             log::error!("[window] 打开主窗口失败: {e}");
+            window_mode::unregister(cx, block);
             return None;
         }
     };
     WindowManager::register(cx, WindowKind::Main, None, handle);
-    WindowManager::on_closed(cx, handle, |cx| {
-        window_mode::on_main_closed(cx);
+    WindowManager::on_closed(cx, handle, move |cx| {
+        window_mode::unregister(cx, block);
         // 与旧版一致：所有窗口都关了就退出（收纳箱等窗口还在时进程继续，托盘可再唤起主窗口）
         if cfg!(windows) && cx.windows().is_empty() {
             cx.quit();
@@ -783,21 +779,19 @@ pub fn open(cx: &mut App) -> Option<AnyWindowHandle> {
         })
         .ok()
         .flatten();
-    window_mode::on_main_opened(cx, hwnd);
+    match view_slot {
+        Some(view) => window_mode::register(cx, block, handle, hwnd, view),
+        None => log::error!("[window] 主窗口没有根视图，窗口模式不会生效"),
+    }
 
     if geometry.is_fixed {
         let target = window_mode::TargetMode::for_state(true, geometry.embed_desktop);
-        window_mode::apply_mode(cx, target).detach();
+        window_mode::apply_mode(cx, block, target).detach();
     }
     if geometry.saved.is_none() {
         // 没有记录：建初始记录
-        window_mode::save_window_state(cx);
+        window_mode::save_window_state(cx, block);
     }
     crate::services::update_check::check_for_updates(cx);
     Some(handle)
-}
-
-/// 显示并激活主窗口（托盘左键、单实例唤起）；主窗口不存在时重新打开
-pub fn show_and_activate(cx: &mut App) {
-    window_mode::bring_main_to_front(cx);
 }

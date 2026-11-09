@@ -68,7 +68,8 @@ pub fn run() {
         windows::WindowManager::init(cx);
         let state = AppState::init(cx);
 
-        services::single_instance::listen(cx, windows::main_window::show_and_activate);
+        // 重复启动：与托盘左键相同，唤起所有登记的窗口（主窗口不在则重新打开）
+        services::single_instance::listen(cx, services::window_mode::bring_all_to_front);
 
         // Linux（只用于 CI 与截图）没有托盘：最后一个窗口关掉就退出。Windows / macOS 由托盘（菜单栏图标）常驻，
         // 主窗口关掉后从托盘 / Dock 再唤起
