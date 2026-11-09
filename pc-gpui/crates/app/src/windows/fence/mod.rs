@@ -42,12 +42,11 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::{
-    AnyElement, AnyWindowHandle, App, AppContext as _, ClickEvent, Context, CursorStyle,
-    DragMoveEvent, Empty, Entity, ExternalPaths, FileDropEvent, FocusHandle, Focusable,
-    InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render, ScrollHandle,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div,
-    prelude::FluentBuilder as _, px, relative,
+    AnyElement, AnyWindowHandle, App, AppContext as _, ClickEvent, Context, DragMoveEvent, Entity,
+    ExternalPaths, FileDropEvent, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
+    Pixels, Point, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Task, Window, div, prelude::FluentBuilder as _, px, relative,
 };
 use mini_todo_core::db::{Fence, UpdateFenceRequest};
 use mini_todo_core::fence::items::{self, FenceEntry};
@@ -142,7 +141,7 @@ impl SnapSetup {
 struct TitlePress {
     /// 按下点（窗口逻辑坐标；判断阈值时窗口还没动）
     position: Point<Pixels>,
-    /// 按下时的光标（[`cursor_point`]）
+    /// 按下时的光标（[`drag::cursor_point`]）
     cursor: (f64, f64),
     /// 是双击的第二下（系统的 `click_count >= 2`，且上一次按下没有拖动收纳箱）：松手时没移动超过 3px 就改名
     double: bool,
@@ -160,7 +159,7 @@ impl TitlePress {
 /// 进行中的移动（标题栏按下后移动超过 3px）
 #[derive(Debug, Clone)]
 struct MoveSession {
-    /// 按下时的光标（[`cursor_point`]）
+    /// 按下时的光标（[`drag::cursor_point`]）
     start_cursor: (f64, f64),
     /// 开始移动时的窗口客户区（物理像素）。按下到超过阈值之间窗口只可能被程序调整（折叠的收纳箱悬停展开、可能向上展开），
     /// 所以取开始移动这一刻的，不取按下时的
@@ -174,7 +173,7 @@ struct MoveSession {
 #[derive(Debug, Clone)]
 struct ResizeSession {
     dir: ResizeDir,
-    /// 按下时的光标（[`cursor_point`]）
+    /// 按下时的光标（[`drag::cursor_point`]）
     start_cursor: (f64, f64),
     /// 按下时的窗口客户区（物理像素）
     start: PxRect,
@@ -207,36 +206,6 @@ struct TitleDrag;
 #[derive(Clone, Copy)]
 struct ResizeDrag(ResizeDir);
 
-/// 当前光标：Windows / macOS 用屏幕物理坐标（拖动时窗口跟着动，窗口坐标不可靠），第二项为 true；Linux 取不到，
-/// 用窗口逻辑坐标 + 窗口原点（第二项 false）
-fn cursor_point(position: Point<Pixels>, window: &Window) -> ((f64, f64), bool) {
-    match platform::cursor_position_physical() {
-        Some((x, y)) => ((f64::from(x), f64::from(y)), true),
-        None => {
-            let origin = window.bounds().origin;
-            (
-                (
-                    f64::from(f32::from(position.x + origin.x)),
-                    f64::from(f32::from(position.y + origin.y)),
-                ),
-                false,
-            )
-        }
-    }
-}
-
-/// 光标相对按下时（`start`，[`cursor_point`] 的结果）移动了多少物理像素：Linux 的窗口逻辑坐标乘系数换成物理像素
-fn cursor_delta(
-    start: (f64, f64),
-    scale: f64,
-    position: Point<Pixels>,
-    window: &Window,
-) -> (f64, f64) {
-    let ((x, y), physical) = cursor_point(position, window);
-    let factor = if physical { 1. } else { scale };
-    ((x - start.0) * factor, (y - start.1) * factor)
-}
-
 /// 光标现在是否在窗口（客户区）上：Windows / macOS 按屏幕物理坐标比（窗口刚被摆过，窗口坐标可能还是旧的）；
 /// Linux 取不到光标，用最后一次鼠标事件的窗口坐标
 fn pointer_inside(window: &Window) -> bool {
@@ -249,14 +218,6 @@ fn pointer_inside(window: &Window) -> bool {
     let p = window.mouse_position();
     let size = window.viewport_size();
     p.x >= px(0.) && p.y >= px(0.) && p.x < size.width && p.y < size.height
-}
-
-struct EmptyDragView;
-
-impl Render for EmptyDragView {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        Empty
-    }
 }
 
 /// 收纳箱窗口视图
@@ -829,7 +790,7 @@ impl FenceWindow {
         let after_drag = std::mem::take(&mut self.last_press_dragged);
         self.title_press = (!self.editing_title).then(|| TitlePress {
             position: event.position,
-            cursor: cursor_point(event.position, window).0,
+            cursor: drag::cursor_point(event.position, window).0,
             double: event.click_count >= 2 && !after_drag,
         });
         // 按住期间标题不挂 tooltip（render_title_bar）
@@ -879,7 +840,8 @@ impl FenceWindow {
         let Some(session) = &self.moving else {
             return;
         };
-        let (dx, dy) = cursor_delta(session.start_cursor, session.scale, event.position, window);
+        let (dx, dy) =
+            drag::cursor_delta(session.start_cursor, session.scale, event.position, window);
         // 移动只改位置，尺寸取窗口当前值：混合 DPI 下跨屏时 WM_DPICHANGED 改了尺寸，不能用起点的尺寸算吸附、摆回去
         let (width, height) = platform::client_rect_physical(window)
             .map_or((session.start.width, session.start.height), |r| {
@@ -1211,7 +1173,7 @@ impl FenceWindow {
         };
         self.resizing = Some(ResizeSession {
             dir,
-            start_cursor: cursor_point(event.position, window).0,
+            start_cursor: drag::cursor_point(event.position, window).0,
             start: runtime::to_px(start),
             scale: platform::physical_scale(window),
             snap: SnapSetup::new(cx, self.fence_id),
@@ -1229,7 +1191,8 @@ impl FenceWindow {
         let Some(session) = &self.resizing else {
             return;
         };
-        let (dx, dy) = cursor_delta(session.start_cursor, session.scale, event.position, window);
+        let (dx, dy) =
+            drag::cursor_delta(session.start_cursor, session.scale, event.position, window);
         let min = drag::js_round(core_fence::MIN_WIDTH_DIP * session.scale);
         let raw = drag::resize_rect(
             session.start,
@@ -1267,34 +1230,18 @@ impl FenceWindow {
         ResizeDir::ALL
             .iter()
             .map(|&dir| {
-                let base = div()
-                    .id(SharedString::from(format!("resize-{}", dir.key())))
-                    .absolute()
-                    .occlude();
-                let base = match dir {
-                    ResizeDir::N => base.top_0().left(px(10.)).right(px(10.)).h(px(5.)),
-                    ResizeDir::S => base.bottom_0().left(px(10.)).right(px(10.)).h(px(5.)),
-                    ResizeDir::W => base.left_0().top(px(10.)).bottom(px(10.)).w(px(5.)),
-                    ResizeDir::E => base.right_0().top(px(10.)).bottom(px(10.)).w(px(5.)),
-                    ResizeDir::NW => base.top_0().left_0().size(px(10.)),
-                    ResizeDir::NE => base.top_0().right_0().size(px(10.)),
-                    ResizeDir::SW => base.bottom_0().left_0().size(px(10.)),
-                    ResizeDir::SE => base.bottom_0().right_0().size(px(10.)),
-                };
-                let cursor = match dir {
-                    ResizeDir::N | ResizeDir::S => CursorStyle::ResizeUpDown,
-                    ResizeDir::W | ResizeDir::E => CursorStyle::ResizeLeftRight,
-                    ResizeDir::NW | ResizeDir::SE => CursorStyle::ResizeUpLeftDownRight,
-                    ResizeDir::NE | ResizeDir::SW => CursorStyle::ResizeUpRightDownLeft,
-                };
-                base.cursor(cursor)
+                // 收纳箱的手柄画在内容之上、挡住下面的元素（网格项目贴不到窗口边）
+                drag::resize_handle(dir)
+                    .occlude()
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                             this.begin_resize(dir, event, window, cx)
                         }),
                     )
-                    .on_drag(ResizeDrag(dir), |_, _, _, cx| cx.new(|_| EmptyDragView))
+                    .on_drag(ResizeDrag(dir), |_, _, _, cx| {
+                        cx.new(|_| drag::EmptyDragView)
+                    })
                     .on_drag_move::<ResizeDrag>(cx.listener(
                         move |this, event: &DragMoveEvent<ResizeDrag>, window, cx| {
                             // 8 个手柄都会收到同一次拖动：只由按下的那个处理
@@ -1585,7 +1532,7 @@ impl FenceWindow {
             // 自绘拖动（移动）：GPUI 的拖动在按下后移动超过 2px 时开始，窗口要等超过 3px 才动；锁定 / 改名中不挂
             // （改名输入框里拖选文字不受影响）
             .when(self.can_move(), |this| {
-                this.on_drag(TitleDrag, |_, _, _, cx| cx.new(|_| EmptyDragView))
+                this.on_drag(TitleDrag, |_, _, _, cx| cx.new(|_| drag::EmptyDragView))
                     .on_drag_move::<TitleDrag>(cx.listener(
                         |this, event: &DragMoveEvent<TitleDrag>, window, cx| {
                             this.on_title_drag_move(&event.event, window, cx)

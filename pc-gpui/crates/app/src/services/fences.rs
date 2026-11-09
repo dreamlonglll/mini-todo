@@ -124,22 +124,10 @@ pub fn to_phys(r: PxRect) -> PhysRect {
 }
 
 /// 把收纳箱窗口的客户区（= 可见区域）摆到 `rect`（物理像素）。Windows：换算成外框一次 `SetWindowPos`；macOS：`setFrame:`
-/// （都延后执行，`scale` 用不到）；Linux GPUI 不能移动窗口，只按 `scale` 改尺寸（截图 / 冒烟测试用）
+/// （都延后执行，`scale` 用不到）；Linux GPUI 不能移动窗口，只按 `scale` 改尺寸（截图 / 冒烟测试用）。与清单 / 日历窗口共用
+/// `windows::drag::place_client_rect`
 pub fn apply_window_rect(window: &mut gpui_kit::Window, cx: &App, rect: PxRect, scale: f64) {
-    #[cfg(any(windows, target_os = "macos"))]
-    {
-        let _ = scale;
-        platform::set_client_rect_physical(window, cx, to_phys(rect));
-    }
-    #[cfg(not(any(windows, target_os = "macos")))]
-    {
-        let _ = cx;
-        let s = if scale > 0. { scale } else { 1. } as f32;
-        window.resize(gpui_kit::size(
-            gpui_kit::px(rect.width as f32 / s),
-            gpui_kit::px(rect.height as f32 / s),
-        ));
-    }
+    crate::windows::drag::place_client_rect(window, cx, rect, scale);
 }
 
 /// 建一个收纳箱窗口（已存在则直接返回它）。`rect` 是窗口应占的矩形（`fence_view` 的结果，物理像素），

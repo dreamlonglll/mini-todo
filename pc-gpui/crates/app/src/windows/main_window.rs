@@ -33,7 +33,7 @@ use gpui_kit::{
 };
 use mini_todo_core::db::Todo;
 
-use super::block::BlockKey;
+use super::block::{BlockDrag, BlockDragHost, BlockKey};
 use super::drag;
 use super::snap::SnapKey;
 use super::{ChildOf, WindowKind, WindowManager, WindowSpec, logical_size, modal_overlay};
@@ -165,6 +165,8 @@ pub(crate) struct ExpandAnim {
 pub struct MainWindow {
     /// 这个窗口在 `window_mode` 状态表 / 几何持久化 / 吸附组里的 key（主窗口 = 默认清单窗口）
     pub(crate) block: BlockKey,
+    /// 标题栏自绘移动与 8 个缩放手柄（与收纳箱同一套做法，吸附到吸附组里的其它窗口）
+    window_drag: BlockDrag,
     pub(crate) state: Entity<AppState>,
     pub(crate) scroll: ScrollHandle,
     pub(crate) scrollbar: ScrollbarState,
@@ -226,8 +228,12 @@ impl MainWindow {
                         AppState::global(cx).update(cx, |state, cx| state.reload_todos(cx));
                     }
                 }),
+                // 系统 / 程序挪动、改尺寸（开关日历加宽、DPI 变化、显示器变化…）后防抖保存；用户自绘拖动 / 缩放中不算，
+                // 松手后由 BlockDrag 直接保存一次
                 cx.observe_window_bounds(window, |this, _, cx| {
-                    window_mode::schedule_save(cx, this.block)
+                    if !this.window_drag.is_busy() {
+                        window_mode::schedule_save(cx, this.block)
+                    }
                 }),
             ];
         window.on_window_should_close(cx, move |window, cx| {
@@ -254,6 +260,7 @@ impl MainWindow {
         calendar.start(cx);
         Self {
             block,
+            window_drag: BlockDrag::new(block, f64::from(MIN_WIDTH), f64::from(MIN_HEIGHT)),
             state,
             scroll: ScrollHandle::new(),
             scrollbar: ScrollbarState::new(),
@@ -634,6 +641,12 @@ impl MainWindow {
     }
 }
 
+impl BlockDragHost for MainWindow {
+    fn block_drag(&mut self) -> &mut BlockDrag {
+        &mut self.window_drag
+    }
+}
+
 impl Render for MainWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // 拖拽被取消（松手不在任何落点上 / 窗口失焦）：会话还在就收尾
@@ -642,9 +655,12 @@ impl Render for MainWindow {
         }
         self.actions_bounds.set(None);
 
+        let fixed = window_mode::is_fixed(cx, self.block);
         let classic_fixed = window_mode::is_classic_fixed(cx, self.block);
         // 吸附组里别的窗口（收纳箱、以后的清单 / 日历窗口）拖动 / 缩放时吸附到本窗口的边
         let snap_edges = crate::services::snap::edges(cx, SnapKey::Block(self.block));
+        // 锁定（任一种固定）时不能缩放：不放手柄
+        let resize_handles = self.window_drag.resize_handles(!fixed, cx);
         let state = self.state.read(cx);
         let palette = state.main_palette();
         let font_size = state.todo_font_size as f32;
@@ -672,7 +688,7 @@ impl Render for MainWindow {
                 .into_any_element()
         });
 
-        div()
+        let root = div()
             .id("main-root")
             .size_full()
             .relative()
@@ -690,8 +706,13 @@ impl Render for MainWindow {
                     .border_color(palette.window_border)
             })
             .on_mouse_move(cx.listener(Self::on_root_mouse_move))
-            .on_drop(cx.listener(|this, _: &DraggedTodo, window, cx| this.finish_drag(window, cx)))
+            .on_drop(cx.listener(|this, _: &DraggedTodo, window, cx| this.finish_drag(window, cx)));
+        self.window_drag
+            .root(root, cx)
             .child(title_bar)
+            // 缩放手柄在标题栏之上、内容之下：标题栏区域的边与角能缩放；其余边上内容在上面（列表滚动条的滑块照常能拖，
+            // 留白与滚动条轨道处缩放）。见 `windows::block` 模块文档
+            .children(resize_handles)
             .child(body)
             .child(fab)
             .children(overlay)
@@ -743,6 +764,9 @@ pub fn open(cx: &mut App) -> Option<AnyWindowHandle> {
         }
     };
     spec.transparent = true;
+    // 移动与缩放都是自绘的（标题栏 + 窗口内 8 个手柄，吸附对齐，`windows::block::BlockDrag`）：系统不再从边框缩放、
+    // 不参与 Aero Snap（GPUI 的缩放热区按建窗时的 is_resizable 计算）。最小尺寸仍由 min_size 兜底
+    spec.resizable = false;
     spec.min_size = Some(logical_size(MIN_WIDTH, MIN_HEIGHT));
     // 有记录时客户区按记录的物理像素摆（中心不在任何显示器上 / 换算取整也以记录为准）；没有记录时按居中的逻辑矩形。
     // 两种情况都由 open_window 建窗后按客户区校正（GPUI 直接建出的客户区偏高半个底边框）

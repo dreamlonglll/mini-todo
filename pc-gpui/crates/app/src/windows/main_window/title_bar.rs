@@ -1,6 +1,9 @@
 //! 主窗口标题栏（旧 `TitleBar.vue`，规格 §4）：padding 12 16、高 52；左区"待办清单" + 版本号（更新红点）+
 //! 展开全部；日历开启时中区月份导航与"今天"；右区 已完成 / 视图 / 主题 / 固定 / 同步 / 设置。
-//! 固定模式（含嵌入桌面）不可拖动：不放拖动区。
+//!
+//! 移动是自绘的（`windows::block::BlockDrag::title_bar`：按下记光标、超过 3px 才跟手、吸附对齐、松手保存一次），不进系统拖动循环
+//! （没有 `drag_region()`，也就没有 Aero Snap 与双击最大化）。固定模式（含嵌入桌面）不挂拖动。按钮、版本号、月份导航等可点击元素
+//! 都 `.occlude()`：挡住标题栏，按它们不会开始拖动。
 
 use std::time::Duration;
 
@@ -20,7 +23,6 @@ use crate::theme::{self, Palette, main_window as dims};
 use crate::ui::icon::{IconSource, icon, spinning};
 use crate::ui::message::{self, MessageKind};
 use crate::ui::message_box::{self, BoxKind, ConfirmOptions};
-use crate::ui::title_bar::drag_region;
 use crate::ui::tooltip;
 use crate::windows::{ChildOf, completed, settings};
 
@@ -74,12 +76,12 @@ impl MainWindow {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let draggable = !window_mode::is_fixed(cx, self.block);
+        let can_move = !window_mode::is_fixed(cx, self.block);
         let state = self.state.read(cx);
         let palette = rc.palette;
         let show_calendar = state.show_calendar;
 
-        div()
+        let bar = div()
             .id("title-bar")
             .relative()
             .flex()
@@ -87,8 +89,9 @@ impl MainWindow {
             .items_center()
             .justify_between()
             .px(px(16.))
-            .py(px(12.))
-            .when(draggable, |this| this.child(drag_region()))
+            .py(px(12.));
+        self.window_drag
+            .title_bar(bar, can_move, cx)
             .child(self.render_title_left(&palette, show_calendar, cx))
             .when(show_calendar, |this| {
                 this.child(self.render_title_center(rc, cx))
