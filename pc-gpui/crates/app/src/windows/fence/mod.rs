@@ -8,8 +8,10 @@
 //! | `mod.rs` | 视图状态、标题栏（超过 3px 才拖动、双击改名、折叠 / 固定 / 更多）、折叠与临时展开状态机、移动 / 缩放（自绘拖动 + 吸附高亮）与几何落库、缩放手柄、外部拖入 |
 //! | `panels.rs` | 外观 / 删除确认 / 云同步提示面板（Windows OneDrive、macOS iCloud），「更多」下拉菜单 |
 //! | `grid.rs` | 项目网格：图标懒加载、选中 / 打开、自绘右键菜单（含「隐藏」/「取消隐藏」「移动到…」）、隐藏项过滤与半透明、箱内拖动排序、Ctrl+滚轮（macOS 另认 ⌘+滚轮）调图标大小 |
-//! | `logic.rs` | 纯函数（标题规范化、拖动阈值、几何闸门、缩放矩形、图标档位、隐藏项过滤与排序合并、结果提示文案） |
-//! | `snap.rs` | 吸附对齐纯函数（移动 / 缩放吸附、高亮边、按显示器筛选目标） |
+//! | `logic.rs` | 纯函数（标题规范化、几何闸门、图标档位、隐藏项过滤与排序合并、结果提示文案） |
+//!
+//! 拖动阈值、缩放方向与矩形、吸附对齐纯函数与清单 / 日历窗口共用（`windows::drag`、`windows::snap`），跨窗口的吸附运行时
+//! （目标快照、高亮）在 `services::snap`：收纳箱与清单 / 日历窗口是同一个吸附组，双向吸附。
 //!
 //! 几何一律物理像素的**客户区**（= 可见区域，与旧版 Tauri 无边框窗口的外框相同；GPUI 窗口另有不可见边框）：
 //! `mini_todo_core::fence::fence_view` + `platform::set_client_rect_physical` 摆窗，`platform::client_rect_physical` 读几何。
@@ -18,8 +20,8 @@
 //! 移动与缩放是同一套**自绘拖动**（不进系统的拖动循环：Windows `WM_NCLBUTTONDOWN(HTCAPTION)` / macOS
 //! `performWindowDragWithEvent:` 中途改不了位置，吸附做不了）：按下记下光标（屏幕物理坐标；移动在超过 3px、进入会话时才读客户区
 //! 起点，缩放在按下时读）→ GPUI `on_drag_move`（捕获阶段、不看悬停：Windows 上 GPUI 按下时已 `SetCapture`，macOS 的 mouseDragged
-//! 一直发给按下的窗口）→ 新几何 = 起点 + 光标位移 → 吸附（`snap.rs`，按住 Alt / Option 不吸附）→ 每帧最多摆一次窗，高亮画在
-//! 目标收纳箱上（`services::fences` 的跨窗口高亮）→ 松手等最后一帧落地后直接落库。GPUI 拖动的两个副作用另行处理：拖动期间
+//! 一直发给按下的窗口）→ 新几何 = 起点 + 光标位移 → 吸附（`windows::snap`，按住 Alt / Option 不吸附）→ 每帧最多摆一次窗，高亮画在
+//! 目标窗口上（`services::snap` 的跨窗口高亮）→ 松手等最后一帧落地后直接落库。GPUI 拖动的两个副作用另行处理：拖动期间
 //! 所有元素都不算悬停（`on_hover_changed` 压下这次"离开"），移动超过 2px 后这次按下不再算单击（双击改名在标题栏松手时自己判断）。
 //!
 //! macOS：窗口是不激活应用的面板（`services::fences` 模块文档）：单击、拖动、缩放、外部拖入、双击打开项目都不激活应用
@@ -34,7 +36,6 @@
 mod grid;
 pub mod logic;
 mod panels;
-pub mod snap;
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
@@ -52,18 +53,20 @@ use mini_todo_core::db::{Fence, UpdateFenceRequest};
 use mini_todo_core::fence::items::{self, FenceEntry};
 use mini_todo_core::fence::{self as core_fence, PxRect};
 
-use self::logic::{GeometryCommitGate, ResizeDir, now_ms, timing};
-use self::snap::{SnapEdge, SnapEdges, SnapGuide, SnapScene};
+use self::logic::{GeometryCommitGate, now_ms, timing};
 use crate::assets::EpIcon;
 use crate::db::spawn_db;
 use crate::platform;
 use crate::services::fences as runtime;
+use crate::services::snap as snap_service;
 use crate::theme::{self, fence_tokens};
 use crate::ui::ep_popper::Anchor;
 use crate::ui::external_drop::{DropScope, ExternalDrop};
 use crate::ui::icon::icon;
 use crate::ui::input::EpInput;
 use crate::ui::message;
+use crate::windows::drag::{self, ResizeDir};
+use crate::windows::snap::{self, SnapGuide, SnapKey, SnapScene};
 
 /// 窗口登记用的 key（与旧版 label 相同：`fence-{id}`）
 pub fn fence_key(fence_id: i64) -> String {
@@ -114,23 +117,23 @@ pub(crate) enum Panel {
     OneDrive,
 }
 
-/// 吸附目标（拖动 / 缩放开始时快照一次：拖动期间其它收纳箱不会动、显示器不会变）
+/// 吸附目标（拖动 / 缩放开始时快照一次：拖动期间其它窗口不会动、显示器不会变）
 #[derive(Debug, Clone)]
 struct SnapSetup {
-    /// 其它显示中的收纳箱的可见矩形与各显示器
+    /// 吸附组里其它显示中的窗口（收纳箱、清单 / 日历窗口）的可见矩形与各显示器
     scene: SnapScene,
 }
 
 impl SnapSetup {
     fn new(cx: &App, fence_id: i64) -> Self {
         Self {
-            scene: runtime::snap_scene(cx, fence_id),
+            scene: snap_service::scene(cx, SnapKey::Fence(fence_id)),
         }
     }
 
     /// 光标所在显示器上的目标；按住 Alt（macOS Option）时完全不吸附（`None`），每次移动按当时的修饰键判断
     fn targets(&self, alt: bool) -> Option<Vec<snap::SnapTarget>> {
-        (!alt).then(|| self.scene.targets_at(platform::cursor_position_physical()))
+        snap_service::targets(&self.scene, alt)
     }
 }
 
@@ -150,7 +153,7 @@ impl TitlePress {
     fn moved_beyond_threshold(&self, position: Point<Pixels>) -> bool {
         let dx = f64::from(f32::from(position.x - self.position.x));
         let dy = f64::from(f32::from(position.y - self.position.y));
-        logic::exceeds_drag_threshold(dx, dy, TITLE_DRAG_THRESHOLD)
+        drag::exceeds_drag_threshold(dx, dy, TITLE_DRAG_THRESHOLD)
     }
 }
 
@@ -246,22 +249,6 @@ fn pointer_inside(window: &Window) -> bool {
     let p = window.mouse_position();
     let size = window.viewport_size();
     p.x >= px(0.) && p.y >= px(0.) && p.x < size.width && p.y < size.height
-}
-
-/// 吸附高亮：被对齐的边画一条主题色线，画在窗口内的边缘、跟着窗口圆角（折叠时就是标题栏的边）；没有命中区，不挡鼠标
-fn render_snap_guides(edges: SnapEdges) -> impl IntoElement {
-    let width = theme::FENCE_SNAP_GUIDE_WIDTH;
-    div()
-        .absolute()
-        .inset_0()
-        .rounded(theme::radius::MD)
-        .border_color(fence_tokens().snap_guide)
-        .when(edges.contains(SnapEdge::Top), |this| this.border_t(width))
-        .when(edges.contains(SnapEdge::Bottom), |this| {
-            this.border_b(width)
-        })
-        .when(edges.contains(SnapEdge::Left), |this| this.border_l(width))
-        .when(edges.contains(SnapEdge::Right), |this| this.border_r(width))
 }
 
 struct EmptyDragView;
@@ -899,8 +886,8 @@ impl FenceWindow {
                 (r.width, r.height)
             });
         let raw = PxRect {
-            x: session.start.x + logic::js_round(dx),
-            y: session.start.y + logic::js_round(dy),
+            x: session.start.x + drag::js_round(dx),
+            y: session.start.y + drag::js_round(dy),
             width,
             height,
         };
@@ -958,7 +945,7 @@ impl FenceWindow {
     fn end_move(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.moving.take().is_some() {
             self.flush_placement(window, cx);
-            runtime::clear_snap_guides(cx, self.fence_id);
+            snap_service::clear_guides(cx, SnapKey::Fence(self.fence_id));
             self.commit_after_placement(window, cx);
         }
         self.resync_hover_after_drag(window, cx);
@@ -995,7 +982,7 @@ impl FenceWindow {
                 runtime::apply_window_rect(window, cx, rect, scale)
             }
         }
-        runtime::set_snap_guides(cx, self.fence_id, &pending.guides);
+        snap_service::set_guides(cx, SnapKey::Fence(self.fence_id), &pending.guides);
     }
 
     /// 拖动 / 缩放结束：摆窗是延后执行的，等最后一帧落地（`GEOMETRY_COMMIT_DELAY`）再读客户区落库。等待期间有程序调整
@@ -1243,8 +1230,8 @@ impl FenceWindow {
             return;
         };
         let (dx, dy) = cursor_delta(session.start_cursor, session.scale, event.position, window);
-        let min = logic::js_round(core_fence::MIN_WIDTH_DIP * session.scale);
-        let raw = logic::resize_rect(
+        let min = drag::js_round(core_fence::MIN_WIDTH_DIP * session.scale);
+        let raw = drag::resize_rect(
             session.start,
             session.dir,
             dx,
@@ -1267,7 +1254,7 @@ impl FenceWindow {
             return;
         }
         self.flush_placement(window, cx);
-        runtime::clear_snap_guides(cx, self.fence_id);
+        snap_service::clear_guides(cx, SnapKey::Fence(self.fence_id));
         // 缩放结束直接落库（不经闸门）
         self.commit_after_placement(window, cx);
         self.resync_hover_after_drag(window, cx);
@@ -1687,8 +1674,8 @@ impl Render for FenceWindow {
             .unwrap_or((0, 0, 0));
         let bg = theme::rgba_css(r, g, b, self.bg_alpha() as f32);
         let expanded = self.view_expanded();
-        // 别的收纳箱拖动 / 缩放时吸附到本收纳箱的边（自己拖动时不会有：目标不含自己）
-        let snap_edges = runtime::snap_edges(cx, self.fence_id);
+        // 吸附组里别的窗口（收纳箱、清单 / 日历窗口）拖动 / 缩放时吸附到本收纳箱的边（自己拖动时不会有：目标不含自己）
+        let snap_edges = snap_service::edges(cx, SnapKey::Fence(self.fence_id));
         self.pump_icons(window, cx);
 
         let root = div()
@@ -1751,7 +1738,7 @@ impl Render for FenceWindow {
             .child(self.render_title_bar(window, cx))
             .when(expanded, |this| this.child(self.render_body(window, cx)))
             .when(!snap_edges.is_empty(), |this| {
-                this.child(render_snap_guides(snap_edges))
+                this.child(drag::render_snap_guides(snap_edges, theme::radius::MD))
             })
             .children(self.render_resize_handles(cx))
             .children(self.render_item_menu(window, cx));

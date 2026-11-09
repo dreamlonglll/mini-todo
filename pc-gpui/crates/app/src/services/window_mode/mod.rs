@@ -46,9 +46,11 @@ pub use self::machine::TargetMode;
 use self::machine::{AutoHideMove, ModeState, Op, Ops, TickFacts, TickPlan};
 use crate::db::Db;
 use crate::platform::{self, Hwnd, MonitorInfo, PhysRect};
+use crate::services::snap;
 use crate::state::AppState;
 use crate::ui::message::{self, MessageKind};
 use crate::windows::block::BlockKey;
+use crate::windows::snap::SnapKey;
 
 /// 贴边隐藏 / 嵌入守护的轮询间隔（旧版 200ms 轮询线程）
 pub const TICK_INTERVAL: Duration = Duration::from_millis(200);
@@ -122,8 +124,8 @@ pub fn prepare(cx: &mut App, key: BlockKey, fixed: bool) {
     mode(cx).blocks.insert(key, Block::new(fixed, top_on_wake));
 }
 
-/// 窗口建好后调用：记下句柄、原生窗口与根视图，启动 200ms 轮询（已在跑就不重复启动），开始集中观察偏好。
-/// 窗口侧总是从普通模式开始：锁定的窗口由调用方随后 [`apply_mode`] 进入固定。没有 [`prepare`] 过时按未锁定登记
+/// 窗口建好后调用：记下句柄、原生窗口与根视图，加入吸附组（与收纳箱同一组），启动 200ms 轮询（已在跑就不重复启动），
+/// 开始集中观察偏好。窗口侧总是从普通模式开始：锁定的窗口由调用方随后 [`apply_mode`] 进入固定。没有 [`prepare`] 过时按未锁定登记
 pub fn register(
     cx: &mut App,
     key: BlockKey,
@@ -145,12 +147,27 @@ pub fn register(
         mode.tick_running = true;
         start_tick_loop(cx);
     }
+    snap::register(
+        cx,
+        SnapKey::Block(key),
+        snap::Member {
+            hwnd,
+            view,
+            suppressed: snap_suppressed,
+        },
+    );
     ensure_prefs_observer(cx);
 }
 
-/// 窗口关闭后调用（或建窗失败时撤掉 [`prepare`]）：之后的保存 / 切换 / 唤起都不再作用于它
+/// 吸附组里清单 / 日历窗口"暂时不算目标"：贴边藏在屏幕边缘时（锁定的照样算）
+fn snap_suppressed(cx: &App, key: SnapKey) -> bool {
+    matches!(key, SnapKey::Block(block) if is_edge_hidden(cx, block))
+}
+
+/// 窗口关闭后调用（或建窗失败时撤掉 [`prepare`]）：之后的保存 / 切换 / 唤起都不再作用于它，并退出吸附组
 pub fn unregister(cx: &mut App, key: BlockKey) {
     mode(cx).blocks.remove(&key);
+    snap::unregister(cx, SnapKey::Block(key));
 }
 
 /// 已登记且窗口已建好

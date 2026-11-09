@@ -799,8 +799,6 @@ pub struct FenceTokens {
     pub menu_divider: Hsla,
     pub menu_note: Hsla,
     pub menu_shadow: Hsla,
-    /// 拖动 / 缩放别的收纳箱吸附到本收纳箱时，被对齐的边上的高亮线 `#409EFF`（Element Plus 主色，不随自定义背景色变）
-    pub snap_guide: Hsla,
 }
 
 static FENCE_TOKENS: LazyLock<FenceTokens> = LazyLock::new(|| FenceTokens {
@@ -830,7 +828,6 @@ static FENCE_TOKENS: LazyLock<FenceTokens> = LazyLock::new(|| FenceTokens {
     menu_divider: rgba_css(255, 255, 255, 0.1),
     menu_note: rgba_css(255, 255, 255, 0.6),
     menu_shadow: rgba_css(0, 0, 0, 0.45),
-    snap_guide: hex(0x409EFF),
 });
 
 /// 收纳箱颜色
@@ -845,8 +842,16 @@ pub const FENCE_FONT_SIZE: Pixels = px(13.);
 /// （同资源管理器里隐藏文件的半透明观感）
 pub const FENCE_HIDDEN_ITEM_OPACITY: f32 = 0.5;
 
-/// 吸附高亮线的宽度（逻辑像素，画在目标收纳箱窗口内的边缘，见 `fence_tokens().snap_guide`）
-pub const FENCE_SNAP_GUIDE_WIDTH: Pixels = px(2.);
+// ---- 吸附对齐（清单窗口 / 日历窗口 / 收纳箱同一个吸附组，`windows::drag::render_snap_guides`） ----
+
+/// 拖动 / 缩放别的窗口吸附到本窗口时，被对齐的边上的高亮线 `#409EFF`（Element Plus 主色；不随收纳箱自定义背景色、
+/// 清单窗口的深浅主题与底色变）
+pub fn snap_guide_color() -> Hsla {
+    hex(0x409EFF)
+}
+
+/// 吸附高亮线的宽度（逻辑像素，画在目标窗口内的边缘）
+pub const SNAP_GUIDE_WIDTH: Pixels = px(2.);
 
 #[cfg(test)]
 mod tests {

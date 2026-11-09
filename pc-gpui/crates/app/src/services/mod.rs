@@ -13,6 +13,7 @@
 //! | [`window_mode`] | 桌面块窗口（清单 / 日历；现在只有主窗口）按窗口的锁定 / 嵌入桌面 / 贴边隐藏、几何与锁定的持久化接缝（`store`）、唤起所有窗口、重置位置、200ms 轮询 |
 //! | [`update_check`] | GitHub 版本检查（启动检查 + 设置「关于 → 检查更新」共用） |
 //! | [`fences`] | 桌面收纳箱生命周期：恢复 / 新建 / 显示隐藏 / 重置位置、目录监听、嵌入守护（Windows）/ 桌面层（macOS）、屏幕组合检测 |
+//! | [`snap`] | 吸附组（清单窗口 / 日历窗口 / 收纳箱）的跨窗口运行时：参与者登记、拖动开始时的目标快照、目标窗口上的高亮 |
 //! | [`mac_menu`] | macOS 应用菜单（⌘Q / ⌘, / ⌘H / ⌘W / ⌘M、编辑菜单）与 Dock 唤起（全平台编译，只在 macOS 上调用） |
 //!
 //! 启动顺序见 `lib.rs::run`：`tray::start` → `auto_sync::start` → `scheduler::start` → `fences` 恢复。
@@ -25,6 +26,7 @@ pub mod mac_menu;
 pub mod notify;
 pub mod scheduler;
 pub mod single_instance;
+pub mod snap;
 pub mod sync;
 pub mod tray;
 pub mod update_check;

@@ -34,6 +34,8 @@ use gpui_kit::{
 use mini_todo_core::db::Todo;
 
 use super::block::BlockKey;
+use super::drag;
+use super::snap::SnapKey;
 use super::{ChildOf, WindowKind, WindowManager, WindowSpec, logical_size, modal_overlay};
 use crate::assets::EpIcon;
 use crate::services::window_mode;
@@ -641,6 +643,8 @@ impl Render for MainWindow {
         self.actions_bounds.set(None);
 
         let classic_fixed = window_mode::is_classic_fixed(cx, self.block);
+        // 吸附组里别的窗口（收纳箱、以后的清单 / 日历窗口）拖动 / 缩放时吸附到本窗口的边
+        let snap_edges = crate::services::snap::edges(cx, SnapKey::Block(self.block));
         let state = self.state.read(cx);
         let palette = state.main_palette();
         let font_size = state.todo_font_size as f32;
@@ -691,6 +695,15 @@ impl Render for MainWindow {
             .child(body)
             .child(fab)
             .children(overlay)
+            .when(!snap_edges.is_empty(), |this| {
+                // 跟着窗口圆角（经典固定没有圆角）；在描边内侧，没有命中区
+                let radius = if classic_fixed {
+                    px(0.)
+                } else {
+                    theme::radius::MD
+                };
+                this.child(drag::render_snap_guides(snap_edges, radius))
+            })
     }
 }
 
