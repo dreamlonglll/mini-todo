@@ -175,8 +175,9 @@ PC 端与 cloud 同时填写 `https://yourhost:8443`、`webdavuser`、原始密�
 Skill / AI 集成：
 
 - [x] Claude Code Skill（`cloud/skill/minitodo/`，含 Python CLI、单测、install 脚本、SKILL.md）
-- [x] CLI 覆盖 today / list / add / done / search / show / update / delete / health / sync；
-      `update` 按字段类型转换取值（字符串字段不会被误转成数字）；部分失败退出码 4
+- [x] CLI 覆盖 today / list / add / done / search / show / update / delete / health / sync / lists；
+      `update` 按字段类型转换取值（字符串字段不会被误转成数字）；部分失败退出码 4；
+      待办相关命令带 `--list <清单名称或 id>`（先经 `GET /lists/<清单>` 解析成 id）
 - [x] cloud 端 `C{seq}` 短码：每个 todo 分配自增短码（`todo_seq` 表），CLI 与 API 均可用 `C3` 代替完整 id
 - [x] 同一份 skill 可装到 openclaw workspace（`install.sh --target openclaw`）
 - [x] openclaw cron 临期提醒：cron 唤起 agent 后由 **agent 自己**拉 `list --pending --json` + 判断哪些该推 + 组织格式，`--announce` 推到 default channel

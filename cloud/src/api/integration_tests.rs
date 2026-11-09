@@ -3051,6 +3051,11 @@ async fn lists_crud_and_name_rules() {
     let (s, _, raw) = send(&fx.router, req(Method::GET, &list_path("WORK"), None)).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(json_body(&raw)["id"], en["id"]);
+    // 名称里的 `/`、`?`、空格编码后照样能寻址（Skill 用 urllib.parse.quote(ref, safe="")）
+    let odd = create_list(&fx, json!({"name": "A/B? c"})).await;
+    let (s, _, raw) = send(&fx.router, req(Method::GET, &list_path("a/b? C"), None)).await;
+    assert_eq!(s, StatusCode::OK, "{}", list_path("a/b? C"));
+    assert_eq!(json_body(&raw)["id"], odd["id"]);
     for missing in ["不存在", "999"] {
         let (s, _, raw) = send(&fx.router, req(Method::GET, &list_path(missing), None)).await;
         assert_eq!(s, StatusCode::NOT_FOUND, "{}", missing);
