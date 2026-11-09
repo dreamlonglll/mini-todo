@@ -16,7 +16,8 @@
 //! - **200ms 轮询遍历所有登记的窗口**：Explorer 重启重挂、经典固定的最小化守护、贴边隐藏（状态机按窗口各一份），以及廉价的
 //!   样式自愈（防御）。GPUI 建窗后不再改写 ex style，旧版为对抗 tao `apply_diff` 写的排队重申不再需要。
 //! - **唤起与重置作用于所有登记的窗口**：托盘左键 / 单实例 / Dock 唤起 / 贴边隐藏中被激活 → [`bring_all_to_front`]（隐藏的清单窗口
-//!   一起显示、清掉隐藏；还没开过窗的清单先开窗；日历只在「显示日历」开着时）；托盘「重置位置」→ [`reset_all`]（错开排列、解除锁定）。
+//!   一起显示、清掉隐藏；还没开过窗的清单先开窗；日历只在「显示日历」开着时）；托盘「重置位置」→ [`reset_all`]（所有清单 /
+//!   日历窗口错开排列、解除锁定、取消隐藏，没开过窗的也算）。
 //! - **几何与锁定按屏幕组合持久化**，经 [`store`]（core 的窗口属性表 `window_layouts`；默认清单窗口另外登记屏幕组合）。
 //!
 //! macOS 走同一套状态机与 200ms 轮询（`platform::Hwnd` 是 NSWindow 窗口号）：几何锁定 = `setMovable:NO` + 去掉可缩放，
@@ -636,52 +637,113 @@ pub fn on_activated(cx: &mut App, key: BlockKey) {
     }
 }
 
-/// 托盘「重置位置」（旧 `reset_window_impl` + 前端 `tray-reset-window`）：所有登记的窗口清贴边状态、撤置顶，在主显示器左上起
-/// 错开排列（第一个 = 以前的主窗口：10% 边距、380×600 逻辑，见 [`machine::reset_rect`]）；锁定的退回普通模式；然后保存。
-/// 默认清单窗口不在（Linux 上被关掉了）时先打开它。隐藏着的窗口照样挪（任务第 5 步改成一并取消隐藏）。
+/// 取不到主显示器时「重置位置」按它排列（物理像素）
+const FALLBACK_MONITOR: MonitorBounds = MonitorBounds {
+    x: 0,
+    y: 0,
+    width: 1920,
+    height: 1080,
+};
+
+/// 「重置位置」里一个已开的窗口要做的事
+struct ResetJob {
+    key: BlockKey,
+    handle: AnyWindowHandle,
+    hwnd: Option<Hwnd>,
+    rect: PhysRect,
+    /// 重置后显示：清单窗口都显示，日历只在「显示日历」开着时
+    show: bool,
+}
+
+/// 托盘「重置位置」（旧 `reset_window_impl` + 前端 `tray-reset-window`，PRD R9）：**所有**清单窗口与日历窗口（开没开过窗都算）
+/// 在主显示器左上起错开排列（[`machine::reset_plan`]：默认清单、其它清单按 id、日历最后；第一个 = 以前的主窗口位置，
+/// 日历与清单窗口等高），全部解除锁定；清单窗口全部取消隐藏（还没开过窗的现在开），日历只在「显示日历」开着时显示
+/// （关着时只改它记下的位置与锁定，下次显示时出现在那里）；最后按排列顺序唤起（后面的在上面：每个窗口的标题栏都露在外面）。
 ///
-/// 屏幕组合 ID 只在启动时算（旧版也是：运行中插拔显示器不切换配置），旧版在重置后重跑 `initSettings` 重算；这里在保存
-/// 之前重算，重置后的几何写进**当前**屏幕组合的记录（不会写到启动时那个已经过时的组合上）
+/// 顺序：先把重置后的几何（未锁定）一次写进**当前**屏幕组合（[`store::save_all`]；屏幕组合 ID 只在启动时算——旧版也是，
+/// 运行中插拔显示器不切换配置——这里先重算），所以随后开窗的窗口读到的就是它，直接出现在重置后的位置、不带锁定；
+/// 再处理已开的窗口：清贴边状态、撤置顶、还原最小化、摆窗、显示，锁定的退回普通模式（切完保存），其余保存（读回实际客户区）。
+/// Linux 不能程序化移动窗口：只改尺寸
 pub fn reset_all(cx: &mut App) {
-    crate::services::block_windows::ensure_default_list(cx);
-    let primary = platform::primary_monitor(cx);
-    let keys = registered(cx);
+    // macOS：从菜单栏图标点的，本应用多半不在前台（同 bring_all_to_front）
+    #[cfg(target_os = "macos")]
+    cx.activate(true);
+    refresh_screen_config_id(cx);
+    let (monitor, scale) = platform::primary_monitor(cx)
+        .map_or((FALLBACK_MONITOR, 1.), |m| (monitor_bounds(&m), m.scale));
+    let plan = machine::reset_plan(
+        monitor,
+        scale,
+        &crate::services::block_windows::all_keys(cx),
+    );
+    let screen_id = AppState::global(cx)
+        .read(cx)
+        .current_screen_config_id
+        .clone();
+    let records: Vec<(BlockKey, PhysRect, bool)> =
+        plan.iter().map(|&(key, rect)| (key, rect, false)).collect();
+    let db = Db::get(cx);
+    let write = cx
+        .background_executor()
+        .spawn(async move { store::save_all(&db, &screen_id, &records) });
     cx.spawn(async move |cx| {
-        for (index, key) in keys.iter().enumerate() {
-            let placed = cx.update(|cx| {
-                let block = block_mut(cx, *key)?;
-                block.state.reset_runtime();
-                Some((block.handle?, block.hwnd))
-            });
-            let Some((handle, hwnd)) = placed else {
-                continue;
-            };
-            match (hwnd, &primary) {
-                (Some(hwnd), Some(monitor)) => {
-                    let rect = machine::reset_rect(monitor_bounds(monitor), monitor.scale, index);
+        if let Err(e) = write.await {
+            // 已开的窗口照样摆好并各自保存；没开过窗的按原来的记录开窗、随后也被摆好
+            log::warn!("[window] 重置位置：保存几何失败: {e}");
+        }
+        let jobs = cx.update(|cx| {
+            // 清单窗口全部取消隐藏，没开过窗的现在开（读到刚写的布局）
+            crate::services::block_windows::prepare_wake_all(cx);
+            plan.iter()
+                .filter_map(|&(key, rect)| {
+                    let show = crate::services::block_windows::should_wake(cx, key);
+                    let block = block_mut(cx, key)?;
+                    block.state.reset_runtime();
+                    Some(ResetJob {
+                        key,
+                        handle: block.handle?,
+                        hwnd: block.hwnd,
+                        rect,
+                        show,
+                    })
+                })
+                .collect::<Vec<_>>()
+        });
+        for job in &jobs {
+            match job.hwnd {
+                Some(hwnd) => {
+                    // 最小化时摆的是还原前的外框，先还原；隐藏着的先摆好再显示（不在旧位置闪一下）
+                    if job.show && hwnd.is_minimized() {
+                        hwnd.restore();
+                    }
                     hwnd.set_topmost(false);
-                    hwnd.set_client_rect(rect);
+                    hwnd.set_client_rect(job.rect);
+                    if job.show && !hwnd.is_visible() {
+                        hwnd.show();
+                    }
                 }
-                _ => {
-                    let _ = cx.update_window(handle, |_, window, _| {
-                        window.resize(gpui_kit::size(
-                            gpui_kit::px(window_logic::RESET_WINDOW_WIDTH as f32),
-                            gpui_kit::px(window_logic::RESET_WINDOW_HEIGHT as f32),
-                        ));
-                    });
+                None => {
+                    let size = job.rect.to_logical(scale).size;
+                    let _ = cx.update_window(job.handle, |_, window, _| window.resize(size));
                 }
             }
         }
         cx.update(|cx| {
-            refresh_screen_config_id(cx);
-            for key in keys {
-                if is_fixed(cx, key) {
+            for job in &jobs {
+                if is_fixed(cx, job.key) {
                     // 锁定的窗口不允许挪：重置后退回普通模式（set_fixed 切换后会保存）
-                    set_fixed(cx, key, false);
+                    set_fixed(cx, job.key, false);
                 } else {
-                    save_window_state(cx, key);
+                    save_window_state(cx, job.key);
                 }
             }
+            wake(
+                cx,
+                jobs.iter()
+                    .filter(|job| job.show)
+                    .map(|job| job.key)
+                    .collect(),
+            );
         });
     })
     .detach();

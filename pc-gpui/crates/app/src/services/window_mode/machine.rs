@@ -14,6 +14,8 @@ use mini_todo_core::window_logic::{
 };
 
 use crate::platform::PhysRect;
+use crate::windows::block::BlockKey;
+use crate::windows::calendar_window::logic as calendar_logic;
 
 /// 目标模式
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -349,23 +351,46 @@ impl ModeState {
 /// 「重置位置」时相邻两个窗口错开的距离（逻辑像素）
 pub const RESET_CASCADE_STEP_DIP: f64 = 32.;
 
-/// 托盘「重置位置」第 `index` 个窗口的客户区（物理像素）：第一个与以前的主窗口相同——主显示器左上起各留 `尺寸 × 10% ÷ 缩放`
-/// 的边距、380×600（逻辑）；之后每个向右下错开 32 逻辑像素，超出显示器就从第一个的位置重新开始
-pub fn reset_rect(monitor: MonitorBounds, scale: f64, index: usize) -> PhysRect {
+/// 「重置位置」后窗口的尺寸（逻辑像素）：清单窗口 380×600（以前的主窗口）；日历窗口与清单窗口等高、宽度按日格大致是方的
+/// （`calendar_window::logic::default_width`，600 高时 596，不小于日历窗口的最小宽度）
+pub fn reset_size(key: BlockKey) -> (f64, f64) {
+    let height = window_logic::RESET_WINDOW_HEIGHT;
+    match key {
+        BlockKey::List(_) => (window_logic::RESET_WINDOW_WIDTH, height),
+        BlockKey::Calendar => (calendar_logic::default_width(height), height),
+    }
+}
+
+/// 托盘「重置位置」第 `index` 个窗口（逻辑尺寸 `size`）的客户区（物理像素）：第一个与以前的主窗口相同——主显示器左上起各留
+/// `尺寸 × 10% ÷ 缩放` 的边距；之后每个向右下错开 32 逻辑像素，这个窗口再错开就超出显示器右边或下边时从第一个的位置重新开始
+pub fn reset_rect(monitor: MonitorBounds, scale: f64, index: usize, size: (f64, f64)) -> PhysRect {
     let scale = if scale.is_finite() && scale > 0. {
         scale
     } else {
         1.
     };
     let base = window_logic::reset_window_position(monitor, scale);
-    let width = (window_logic::RESET_WINDOW_WIDTH * scale).round() as i32;
-    let height = (window_logic::RESET_WINDOW_HEIGHT * scale).round() as i32;
+    let width = (size.0 * scale).round() as i32;
+    let height = (size.1 * scale).round() as i32;
     let step = (RESET_CASCADE_STEP_DIP * scale).round().max(1.) as i32;
     let room_x = (monitor.right() - (base.x + width)).max(0) / step;
     let room_y = (monitor.bottom() - (base.y + height)).max(0) / step;
     let slots = (room_x.min(room_y) + 1).max(1) as usize;
     let offset = (index % slots) as i32 * step;
     PhysRect::new(base.x + offset, base.y + offset, width, height)
+}
+
+/// 托盘「重置位置」的排列：`keys` 按给出的顺序（默认清单、其它清单按 id、日历最后）在主显示器 `monitor` 上依次错开
+/// （[`reset_rect`]，尺寸见 [`reset_size`]）。返回每个窗口的客户区（物理像素）
+pub fn reset_plan(
+    monitor: MonitorBounds,
+    scale: f64,
+    keys: &[BlockKey],
+) -> Vec<(BlockKey, PhysRect)> {
+    keys.iter()
+        .enumerate()
+        .map(|(index, key)| (*key, reset_rect(monitor, scale, index, reset_size(*key))))
+        .collect()
 }
 
 #[cfg(test)]
@@ -641,16 +666,17 @@ mod tests {
             width: 2560,
             height: 1440,
         };
-        let first = reset_rect(monitor, 1.25, 0);
+        const LIST: (f64, f64) = (380., 600.);
+        let first = reset_rect(monitor, 1.25, 0, LIST);
         let pos = window_logic::reset_window_position(monitor, 1.25);
         assert_eq!(first, PhysRect::new(pos.x, pos.y, 475, 750));
         // 之后的窗口向右下错开 32 逻辑像素（125% 下 40 物理像素）
         assert_eq!(
-            reset_rect(monitor, 1.25, 1),
+            reset_rect(monitor, 1.25, 1, LIST),
             PhysRect::new(pos.x + 40, pos.y + 40, 475, 750)
         );
         assert_eq!(
-            reset_rect(monitor, 1.25, 3),
+            reset_rect(monitor, 1.25, 3, LIST),
             PhysRect::new(pos.x + 120, pos.y + 120, 475, 750)
         );
         // 偏移的显示器
@@ -661,18 +687,42 @@ mod tests {
             height: 1080,
         };
         assert_eq!(
-            reset_rect(offset, 0., 0),
+            reset_rect(offset, 0., 0, LIST),
             PhysRect::new(-1920 + 192, 108, 380, 600)
         );
     }
 
     #[test]
     fn reset_wraps_around_instead_of_leaving_the_monitor() {
+        const LIST: (f64, f64) = (380., 600.);
         // 1920×1080 @100%：第一个在 (192, 108)，下边还能错开 (1080 − 708) / 32 = 11 次
         let slots = 12;
-        let last = reset_rect(MONITOR, 1., slots - 1);
+        let last = reset_rect(MONITOR, 1., slots - 1, LIST);
         assert!(last.bottom() <= MONITOR.bottom() && last.right() <= MONITOR.right());
-        assert_eq!(reset_rect(MONITOR, 1., slots), reset_rect(MONITOR, 1., 0));
+        assert_eq!(
+            reset_rect(MONITOR, 1., slots, LIST),
+            reset_rect(MONITOR, 1., 0, LIST)
+        );
+        // 每个窗口按自己的尺寸判断：1366×768 上第一个在 (136, 76)
+        let small = MonitorBounds {
+            x: 0,
+            y: 0,
+            width: 1366,
+            height: 768,
+        };
+        // 600 高：下边只剩 768 − 76 − 600 = 92，只够错开 2 次
+        assert_eq!(reset_rect(small, 1., 2, LIST).y, 76 + 64);
+        assert_eq!(
+            reset_rect(small, 1., 3, LIST),
+            reset_rect(small, 1., 0, LIST)
+        );
+        // 1200 宽：右边只剩 30，不够错开一次，都叠在第一个位置；同样高的 380 宽窗口照常错开
+        let wide = (1200., 400.);
+        assert_eq!(
+            reset_rect(small, 1., 1, wide),
+            reset_rect(small, 1., 0, wide)
+        );
+        assert_eq!(reset_rect(small, 1., 1, (380., 400.)).x, 136 + 32);
         // 显示器比窗口还小：都叠在第一个位置
         let tiny = MonitorBounds {
             x: 0,
@@ -680,6 +730,41 @@ mod tests {
             width: 300,
             height: 300,
         };
-        assert_eq!(reset_rect(tiny, 1., 5), reset_rect(tiny, 1., 0));
+        assert_eq!(reset_rect(tiny, 1., 5, LIST), reset_rect(tiny, 1., 0, LIST));
+    }
+
+    #[test]
+    fn reset_plan_cascades_lists_then_the_calendar() {
+        let keys = [
+            BlockKey::DEFAULT_LIST,
+            BlockKey::List(1_762_000_000_000_001),
+            BlockKey::Calendar,
+        ];
+        let plan = reset_plan(MONITOR, 1., &keys);
+        assert_eq!(
+            plan,
+            vec![
+                (BlockKey::DEFAULT_LIST, PhysRect::new(192, 108, 380, 600)),
+                (
+                    BlockKey::List(1_762_000_000_000_001),
+                    PhysRect::new(224, 140, 380, 600)
+                ),
+                // 日历与清单窗口等高，宽度让日格大致是方的
+                (BlockKey::Calendar, PhysRect::new(256, 172, 596, 600)),
+            ]
+        );
+        assert_eq!(reset_size(BlockKey::Calendar), (596., 600.));
+        assert!(reset_size(BlockKey::Calendar).0 >= f64::from(calendar_logic::MIN_WIDTH));
+        // 150%：尺寸与步长都按缩放换算
+        let hidpi = MonitorBounds {
+            x: 0,
+            y: 0,
+            width: 2880,
+            height: 1620,
+        };
+        let plan = reset_plan(hidpi, 1.5, &keys);
+        let base = window_logic::reset_window_position(hidpi, 1.5);
+        assert_eq!(plan[2].1, PhysRect::new(base.x + 96, base.y + 96, 894, 900));
+        assert!(reset_plan(MONITOR, 1., &[]).is_empty());
     }
 }

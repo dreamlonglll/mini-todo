@@ -76,19 +76,51 @@ pub fn save(
         return Ok(());
     }
     if key == BlockKey::DEFAULT_LIST {
-        settings::save_screen_config(
-            db,
-            &SaveScreenConfigRequest {
-                config_id: screen_id.to_string(),
-                display_name: Some(settings::screen_config_display_name(screen_id)),
-                window_x: rect.x,
-                window_y: rect.y,
-                window_width: rect.width,
-                window_height: rect.height,
-                is_fixed: fixed,
-            },
-        )?;
+        register_screen(db, screen_id, rect, fixed)?;
     }
+    Ok(())
+}
+
+/// 一次写多个窗口在屏幕组合 `screen_id` 下的几何与锁定（托盘「重置位置」，包括还没开过窗的窗口）：窗口布局在一个事务里写，
+/// 清单已被删除的跳过；默认清单窗口在其中时同样登记屏幕组合
+pub fn save_all(
+    db: &Database,
+    screen_id: &str,
+    placements: &[(BlockKey, PhysRect, bool)],
+) -> Result<(), String> {
+    let layouts: Vec<WindowLayout> = placements
+        .iter()
+        .map(|&(key, rect, fixed)| layout_of(key, screen_id, rect, fixed))
+        .collect();
+    window_prefs::save_layouts(db, &layouts)?;
+    if let Some(&(_, rect, fixed)) = placements
+        .iter()
+        .find(|(key, ..)| *key == BlockKey::DEFAULT_LIST)
+    {
+        register_screen(db, screen_id, rect, fixed)?;
+    }
+    Ok(())
+}
+
+/// 登记屏幕组合（设置 → 屏幕配置按 `screen_configs` 列出组合），记下默认清单窗口的几何与锁定
+fn register_screen(
+    db: &Database,
+    screen_id: &str,
+    rect: PhysRect,
+    fixed: bool,
+) -> Result<(), String> {
+    settings::save_screen_config(
+        db,
+        &SaveScreenConfigRequest {
+            config_id: screen_id.to_string(),
+            display_name: Some(settings::screen_config_display_name(screen_id)),
+            window_x: rect.x,
+            window_y: rect.y,
+            window_width: rect.width,
+            window_height: rect.height,
+            is_fixed: fixed,
+        },
+    )?;
     Ok(())
 }
 
@@ -219,5 +251,51 @@ mod tests {
         save(&db, key, SCREEN, PhysRect::new(1, 2, 300, 400), false).unwrap();
         mini_todo_core::lists::delete(&db, work.id).unwrap();
         assert_eq!(load(&db, key, SCREEN).unwrap(), None, "删清单时连带删布局");
+    }
+
+    #[test]
+    fn reset_writes_every_window_including_ones_never_opened() {
+        let db = Database::new_in_memory().unwrap();
+        let work = mini_todo_core::lists::create(&db, "工作").unwrap();
+        // 重置前：默认清单锁定在别处，日历从没开过（没有记录）
+        save(
+            &db,
+            BlockKey::DEFAULT_LIST,
+            SCREEN,
+            PhysRect::new(-3000, 50, 380, 600),
+            true,
+        )
+        .unwrap();
+        let ghost = BlockKey::List(1_762_000_000_000_001);
+        let placements = [
+            (
+                BlockKey::DEFAULT_LIST,
+                PhysRect::new(192, 108, 380, 600),
+                false,
+            ),
+            (
+                BlockKey::List(work.id),
+                PhysRect::new(224, 140, 380, 600),
+                false,
+            ),
+            (ghost, PhysRect::new(256, 172, 380, 600), false),
+            (BlockKey::Calendar, PhysRect::new(288, 204, 596, 600), false),
+        ];
+        save_all(&db, SCREEN, &placements).unwrap();
+        for (key, rect, _) in placements {
+            let expected = (key != ghost).then_some(BlockPlacement {
+                rect: Some(rect),
+                fixed: false,
+            });
+            assert_eq!(load(&db, key, SCREEN).unwrap(), expected, "{key}");
+        }
+        // 屏幕组合的登记跟着默认清单窗口
+        let row = settings::get_screen_config(&db, SCREEN).unwrap().unwrap();
+        assert_eq!(
+            (row.window_x, row.window_y, row.is_fixed),
+            (192, 108, false)
+        );
+        // 别的屏幕组合不动
+        assert_eq!(load(&db, BlockKey::Calendar, OTHER_SCREEN).unwrap(), None);
     }
 }
