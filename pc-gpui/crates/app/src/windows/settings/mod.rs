@@ -17,6 +17,8 @@ mod data;
 mod general;
 mod screen;
 
+use std::collections::HashMap;
+
 use gpui_kit::component::input::InputState;
 use gpui_kit::{
     AnyElement, AnyWindowHandle, App, AppContext as _, ClickEvent, Context, Div, Entity,
@@ -162,6 +164,8 @@ pub struct SettingsWindow {
 
     // ---- 屏幕配置 ----
     current_screen_id: String,
+    /// 每个屏幕组合保存了哪些窗口的位置（打开时后台读）
+    screen_layouts: HashMap<String, screen::LayoutSummary>,
 
     // ---- 关于 ----
     checking_update: bool,
@@ -282,6 +286,7 @@ impl SettingsWindow {
             advanced_open: false,
             seen_report: None,
             current_screen_id: crate::platform::screen_config_id(cx),
+            screen_layouts: HashMap::new(),
             checking_update: false,
             _subscriptions: subscriptions,
         };
@@ -298,6 +303,7 @@ impl SettingsWindow {
             state.reload_screen_configs(cx).detach();
             state.reload_app_settings(cx).detach();
         });
+        self.load_screen_layouts(cx);
         self.load_sync_settings(window, cx);
         self.load_system_fonts(cx);
     }

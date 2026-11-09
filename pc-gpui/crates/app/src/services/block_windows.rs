@@ -6,6 +6,7 @@
 //! | 启动（[`start`]） | 迁移 ui-state、**同步**读清单与窗口属性（建窗前就要知道深色 / 视图，第一帧按它画）→ 默认清单窗口（总是显示，清掉它的隐藏）→ 显示中的日历窗口 → 其它没隐藏的清单窗口；之后观察清单列表、起 5 秒变更轮询 |
 //! | 关闭（Alt+F4 / ⌘W，[`request_close`]） | 保存几何、记住隐藏、原生隐藏窗口，**不注销**（唤起、重置、轮询、吸附照常找得到它；隐藏的窗口自动不算吸附目标）；有模态子窗口时不关、把子窗口带到前台。Linux 不能程序化隐藏窗口，真的关掉（最后一个窗口关掉就退出，见 `lib.rs`） |
 //! | 托盘左键 / 单实例 / Dock（`window_mode::bring_all_to_front` → [`prepare_wake_all`]） | 清单窗口全部显示：还没开过窗的开窗、隐藏的清掉隐藏；日历只在「显示日历」开着时唤起（[`should_wake`]） |
+//! | 托盘「重置位置」（`window_mode::reset_all`） | 先按 [`all_keys`] 的顺序把所有清单 / 日历窗口（含没开过窗的）重置后的几何写进当前屏幕组合，再 [`prepare_wake_all`]（没开过窗的读到新布局，直接开在重置后的位置）；已开的窗口由 `window_mode` 摆好、解锁、唤起 |
 //! | 清单列表变化（`AppState::lists_revision` → [`reconcile`]） | 同步 / cloud 新建、本机没有窗口记录（`window_prefs` 没有这一行）的清单自动开窗：主显示器上找空位、380×600、未锁定、浅色、列表视图（都是没有记录时的默认值）；已删除清单的窗口关掉 |
 //! | 「显示日历」（设置 → 常规、托盘勾选，[`set_calendar_visible`]） | 写日历窗口的隐藏属性；第一次显示且当前屏幕组合没有布局时贴默认清单窗口右侧、与它等高（`calendar_window::logic::first_rect`） |
 //!
@@ -404,17 +405,8 @@ pub fn request_close(window: &mut Window, cx: &mut App, key: BlockKey) -> bool {
 /// 托盘左键 / 单实例 / Dock 唤起之前（`window_mode::bring_all_to_front`）：所有清单窗口都要显示——已开过窗的清掉隐藏（随后由
 /// 唤起显示出来），还没开过窗的（启动时隐藏着）现在开窗。返回这次新开的窗口（建窗时已显示并激活，不用再唤起）
 pub fn prepare_wake_all(cx: &mut App) -> Vec<BlockKey> {
-    let mut ids: Vec<i64> = AppState::global(cx)
-        .read(cx)
-        .lists
-        .iter()
-        .map(|l| l.id)
-        .collect();
-    if !ids.contains(&DEFAULT_LIST_ID) {
-        ids.insert(0, DEFAULT_LIST_ID);
-    }
     let mut opened = Vec::new();
-    for id in ids {
+    for id in list_ids(cx) {
         let key = BlockKey::List(id);
         if window_mode::is_registered(cx, key) {
             mark_shown(cx, key);
@@ -424,6 +416,31 @@ pub fn prepare_wake_all(cx: &mut App) -> Vec<BlockKey> {
         }
     }
     opened
+}
+
+/// 全部清单的 id（默认清单总在其中；按 id 排序，默认清单在前）
+fn list_ids(cx: &App) -> Vec<i64> {
+    let mut ids: Vec<i64> = AppState::global(cx)
+        .read(cx)
+        .lists
+        .iter()
+        .map(|l| l.id)
+        .collect();
+    if !ids.contains(&DEFAULT_LIST_ID) {
+        ids.push(DEFAULT_LIST_ID);
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+/// 所有清单窗口与日历窗口的 key（不管开没开过窗）：默认清单、其它清单按 id、日历最后（托盘「重置位置」的排列顺序）
+pub fn all_keys(cx: &App) -> Vec<BlockKey> {
+    list_ids(cx)
+        .into_iter()
+        .map(BlockKey::List)
+        .chain([BlockKey::Calendar])
+        .collect()
 }
 
 /// 唤起所有窗口时要不要唤起 `key`：日历只在「显示日历」开着时（隐藏着的日历窗口不被托盘左键带出来，PRD R9）
@@ -572,7 +589,8 @@ pub fn reconcile(cx: &mut App) {
 // ----------------------------------------------------------------------
 
 /// 托盘「新增待办清单」（调试 `list:new`）：自动取名"清单 / 清单 2…"新建清单（`AppState::create_list`，同时建好显示中的
-/// 窗口记录），在光标所在显示器上找空位开 380×600 的窗口，建好后直接进入改名（PRD R6 / R9）。失败在默认清单窗口里提示。
+/// 窗口记录），在光标所在显示器上找空位开 380×600 的窗口，建好后直接进入改名（PRD R6 / R9）。失败提示经 `services::notice`
+/// 显示在看得见的清单 / 日历窗口里。
 ///
 /// 清单建好时 `lists_revision` 变化，对账（[`reconcile`]）先于这里的回调开窗：位置事先放进 `creating`，两条路径开在
 /// 同一个位置，谁先开都一样（`open_list` 不重复开窗）
@@ -597,14 +615,11 @@ pub fn create_list(cx: &mut App) {
                 }
                 Err(e) => {
                     log::error!("[block] 新建清单失败: {e}");
-                    if let Some(handle) = WindowManager::default_list(cx) {
-                        crate::ui::message::show_in(
-                            handle,
-                            cx,
-                            crate::ui::message::MessageKind::Error,
-                            crate::ui::message::error_text("新建清单失败", &e),
-                        );
-                    }
+                    crate::services::notice::show(
+                        cx,
+                        crate::ui::message::MessageKind::Error,
+                        crate::ui::message::error_text("新建清单失败", &e),
+                    );
                 }
             }
         });

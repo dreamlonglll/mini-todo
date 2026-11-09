@@ -46,6 +46,10 @@ pub fn run_sync(cx: &mut App, mode: SyncMode) -> Task<Result<SyncReport, String>
                 state.apply_sync_report(report, cx);
             }
         });
+        if result.is_ok() {
+            // 同步恢复了：还存着没显示的「自动同步失败」（失败时窗口都看不见）不再显示
+            cx.update(|cx| super::notice::retract(cx, super::notice::Topic::AutoSyncFailed));
+        }
         result
     })
 }

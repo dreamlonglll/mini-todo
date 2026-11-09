@@ -443,7 +443,7 @@ fn begin_move_if_dragged<V: BlockDragHost>(
     // 拖过的按下之后紧跟的一下不算双击（同收纳箱）
     drag.last_press_dragged = true;
     let key = drag.key;
-    // 按住期间被锁定了（托盘「固定模式」）：不拖
+    // 按住期间被锁定了（防御：锁定只能从这个窗口自己的锁按钮改，按住标题栏时点不到）：不拖
     if window_mode::is_fixed(cx, key) {
         return false;
     }

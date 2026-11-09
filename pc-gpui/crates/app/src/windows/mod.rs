@@ -386,8 +386,8 @@ impl WindowManager {
         Self::find(cx, kind, &key.registry_key())
     }
 
-    /// 默认清单窗口（以前的主窗口）：托盘「添加待办项」/「打开设置」的打开方、整个应用的提示（导入成功、自动同步失败……）
-    /// 显示在这里
+    /// 默认清单窗口（以前的主窗口）：托盘「添加待办项」/「打开设置」的打开方。整个应用的提示（导入成功、自动同步失败……）
+    /// 不再固定显示在这里，见 `services::notice`
     pub fn default_list(cx: &App) -> Option<AnyWindowHandle> {
         Self::block_window(cx, BlockKey::DEFAULT_LIST)
     }

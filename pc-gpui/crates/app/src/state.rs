@@ -4,7 +4,8 @@
 //!   `cx.observe(&AppState::global(cx), |this, _, cx| cx.notify())` 跟着刷新。
 //! - 写操作经 core 在后台执行，成功后更新本地副本并 `cx.notify()`；返回 `Task<Result<_, String>>`，
 //!   调用方按旧版文案提示失败（`ui::message::error(window, cx, "更新待办失败", &e)`）。
-//! - 需要整个窗口提示的错误（加载待办失败）以 [`AppStateEvent::Message`] 发出，默认清单窗口订阅后显示。
+//! - 需要整个应用提示的错误（加载待办失败）以 [`AppStateEvent::Message`] 发出，`services::notice` 订阅后显示在看得见的清单 /
+//!   日历窗口里。
 //! - 窗口模式（锁定 / 嵌入 / 贴边隐藏）、窗口位置保存等平台动作在 `services::window_mode`：锁定按窗口
 //!   （`window_mode::is_fixed(cx, key)` / `toggle_fixed(cx, key)`），这里只放全局的偏好（嵌入桌面、贴边隐藏、唤起置顶）。
 //! - **待办清单**（v31，[`AppState::lists`]）随待办一起加载（5s 轮询、同步完成、子窗口关闭后都走 [`AppState::fetch_todos`]）；
@@ -81,7 +82,7 @@ pub struct TodoCount {
     pub completed: usize,
 }
 
-/// 需要在窗口里弹出的提示（默认清单窗口订阅后用 `ui::message` 显示）
+/// 需要在窗口里弹出的提示（`services::notice` 订阅后用 `ui::message` 显示在看得见的清单 / 日历窗口里）
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppStateEvent {
     Message { kind: MessageKind, text: String },
