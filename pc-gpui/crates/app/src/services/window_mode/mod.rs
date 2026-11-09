@@ -17,7 +17,7 @@
 //!   样式自愈（防御）。GPUI 建窗后不再改写 ex style，旧版为对抗 tao `apply_diff` 写的排队重申不再需要。
 //! - **唤起与重置作用于所有登记的窗口**：托盘左键 / 单实例 / Dock 唤起 / 贴边隐藏中被激活 → [`bring_all_to_front`]；
 //!   托盘「重置位置」→ [`reset_all`]（错开排列、解除锁定）。
-//! - **几何与锁定按屏幕组合持久化**，经 [`store`] 的接缝（现在默认清单窗口存 `screen_configs`；第 4 步换成 core 的窗口属性表）。
+//! - **几何与锁定按屏幕组合持久化**，经 [`store`]（core 的窗口属性表 `window_layouts`；默认清单窗口另外登记屏幕组合）。
 //!
 //! macOS 走同一套状态机与 200ms 轮询（`platform::Hwnd` 是 NSWindow 窗口号）：几何锁定 = `setMovable:NO` + 去掉可缩放，
 //! 置顶 = `NSFloatingWindowLevel`，`ToolWindow` 是 no-op（程序坞 / ⌘Tab 是整个应用的），没有嵌入桌面；被最小化即还原、
@@ -38,7 +38,7 @@ use std::time::{Duration, Instant};
 use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, AsyncApp, EntityId, Global, Subscription, Task, Window,
 };
-use mini_todo_core::db::{AppSettings, WindowPosition, WindowSize};
+use mini_todo_core::db::{WindowPosition, WindowSize};
 use mini_todo_core::settings::{self, RuntimePrefs};
 use mini_todo_core::window_logic::{self, MonitorBounds, WindowPersistState};
 
@@ -752,13 +752,10 @@ pub fn save_window_state(cx: &mut App, key: BlockKey) {
 }
 
 /// 用已经读好的客户区几何保存（窗口关闭时窗口马上就没了，几何要在关闭回调里同步读）：当前屏幕组合下的几何与锁定经
-/// [`store`] 落库（贴边隐藏中存锚点，不把屏幕外的隐藏位置存进库）。默认清单窗口（原主窗口）另外按旧版写一次全局设置键
-/// （`save_window_settings`：`is_fixed` / `window_position` / `window_size` / 主题 / 底色 / 贴边…，参与同步与导出；第 4 步决定去留），
-/// 写完刷新运行时偏好。
+/// [`store`] 落库（贴边隐藏中存锚点，不把屏幕外的隐藏位置存进库）。只写窗口布局（默认清单窗口另外登记屏幕组合），
+/// 不再写旧的全局设置键（`is_fixed` / `window_position` / `window_size` / 主题…，见 [`store`] 模块文档）。
 ///
-/// 几何与锁定在调用时就取好（贴边状态、锁定此刻的值；窗口随后关掉、注销也照样保存）。设置还没加载完（`AppState.initialized`
-/// 为假）时等加载完再写：`save_window_settings` 会写主题 / 底色 / 贴边等 9 个键，用默认值写就把用户设置覆盖了（旧版
-/// `initSettings` 也是先读设置再保存）
+/// 几何与锁定在调用时就取好（贴边状态、锁定此刻的值；窗口随后关掉、注销也照样保存）
 pub fn save_window_state_with(cx: &mut App, key: BlockKey, rect: PhysRect) {
     let Some((persist, fixed)) = block(cx, key).map(|b| {
         let persist = b.state.auto_hide.persist_state(
@@ -780,22 +777,6 @@ pub fn save_window_state_with(cx: &mut App, key: BlockKey, rect: PhysRect) {
 
 /// [`save_window_state_with`] 的落库部分（`persist`：贴边隐藏中已换成锚点的几何）
 fn persist_window_state(cx: &mut App, key: BlockKey, persist: WindowPersistState, fixed: bool) {
-    if !AppState::global(cx).read(cx).initialized {
-        cx.spawn(async move |cx| {
-            for _ in 0..200 {
-                cx.background_executor()
-                    .timer(Duration::from_millis(50))
-                    .await;
-                if cx.update(|cx| AppState::global(cx).read(cx).initialized) {
-                    cx.update(|cx| persist_window_state(cx, key, persist, fixed));
-                    return;
-                }
-            }
-            log::warn!("[window] 设置迟迟没有加载完，放弃这次保存{key}的状态");
-        })
-        .detach();
-        return;
-    }
     let state = AppState::global(cx);
     let screen_id = {
         let current = state.read(cx).current_screen_config_id.clone();
@@ -813,46 +794,14 @@ fn persist_window_state(cx: &mut App, key: BlockKey, persist: WindowPersistState
         persist.size.width as i32,
         persist.size.height as i32,
     );
-    let legacy = (key == BlockKey::DEFAULT_LIST).then(|| {
-        let s = state.read(cx);
-        AppSettings {
-            is_fixed: fixed,
-            fixed_embed_desktop: s.fixed_embed_desktop,
-            window_position: Some(persist.position.clone()),
-            window_size: Some(persist.size.clone()),
-            auto_hide_enabled: s.auto_hide_enabled,
-            top_on_wake: s.top_on_wake,
-            window_bg_color: s.window_bg.color.clone(),
-            window_bg_alpha: s.window_bg.alpha,
-            text_theme: if s.is_dark_theme { "light" } else { "dark" }.to_string(),
-            show_calendar: s.show_calendar,
-            view_mode: s.view_mode.as_str().to_string(),
-            notification_type: s.notification_type.as_str().to_string(),
-        }
-    });
     let db = Db::get(cx);
-    let task = cx.background_executor().spawn(async move {
-        store::save(&db, key, &screen_id, placement, fixed)?;
-        match &legacy {
-            Some(app_settings) => {
-                settings::save_window_settings(&db, app_settings)?;
-                Ok::<_, String>(Some(settings::runtime_prefs(&db)))
-            }
-            None => Ok(None),
+    let task = cx
+        .background_executor()
+        .spawn(async move { store::save(&db, key, &screen_id, placement, fixed) });
+    cx.spawn(async move |_| {
+        if let Err(e) = task.await {
+            log::warn!("[window] 保存{key}的状态失败: {e}");
         }
-    });
-    cx.spawn(async move |cx| match task.await {
-        Ok(Some(prefs)) => cx.update(|cx| {
-            state.update(cx, |state, cx| {
-                state.window_position = Some(persist.position);
-                state.window_size = Some(persist.size);
-                state.runtime_prefs = prefs;
-                cx.notify();
-            });
-            apply_runtime_prefs(cx, prefs);
-        }),
-        Ok(None) => {}
-        Err(e) => log::warn!("[window] 保存{key}的状态失败: {e}"),
     })
     .detach();
 }

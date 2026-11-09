@@ -7,7 +7,7 @@
 //! | 能力 | 位置 |
 //! |---|---|
 //! | 模式（普通 / 经典固定 / 嵌入桌面）、贴边隐藏、唤起置顶、几何保存 | `services::window_mode`（按 [`BlockKey`] 的状态表） |
-//! | 几何与锁定的持久化接缝（第 4 步换成 core 的窗口属性表） | `services::window_mode::store` |
+//! | 几何与锁定的持久化（core 的窗口属性表 `window_layouts`，按屏幕组合） | `services::window_mode::store` |
 //! | 吸附（与收纳箱同一组） | `services::snap` + `windows::snap` |
 //! | 自绘移动与缩放 | 本模块的 [`BlockDrag`]（窗口根视图实现 [`BlockDragHost`]） |
 //!
@@ -39,6 +39,7 @@ use gpui_kit::{
     StatefulInteractiveElement as _, Window,
 };
 use mini_todo_core::fence::PxRect;
+use mini_todo_core::window_prefs::WindowKey;
 
 use super::drag::{self, ResizeDir, js_round};
 use super::snap::{self, SnapGuide, SnapKey, SnapScene};
@@ -63,6 +64,39 @@ pub enum BlockKey {
 impl BlockKey {
     /// 默认清单窗口（= 现在的主窗口）
     pub const DEFAULT_LIST: BlockKey = BlockKey::List(DEFAULT_LIST_ID);
+
+    /// core 窗口属性表（`window_prefs` / `window_layouts`）里的 key：`list:<清单 id>` / `calendar`
+    pub fn window_key(self) -> WindowKey {
+        match self {
+            BlockKey::List(id) => WindowKey::List(id),
+            BlockKey::Calendar => WindowKey::Calendar,
+        }
+    }
+
+    pub fn from_window_key(key: WindowKey) -> BlockKey {
+        match key {
+            WindowKey::List(id) => BlockKey::List(id),
+            WindowKey::Calendar => BlockKey::Calendar,
+        }
+    }
+
+    /// 解析存储 / 登记用的 key 字符串（只认规范写法，见 `WindowKey::parse`）
+    pub fn parse(key: &str) -> Option<BlockKey> {
+        WindowKey::parse(key).map(BlockKey::from_window_key)
+    }
+
+    /// `WindowManager` 登记用的 key 字符串（与 core 存储的 key 相同）
+    pub fn registry_key(self) -> String {
+        self.window_key().as_key()
+    }
+
+    /// 清单窗口的清单 id
+    pub fn list_id(self) -> Option<i64> {
+        match self {
+            BlockKey::List(id) => Some(id),
+            BlockKey::Calendar => None,
+        }
+    }
 }
 
 impl fmt::Display for BlockKey {
@@ -585,6 +619,24 @@ mod tests {
         assert_eq!(BlockKey::DEFAULT_LIST, BlockKey::List(1));
         assert_eq!(BlockKey::DEFAULT_LIST.to_string(), "清单窗口 #1");
         assert_eq!(BlockKey::Calendar.to_string(), "日历窗口");
+    }
+
+    #[test]
+    fn keys_map_to_the_core_window_keys() {
+        for key in [
+            BlockKey::DEFAULT_LIST,
+            BlockKey::List(1_762_000_000_000_123),
+            BlockKey::Calendar,
+        ] {
+            assert_eq!(BlockKey::from_window_key(key.window_key()), key);
+            assert_eq!(BlockKey::parse(&key.registry_key()), Some(key));
+        }
+        assert_eq!(BlockKey::DEFAULT_LIST.registry_key(), "list:1");
+        assert_eq!(BlockKey::Calendar.registry_key(), "calendar");
+        assert_eq!(BlockKey::List(42).list_id(), Some(42));
+        assert_eq!(BlockKey::Calendar.list_id(), None);
+        assert_eq!(BlockKey::parse("fence-1"), None);
+        assert_eq!(BlockKey::parse("list:0"), None);
     }
 
     /// 主窗口（默认清单窗口）的最小客户区：320×400 逻辑像素

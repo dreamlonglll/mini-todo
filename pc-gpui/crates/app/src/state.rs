@@ -15,7 +15,7 @@ use futures::future::Shared;
 use gpui_kit::{App, AppContext as _, Context, Entity, EventEmitter, Global, Task};
 use mini_todo_core::db::{
     CreateSubTaskRequest, CreateTodoRequest, ScreenConfig, SubTask, Todo, UpdateSubTaskRequest,
-    UpdateTodoRequest, WindowPosition, WindowSize,
+    UpdateTodoRequest,
 };
 use mini_todo_core::settings::{self, RuntimePrefs};
 use mini_todo_core::sync::SyncReport;
@@ -122,9 +122,6 @@ pub struct AppState {
     // 是否固定（锁定）按窗口，在 `services::window_mode`（按屏幕组合持久化，见 `window_mode::store`）
     /// 深色主题（settings `text_theme == "light"`，注意语义反转）
     pub is_dark_theme: bool,
-    /// 主窗口位置 / 尺寸（物理像素；`services::window_mode` 维护）
-    pub window_position: Option<WindowPosition>,
-    pub window_size: Option<WindowSize>,
     /// 当前屏幕组合 ID（`platform::screen_config_id`；`services::window_mode` 维护）
     pub current_screen_config_id: String,
     pub screen_configs: Vec<ScreenConfig>,
@@ -229,8 +226,6 @@ impl AppState {
             fetch_failing: false,
             change_seq_warned: false,
             is_dark_theme: false,
-            window_position: None,
-            window_size: None,
             current_screen_config_id: String::new(),
             screen_configs: Vec::new(),
             show_calendar: false,
