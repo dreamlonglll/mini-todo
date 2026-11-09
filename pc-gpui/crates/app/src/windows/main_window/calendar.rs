@@ -251,13 +251,13 @@ impl MainWindow {
         let bars = {
             let state = self.state.read(cx);
             let plain: Vec<CalendarCell> = cells.iter().map(|c| c.cell).collect();
-            logic::calendar_bars(&plain, &state.todos)
+            logic::calendar_bars(&plain, &state.calendar_todos())
         };
         let todo_info: HashMap<i64, (SharedString, gpui_kit::Hsla, bool)> = {
             let state = self.state.read(cx);
             state
-                .todos
-                .iter()
+                .calendar_todos()
+                .into_iter()
                 .map(|t| {
                     (
                         t.id,

@@ -48,6 +48,7 @@ use gpui_kit::{
     WindowKind as GpuiWindowKind, WindowOptions, div, point, px, size, transparent_black,
 };
 
+use self::block::BlockKey;
 use crate::platform::{self, Hwnd, MonitorInfo, PhysRect};
 use crate::theme;
 
@@ -419,8 +420,17 @@ impl WindowManager {
         Self::modal_child(cx, opener).is_some()
     }
 
-    /// 主窗口是否有模态子窗口（5s 轮询、同步后刷新据此跳过）
-    pub fn main_has_modal_child(cx: &App) -> bool {
+    /// 清单 / 日历窗口的 [`BlockKey`]（其它窗口 `None`）
+    pub fn block_key_of(cx: &App, id: WindowId) -> Option<BlockKey> {
+        let registered = cx.try_global::<WindowManager>()?.windows.get(&id)?;
+        match registered.kind {
+            WindowKind::Main => Some(BlockKey::DEFAULT_LIST),
+            _ => None,
+        }
+    }
+
+    /// 是否有清单 / 日历窗口开着模态子窗口（5s 轮询、同步后刷新据此跳过）
+    pub fn any_block_has_modal_child(cx: &App) -> bool {
         Self::main(cx).is_some_and(|main| Self::has_modal_child(cx, main.window_id()))
     }
 
@@ -694,7 +704,9 @@ pub fn open_debug(cx: &mut App, items: &[DebugOpen]) {
             }
             DebugOpen::Calendar => {
                 crate::state::AppState::global(cx)
-                    .update(cx, |state, cx| state.set_show_calendar(true, cx))
+                    .update(cx, |state, cx| {
+                        state.set_window_hidden(BlockKey::Calendar, false, cx)
+                    })
                     .detach();
             }
             DebugOpen::NewFence => {

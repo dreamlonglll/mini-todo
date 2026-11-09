@@ -35,6 +35,7 @@ use crate::ui::ep_select::{EpSelect, EpSelectEvent, EpSelectOption};
 use crate::ui::icon::{icon, spinning};
 use crate::ui::input::InputEvent;
 use crate::ui::title_bar::WindowTitleBar;
+use crate::windows::block::BlockKey;
 
 /// 左侧菜单
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -119,6 +120,8 @@ enum SyncAction {
 /// 设置窗口视图
 pub struct SettingsWindow {
     pub tab: SettingsTab,
+    /// 打开设置的清单 / 日历窗口（「深色主题」切的是它；托盘 / 应用菜单打开时是默认清单窗口）
+    target: BlockKey,
     state: Entity<AppState>,
     scroll: ScrollHandle,
 
@@ -170,7 +173,12 @@ pub struct SettingsWindow {
 const SYNC_INTERVALS: [i32; 5] = [5, 10, 15, 30, 60];
 
 impl SettingsWindow {
-    pub fn new(tab: SettingsTab, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        tab: SettingsTab,
+        target: BlockKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let state = AppState::global(cx);
         let url_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("https://dav.example.com/dav"));
@@ -245,6 +253,7 @@ impl SettingsWindow {
 
         let mut this = Self {
             tab,
+            target,
             state,
             scroll: ScrollHandle::new(),
             auto_start: false,
@@ -297,7 +306,7 @@ impl SettingsWindow {
     fn sync_from_state(&mut self, cx: &mut Context<Self>) {
         let state = self.state.read(cx);
         let color = state.window_bg.color.clone();
-        let dark = state.is_dark_theme;
+        let dark = state.is_dark(self.target);
         let family = state.todo_font_family.clone();
         let report = state.last_sync_report.clone();
         self.bg_picker.update(cx, |picker, cx| {
@@ -597,8 +606,12 @@ fn data_btn(
         .child(label.into())
 }
 
-/// 打开设置窗口（打开方：主窗口；截图调试 `None`）
+/// 打开设置窗口（打开方：清单 / 日历窗口；截图调试 `None`）
 pub fn open(cx: &mut App, parent: Option<ChildOf>, tab: SettingsTab) -> Option<AnyWindowHandle> {
+    let target = parent
+        .as_ref()
+        .and_then(|p| WindowManager::block_key_of(cx, p.opener.window_id()))
+        .unwrap_or(BlockKey::DEFAULT_LIST);
     let mut spec = WindowSpec::new(
         "设置",
         gpui_kit::Bounds::new(Default::default(), logical_size(WIDTH, HEIGHT)),
@@ -610,7 +623,7 @@ pub fn open(cx: &mut App, parent: Option<ChildOf>, tab: SettingsTab) -> Option<A
         WindowKind::Settings,
         None,
         spec,
-        |window, cx| cx.new(|cx| SettingsWindow::new(tab, window, cx)),
+        |window, cx| cx.new(|cx| SettingsWindow::new(tab, target, window, cx)),
     )
 }
 

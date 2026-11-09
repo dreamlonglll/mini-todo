@@ -50,7 +50,7 @@ pub fn run_sync(cx: &mut App, mode: SyncMode) -> Task<Result<SyncReport, String>
     })
 }
 
-/// 本地待办 / 子任务是否被改动（`hasLocalDataChanges`）
+/// 本地待办 / 子任务 / 待办清单是否被改动（`hasLocalDataChanges`；清单有变化时要重新拉清单、开 / 关清单窗口）
 pub fn has_local_data_changes(report: &SyncReport) -> bool {
     report.todos_inserted
         + report.todos_updated
@@ -59,6 +59,7 @@ pub fn has_local_data_changes(report: &SyncReport) -> bool {
         + report.subtasks_updated
         + report.subtasks_deleted
         > 0
+        || report.lists_changed()
 }
 
 fn status_text(status: SyncStatus) -> &'static str {
@@ -80,6 +81,9 @@ pub fn describe_sync_report(report: &SyncReport) -> String {
         (report.subtasks_inserted, "新增子任务"),
         (report.subtasks_updated, "更新子任务"),
         (report.subtasks_deleted, "删除子任务"),
+        (report.lists_inserted, "新增清单"),
+        (report.lists_updated, "更新清单"),
+        (report.lists_deleted, "删除清单"),
         (report.images_downloaded, "下载图片"),
         (report.images_uploaded, "上传图片"),
     ];
@@ -169,6 +173,18 @@ mod tests {
         assert_eq!(
             describe_sync_report(&settings_only),
             "已从云端拉取更新（已应用云端设置）"
+        );
+        // 只改了清单：也算本地数据变化（要重新拉清单、开 / 关清单窗口）
+        let lists_only = SyncReport {
+            status: SyncStatus::Merged,
+            lists_inserted: 1,
+            lists_deleted: 2,
+            ..Default::default()
+        };
+        assert!(has_local_data_changes(&lists_only));
+        assert_eq!(
+            describe_sync_report(&lists_only),
+            "已合并本地与云端的更改（新增清单 1，删除清单 2）"
         );
     }
 

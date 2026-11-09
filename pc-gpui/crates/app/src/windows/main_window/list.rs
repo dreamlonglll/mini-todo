@@ -19,14 +19,15 @@ impl MainWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let list_id = self.list_id();
         let state = self.state.read(cx);
-        let total = state.todo_count().total;
+        let total = state.todo_count_in(list_id).total;
         let rows = match self.drag.as_ref().map(|d| &d.kind) {
             Some(DragKind::List { order, .. }) => {
                 let order = order.clone();
                 self.rows_for(&order, cx)
             }
-            _ => rows_of(&state.pending_todos()),
+            _ => rows_of(&state.pending_todos_in(list_id)),
         };
         let empty = rows.is_empty() && total == 0;
         let mut children = Vec::with_capacity(rows.len());

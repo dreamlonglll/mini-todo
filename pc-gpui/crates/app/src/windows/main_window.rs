@@ -202,9 +202,9 @@ impl MainWindow {
         let block = BlockKey::DEFAULT_LIST;
         let state = AppState::global(cx);
         let snapshot = state.read(cx);
-        let last_expand_all = snapshot.subtask_expand_all;
-        let last_view_mode = snapshot.view_mode;
-        let last_show_calendar = snapshot.show_calendar;
+        let last_expand_all = snapshot.expand_all(block);
+        let last_view_mode = snapshot.view_mode(block);
+        let last_show_calendar = snapshot.calendar_visible();
         let subscriptions =
             vec![
                 cx.observe_in(&state, window, Self::on_state_changed),
@@ -245,7 +245,7 @@ impl MainWindow {
             loop {
                 cx.background_executor().timer(POLL_INTERVAL).await;
                 let alive = this.update(cx, |_, cx| {
-                    if !WindowManager::main_has_modal_child(cx) {
+                    if !WindowManager::any_block_has_modal_child(cx) {
                         AppState::global(cx).update(cx, |state, cx| state.refresh_if_changed(cx));
                     }
                 });
@@ -297,14 +297,13 @@ impl MainWindow {
     ) {
         let s = state.read(cx);
         let (expand_all, view_mode, show_calendar, initialized) = (
-            s.subtask_expand_all,
-            s.view_mode,
-            s.show_calendar,
+            s.expand_all(self.block),
+            s.view_mode(self.block),
+            s.calendar_visible(),
             s.initialized,
         );
         let animate_ids: Vec<i64> = if expand_all != self.last_expand_all {
-            s.todos
-                .iter()
+            crate::state::todos_in_list(&s.todos, &s.lists, self.list_id())
                 .filter(|t| !t.subtasks.is_empty())
                 .filter(|t| self.is_expanded(t.id, self.last_expand_all) != expand_all)
                 .map(|t| t.id)
@@ -355,6 +354,13 @@ impl MainWindow {
                 window.resize(logical_size(previous, h));
             }
         }
+    }
+
+    /// 本窗口的清单 id
+    pub(crate) fn list_id(&self) -> i64 {
+        self.block
+            .list_id()
+            .unwrap_or(super::block::DEFAULT_LIST_ID)
     }
 
     // ------------------------------------------------------------------
@@ -546,8 +552,8 @@ impl MainWindow {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let state = self.state.read(cx);
-        let show_calendar = state.show_calendar;
-        let view_mode = state.view_mode;
+        let show_calendar = state.calendar_visible();
+        let view_mode = state.view_mode(self.block);
         let quadrant_fill = show_calendar && view_mode == ViewMode::Quadrant;
 
         let content = match view_mode {
@@ -662,14 +668,14 @@ impl Render for MainWindow {
         // 锁定（任一种固定）时不能缩放：不放手柄
         let resize_handles = self.window_drag.resize_handles(!fixed, cx);
         let state = self.state.read(cx);
-        let palette = state.main_palette();
+        let palette = state.palette_for(self.block);
         let font_size = state.todo_font_size as f32;
         let rc = RenderCtx {
             palette,
             colors: MainColors::new(&palette),
             todo_font: theme::todo_font(&state.todo_font_family),
             font_size,
-            expand_all: state.subtask_expand_all,
+            expand_all: state.expand_all(self.block),
         };
 
         let title_bar = self.render_title_bar(&rc, window, cx).into_any_element();
@@ -772,13 +778,19 @@ pub fn open(cx: &mut App) -> Option<AnyWindowHandle> {
     // 两种情况都由 open_window 建窗后按客户区校正（GPUI 直接建出的客户区偏高半个底边框）
     spec.client_rect = geometry.saved;
 
-    // 全局偏好与锁定状态先就位（`open_window` 同步画第一帧：第一帧就按固定模式外观画）
-    let runtime_prefs = {
+    // 全局偏好、窗口属性（深色 / 视图 / 展开全部）与锁定状态先就位（`open_window` 同步画第一帧：第一帧就按它们画）
+    let (runtime_prefs, lists, prefs) = {
         let db = crate::db::Db::get(cx);
-        mini_todo_core::settings::runtime_prefs(&db)
+        crate::state::migrate_legacy_ui_state(&db);
+        (
+            mini_todo_core::settings::runtime_prefs(&db),
+            mini_todo_core::lists::list(&db).unwrap_or_default(),
+            mini_todo_core::window_prefs::list_prefs(&db).unwrap_or_default(),
+        )
     };
     let state = AppState::global(cx);
     state.update(cx, |state, cx| {
+        state.set_startup_snapshot(lists, prefs);
         state.current_screen_config_id = geometry.screen_config_id.clone();
         state.fixed_embed_desktop = geometry.embed_desktop;
         state.runtime_prefs = runtime_prefs;

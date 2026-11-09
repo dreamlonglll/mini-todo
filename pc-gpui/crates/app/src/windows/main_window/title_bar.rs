@@ -79,7 +79,7 @@ impl MainWindow {
         let can_move = !window_mode::is_fixed(cx, self.block);
         let state = self.state.read(cx);
         let palette = rc.palette;
-        let show_calendar = state.show_calendar;
+        let show_calendar = state.calendar_visible();
 
         let bar = div()
             .id("title-bar")
@@ -105,8 +105,9 @@ impl MainWindow {
         show_calendar: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let block = self.block;
         let state = self.state.read(cx);
-        let expand_all = state.subtask_expand_all;
+        let expand_all = state.expand_all(block);
         let has_update = state.has_update;
         let version_color = palette.text_tertiary;
         let version_hover = palette.text_secondary;
@@ -180,9 +181,9 @@ impl MainWindow {
                     },
                     expand_all,
                     palette,
-                    |_, _, cx| {
+                    move |_, _, cx| {
                         AppState::global(cx)
-                            .update(cx, |state, cx| state.toggle_subtask_expand_all(cx))
+                            .update(cx, |state, cx| state.toggle_window_expand_all(block, cx))
                     },
                 )
                 .ml_auto(),
@@ -286,9 +287,9 @@ impl MainWindow {
         let block = self.block;
         let is_fixed = window_mode::is_fixed(cx, block);
         let state = self.state.read(cx);
-        let completed = state.todo_count().completed;
-        let is_dark = state.is_dark_theme;
-        let view_mode = state.view_mode;
+        let completed = state.todo_count_in(self.list_id()).completed;
+        let is_dark = state.is_dark(block);
+        let view_mode = state.view_mode(block);
         let syncing = state.syncing;
         let palette = *palette;
 
@@ -346,9 +347,10 @@ impl MainWindow {
                     "切换到四象限视图",
                     false,
                     &palette,
-                    |_, _, cx| {
-                        AppState::global(cx)
-                            .update(cx, |state, cx| state.set_view_mode(ViewMode::Quadrant, cx))
+                    move |_, _, cx| {
+                        AppState::global(cx).update(cx, |state, cx| {
+                            state.set_window_view_mode(block, ViewMode::Quadrant, cx)
+                        })
                     },
                 ),
                 ViewMode::Quadrant => title_button(
@@ -357,9 +359,10 @@ impl MainWindow {
                     "切换到列表视图",
                     true,
                     &palette,
-                    |_, _, cx| {
-                        AppState::global(cx)
-                            .update(cx, |state, cx| state.set_view_mode(ViewMode::List, cx))
+                    move |_, _, cx| {
+                        AppState::global(cx).update(cx, |state, cx| {
+                            state.set_window_view_mode(block, ViewMode::List, cx)
+                        })
                     },
                 ),
             })
@@ -375,7 +378,7 @@ impl MainWindow {
                 &palette,
                 move |_, window, cx| {
                     let task = AppState::global(cx)
-                        .update(cx, |state, cx| state.set_dark_theme(!is_dark, cx));
+                        .update(cx, |state, cx| state.set_window_dark(block, !is_dark, cx));
                     let handle = window.window_handle();
                     cx.spawn(async move |cx| {
                         if let Err(text) = task.await {

@@ -1,6 +1,8 @@
 //! 「常规」面板（§2.7）：开机自启、展示日历、贴边自动隐藏、唤起时置顶、固定模式时嵌入桌面（仅 Windows）、
 //! 深色主题、界面底色、背景透明度、通知方式。全部即时生效（改动即写库并更新 AppState）。
 
+use std::rc::Rc;
+
 use gpui_kit::{
     Context, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
     StatefulInteractiveElement as _, Styled as _, Task, Window, div, prelude::FluentBuilder as _,
@@ -16,9 +18,11 @@ use crate::ui::ep_radio::EpRadioButtons;
 use crate::ui::ep_slider::EpSlider;
 use crate::ui::ep_switch::EpSwitch;
 use crate::ui::message;
+use crate::windows::block::BlockKey;
 
-/// `AppState` 上的布尔设置写入方法（`set_show_calendar` 等）：先改内存、后台写库，失败回滚并返回提示文本
-type SettingSetter = fn(&mut AppState, bool, &mut Context<AppState>) -> Task<Result<(), String>>;
+/// `AppState` 上的布尔设置写入方法（`set_auto_hide_enabled` 等）：先改内存、后台写库，失败回滚并返回提示文本
+type SettingSetter =
+    Rc<dyn Fn(&mut AppState, bool, &mut Context<AppState>) -> Task<Result<(), String>>>;
 
 /// 设置项写库失败的统一处理：AppState 已回滚，`Err` 是完整提示文本
 fn report_setting_error(
@@ -165,12 +169,15 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let t = settings_tokens();
+        let target = self.target;
         let state = self.state.read(cx);
-        let show_calendar = state.show_calendar;
+        let show_calendar = state.calendar_visible();
         let auto_hide = state.auto_hide_enabled;
         let top_on_wake = state.top_on_wake;
         let embed = state.fixed_embed_desktop;
-        let dark = state.is_dark_theme;
+        // 日 / 夜按窗口：这里切的是打开设置的那个清单 / 日历窗口（托盘 / 应用菜单打开时是默认清单窗口）；
+        // 底色与透明度是全局的，跟着它是否深色决定能不能改（同以前"仅深色主题下生效"）
+        let dark = state.is_dark(target);
         let bg_color = state.window_bg.color.clone();
         let alpha = self
             .alpha_preview
@@ -189,6 +196,7 @@ impl SettingsWindow {
                 .disabled(disabled)
                 .on_change(cx.listener(move |_, value: &bool, window, cx| {
                     let value = *value;
+                    let apply = apply.clone();
                     let task = state.update(cx, |state, cx| apply(state, value, cx));
                     report_setting_error(task, window, cx);
                 }))
@@ -293,21 +301,27 @@ impl SettingsWindow {
                 EpIcon::Calendar,
                 "展示日历",
                 Some("开启后主界面将显示日历视图"),
-                toggle("show-calendar", show_calendar, false, AppState::set_show_calendar, cx),
+                toggle(
+                    "show-calendar",
+                    show_calendar,
+                    false,
+                    Rc::new(|state, show, cx| state.set_window_hidden(BlockKey::Calendar, !show, cx)),
+                    cx,
+                ),
                 false,
             ))
             .child(settings_row(
                 EpIcon::Monitor,
                 "贴边自动隐藏",
                 Some("固定模式下，贴边后自动隐藏并在边缘唤起"),
-                toggle("auto-hide", auto_hide, false, AppState::set_auto_hide_enabled, cx),
+                toggle("auto-hide", auto_hide, false, Rc::new(AppState::set_auto_hide_enabled), cx),
                 false,
             ))
             .child(settings_row(
                 EpIcon::Top,
                 "唤起时置顶",
                 Some("贴边唤起时显示在其它窗口之上；关闭后可能被全屏窗口遮挡"),
-                toggle("top-on-wake", top_on_wake, !auto_hide, AppState::set_top_on_wake, cx),
+                toggle("top-on-wake", top_on_wake, !auto_hide, Rc::new(AppState::set_top_on_wake), cx),
                 false,
             ))
             .when(cfg!(windows) || show_embed_row_for_screenshots(), |this| {
@@ -321,7 +335,7 @@ impl SettingsWindow {
                         "embed-desktop",
                         embed,
                         false,
-                        AppState::set_fixed_embed_desktop,
+                        Rc::new(AppState::set_fixed_embed_desktop),
                         cx,
                     ),
                     false,
@@ -331,7 +345,13 @@ impl SettingsWindow {
                 EpIcon::Moon,
                 "深色主题",
                 Some("启用半透明深色外观"),
-                toggle("dark-theme", dark, false, AppState::set_dark_theme, cx),
+                toggle(
+                    "dark-theme",
+                    dark,
+                    false,
+                    Rc::new(move |state, dark, cx| state.set_window_dark(target, dark, cx)),
+                    cx,
+                ),
                 false,
             ))
             .child(settings_row(

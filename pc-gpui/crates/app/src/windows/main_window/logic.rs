@@ -285,7 +285,7 @@ pub struct TodoBar {
 }
 
 /// 计算跨天条（`todoBarsByRow` + `assignLanes`）。返回顺序同旧模板：按行，行内按开始 / 截止日期排序
-pub fn calendar_bars(cells: &[CalendarCell], todos: &[Todo]) -> Vec<TodoBar> {
+pub fn calendar_bars(cells: &[CalendarCell], todos: &[&Todo]) -> Vec<TodoBar> {
     let (Some(first), Some(last)) = (cells.first(), cells.get(41)) else {
         return Vec::new();
     };
@@ -605,7 +605,7 @@ mod tests {
         let mut long = todo(5);
         long.start_time = Some("2026-08-01".into());
         long.end_time = Some("2026-09-29".into());
-        let bars = calendar_bars(&cells, &[a, b, c, out_of_range, long]);
+        let bars = calendar_bars(&cells, &[&a, &b, &c, &out_of_range, &long]);
         let summary: Vec<(i64, usize, usize, usize, bool, usize)> = bars
             .iter()
             .map(|b| (b.todo_id, b.row, b.start_col, b.end_col, b.is_start, b.lane))

@@ -378,10 +378,11 @@ impl MainWindow {
                     button("todo-top", EpIcon::Top, "置顶", palette.warning).on_click(cx.listener(
                         move |this, _, window, cx| {
                             cx.stop_propagation();
+                            let list_id = this.list_id();
                             let mut ids: Vec<i64> = this
                                 .state
                                 .read(cx)
-                                .pending_todos()
+                                .pending_todos_in(list_id)
                                 .iter()
                                 .map(|t| t.id)
                                 .filter(|t| *t != id)
@@ -434,17 +435,22 @@ impl MainWindow {
 
     /// 开始拖拽：按当前显示顺序建会话
     pub(crate) fn begin_drag(&mut self, id: i64, cx: &mut Context<Self>) {
+        let list_id = self.list_id();
         let state = self.state.read(cx);
-        let kind = match state.view_mode {
+        let kind = match state.view_mode(self.block) {
             state::ViewMode::List => {
-                let order: Vec<i64> = state.pending_todos().iter().map(|t| t.id).collect();
+                let order: Vec<i64> = state
+                    .pending_todos_in(list_id)
+                    .iter()
+                    .map(|t| t.id)
+                    .collect();
                 DragKind::List {
                     original: order.clone(),
                     order,
                 }
             }
             state::ViewMode::Quadrant => {
-                let groups = state.todos_by_quadrant();
+                let groups = state.todos_by_quadrant_in(list_id);
                 let lists: [Vec<i64>; 4] =
                     std::array::from_fn(|i| groups[i].iter().map(|t| t.id).collect());
                 let origin = lists.iter().position(|l| l.contains(&id)).unwrap_or(0);
@@ -587,8 +593,13 @@ impl MainWindow {
                 }
                 // 两个顺序都在第一个 await 之前取快照
                 let quadrant_ids = lists[current].clone();
+                let list_id = self.list_id();
                 let state = self.state.read(cx);
-                let global: Vec<i64> = state.pending_todos().iter().map(|t| t.id).collect();
+                let global: Vec<i64> = state
+                    .pending_todos_in(list_id)
+                    .iter()
+                    .map(|t| t.id)
+                    .collect();
                 let todo = state.todo(id).cloned();
                 let change = (current != origin)
                     .then_some(todo.as_ref())

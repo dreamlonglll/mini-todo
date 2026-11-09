@@ -30,7 +30,7 @@ impl MainWindow {
                 std::array::from_fn(|i| self.rows_for(&lists[i], cx))
             }
             _ => {
-                let groups = self.state.read(cx).todos_by_quadrant();
+                let groups = self.state.read(cx).todos_by_quadrant_in(self.list_id());
                 std::array::from_fn(|i| rows_of(&groups[i]))
             }
         };
