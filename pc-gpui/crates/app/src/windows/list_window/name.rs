@@ -183,11 +183,12 @@ impl ListWindow {
     fn open_name_menu(&mut self, cx: &mut Context<Self>) {
         if !self.name.renaming && !self.name.menu_open {
             self.name.menu_open = true;
+            self.close_row_menu(cx);
             cx.notify();
         }
     }
 
-    fn close_name_menu(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn close_name_menu(&mut self, cx: &mut Context<Self>) {
         if self.name.menu_open {
             self.name.menu_open = false;
             cx.notify();

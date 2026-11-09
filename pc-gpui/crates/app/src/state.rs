@@ -665,6 +665,47 @@ impl AppState {
         )
     }
 
+    /// 把待办移到另一个清单（待办行右键「移动到」；core `todo::move_to_list`：只改清单归属，归属的版本与 `updatedAt`
+    /// 都刷新，随同步传播）。本地立即生效：本清单窗口里这条随即消失、目标清单窗口里出现；成功后用库里的结果替换本地项，
+    /// 失败把本地的归属改回去（没被别处改过时）并原样返回 core 的错误文本（失败文案前缀 `移动待办失败`）
+    pub fn move_todo_to_list(
+        &mut self,
+        id: i64,
+        list_id: i64,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Todo, String>> {
+        self.mutation_seq += 1;
+        let previous = self.set_local_list_id(id, Some(list_id));
+        cx.notify();
+        let task = spawn_db(cx, move |db| todo::move_to_list(db, id, list_id));
+        cx.spawn(async move |this, cx| match task.await {
+            Ok(moved) => {
+                let _ = this.update(cx, |this, cx| {
+                    this.upsert_local(moved.clone());
+                    cx.notify();
+                });
+                Ok(moved)
+            }
+            Err(e) => {
+                let _ = this.update(cx, |this, cx| {
+                    if let Some(previous) = previous
+                        && this.todo(id).is_some_and(|t| t.list_id == Some(list_id))
+                    {
+                        this.set_local_list_id(id, previous);
+                        cx.notify();
+                    }
+                });
+                Err(e)
+            }
+        })
+    }
+
+    /// 本地副本里把待办 `id` 的清单归属改成 `list_id`，返回原来的归属（没有这条待办时 `None`）
+    fn set_local_list_id(&mut self, id: i64, list_id: Option<i64>) -> Option<Option<i64>> {
+        let todo = self.todos.iter_mut().find(|t| t.id == id)?;
+        Some(std::mem::replace(&mut todo.list_id, list_id))
+    }
+
     /// 删除待办（连带子任务，写墓碑；失败文案前缀 `删除待办失败`）
     pub fn delete_todo(&mut self, id: i64, cx: &mut Context<Self>) -> Task<Result<(), String>> {
         self.mutation_seq += 1;
@@ -1473,6 +1514,34 @@ mod tests {
         assert_eq!(work, vec![6]);
         assert_eq!(state.todo_count_in(7).completed, 1);
         assert_eq!(state.todos_by_quadrant_in(7)[1].len(), 1);
+    }
+
+    #[test]
+    fn moving_a_todo_takes_it_out_of_its_list_at_once_and_can_be_undone() {
+        let mut state = AppState::new();
+        state.lists = vec![list(1, "待办清单"), list(7, "工作")];
+        state.todos = vec![
+            Todo {
+                list_id: None,
+                ..todo(1, false, 0, 1)
+            },
+            todo(2, false, 1, 1),
+        ];
+        let pending = |state: &AppState, list_id| -> Vec<i64> {
+            state
+                .pending_todos_in(list_id)
+                .iter()
+                .map(|t| t.id)
+                .collect()
+        };
+        // 归属未知的待办移到「工作」：默认清单窗口里随即消失，「工作」窗口里出现
+        assert_eq!(state.set_local_list_id(1, Some(7)), Some(None));
+        assert_eq!(pending(&state, 1), vec![2]);
+        assert_eq!(pending(&state, 7), vec![1]);
+        // 失败回滚：改回原来的（未知）
+        assert_eq!(state.set_local_list_id(1, None), Some(Some(7)));
+        assert_eq!(pending(&state, 1), vec![1, 2]);
+        assert_eq!(state.set_local_list_id(99, Some(7)), None, "没有这条待办");
     }
 
     #[test]

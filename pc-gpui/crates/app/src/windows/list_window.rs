@@ -6,11 +6,13 @@
 //! | [`title_bar`] | 标题栏（自绘移动、清单名、版本号 / 更新红点（只在默认清单窗口）、展开全部、右侧 已完成 / 视图 / 日夜 / 锁 / 同步 / 设置） |
 //! | [`name`] | 清单名：双击就地改名、右键菜单「重命名 / 删除清单」、删除确认 |
 //! | [`todo_item`] | 待办行（列表与四象限共用）、操作条、子任务展开、拖拽影子 |
+//! | [`row_menu`] | 待办行的右键菜单「移动到 ▸」（级联列出其它清单，跟随本窗口的日 / 夜） |
 //! | [`list`] | 列表视图、空状态、列表拖拽排序 |
 //! | [`quadrant`] | 四象限视图与跨象限拖拽 |
 //! | [`logic`] | 纯逻辑（重复文案、象限颜色、拖拽排序、版本比较……，带单测） |
 //!
-//! - 只显示**有效清单**等于本清单的待办（`AppState::pending_todos_in`：归属未知 / 清单不存在的待办按默认清单）；FAB 新建到本清单
+//! - 只显示**有效清单**等于本清单的待办（`AppState::pending_todos_in`：归属未知 / 清单不存在的待办按默认清单）；FAB 新建到本清单；
+//!   右键待办行「移动到」别的清单（[`row_menu`]）
 //! - 日 / 夜、列表 / 四象限、展开全部按窗口（`AppState::window_prefs`）；锁定按窗口（`services::window_mode`）
 //! - 生命周期（启动开窗、关闭 = 隐藏、同步来的清单开 / 关窗、托盘唤起）在 `services::block_windows`；窗口模式（锁定 / 嵌入桌面）、
 //!   几何保存 / 恢复、贴边隐藏、唤起见 `services::window_mode`；日历是另一个窗口（`windows::calendar_window`）
@@ -19,6 +21,7 @@ pub mod list;
 pub mod logic;
 pub mod name;
 pub mod quadrant;
+pub mod row_menu;
 pub mod title_bar;
 pub mod todo_item;
 
@@ -190,6 +193,8 @@ pub struct ListWindow {
     last_name: String,
     /// 清单名的就地改名与右键菜单
     name: name::NameEditor,
+    /// 待办行的右键菜单（「移动到 ▸」）
+    row_menu: Option<row_menu::RowMenu>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -206,6 +211,9 @@ impl ListWindow {
             cx.observe_global::<WindowManager>(|_, cx| cx.notify()),
             cx.observe_window_activation(window, |this, window, cx| {
                 if !window.is_window_active() {
+                    // 切到别的窗口：收起本窗口的右键菜单
+                    this.close_row_menu(cx);
+                    this.close_name_menu(cx);
                     return;
                 }
                 // macOS：贴边隐藏中被 Dock / ⌘Tab 激活时拉回（Windows 上是空操作）
@@ -264,6 +272,7 @@ impl ListWindow {
             last_view_mode,
             last_name,
             name,
+            row_menu: None,
             _subscriptions: subscriptions,
         }
     }
@@ -294,6 +303,14 @@ impl ListWindow {
             Vec::new()
         };
         let name = s.list(list_id).map(|l| l.name.clone());
+        // 右键菜单对应的待办已不是本清单的未完成待办（被移走 / 完成 / 删除 / 同步改了归属）：收起菜单
+        let row_menu_stale = self.row_menu.as_ref().is_some_and(|menu| {
+            !crate::state::todos_in_list(&s.todos, &s.lists, list_id)
+                .any(|t| t.id == menu.todo_id() && !t.completed)
+        });
+        if row_menu_stale {
+            self.row_menu = None;
+        }
 
         if expand_all != self.last_expand_all {
             self.last_expand_all = expand_all;
@@ -309,6 +326,7 @@ impl ListWindow {
             self.expand_anims.clear();
             self.drag = None;
             self.hovered_row = None;
+            self.row_menu = None;
         }
         if let Some(name) = name
             && name != self.last_name
@@ -580,8 +598,9 @@ impl Render for ListWindow {
         let body = self.render_main_body(&rc, window, cx).into_any_element();
         let border = if classic_fixed { 0. } else { 1. };
         let fab = self.render_fab(&palette, border).into_any_element();
-        // 清单名的右键菜单（画在本帧最后的浮层；跟随本窗口的日 / 夜）
+        // 清单名 / 待办行的右键菜单（画在本帧最后的浮层；跟随本窗口的日 / 夜）
         let name_menu = self.render_name_menu(palette.is_dark, window, cx);
+        let row_menu = self.render_row_menu(palette.is_dark, window, cx);
         // 遮罩是满窗口矩形（盖住描边与圆角外的透明角）
         let overlay: Option<AnyElement> = modal_overlay(window, cx, 0.3).map(|overlay| {
             div()
@@ -622,6 +641,7 @@ impl Render for ListWindow {
             .child(body)
             .child(fab)
             .children(name_menu)
+            .children(row_menu)
             .children(overlay)
             .when(!snap_edges.is_empty(), |this| {
                 // 跟着窗口圆角（经典固定没有圆角）；在描边内侧，没有命中区

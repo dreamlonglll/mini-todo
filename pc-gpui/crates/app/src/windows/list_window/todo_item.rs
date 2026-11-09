@@ -3,8 +3,8 @@
 
 use gpui_kit::{
     Animation, AnimationExt as _, AnyElement, AppContext as _, Bounds, Context, CursorStyle,
-    InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Pixels, Point, Render,
-    StatefulInteractiveElement as _, Styled as _, Window, canvas, div, ease_in_out,
+    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels,
+    Point, Render, StatefulInteractiveElement as _, Styled as _, Window, canvas, div, ease_in_out,
     prelude::FluentBuilder as _, px, relative,
 };
 
@@ -103,6 +103,14 @@ impl ListWindow {
                 cx.notify();
             }))
             .on_click(cx.listener(move |this, _, window, cx| this.open_todo(id, window, cx)))
+            // 右键：「移动到 ▸」菜单（`row_menu`）
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    this.open_row_menu(id, event.position, cx);
+                    cx.stop_propagation();
+                }),
+            )
             .child(measure)
             .child(self.render_handle(row, rc, cx))
             .child(self.render_content(row, show_subtasks, expanded, anim, rc, cx))
