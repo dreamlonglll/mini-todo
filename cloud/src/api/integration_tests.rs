@@ -2344,6 +2344,9 @@ struct PcTodo {
     /// 多清单（PC v31 起）：缺失或 null = 未知（契约 §12），不是默认清单。
     #[serde(default)]
     list_id: Option<i64>,
+    /// `listId` 自己的版本（契约 §13）：已知归属才有；缺失 = 已知但没有时间（存量）。
+    #[serde(default)]
+    list_updated_at: Option<String>,
     #[serde(default)]
     subtasks: Vec<PcSubTask>,
 }
@@ -2483,9 +2486,15 @@ async fn pushed_records_deserialize_into_pc_model() {
             (&t.notify_at, "notifyAt"),
             (&t.start_time, "startTime"),
             (&t.end_time, "endTime"),
+            (&t.list_updated_at, "listUpdatedAt"),
         ] {
             assert_canonical_time(v, what);
         }
+        assert!(
+            t.list_id.is_some() || t.list_updated_at.is_none(),
+            "未知归属不写 listUpdatedAt（契约 §13-7）: {}",
+            raw
+        );
         assert_canonical_time(&Some(t.updated_at.clone()), "updatedAt");
         for s in &t.subtasks {
             assert_eq!(s.parent_id, t.id);
@@ -2525,13 +2534,18 @@ async fn pushed_records_deserialize_into_pc_model() {
         "PC 来的记录缺 listId = 未知：不替它补值（契约 §12）"
     );
     let pc: PcTodo = serde_json::from_value(pc.clone()).unwrap();
-    assert_eq!(pc.list_id, None);
+    assert_eq!((pc.list_id, pc.list_updated_at), (None, None));
     assert!(
         legacy.get("listId").is_none(),
         "旧版 API 写的记录同样是未知"
     );
     let ai: PcTodo = serde_json::from_value(ai.clone()).unwrap();
     assert_eq!(ai.list_id, Some(work_id), "cloud 新建的待办总是已知");
+    assert_eq!(
+        ai.list_updated_at.as_deref(),
+        Some(ai.created_at.as_str()),
+        "新建时的归属版本 = 新建时刻（契约 §13-2）"
+    );
 
     // 清单与清单墓碑：PC 的强类型模型能反序列化，时间是规范格式，默认清单总在
     let lists: Vec<PcTodoList> = serde_json::from_value(remote["todoLists"].clone())
@@ -3197,6 +3211,10 @@ async fn delete_list_moves_its_todos_to_the_default_list() {
             stored["updatedAt"].as_str().unwrap() > t["updatedAt"].as_str().unwrap(),
             "移动要刷新 updatedAt（随同步传播）"
         );
+        assert!(
+            stored["listUpdatedAt"].as_str().unwrap() > t["listUpdatedAt"].as_str().unwrap(),
+            "移进默认清单是显式设置清单：刷新归属版本（契约 §13-2）"
+        );
     }
     assert_eq!(
         stored_todo(&fx, &todo_id_path(&t3))["updatedAt"],
@@ -3509,6 +3527,106 @@ async fn unknown_list_id_is_never_filled_in() {
     .await;
     assert_eq!(json_body(&raw)["listId"], wid);
     assert_eq!(stored_todo(&fx, "7")["listId"], wid);
+}
+
+/// 契约 §13-2：`listUpdatedAt` 由服务端维护——客户端传入的忽略、响应照常返回；只在显式设置清单时
+/// 刷新：`POST` = 新建时刻，`PATCH` 带了 `listId` 且值变了（含未知 → 已知）= `max(now, 旧值 + 1 秒)`，
+/// `DELETE /lists` 把待办移进默认清单同样刷新。只改其它字段、原样写回 `listId` 时不动；
+/// 存量"已知但没有时间"的记录不补时间（§13-7）。
+#[tokio::test]
+async fn list_updated_at_is_server_maintained() {
+    let fx = fixture();
+    let work = create_list(&fx, json!({"name": "工作"})).await;
+    let wid = work["id"].as_i64().unwrap();
+    let t = create_todo(
+        &fx,
+        json!({"title": "x", "listUpdatedAt": "2099-01-01 00:00:00"}),
+    )
+    .await;
+    assert_eq!(t["listId"], 1);
+    assert_eq!(t["listUpdatedAt"], t["createdAt"], "新建：版本 = 新建时刻");
+    let id = todo_id_path(&t);
+    let v0 = t["listUpdatedAt"].as_str().unwrap().to_string();
+    let patch = |body: Value| req(Method::PATCH, &format!("/todos/{}", id), Some(body));
+
+    for body in [
+        json!({"title": "y"}),
+        json!({"listId": 1}),
+        json!({"listUpdatedAt": "2099-01-01 00:00:00"}),
+    ] {
+        let (s, _, raw) = send(&fx.router, patch(body.clone())).await;
+        assert_eq!(s, StatusCode::OK, "{}", body);
+        assert_eq!(
+            json_body(&raw)["listUpdatedAt"],
+            json!(v0),
+            "不动: {}",
+            body
+        );
+    }
+    // 移到别的清单：刷新，且严格晚于旧版本（同一秒内也 +1 秒）
+    let (_, _, raw) = send(&fx.router, patch(json!({"listId": wid}))).await;
+    let v1 = json_body(&raw)["listUpdatedAt"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(v1 > v0, "{} > {}", v1, v0);
+    assert_eq!(stored_todo(&fx, &id)["listUpdatedAt"], json!(v1));
+    // 删除清单：移进默认清单，再刷新
+    let (s, _, _) = send(&fx.router, req(Method::DELETE, &list_path("工作"), None)).await;
+    assert_eq!(s, StatusCode::OK);
+    let stored = stored_todo(&fx, &id);
+    assert_eq!(stored["listId"], 1);
+    assert!(stored["listUpdatedAt"].as_str().unwrap() > v1.as_str());
+
+    // 存量：7 未知、8 已知但没有时间（§12 时代的写入方）
+    let before = now_local_string(fx.state.config.timezone);
+    fx.state.db.with_conn(|c| {
+        for (id, data) in [
+            (
+                "7",
+                r#"{"id":7,"title":"unknown","updatedAt":"2026-11-01 10:00:00"}"#,
+            ),
+            (
+                "8",
+                r#"{"id":8,"title":"known","listId":1,"updatedAt":"2026-11-01 10:00:00"}"#,
+            ),
+        ] {
+            repo::upsert_todo(c, id, data, "2026-11-01 10:00:00").unwrap();
+        }
+    });
+    let (_, _, raw) = send(
+        &fx.router,
+        req(Method::PATCH, "/todos/7", Some(json!({"title": "u2"}))),
+    )
+    .await;
+    let v = json_body(&raw);
+    assert!(
+        v.get("listId").is_none() && v.get("listUpdatedAt").is_none(),
+        "未知：两个键都不带出 {}",
+        v
+    );
+    let (_, _, raw) = send(
+        &fx.router,
+        req(Method::PATCH, "/todos/7", Some(json!({"listId": 1}))),
+    )
+    .await;
+    let v = json_body(&raw);
+    assert_eq!(v["listId"], 1, "未知 → 已知");
+    assert!(v["listUpdatedAt"].as_str().unwrap() >= before.as_str());
+    for body in [json!({"title": "k2"}), json!({"listId": 1})] {
+        let (_, _, raw) = send(
+            &fx.router,
+            req(Method::PATCH, "/todos/8", Some(body.clone())),
+        )
+        .await;
+        let v = json_body(&raw);
+        assert_eq!(v["listId"], 1);
+        assert!(
+            v.get("listUpdatedAt").is_none(),
+            "已知没有时间：不补时间 {}",
+            body
+        );
+    }
 }
 
 /// 经 `/sync*` 真走一遍：清单写入、删除随推送出去；PC 改名经 `/sync/pull` 合并回来。

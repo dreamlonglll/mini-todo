@@ -203,7 +203,8 @@ body 是 JSON（`Content-Type: application/json`）。
 | `repeatMonthDay` | 1-31 / null | 仅 `monthly`：每月几号 |
 | `listId` | 整数 ≥ 1 | 所属清单的 id（见 `GET /lists`）；新建不给时为 1（默认清单）。必须是现有的清单，否则 400 `清单不存在`；把读到的对象原样写回时不校验，PATCH 不带 `listId` 时清单不变。读到的是存储的原值：**没有 `listId` 表示清单未知**（旧版本设备写的，服务端不会替它补值），与指向已删除的清单一样，这条待办算在默认清单里 |
 
-只读 / 服务端维护的字段：`id`、`createdAt`、`updatedAt`、`seq`（cloud 短码）、`subtasks`、
+只读 / 服务端维护的字段：`id`、`createdAt`、`updatedAt`、`listUpdatedAt`（`listId` 自己的版本，只在清单真的
+被设置时刷新：新建、改了 `listId`、删除清单把它移进默认清单；清单未知时不返回）、`seq`（cloud 短码）、`subtasks`、
 `subtaskCount`（列表不嵌套时附带）。写入时这些字段会被**忽略**，所以把读到的对象改几个字段
 后整包写回是安全的；对象里原样带回的 `color` / `endTime` / `description` 不会盖掉你对
 `priority` / `dueDate` / `notes` 的修改（规范字段只有真的改了才优先于别名）。
@@ -252,7 +253,9 @@ body 是 JSON（`Content-Type: application/json`）。
 - **有效清单**：待办的 `listId` 指向一个现有清单时就是它；没有 `listId`（未知：旧版本设备写的）、类型不对或指向已删除的
   清单时，这条待办算在默认清单里（PC 也这样显示）。`GET /todos?listId=` / `?list=` 按有效清单过滤。未知的清单只有在
   显式设置时才会变成已知（`update <ref> --list …` / `listId=`）；只改其它字段不会把它写成默认清单
-- 删除清单不会删除待办：其下待办全部移到默认清单（`listId` 改为 1，`updatedAt` 刷新）；默认清单不能删除（400）
+- 删除清单不会删除待办：其下待办全部移到默认清单（`listId` 改为 1，`updatedAt` 与 `listUpdatedAt` 刷新）；默认清单不能删除（400）
+- 清单归属单独合并：两端同时改了同一个待办时，其它字段按 `updatedAt` 整条取较新的一方，**清单归属按
+  `listUpdatedAt` 取较新的一方**——别处刚做的「移动到」不会被另一端只改了标题的旧副本带回原清单
 
 ### 图片
 
@@ -441,8 +444,9 @@ openclaw cron add \
 - 单用户、单 API key（云端 `config.toml` 配）
 - 写入约 1.5 秒后推送到 WebDAV（连续写入最多攒 10 秒），PC 端要在自己的同步周期内才能拉到
 - 删除会留下墓碑并双向同步，30 天内能拦截其它端把已删除记录"复活"；离线超过 30 天的设备
-  再上线时，它手里的旧记录仍可能被恢复
-- 同一条记录两端同时修改时按 `updatedAt` 整条取较新的一方（不做字段级合并）；写后立刻 `show` 校验最稳
+  再上线时，它手里的旧记录仍可能被恢复（清单的删除墓碑永不过期，已删的清单不会这样复活）
+- 同一条记录两端同时修改时按 `updatedAt` 整条取较新的一方，只有清单归属（`listId`）按自己的 `listUpdatedAt`
+  单独取较新的一方；写后立刻 `show` 校验最稳
 - 不支持移动端
 
 ## 安装目录约定

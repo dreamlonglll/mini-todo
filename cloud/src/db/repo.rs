@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 
-use crate::model::{self, ListIdState};
+use crate::model;
 
 /// `meta` 表里用到的键。集中在一处，避免 worker / API / 健康检查各写各的字符串。
 pub mod meta_keys {
@@ -670,42 +670,6 @@ pub fn todo_timestamps(conn: &Connection) -> rusqlite::Result<HashMap<String, St
     rows.collect()
 }
 
-/// 同步合并用：每条 todo 存储的 `listId` 的状态（契约 §12：缺失或 null = 未知）。
-/// data_json 不是合法 JSON 的行算 `Invalid`（不碰它）。
-pub fn todo_list_id_states(conn: &Connection) -> rusqlite::Result<HashMap<String, ListIdState>> {
-    let mut stmt = conn.prepare(
-        "SELECT id,
-                json_valid(data_json),
-                CASE WHEN json_valid(data_json) THEN json_type(data_json, '$.listId') END,
-                CASE WHEN json_valid(data_json) THEN json_extract(data_json, '$.listId') END
-         FROM todos",
-    )?;
-    let rows = stmt.query_map([], |row| {
-        let id: String = row.get(0)?;
-        let valid: bool = row.get(1)?;
-        let typ: Option<String> = row.get(2)?;
-        let state = match (valid, typ.as_deref()) {
-            (false, _) => ListIdState::Invalid,
-            (true, None | Some("null")) => ListIdState::Unknown,
-            (true, Some("integer")) => ListIdState::Known(row.get(3)?),
-            (true, Some(_)) => ListIdState::Invalid,
-        };
-        Ok((id, state))
-    })?;
-    rows.collect()
-}
-
-/// 只把 todo 的 `listId` 设成 `list_id`，`updated_at` 与其它字段都不动（契约 §12-3：远端有
-/// `listId`、本地是未知时采纳远端的值，不算一次新的编辑）。
-pub fn set_todo_list_id(conn: &Connection, id: &str, list_id: i64) -> rusqlite::Result<bool> {
-    let n = conn.execute(
-        "UPDATE todos SET data_json = json_set(data_json, '$.listId', ?2)
-         WHERE id = ?1 AND json_valid(data_json)",
-        params![id, list_id],
-    )?;
-    Ok(n > 0)
-}
-
 /// 同步合并用：`id → (todo_id, updated_at)`。
 pub fn subtask_timestamps(
     conn: &Connection,
@@ -1065,22 +1029,11 @@ pub fn add_list_tombstone(
     Ok(())
 }
 
-/// 全部清单墓碑 `(entity_id, deleted_at)`。
+/// 全部清单墓碑 `(entity_id, deleted_at)`。清单墓碑永不过期（契约 §13-10），没有清理函数。
 pub fn all_list_tombstones(conn: &Connection) -> rusqlite::Result<Vec<(String, String)>> {
     let mut stmt = conn.prepare("SELECT entity_id, deleted_at FROM list_tombstones")?;
     let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
     rows.collect()
-}
-
-/// 清理早于 `cutoff_local` 的清单墓碑（与 todo 墓碑同一个保留期截止口径）。
-pub fn purge_list_tombstones_before(
-    conn: &Connection,
-    cutoff_local: &str,
-) -> rusqlite::Result<usize> {
-    conn.execute(
-        "DELETE FROM list_tombstones WHERE deleted_at < ?1",
-        [cutoff_local],
-    )
 }
 
 #[cfg(test)]
@@ -1681,11 +1634,9 @@ mod tests {
             ],
             "同键取较大 deletedAt；默认清单的墓碑不存"
         );
-        assert_eq!(
-            purge_list_tombstones_before(&c, "2026-10-15 00:00:00").unwrap(),
-            1
-        );
-        assert_eq!(all_list_tombstones(&c).unwrap().len(), 1);
+        // todo 墓碑按保留期清理时，清单墓碑一条都不动（永不过期，契约 §13-10）
+        purge_tombstones_before(&c, "2026-11-30 00:00:00").unwrap();
+        assert_eq!(all_list_tombstones(&c).unwrap().len(), 2);
     }
 
     #[test]

@@ -7,7 +7,8 @@
 //! - 新清单 id 用 `ids::new_id`（与 PC 同一算法，撞主键换 id 重试），`sortOrder` 缺省 = 现有最大值 + 1
 //! - 改写已有清单：`updatedAt = max(now, 旧值 + 1 秒)`；内容没变时不刷新、不标脏
 //! - DELETE（契约 §5，单事务）：默认清单 → 400；`listId` 等于它的待办改到默认清单并刷新
-//!   `updatedAt`，删清单，写清单墓碑 `deletedAt = max(now, 清单的 updatedAt)`
+//!   `updatedAt` 与归属版本 `listUpdatedAt`（契约 §13-2，都是 `max(now, 旧值 + 1 秒)`），删清单，
+//!   写清单墓碑 `deletedAt = max(now, 清单的 updatedAt)`（清单墓碑永不过期，契约 §13-10）
 //! - 清单不分配 `C{seq}` 短码；写操作照常标脏，由 push worker 去抖推送
 
 use axum::extract::{Path, State};
@@ -237,7 +238,8 @@ pub(crate) struct DeletedList {
 }
 
 /// `DELETE /lists/:id` 的落库动作（契约 §5；调用方负责事务）：默认清单 → 400；原始
-/// `listId` 等于它的待办改到默认清单并刷新 `updatedAt`；删清单；写清单墓碑；标脏。
+/// `listId` 等于它的待办改到默认清单并刷新 `updatedAt` 与 `listUpdatedAt`（契约 §13-2：移进
+/// 默认清单是一次显式设置清单）；删清单；写清单墓碑；标脏。
 pub(crate) fn delete_list_tx(
     conn: &Connection,
     entry: &ListEntry,
@@ -257,7 +259,16 @@ pub(crate) fn delete_list_tx(
             &[&row.updated_at, model::json_updated_at(&obj).unwrap_or("")],
             tz,
         );
+        let list_updated_at = bump_updated_at(
+            now,
+            &[obj
+                .get("listUpdatedAt")
+                .and_then(Value::as_str)
+                .unwrap_or("")],
+            tz,
+        );
         obj.insert("listId".into(), json!(DEFAULT_LIST_ID));
+        obj.insert("listUpdatedAt".into(), json!(list_updated_at));
         obj.insert("updatedAt".into(), json!(updated_at));
         repo::upsert_todo(conn, &row.id, &Value::Object(obj).to_string(), &updated_at)?;
         moved_todos += 1;

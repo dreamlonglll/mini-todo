@@ -35,6 +35,7 @@ use serde_json::{json, Map, Value};
 use tracing::{debug, warn};
 
 use crate::db::repo;
+use crate::model::{list_id_state, ListIdState};
 use crate::sync::images::is_safe_image_name;
 use crate::time::{normalize_datetime, now_iso_string};
 
@@ -42,7 +43,8 @@ use crate::time::{normalize_datetime, now_iso_string};
 pub const SYNC_FORMAT_VERSION: &str = "4.0";
 /// 云端写出文档时的 `deviceId`。
 pub const CLOUD_DEVICE_ID: &str = "minitodo-cloud";
-/// 墓碑保留期（天）。写出时丢弃更早的墓碑，本地墓碑表同样按此清理（清单墓碑同一口径）。
+/// todo / subtask 墓碑的保留期（天）。写出时丢弃更早的墓碑，本地墓碑表同样按此清理。
+/// 清单墓碑**永不过期**（契约 §13-10），不受它约束。
 pub const TOMBSTONE_RETENTION_DAYS: i64 = 30;
 /// 顶层键：全部未删除的清单（含默认清单 id 1）。
 pub const KEY_TODO_LISTS: &str = "todoLists";
@@ -322,10 +324,11 @@ fn cmp_records(a: &Value, b: &Value) -> Ordering {
 /// 用本地 SQLite 当前状态 + 基准信封构造要上传的文档（K2）。
 ///
 /// - `todos`：本地全部 todo（嵌套各自的 subtasks）。本地状态已经合并过基准版本，
-///   所以它就是"远端 ∪ 本地"按 K3 合并后的结果。清单未知（缺失 / null）的不写 `listId`。
+///   所以它就是"远端 ∪ 本地"按 K3 合并后的结果。清单归属（契约 §13-7）：未知（`listId` 缺失 /
+///   null）时 `listId` 与 `listUpdatedAt` 都不写；已知时写 `listId`，有 `listUpdatedAt` 就一并写。
 /// - `tombstones`：本地墓碑表（已包含合并进来的远端墓碑），按保留期过滤。
 /// - `todoLists` / `listTombstones`：本地全部清单（总是含默认清单 id 1，本地缺它时按初始值补上）
-///   与保留期内的全部清单墓碑（契约 §1），同样是合并后的结果。
+///   与全部清单墓碑（永不过期，契约 §1 / §13-10），同样是合并后的结果。
 /// - `images`：调用方算好的清单。
 /// - 其它顶层键来自 `envelope`，原样保留；`settings` 缺失时写占位并去掉
 ///   `settingsUpdatedAt`。
@@ -350,9 +353,17 @@ pub fn build_outgoing_doc(
             warn!(target: "minitodo_cloud::push", "skip corrupt todo row {}", row.id);
             continue;
         };
-        // 未知的清单不写 listId 键（契约 §12-5：与旧写入方一样，未知永远不会覆盖别人的已知值）
-        if obj.get("listId").is_some_and(Value::is_null) {
-            obj.remove("listId");
+        // 未知的归属两个键都不写（契约 §12-5 / §13-7：与旧写入方一样，未知永远不会覆盖别人的已知值）；
+        // 已知时 listUpdatedAt 为 null 就当没有
+        match list_id_state(&obj) {
+            ListIdState::Unknown => {
+                obj.remove("listId");
+                obj.remove("listUpdatedAt");
+            }
+            ListIdState::Known(_) if obj.get("listUpdatedAt").is_some_and(Value::is_null) => {
+                obj.remove("listUpdatedAt");
+            }
+            _ => {}
         }
         let mut subs = subs_by_todo.remove(&row.id).unwrap_or_default();
         subs.sort_by(cmp_records);
@@ -393,7 +404,7 @@ pub fn build_outgoing_doc(
         })
     });
     let tombstones: Vec<Value> = tombs.iter().filter_map(Tombstone::to_value).collect();
-    let (lists, list_tombstones) = outgoing_lists(conn, tz, retention_cutoff)?;
+    let (lists, list_tombstones) = outgoing_lists(conn, tz)?;
 
     let mut doc = envelope.clone();
     let version = doc
@@ -421,12 +432,8 @@ pub fn build_outgoing_doc(
 }
 
 /// 要写出的 `todoLists`（按 `(sortOrder, id)` 排序，总是含默认清单）与 `listTombstones`
-/// （保留期内、按 id 排序，默认清单的墓碑不写）。
-fn outgoing_lists(
-    conn: &Connection,
-    tz: Tz,
-    retention_cutoff: &str,
-) -> rusqlite::Result<(Vec<Value>, Vec<Value>)> {
+/// （全部、按 id 排序，永不过期；默认清单的墓碑不写）。
+fn outgoing_lists(conn: &Connection, tz: Tz) -> rusqlite::Result<(Vec<Value>, Vec<Value>)> {
     let default_id = crate::model::DEFAULT_LIST_ID.to_string();
     let mut has_default = false;
     let mut lists = Vec::new();
@@ -450,9 +457,6 @@ fn outgoing_lists(
         let Some(deleted_at) = normalize_datetime(&deleted_at, tz, NaiveTime::MIN) else {
             continue;
         };
-        if deleted_at.as_str() < retention_cutoff {
-            continue;
-        }
         tombs.push(ListTombstone {
             entity_id: id,
             deleted_at,
@@ -711,7 +715,8 @@ mod tests {
         repo::upsert_list(&c, "7", "corrupt", "2026-11-01 10:00:00").unwrap();
         repo::add_list_tombstone(&c, "50", "2026-10-30T11:00:00").unwrap();
         repo::add_list_tombstone(&c, "40", "2026-10-30 10:00:00").unwrap();
-        repo::add_list_tombstone(&c, "30", "2026-01-01 10:00:00").unwrap(); // 过期
+        // 早于 todo 墓碑保留期：清单墓碑永不过期，照样写出（契约 §13-10）
+        repo::add_list_tombstone(&c, "30", "2026-01-01 10:00:00").unwrap();
         repo::add_list_tombstone(&c, "not-a-number", "2026-10-30 10:00:00").unwrap();
         let doc = build_outgoing_doc(&c, &Map::new(), vec![], tz(), "2026-10-01 00:00:00").unwrap();
         let ids: Vec<i64> = doc["todoLists"]
@@ -733,6 +738,7 @@ mod tests {
         assert_eq!(
             doc["listTombstones"],
             json!([
+                {"entityId": 30, "deletedAt": "2026-01-01 10:00:00"},
                 {"entityId": 40, "deletedAt": "2026-10-30 10:00:00"},
                 {"entityId": 50, "deletedAt": "2026-10-30 11:00:00"}
             ])
@@ -746,7 +752,8 @@ mod tests {
         assert_eq!(doc["todoLists"][0]["name"], json!("待办清单"));
     }
 
-    /// 契约 §12-5：清单未知（缺失 / null）的待办上传时不写 listId 键；已知（含 1）照常写。
+    /// 契约 §12-5 / §13-7：清单未知（缺失 / null）的待办上传时 `listId` / `listUpdatedAt` 都不写；
+    /// 已知（含 1）照常写 `listId`，有 `listUpdatedAt` 就一并写（null 当没有）。
     #[test]
     fn outgoing_doc_omits_unknown_list_ids() {
         let c = mem_db();
@@ -755,23 +762,38 @@ mod tests {
             ("2", r#"{"id":2,"title":"null","listId":null}"#),
             ("3", r#"{"id":3,"title":"default","listId":1}"#),
             ("4", r#"{"id":4,"title":"work","listId":1731000000000123}"#),
+            (
+                "5",
+                r#"{"id":5,"title":"stray","listUpdatedAt":"2026-11-01 09:00:00"}"#,
+            ),
+            (
+                "6",
+                r#"{"id":6,"title":"moved","listId":5,"listUpdatedAt":"2026-11-01 09:00:00"}"#,
+            ),
+            (
+                "7",
+                r#"{"id":7,"title":"null-at","listId":5,"listUpdatedAt":null}"#,
+            ),
         ] {
             repo::upsert_todo(&c, id, data, "2026-11-01 10:00:00").unwrap();
         }
         let doc = build_outgoing_doc(&c, &Map::new(), vec![], tz(), "2000-01-01 00:00:00").unwrap();
-        let list_ids: Vec<Option<Value>> = doc["todos"]
+        let owners: Vec<(Option<Value>, Option<Value>)> = doc["todos"]
             .as_array()
             .unwrap()
             .iter()
-            .map(|t| t.get("listId").cloned())
+            .map(|t| (t.get("listId").cloned(), t.get("listUpdatedAt").cloned()))
             .collect();
         assert_eq!(
-            list_ids,
+            owners,
             vec![
-                None,
-                None,
-                Some(json!(1)),
-                Some(json!(1731000000000123_i64))
+                (None, None),
+                (None, None),
+                (Some(json!(1)), None),
+                (Some(json!(1731000000000123_i64)), None),
+                (None, None),
+                (Some(json!(5)), Some(json!("2026-11-01 09:00:00"))),
+                (Some(json!(5)), None),
             ]
         );
     }

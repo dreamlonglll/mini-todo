@@ -18,6 +18,10 @@
 //! 补值，响应里也不带。`GET /todos` 的 `listId=` / `list=<名称>` 按**有效清单**过滤：未知、指向
 //! 已删除清单的待办算在默认清单里；响应里的 `listId` 是存储的原值。
 //!
+//! 清单归属的版本 `listUpdatedAt`（契约 §13）由服务端维护：客户端传入的忽略，响应照常返回；只在
+//! 显式设置清单时刷新——`POST`（= now）与 `PATCH` 带了 `listId` 且值变了（含未知 → 已知，
+//! `max(now, 旧值 + 1 秒)`）；只改其它字段时不动。
+//!
 //! 读取：响应附加派生字段 `priority`（由 color 映射）与 cloud 短码 `seq`，都不入库。
 
 use std::collections::HashMap;
@@ -280,6 +284,17 @@ pub async fn patch_todo(
             model::apply_shadowed_aliases(&mut patch, &body, &base, tz);
             let mut next = base.clone();
             model::apply_todo_patch(&mut next, &patch);
+            // 显式设置了清单且值变了（含未知 → 已知）→ 刷新归属版本（契约 §13-2；原样写回不刷新）
+            if let Some(list_id) = patch.get("listId").and_then(Value::as_i64) {
+                if model::list_id_state(&base) != model::ListIdState::Known(list_id) {
+                    let previous = base
+                        .get("listUpdatedAt")
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    let list_updated_at = bump_updated_at(&now, &[previous], tz);
+                    next.insert("listUpdatedAt".into(), json!(list_updated_at));
+                }
+            }
 
             let changed = normalized.semantic || next != base;
             if changed {
