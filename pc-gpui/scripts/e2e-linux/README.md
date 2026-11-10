@@ -13,12 +13,12 @@ Windows 专有行为（嵌入桌面、桌面收纳箱、DirectComposition 透明
 
 ```
 Xvfb :78 ── mini-todo（设备 A，MINI_TODO_DATA_DIR 隔离）──┐  xdotool / OCR / sqlite3
-Xvfb :79 ── mini-todo（设备 B，仅 S05 双设备用例）─────────┤
+Xvfb :79 ── mini-todo（设备 B，S05 / S13~S15 双设备用例）──┤
                                                          │ 同步（标题栏按钮 / 设置页 / 自动同步）
               Apache mod_dav :8081 ◄─────────────────────┤ （遵守条件请求）
               nginx dav      :8082 ◄─────────────────────┘ （忽略条件请求）
                     ▲
-              minitodo-cloud（REST :8787 / :8797）◄── minitodo.py（Skill CLI）
+              minitodo-cloud（REST :8787 / :8797，MT_E2E_CLOUD_PORTS）◄── minitodo.py（Skill CLI）
 ```
 
 ## 一次性准备（Ubuntu 24.04，root）
@@ -46,7 +46,7 @@ cd ../cloud && cargo build               # → target/debug/minitodo-cloud
 
 ```bash
 cd pc-gpui/scripts/e2e-linux
-python3 run_e2e.py ../../target/debug/mini-todo ../../../cloud/target/debug/minitodo-cloud            # 全量（约 20 分钟）
+python3 run_e2e.py ../../target/debug/mini-todo ../../../cloud/target/debug/minitodo-cloud            # 全量（约 40 分钟）
 python3 run_e2e.py <app> <cloud> F                 # 只跑本地组
 python3 run_e2e.py <app> <cloud> S[nginx] L01      # 前缀过滤；方括号只匹配该 WebDAV
 python3 run_e2e.py <app> <cloud> S03[apache] F06b
@@ -55,7 +55,8 @@ python3 run_e2e.py <app> <cloud> S03[apache] F06b
 | 环境变量 | 默认 | 作用 |
 |---|---|---|
 | `MT_E2E_WORK` | `/tmp/mini-todo-gpui-e2e` | 隔离数据目录、进程输出、截图、`results.txt` 的根 |
-| `MT_E2E_DISPLAYS` | `:78,:79` | Xvfb 显示号（第二个只给 S05 的设备 B 用） |
+| `MT_E2E_DISPLAYS` | `:78,:79` | Xvfb 显示号（第二个只给双设备用例的设备 B 用） |
+| `MT_E2E_CLOUD_PORTS` | `8787,8797` | cloud 的 REST 端口（Apache 一遍、nginx 一遍）。WSL 镜像网络与 Windows 共用 `127.0.0.1`，端口被 Windows 上的程序占着时请求会打到那个程序（症状：cloud 返回陌生的 404），换一组空闲端口 |
 | `MT_E2E_DAV_ROOT` | `/srv/mtodo-e2e` | `setup.sh` 建的 WebDAV 根 |
 | `MT_E2E_SEED` | `<app 同目录>/examples/seed` | core 的 seed 示例 |
 | `MT_E2E_REF_SHOTS` | 空 | **可选**：参考截图目录（旧 Tauri 版 Vue 前端渲染，不在仓库里，见 `../README.md`）；设置后 F00 在结果里附 RMSE 差异度量（只报告，不断言） |
@@ -71,25 +72,32 @@ python3 run_e2e.py <app> <cloud> S03[apache] F06b
 
 | 组 | 编号 | 覆盖（全部经界面操作，除非注明） |
 |---|---|---|
-| F 本地 | F00 | 官方样例数据（`scripts/sample-data.json`）启动：380×600、列表 / 四象限渲染（OCR + 截图） |
+| F 本地 | F00 | 官方样例数据（`scripts/sample-data.json`）启动：默认清单窗口 380×600、列表 / 四象限渲染（OCR + 截图），视图写 `window_prefs` |
 | | F01 | FAB → 新建窗口 → 输入标题 → Ctrl+Enter 连按三次：库里只多一条、默认颜色 / 象限、时间规范、列表出现 |
 | | F02 | 点待办 → 只读详情 → 编辑 → 改标题 → 保存：库与列表更新，`updated_at` 递增 |
 | | F02b | 有未保存修改时 Esc →「放弃修改」确认框：Esc 取消留在编辑，点「放弃」关闭且不写库 |
 | | F03 | 编辑窗口子任务面板：添加两条、勾选一条 → 库 + 面板 1/2 + 主窗口计数 1/2 |
-| | F03b | 标题栏「展开全部子任务」→ 列表里出现子任务标题、写入 `ui-state.json` → 再点收起 |
+| | F03b | 标题栏「展开全部子任务」→ 列表里出现子任务标题、`window_prefs.expand_all` = 1 → 再点收起（= 0） |
 | | F04 | 悬停操作条「完成」→ 离开列表；标题栏「已完成」窗口里列出；`local_seq` 递增；「恢复为未完成」拿回一条 |
 | | F05 | 操作条「删除」+「删除确认」对话框（点按钮）→ 待办与子任务删除、墓碑写入且时间规范 |
-| | F06 / F06b | 四象限拖拽改象限（默认色跟随、自定义色保留）；列表拖拽排序与「置顶」（`sort_order`） |
+| | F06 / F06b | 四象限拖拽改象限（默认色跟随、自定义色保留）；列表拖拽排序与「置顶」（`sort_order`）。视图按窗口存（`window_prefs.view_mode`） |
 | | F07 | 日期 / 时间选择器键入（开始仅日期、截止、提醒）→ 新建与编辑都存 `YYYY-MM-DD HH:MM:SS` |
 | | F08 | 外部直接写库（插入 / 改名）→ 5s 变更计数轮询后列表刷新 |
 | | F09a / F09b | 启动补发错过的每日重复提醒并推进；1 分钟内到期的每日提醒弹应用内通知窗口（屏内、不重叠）、`notify_at` +1 天 |
 | | F10 | 单实例：**N/A**（GPUI 版只在 Windows 实现；debug 隔离时也关闭） |
 | | F11 | 日志落盘 `<data>/logs/mini-todo.log`（启动行、隔离提示、无 panic） |
-| | F12 | 设置 → 导出数据（ZIP，含 `data.json` 4.0）→ 新建一条 → 导入数据 + 确认 → id 保留、多出的记录写墓碑、导入前自动备份、主窗口提示 |
-| | F13 | 标题栏主题切换（库 + 像素）；设置「展示日历」→ 主窗口加宽、日历渲染、点日历横条打开只读详情 → 关闭复原 |
+| | F12 | 设置 → 导出数据（ZIP，含 `data.json` 4.1：`todoLists`、已知归属的 `listId`，归属未知的没有这个键）→ 新建一条 → 导入数据 + 确认 → id 保留、多出的记录写墓碑、导入前自动备份、主窗口提示 |
+| | F13 | 标题栏日 / 夜（`window_prefs.dark` + 像素，不写全局 `text_theme`）；设置「展示日历」→ 独立的「日历」窗口贴在默认清单窗口右侧（默认清单窗口仍 380×600）、点日历横条打开只读详情 → 关掉「展示日历」= 日历窗口关闭、`hidden` = 1 |
 | | F14 | 空描述框点中部即进入 Markdown 编辑（旧版行为；缺陷 D1 已修复） |
 | | F15 | 子任务窗口：悬停「编辑子任务」→ 输入 Markdown → Ctrl+Enter 保存 →「查看子任务」渲染出来 |
 | | F16 | 未配置 WebDAV 时点标题栏同步 → 提示「请先在设置中配置 WebDAV 服务器」，不发起同步 |
+| F 清单 | F17 | `list:new`（同托盘「新增待办清单」）→ 新窗口「清单」直接在改名 → 改名写库、窗口标题跟着改；只改大小写算改名；与其它清单重名（不区分大小写）提示「已有同名清单」并保持原名；新窗口的 FAB 新建的待办在本清单 |
+| | F18 | 行右键「移动到 ▸」→ 子菜单点目标清单：`list_id` / `list_updated_at` 刷新，这一行离开本窗口、出现在目标清单窗口 |
+| | F19 | 只读详情的「所属清单」徽章；编辑表单「四象限」下面的「清单」下拉改清单并保存；归属未知（`list_id` NULL）的待办只改标题，保存后仍是 NULL（契约 §12-6） |
+| | F20 | 日历窗口标题栏的清单筛选：取消一个 → `window_prefs.calendar_filter` = 其余清单 id 的 JSON 数组；勾满 → NULL；关闭日历窗口 = 关掉「显示日历」 |
+| | F21 | 清单窗口挪位置（xdotool，Linux 上自绘拖动摆不了窗，见下文）后关闭：按屏幕组合写 `window_layouts`、`window_prefs.hidden` = 1，进程不退出 |
+| | F22 | 右键清单名 →「删除清单」→ 确认框（"N 项待办将移到「待办清单」"）→ 清单删除、写 `list_tombstones`、待办回默认清单、窗口属性删除、窗口关闭；默认清单的「删除清单」置灰、点了没有确认框 |
+| | F23 | 隐藏的清单窗口重启后不开；`list:<id>`（与托盘唤起同一入口 `show_list`）再显示：回到保存的位置、`hidden` = 0 |
 | S 同步（Apache / nginx 各一遍） | S01 | 设置页填写 WebDAV：错误密码「测试连接」→「连接失败」且不保存；正确密码 →「连接成功」→ 保存配置 → 立即同步（首次上传）→ 再同步为「已是最新」 |
 | | S02 | 界面新建 → 标题栏同步按钮推送、提示；再点为「已是最新」；Skill CLI `list` 经 cloud 看到它 |
 | | S03 | cloud 写入（Skill `add --priority --due`、REST 带象限别名与 `T` 时间）→ PC 标题栏同步后库与列表出现，别名映射正确 |
@@ -97,16 +105,22 @@ python3 run_e2e.py <app> <cloud> S03[apache] F06b
 | | S05 | 双设备（两个应用进程 / 两个 Xvfb）：B 界面配置并拉取、B 改名 → A、A 删除 → B、B 新建 → A，多轮后两端一致 |
 | | S06 | 单调版本：上一版来自时钟快 90s 的设备 → 界面编辑后 `updated_at` = 旧值 + 1s；cloud 连续两次 PATCH 严格递增，PC 收敛到最后一版 |
 | | S07 | 在描述里键入 `minitodo-image://` 引用（图片文件预先放进 images 目录）→ 上传、cloud 镜像、只读详情按原尺寸渲染；远端恶意文件名被忽略 |
-| | S08 | 远端更新的设置按 `settingsUpdatedAt` 应用（窗口位置不应用，界面切回浅色）；未知顶层键经 PC 与 cloud 都保留 |
+| | S08 | 远端更新的设置按 `settingsUpdatedAt` 应用（`notificationType`；窗口位置不应用；`textTheme` 只落进 settings，不改窗口的日 / 夜）；未知顶层键经 PC 与 cloud 都保留 |
 | | S09 | 设置「高级」→ 用云端覆盖本地 / 用本地覆盖云端（确认框）：强制拉取删除本地独有、强制推送给远端独有写墓碑、cloud 不复活 |
 | | S10 | PC（直接写库 + 标题栏同步）与 cloud（REST + push）并发写 4 轮：一条不丢 |
 | | S11 | 设置里打开自动同步（间隔 1 分钟，间隔值直接写库）→ 不点按钮也拉到 cloud 新建的待办 |
-| L 生命周期 | L01 | v27 旧库（见下）启动：升级前自动备份 `backups/data-v27-*.db`、v28~v30 迁移、存量时间规范化、数据完好并显示、日志记录 |
-| | L02 | WM_DELETE_WINDOW 关闭主窗口 → 进程正常退出（Linux 无托盘）→ 数据与视图模式保留；SIGKILL 后重启库完好 |
-| | L03 | 库版本比程序新（v31）→ 记警告、照常运行 |
+| | S12 | 旧格式远端（旧版本写回的文档，待办没有 `listId` / `listUpdatedAt`）+ 本机已知归属 → 同步补传一次，远端带回两个键、本地不变；再同步为「已是最新」 |
+| | S13 | 双设备：A 用 `list:new` 建清单、改名、「移动到」一条 → 同步 → B 同步后自动开这个清单的窗口，归属与 A 一致 |
+| | S14 | 契约 §13 F1：A「移动到」与 B 拿旧副本改标题，两种同步顺序（先移动 / 先改标题）都收敛到移动后的清单，两端一致 |
+| | S15 | 双设备：A 删清单 → 同步 → 远端 `listTombstones`；B 同步后关掉这个清单的窗口、待办落进默认清单，多轮后不复活 |
+| L 生命周期 | L01 | v27 旧库（见下）启动：升级前自动备份 `backups/data-v27-*.db`、v28~v31 迁移、存量时间规范化、存量待办 `list_id` / `list_updated_at` 都是 NULL、默认清单与窗口属性的种子（旧主窗口开着日历：加宽的矩形按 40% / 60% 拆给默认清单窗口与日历窗口）、数据完好并显示、日志记录 |
+| | L02 | WM_DELETE_WINDOW 先关日历窗口（记 `hidden`，进程不退）再关默认清单窗口 → 进程正常退出（Linux 无托盘：最后一个窗口关掉才退出）→ 数据、按窗口的视图、日历隐藏都保留；SIGKILL 后重启库完好 |
+| | L03 | 库版本比程序新（v32）→ 记警告、照常运行 |
 
-**L01 的旧库**：先让 core 建出最新库，再按 v28 / v29 / v30 迁移的内容逆向剥掉（6 个 `local_seq` 触发器、`sync_meta`、`tombstones`、
-三张收纳箱表（含 v30 的两列）、两次迁移新增的 settings 键与迁移记录），最后按旧版写法插入 `T` 分隔 / 无秒 / 小数秒 / 仅日期的存量时间。
+**L01 的旧库**：先让 core 建出最新库，再按 v28 ~ v31 迁移的内容逆向剥掉（v31 的 `todo_lists` / `list_tombstones` / `window_prefs` /
+`window_layouts`、3 个 `todo_lists` 触发器、`todos.list_id` / `list_updated_at` 两列与索引；6 个 `local_seq` 触发器、`sync_meta`、`tombstones`、
+三张收纳箱表（含 v30 的两列）、迁移新增的 settings 键与迁移记录），再写旧主窗口的全局键（浅色、列表、开着日历）与一条 1000×600 的屏幕配置，
+最后按旧版写法插入 `T` 分隔 / 无秒 / 小数秒 / 仅日期的存量时间。
 v1~v27 的表结构与旧版 Tauri 应用是同一份迁移 SQL；不需要构建旧版（旧套件要求一个 v28 之前的旧版二进制）。
 
 ## 与旧版套件的差异
@@ -136,13 +150,27 @@ v1~v27 的表结构与旧版 Tauri 应用是同一份迁移 SQL；不需要构�
 - **ElMessage 提示会盖住标题栏右区按钮**，光标停在提示上它不会消失（与 Element Plus 一样悬停暂停计时）：点标题栏按钮前
   `ui.wait_no_toast` 先把光标移开并等标题栏底部恢复底色。
 - **拖拽**：手柄是标题左侧的颜色圆点（标题文字左边 16px），`XDisplay.drag` 按下 → 分步移动 → 停 0.4s → 松开。
-- **布局常量**（`ui.py`）：标题栏右区按钮从右往左 设置 / 同步 / 固定 / 主题 / 视图 / 已完成，中心 x = `w-31-36i`、y=27；
+- **窗口**：默认清单窗口标题固定「Mini Todo」（`App.main_win()`），其它清单窗口的标题 = 清单名（`list:new` 刚建好时是「清单」），
+  日历窗口「日历」。`ui.find_row` / `row_action` / `wait_main_shows` / `click_title` 都可以传 `win=` 指定清单窗口（缺省默认清单窗口）。
+  窗口属性按窗口查 `Session.prefs("list:<id>" | "calendar")`、几何查 `Session.layouts(...)`，清单 `Session.lists()`。
+- **布局常量**（`ui.py`）：清单窗口标题栏右区按钮从右往左 设置 / 同步 / 锁定 / 日夜 / 视图 / 已完成（只在本清单有已完成时出现），
+  中心 x = `w-31-36i`、y=27，「展开全部」在「已完成」左边 30px；日历窗口右区从右往左 设置 / 锁定 / 日夜 / 清单筛选（`ui.cal_button`）；
+  标题栏左侧的清单名在 (40, 27)：双击改名、右键菜单「重命名」(75, 74) /「删除清单」(75, 105)；
   FAB 中心 `(w-44, h-44)`；行操作条 完成 / 置顶 / 删除 在 `w-97 / w-69 / w-41`、行标题那一行；编辑窗口标题输入框 (350,119)、
-  描述框中部 (350,245)；子任务行悬停操作 查看 / 编辑 / 删除 在 x=985 / 1011 / 1037（只读模式只有查看，在 1037）；
+  描述框中部 (350,245)；表单「四象限」下面多了「清单」下拉（一个表单项约 80px，后面的时间范围 / 提醒 / 重复都往下挪了，
+  靠 OCR 表单项标题定位的不受影响；`ui.editor_set_list`）；子任务行悬停操作 查看 / 编辑 / 删除 在 x=985 / 1011 / 1037（只读模式只有查看，在 1037）；
   设置窗口左侧菜单 x=75、y=85+39i，开关在 x=636。
 - **关闭窗口**：`XDisplay.wm_close` 发 WM_DELETE_WINDOW（`xdotool windowclose` 是 XDestroyWindow，不走应用的关闭流程）。
+  清单 / 日历窗口的关闭 = 隐藏（保存几何、记 `hidden`）；Linux 不能程序化隐藏，窗口真的关掉，最后一个窗口关掉进程才退出
+  （Windows / macOS 上进程常驻）。隐藏的清单窗口重启后不开，`MINI_TODO_DEBUG_OPEN=list:<id>` 再显示（Linux 没有托盘）。
+- **Linux 上应用摆不了窗**：`platform/fallback.rs` 的摆窗 / 取 Hwnd 都是 no-op，所以清单窗口的自绘拖动、缩放、吸附在这里动不了窗口
+  （由 Windows e2e 覆盖）；新清单窗口找空位时看不到别的窗口（吸附组为空），总落在右上角同一个位置、互相叠住。用例用
+  `XDisplay.move_window`（`xdotool windowmove`，相当于窗口管理器挪窗）把窗口挪开，用 `raise_window` 把被新窗口盖住的窗口提上来
+  （例如「展示日历」打开的日历窗口盖住设置窗口的 ×）。GPUI 的 X11 后端（没有窗口管理器）建窗时 x 偏 2px，比较位置时留 2px 容差。
 - **同步完成**以日志行 `[sync] 同步完成（…）: <报告>` 为准，提示文字作为附加断言。
 - 系统通知需要通知守护进程：本地组切到应用内通知（`notification_type = app`）。
+- **种子**：`seed` 认 4.0 与 4.1（`todoLists` + 待办的 `listId`）；4.0 的待办导入后落进默认清单 1。直接写库插入的待办没有 `list_id`（归属未知，
+  界面按默认清单显示）。
 
 ## 已知缺陷与观察
 
@@ -151,6 +179,8 @@ v1~v27 的表结构与旧版 Tauri 应用是同一份迁移 SQL；不需要构�
 | D1（已修复） | 编辑模式下描述为空时只有描述框顶部约 10px 能点进源码编辑。原因是 `ui/markdown_editor.rs` 根元素只有 `min_h_full()`，父元素没有确定高度时百分比最小高度不生效；改为在父级 flex 列里 `flex_grow` 撑满 | F14 |
 | O1（已修复） | 与文字同一段的图片被画成一行字高；现在含图片的段落按行拆成文字 / 图片片段排版，图片按原尺寸（最大宽度 100%）、与文字垂直居中，与旧版一致。剩余差异：图片旁的文字超过一行时整段先换到下一行；链接 / 标题 / 表格里的图片仍按行高绘制 | S07 |
 | O2 | 应用内通知窗口 320×120 时描述行被裁掉（标题下没有剩余高度）；旧版在 Windows 上同样只露出几像素 | F09b 截图 |
+| D2（已修复） | 列表较长时点 FAB 会同时点到它下面那行的悬停操作条（「删除」弹确认框）：FAB 没有 `occlude`。现在平时 FAB 挡住下面的行，「操作模式」变暗时让给操作条（同旧版的 z-index） | S13 |
+| O3 | Linux 上关掉最后一个窗口立即退出，关窗时后台写的窗口属性（`hidden` / 几何）可能还没提交，留下 hot journal、下次打开时回滚（只丢这一笔）。L02 用读写连接做 `integrity_check`（只读连接遇到 hot journal 会报 "attempt to write a readonly database"），结果里注明是否留下了 hot journal | L02 |
 
 ## 已知环境差异
 
