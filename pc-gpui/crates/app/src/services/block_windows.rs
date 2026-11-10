@@ -69,7 +69,12 @@ pub fn start(cx: &mut App) {
     open_list(cx, DEFAULT_LIST_ID, Placement::Restore);
     mark_shown(cx, BlockKey::DEFAULT_LIST);
     if AppState::global(cx).read(cx).calendar_visible() {
-        open_calendar(cx);
+        // 默认清单窗口的客户区校正（`windows::open_window`）还在前台排队，这时量到的客户区偏高半个底边框：
+        // 日历没有布局时按默认清单窗口的目标客户区（同 `open_block` 的取法）贴右侧
+        let list = window_mode::read_startup_geometry(cx, BlockKey::DEFAULT_LIST)
+            .saved
+            .unwrap_or_else(|| centered_on_primary(cx));
+        open_calendar(cx, Some(list));
     }
     reconcile(cx);
     observe_lists(cx);
@@ -180,12 +185,12 @@ fn open_list(cx: &mut App, list_id: i64, placement: Placement) -> Option<Entity<
     Some(view)
 }
 
-/// 打开日历窗口（已开着时返回它）
-fn open_calendar(cx: &mut App) -> Option<AnyWindowHandle> {
+/// 打开日历窗口（已开着时返回它）。`beside`：没有布局时贴哪个客户区的右侧（`None` = 默认清单窗口现在的客户区）
+fn open_calendar(cx: &mut App, beside: Option<PhysRect>) -> Option<AnyWindowHandle> {
     if let Some(handle) = WindowManager::block_window(cx, BlockKey::Calendar) {
         return Some(handle);
     }
-    let fallback = calendar_fallback(cx);
+    let fallback = calendar_fallback(cx, beside);
     open_block(
         cx,
         BlockKey::Calendar,
@@ -338,9 +343,11 @@ pub fn new_list_rect(work: PhysRect, scale: f64, existing: &[PxRect]) -> PhysRec
     PhysRect::new(rect.x, rect.y, rect.width, rect.height)
 }
 
-/// 日历窗口没有布局时：贴默认清单窗口右侧、与它等高（取不到默认清单窗口的位置时按它在主显示器居中的位置算）
-fn calendar_fallback(cx: &mut App) -> PhysRect {
-    let list = window_mode::client_rect(cx, BlockKey::DEFAULT_LIST)
+/// 日历窗口没有布局时：贴默认清单窗口右侧、与它等高（`beside` 给出时贴它；取不到默认清单窗口的位置时按它在主显示器
+/// 居中的位置算）
+fn calendar_fallback(cx: &mut App, beside: Option<PhysRect>) -> PhysRect {
+    let list = beside
+        .or_else(|| window_mode::client_rect(cx, BlockKey::DEFAULT_LIST))
         .unwrap_or_else(|| centered_on_primary(cx));
     let monitors = platform::monitors(cx);
     let (cx_, cy_) = (list.x + list.width / 2, list.y + list.height / 2);
@@ -477,7 +484,7 @@ pub fn set_calendar_visible(cx: &mut App, visible: bool) {
         if window_mode::is_registered(cx, BlockKey::Calendar) {
             window_mode::bring_to_front(cx, BlockKey::Calendar);
         } else {
-            open_calendar(cx);
+            open_calendar(cx, None);
         }
         return;
     }

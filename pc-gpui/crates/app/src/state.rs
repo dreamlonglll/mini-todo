@@ -213,18 +213,24 @@ struct Loaded {
 fn load_all(db: &Database) -> Result<Loaded, String> {
     let seq = todo::change_seq(db);
     let todos = todo::list(db)?;
-    let lists = lists::list(db)
-        .map_err(|e| log::warn!("[lists] 读取待办清单失败: {e}"))
-        .ok();
-    let prefs = window_prefs::list_prefs(db)
-        .map_err(|e| log::warn!("[window-prefs] 读取窗口属性失败: {e}"))
-        .ok();
+    let (lists, prefs) = load_lists(db);
     Ok(Loaded {
         seq,
         todos,
         lists,
         prefs,
     })
+}
+
+/// 读清单与窗口属性（读失败只记日志，返回 `None` = 不覆盖内存副本）
+fn load_lists(db: &Database) -> (Option<Vec<TodoList>>, Option<Vec<WindowPrefs>>) {
+    let lists = lists::list(db)
+        .map_err(|e| log::warn!("[lists] 读取待办清单失败: {e}"))
+        .ok();
+    let prefs = window_prefs::list_prefs(db)
+        .map_err(|e| log::warn!("[window-prefs] 读取窗口属性失败: {e}"))
+        .ok();
+    (lists, prefs)
 }
 
 impl AppState {
@@ -567,6 +573,35 @@ impl AppState {
     /// [`Self::fetch_todos`] 的"不关心结果"版本
     pub fn reload_todos(&mut self, cx: &mut Context<Self>) {
         drop(self.fetch_todos(cx));
+    }
+
+    /// 只重读清单与窗口属性、不拉待办（有窗口开着模态子窗口、待办的重拉要推迟时）：同步来的清单照样开窗、被删清单照样关窗
+    /// （`lists_revision` → `services::block_windows::reconcile`），编辑窗口的「清单」下拉也跟着更新。
+    /// 完整拉取在途时只记补拉（它的结果可能早于这次同步，补拉的那一轮会带上新清单）；读的期间有本地写操作则丢弃，交给之后的完整重拉
+    fn reload_lists(&mut self, cx: &mut Context<Self>) {
+        if self.fetch_in_flight {
+            self.fetch_queued = true;
+            return;
+        }
+        let (start_mutation, start_prefs) = (self.mutation_seq, self.prefs_mutation_seq);
+        let task = spawn_db(cx, |db| Ok(load_lists(db)));
+        cx.spawn(async move |this, cx| {
+            let Ok((lists, prefs)) = task.await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                if this.mutation_seq != start_mutation {
+                    return;
+                }
+                let prefs = prefs.filter(|_| this.prefs_mutation_seq == start_prefs);
+                let revision = this.lists_revision;
+                this.apply_loaded_lists(lists, prefs);
+                if this.lists_revision != revision {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// 5s 轮询（旧 `refreshIfChanged`）：拉取在途则跳过；`change_seq` 读不到或没变则跳过；否则 `fetch_todos`。
@@ -1266,6 +1301,7 @@ impl AppState {
 
     /// 处理同步报告（旧 `applySyncReport`）：同一份报告只处理一次；本地数据（待办 / 子任务 / 清单）有变化且没有窗口开着
     /// 模态子窗口 → 重新拉待办（连同清单与窗口属性：同步来的新清单开窗、被删清单关窗由 `services::block_windows` 处理）；
+    /// 开着模态子窗口时待办的重拉推迟到子窗口关闭，但清单有变化时先只重读清单（[`Self::reload_lists`]），开 / 关窗不等；
     /// 应用了远端设置 → 重新读设置（含运行时偏好）。返回是否处理了。
     pub fn apply_sync_report(&mut self, report: &SyncReport, cx: &mut Context<Self>) -> bool {
         self.last_sync_report = Some(report.clone());
@@ -1273,10 +1309,12 @@ impl AppState {
             return false;
         }
         self.last_applied_sync_report = Some(report.clone());
-        if crate::services::sync::has_local_data_changes(report)
-            && !crate::windows::WindowManager::any_block_has_modal_child(cx)
-        {
-            self.reload_todos(cx);
+        if crate::services::sync::has_local_data_changes(report) {
+            if !crate::windows::WindowManager::any_block_has_modal_child(cx) {
+                self.reload_todos(cx);
+            } else if report.lists_changed() {
+                self.reload_lists(cx);
+            }
         }
         if report.settings_applied {
             self.reload_app_settings(cx).detach();
