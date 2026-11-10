@@ -5,7 +5,7 @@
                       [--only W,S,...] [--allow-real-profile] [--emit-shots W01,I05]
 
 - debug 套件：各窗口外观（W）、窗口模式与 Win32 状态（S）、应用内通知（N）、交互（I）、WebDAV（D）、
-  收纳箱（F）、平台集成（P，需 --allow-real-profile）。除 P 外全部在开发专用数据隔离下运行
+  收纳箱（F）、待办清单窗口与日历窗口（L）、平台集成（P，需 --allow-real-profile）。除 P 外全部在开发专用数据隔离下运行
   （MINI_TODO_DATA_DIR / MINI_TODO_FENCES_ROOT，只在 debug 构建生效）。
 - release 套件：release 冒烟 + 平台集成（P）。
 - P 组不设 MINI_TODO_DATA_DIR，会读写 %LOCALAPPDATA%\\mini-todo 与开机自启注册表项，所以默认跳过；
@@ -114,9 +114,111 @@ def has_content(img) -> int:
 
 
 def title_button(main: Win, index_from_right: int) -> tuple[int, int]:
-    """主窗口标题栏右区按钮（从右往左 0=设置 1=同步 2=固定 3=主题 4=视图 5=已完成）：28×28、间距 8、右内边距 16、描边 1"""
+    """清单 / 日历窗口标题栏右区按钮：28×28、间距 8、右内边距 16、描边 1（380 宽时中心 x = 349 / 313 / 277 / 241 / 205 / 169）。
+    清单窗口从右往左 0=设置 1=同步 2=锁 3=日 / 夜 4=视图 5=已完成（只有本清单有已完成时才有）；
+    日历窗口（596 宽）0=设置 1=锁 2=日 / 夜 3=清单筛选"""
     w, _ = main.logical_size()
     return main.pt(w - 1 - 16 - 14 - 36 * index_from_right, 27)
+
+
+LIST_LOCK, LIST_THEME, CAL_LOCK, CAL_SETTINGS = 2, 3, 1, 0
+DEFAULT_LIST = "list:1"     # 默认清单窗口的 window_key（window_prefs / window_layouts）
+CALENDAR = "日历"           # 日历窗口的系统标题
+TITLE_BLANK = (60, 47)      # 标题栏下半截的空白处（清单名 / 按钮都在 y 13..41）：拖动、双击、激活都点这里
+TRAY_RS = HERE.parent.parent / "crates" / "app" / "src" / "services" / "tray.rs"
+
+
+def layout(app: App, key: str) -> tuple | None:
+    """窗口在（最近写的）屏幕组合下的布局：(x, y, width, height, is_fixed)，客户区物理像素"""
+    rows = app.q("SELECT x, y, width, height, is_fixed FROM window_layouts WHERE window_key = ? "
+                 "ORDER BY updated_at DESC LIMIT 1", (key,))
+    return rows[0] if rows else None
+
+
+def prefs(app: App, key: str) -> dict | None:
+    rows = app.q("SELECT hidden, dark, view_mode FROM window_prefs WHERE window_key = ?", (key,))
+    return dict(zip(("hidden", "dark", "view_mode"), rows[0])) if rows else None
+
+
+def wait_layout_is(app: App, key: str, win: Win, c: Checks, what: str, fixed: int | None = None) -> None:
+    """window_layouts 里这个窗口的几何 = 当前客户区（±2px）；fixed 非空时另比 is_fixed"""
+    def ok():
+        r, now = layout(app, key), win.client()
+        return r if r and all(abs(a - b) <= 2 for a, b in zip(r[:4], now)) and (fixed is None or r[4] == fixed) else None
+    try:
+        r = W.wait_until(ok, 6, f"window_layouts[{key}] = 客户区")
+        c.ok(True, f"{what}：window_layouts[{key}] = {r}")
+    except W.Timeout as e:
+        c.ok(False, f"{what}：{e}；客户区={win.client()} 库={app.q('SELECT * FROM window_layouts WHERE window_key = ?', (key,))}")
+
+
+def tray_window(app: App) -> Win:
+    trays = app.windows(cls="tray_icon_app", visible=False)
+    if not trays:
+        raise AssertionError("进程没有 tray_icon_app 窗口（托盘没建起来？）")
+    return trays[0]
+
+
+def tray_menu(app: App, item: str) -> None:
+    """触发托盘菜单项：往托盘的隐藏窗口 Post WM_COMMAND(muda 命令 id)，与在菜单上点它走同一条 muda → MenuEvent 路径
+    （不弹菜单、不需要托盘图标可见）。item 是 tray.rs menu_id 的值（new_list / reset / show_calendar / quit …）"""
+    ids = W.tray_menu_ids(TRAY_RS)
+    t = tray_window(app)
+    print(f"    托盘菜单 {item} → WM_COMMAND {ids[item]} → 0x{t.hwnd:X}")
+    W.post_message(t.hwnd, W.WM_COMMAND, ids[item], 0)
+    time.sleep(0.5)
+
+
+def tray_left_click(app: App) -> None:
+    """托盘左键单击：Post tray-icon 的回调消息（lParam = WM_LBUTTONUP），图标在溢出区也能触发；之后等过 300ms 去抖"""
+    t = tray_window(app)
+    W.post_message(t.hwnd, W.WM_USER_TRAYICON, 1, W.WM_LBUTTONUP)
+    time.sleep(0.8)
+
+
+def held_drag(p0: tuple[int, int], p1: tuple[int, int], *, alt_midway: bool = False, while_held=None,
+              steps: int = 24) -> object:
+    """左键按下 → 分步拖到 p1（alt_midway：过半时按下 Alt，松开鼠标后再松 Alt）→ 停住时调 while_held → 抬起。
+    自绘拖动每帧最多摆一次窗：每步留 30ms，太快时落点会多跳一点"""
+    W.mouse_move(*p0)
+    time.sleep(0.15)
+    W._send(W._mouse_input(W.MOUSEEVENTF_LEFTDOWN))
+    time.sleep(0.15)
+    alt_down = False
+    held = None
+    try:
+        for i in range(1, steps + 1):
+            if alt_midway and not alt_down and i > steps // 2:
+                W._send(W._key_input(W.VK["alt"], False))
+                alt_down = True
+                time.sleep(0.05)
+            W.mouse_move(round(p0[0] + (p1[0] - p0[0]) * i / steps), round(p0[1] + (p1[1] - p0[1]) * i / steps))
+            time.sleep(0.03)
+        time.sleep(0.4)
+        if while_held:
+            held = while_held()
+    finally:
+        W._send(W._mouse_input(W.MOUSEEVENTF_LEFTUP))
+        time.sleep(0.1)
+        if alt_down:
+            W._send(W._key_input(W.VK["alt"], True))
+        time.sleep(0.5)
+    return held
+
+
+def edge_blue(win: Win, edge: str) -> bool:
+    """窗口内某条边上（中点附近、往里 3 个逻辑像素以内）有没有吸附高亮色 #409EFF"""
+    img = W.grab_client(win)
+    depth = max(2, round(3 * win.scale)) + 1
+    if edge in ("top", "bottom"):
+        x = img.width // 2
+        rows = range(depth) if edge == "top" else range(img.height - depth, img.height)
+        px = [W.rgb_at(img, x, y) for y in rows]
+    else:
+        y = img.height // 2
+        cols = range(depth) if edge == "left" else range(img.width - depth, img.width)
+        px = [W.rgb_at(img, x, y) for x in cols]
+    return any(W.color_dist(p, EP_PRIMARY) <= 48 for p in px)
 
 
 def detect_rows(main: Win, img=None) -> list[float]:
@@ -130,13 +232,17 @@ def detect_rows(main: Win, img=None) -> list[float]:
     return [((a + b) / 2) / s for a, b in rs if (b - a + 1) <= 12 * s]
 
 
-def pending_ids(app: App) -> list[int]:
-    return [r[0] for r in app.q("SELECT id FROM todos WHERE completed = 0 ORDER BY sort_order ASC, created_at DESC")]
+def pending_ids(app: App, list_id: int = 1) -> list[int]:
+    """某个清单窗口列表里的未完成待办（自上而下）。默认清单还兜住 list_id 指向不存在的清单的待办"""
+    where = ("(list_id = 1 OR list_id NOT IN (SELECT id FROM todo_lists))" if list_id == 1 else "list_id = ?")
+    params = () if list_id == 1 else (list_id,)
+    return [r[0] for r in app.q(f"SELECT id FROM todos WHERE completed = 0 AND {where} "
+                                "ORDER BY sort_order ASC, created_at DESC", params)]
 
 
-def row_y(app: App, main: Win, todo_id: int) -> float:
+def row_y(app: App, main: Win, todo_id: int, list_id: int = 1) -> float:
     rows = detect_rows(main)
-    ids = pending_ids(app)
+    ids = pending_ids(app, list_id)
     print(f"    rows(dot y)={[round(r) for r in rows]} pending ids={ids}")
     if todo_id not in ids:
         raise AssertionError(f"待办 #{todo_id} 不在未完成列表里")
@@ -337,7 +443,7 @@ def setup_env() -> None:
 
 WINDOW_CASES = [
     # id, DEBUG_OPEN, 说明, 窗口标题, 逻辑尺寸
-    ("W01", "main", "主窗口", MAIN, (380, 600)),
+    ("W01", "main", "默认清单窗口", MAIN, (380, 600)),
     ("W02", "main,editor:1:view", "待办详情（只读）", "待办详情", (1080, 600)),
     ("W03", "main,editor:1:edit", "待办详情（编辑）", "待办详情", (1080, 600)),
     ("W04", "main,editor:new", "新建待办", "新建待办", (1080, 600)),
@@ -349,6 +455,9 @@ WINDOW_CASES = [
     ("W10", "main,settings:about", "设置-关于", "设置", (680, 560)),
     ("W11", "main,completed", "已完成", "已完成", (460, 550)),
     ("W12", "main,notification:1", "应用内通知", "通知", (320, 120)),
+    # 3.1：日历是独立窗口（系统标题「日历」，596×600），不再加宽默认清单窗口；新清单窗口的系统标题 = 清单名（新建时「清单」）
+    ("W13", "main,calendar", "日历窗口", CALENDAR, (596, 600)),
+    ("W14", "main,list:new", "新建的清单窗口", "清单", (380, 600)),
 ]
 
 
@@ -439,65 +548,58 @@ def group_states() -> None:
         print(f"    state={main.state()}")
         c.eq(main.owner, 0, "owner")
         c.ok(not f["toolWindow"] and f["appWindow"], f"APPWINDOW 且非 TOOLWINDOW（{f}）")
-        c.ok(f["minimizeBox"] and f["thickFrame"], "有最小化按钮与可缩放边框")
+        # 3.1：清单 / 日历窗口建窗 resizable: false，移动与缩放自绘（windows/block.rs 的 BlockDrag）：没有 WS_THICKFRAME，
+        # 标题栏不是 HTCAPTION（GPUI 不再报拖动区）、外框外沿不是缩放区；双击标题栏不最大化（没有 Aero Snap）
+        c.ok(f["minimizeBox"] and not f["thickFrame"], f"有最小化按钮、没有 WS_THICKFRAME（自绘缩放；{f}）")
         c.ok(not f["topmost"], "不置顶")
         check_no_caption_buttons(main, c, "普通模式")
-        title_pt = main.pt(60, 47)
+        title_pt = main.pt(*TITLE_BLANK)
         ht = main.nchittest(*title_pt)
-        c.eq(W.HT_NAMES.get(ht, ht), "HTCAPTION", "标题栏 WM_NCHITTEST")
+        c.eq(W.HT_NAMES.get(ht, ht), "HTCLIENT", "标题栏 WM_NCHITTEST（自绘拖动，不是 HTCAPTION）")
         rect, (cx, cy, cw, ch) = main.rect(), main.client()
         if rect[0] < cx - 2:
             ht = main.nchittest(cx - 3, cy + ch // 2)
-            c.eq(W.HT_NAMES.get(ht, ht), "HTLEFT", "左边框 WM_NCHITTEST")
+            c.ok(ht not in (2, 10, 11, 12, 13, 14, 15, 16, 17), f"外框外沿不是拖动 / 缩放区（{W.HT_NAMES.get(ht, ht)}，规格 HTBORDER）")
+        else:
+            print(f"    外框与客户区重合（rect={rect} client={main.client()}），不查外沿")
         before = main.client()
         W.drag(title_pt[0], title_pt[1], title_pt[0] + 120, title_pt[1] + 80)
         after = main.client()
         c.ok(abs(after[0] - before[0] - 120) <= 3 and abs(after[1] - before[1] - 80) <= 3,
-             f"拖动标题栏移动了窗口 {before[:2]} → {after[:2]}")
+             f"拖动标题栏移动了窗口（自绘）{before[:2]} → {after[:2]}")
+        c.ok(after[2:] == before[2:], f"移动不改尺寸 {before[2:]} → {after[2:]}")
         W.park_cursor()
-        try:
-            saved = W.wait_until(lambda: (lambda r: r if r and abs(r[0] - after[0]) <= 2 and abs(r[1] - after[1]) <= 2 else None)(
-                (app.q("SELECT window_x, window_y, is_fixed FROM screen_configs ORDER BY updated_at DESC LIMIT 1") or [None])[0]),
-                6, "screen_configs 记下新位置")
-            c.ok(True, f"screen_configs 已保存位置 {saved}")
-        except W.Timeout as e:
-            c.ok(False, f"{e}；screen_configs={app.q('SELECT config_id, window_x, window_y, window_width, window_height, is_fixed FROM screen_configs')}")
+        wait_layout_is(app, DEFAULT_LIST, main, c, "松手后位置落库", fixed=0)
+        # 默认清单窗口另外照旧登记 screen_configs（设置 → 屏幕配置与旧版本读它）
+        sc = (app.q("SELECT window_x, window_y, is_fixed FROM screen_configs ORDER BY updated_at DESC LIMIT 1") or [None])[0]
+        c.ok(bool(sc) and abs(sc[0] - after[0]) <= 2 and abs(sc[1] - after[1]) <= 2,
+             f"screen_configs 也记下新位置（{sc}）")
         shot(main, "S01-normal")
-        # 真实双击标题栏 → 最大化 → 再双击 → 还原（去掉 WS_SYSMENU 后系统的 HTCAPTION 双击仍然生效）。放在拖动落库之后，
-        # 还原后再等一次落库，后面的用例（S03 重启恢复位置）不受影响
-        restored = main.client()
-        W.dblclick(*main.pt(60, 47))
+        # 右边缩放手柄（可见边缘内侧 5px）：往右拖 40 → 宽 +40、左上角不动；再拖回去
+        lw, lh = main.logical_size()
+        p0 = main.pt(lw - 2.5, lh / 2)
+        before = main.client()
+        held_drag(p0, (p0[0] + 40, p0[1]))
+        grown = main.client()
+        c.ok(abs(grown[2] - before[2] - 40) <= 3 and grown[:2] == before[:2] and grown[3] == before[3],
+             f"拖右边手柄缩放：{before} → {grown}")
+        held_drag(main.pt(grown[2] / main.scale - 2.5, lh / 2), (p0[0], p0[1]))
         W.park_cursor()
-        try:
-            W.wait_until(lambda: main.zoomed, 5, "双击标题栏后最大化（IsZoomed）")
-            c.ok(True, f"双击标题栏最大化（客户区 {main.client()}）")
-        except W.Timeout as e:
-            c.ok(False, f"{e}；state={main.state()}")
-        if main.zoomed:
-            time.sleep(0.5)
-            W.dblclick(*main.pt(60, 47))
-            W.park_cursor()
-            try:
-                W.wait_until(lambda: not main.zoomed, 5, "再双击标题栏后还原")
-                c.ok(True, "再双击标题栏还原")
-            except W.Timeout as e:
-                c.ok(False, str(e))
-                main.show(W.SW_RESTORE)  # 不让后面的用例在最大化状态下跑
-        time.sleep(0.8)
+        # 双击标题栏空白处：不最大化、几何不变（以前系统 HTCAPTION 双击会最大化）
+        restored = main.client()
+        W.dblclick(*main.pt(*TITLE_BLANK))
+        W.park_cursor()
+        time.sleep(1.0)
+        c.ok(not main.zoomed, f"双击标题栏不最大化（IsZoomed={main.zoomed}）")
         now = main.client()
-        c.ok(all(abs(a - b) <= 2 for a, b in zip(now, restored)), f"还原后几何复原 {restored} → {now}")
-        try:
-            W.wait_until(lambda: (lambda r: r and abs(r[0] - now[0]) <= 2 and abs(r[1] - now[1]) <= 2)(
-                (app.q("SELECT window_x, window_y FROM screen_configs ORDER BY updated_at DESC LIMIT 1") or [None])[0]),
-                6, "还原后 screen_configs 仍是还原后的位置")
-            c.ok(True, "还原后 screen_configs 仍是还原后的位置")
-        except W.Timeout as e:
-            c.ok(False, f"{e}；screen_configs={app.q('SELECT window_x, window_y, window_width, window_height FROM screen_configs')}")
+        c.ok(all(abs(a - b) <= 2 for a, b in zip(now, restored)), f"双击后几何不变 {restored} → {now}")
+        wait_layout_is(app, DEFAULT_LIST, main, c, "缩放回原尺寸后落库", fixed=0)
         return c.done(f"normal: {f}")
 
     def s02():
         main = need_main()
-        lock = title_button(main, 2)
+        legacy = app.setting("is_fixed")
+        lock = title_button(main, LIST_LOCK)
         W.click(*lock)
         W.park_cursor()
         c = Checks()
@@ -511,9 +613,12 @@ def group_states() -> None:
         c.ok(f["toolWindow"] and not f["appWindow"], f"TOOLWINDOW 且非 APPWINDOW（{f}）")
         c.eq(main.owner, 0, "owner")
         check_no_caption_buttons(main, c, "经典固定")
-        c.eq(app.q1("SELECT is_fixed FROM screen_configs ORDER BY updated_at DESC LIMIT 1"), 1, "screen_configs.is_fixed")
-        c.eq(app.setting("is_fixed"), "true", "settings.is_fixed")
-        title_pt = main.pt(60, 47)
+        # 3.1：锁定按窗口，落在 window_layouts.is_fixed；旧的全局 settings.is_fixed 只是迁移种子，不再写
+        wait_layout_is(app, DEFAULT_LIST, main, c, "锁定落库", fixed=1)
+        c.eq(app.q1("SELECT is_fixed FROM screen_configs ORDER BY updated_at DESC LIMIT 1"), 1,
+             "screen_configs.is_fixed（默认清单窗口照旧登记）")
+        c.eq(app.setting("is_fixed"), legacy, "settings.is_fixed 不变（3.1 起不再写）")
+        title_pt = main.pt(*TITLE_BLANK)
         ht = main.nchittest(*title_pt)
         c.ok(ht != 2, f"标题栏不再是拖动区（{W.HT_NAMES.get(ht, ht)}）")
         rect, (cx, cy, cw, ch) = main.rect(), main.client()
@@ -526,6 +631,10 @@ def group_states() -> None:
         W.drag(title_pt[0], title_pt[1], title_pt[0] + 120, title_pt[1] + 80)
         after = main.client()
         c.eq(after, before, "拖动标题栏后窗口不动")
+        lw, lh = main.logical_size()
+        p0 = main.pt(lw - 2.5, lh / 2)
+        held_drag(p0, (p0[0] + 40, p0[1]))
+        c.eq(main.client(), before, "锁定时没有缩放手柄：拖右边缘不缩放")
         W.park_cursor()
         shot(main, "S02-classic-fixed")
         return c.done(f"classic fixed: {f}")
@@ -621,7 +730,7 @@ def group_states() -> None:
     def s07():
         main = need_main()
         stop_proc(probe)
-        W.click(*title_button(main, 2))
+        W.click(*title_button(main, LIST_LOCK))
         W.park_cursor()
         c = Checks()
         try:
@@ -635,10 +744,18 @@ def group_states() -> None:
         c.ok(f["appWindow"] and not f["toolWindow"], f"APPWINDOW（{f}）")
         c.ok(f["minimizeBox"], "最小化按钮恢复")
         check_no_caption_buttons(main, c, "回到普通模式")
-        c.eq(app.q1("SELECT is_fixed FROM screen_configs ORDER BY updated_at DESC LIMIT 1"), 0, "screen_configs.is_fixed")
-        ht = main.nchittest(*main.pt(60, 47))
-        c.eq(W.HT_NAMES.get(ht, ht), "HTCAPTION", "标题栏又能拖动")
+        wait_layout_is(app, DEFAULT_LIST, main, c, "解锁落库", fixed=0)
+        # 3.1：标题栏是自绘拖动（HTCLIENT），用真实拖动判断"又能拖动"，再拖回原处
+        title_pt = main.pt(*TITLE_BLANK)
+        before = main.client()
+        W.drag(title_pt[0], title_pt[1], title_pt[0] - 60, title_pt[1] + 40)
+        after = main.client()
+        c.ok(abs(after[0] - before[0] + 60) <= 3 and abs(after[1] - before[1] - 40) <= 3,
+             f"标题栏又能拖动 {before[:2]} → {after[:2]}")
+        back = main.pt(*TITLE_BLANK)
+        W.drag(back[0], back[1], back[0] + 60, back[1] - 40)
         W.park_cursor()
+        wait_layout_is(app, DEFAULT_LIST, main, c, "拖回后落库", fixed=0)
         return c.done()
 
     def s08():
@@ -672,7 +789,7 @@ def group_states() -> None:
             raise Skip(f"任务栏按钮不在屏幕上（{rect}；任务栏自动隐藏？）")
         # 任务栏只在按钮对应的窗口处于前台时把单击当作最小化：找到按钮之后、紧挨着单击之前点标题栏空白处激活主窗口
         if W.foreground_window() != main.hwnd:
-            W.click(*main.pt(60, 47))
+            W.click(*main.pt(*TITLE_BLANK))
             W.park_cursor()
         try:
             W.wait_until(lambda: W.foreground_window() == main.hwnd, 5, "主窗口成为前台窗口")
@@ -710,8 +827,9 @@ def group_states() -> None:
         return c.done(f"{name}（{bar} {rect}）")
 
     try:
-        C.report.case("S01", "普通模式：APPWINDOW / 无 owner / 无 WS_SYSMENU / 可拖动可缩放 / 位置落库 / 双击标题栏最大化还原", s01)
-        C.report.case("S02", "经典固定：点锁按钮 → TOOLWINDOW / 不可拖动缩放 / 落库", s02)
+        C.report.case("S01", "默认清单窗口普通模式：APPWINDOW / 无 owner / 无 WS_SYSMENU / 无 WS_THICKFRAME / 自绘拖动与缩放 / "
+                             "window_layouts 落库 / 双击标题栏不最大化", s01)
+        C.report.case("S02", "经典固定：点锁按钮 → TOOLWINDOW / 不可拖动缩放 / window_layouts.is_fixed 落库", s02)
         C.report.case("S03", "固定 + 嵌入桌面（重启恢复）：owner=桌面宿主 / TOOLWINDOW / 无最小化", s03)
         C.report.case("S04", "嵌入桌面的 Z 序：在普通应用窗口之下（探针窗口）", s04)
         C.report.case("S05", "嵌入桌面：Win+D 后仍可见", s05)
@@ -840,6 +958,7 @@ def group_interactions() -> None:
             W.key_combo("esc")
         new_id = app.q1("SELECT id FROM todos WHERE title = 'E2E created todo'")
         c.ok(new_id is not None, f"数据库里有新待办（id={new_id}）")
+        c.eq(app.q1("SELECT list_id FROM todos WHERE id = ?", (new_id,)), 1, "FAB 新建的待办在本清单（默认清单）")
         W.park_cursor()
         time.sleep(1.5)
         after = shot(main, "I01-main-after")
@@ -946,12 +1065,16 @@ def group_interactions() -> None:
             maybe_emit("I05", img)
             raise AssertionError(f"常规页只识别到 {len(sw)} 个开关：{sw}")
         dark_y = sw[5][0]
+        legacy_theme = app.setting("text_theme")
         W.click(*stw.pt(646, dark_y))
+        # 3.1：日 / 夜按窗口——设置里的「深色主题」切的是打开设置的那个窗口（这里是默认清单窗口），写 window_prefs.dark；
+        # 旧的全局 text_theme 只是迁移种子，不再写
         try:
-            W.wait_until(lambda: app.setting("text_theme") == "light", 5, "settings.text_theme = light（深色）")
-            c.ok(True, "深色主题写库（text_theme=light）")
+            W.wait_until(lambda: (prefs(app, DEFAULT_LIST) or {}).get("dark") == 1, 5, "window_prefs[list:1].dark = 1")
+            c.ok(True, "深色主题写库（window_prefs[list:1].dark = 1）")
         except W.Timeout as e:
-            c.ok(False, f"{e}；text_theme={app.setting('text_theme')}")
+            c.ok(False, f"{e}；window_prefs={app.q('SELECT * FROM window_prefs')}")
+        c.eq(app.setting("text_theme"), legacy_theme, "settings.text_theme 不变（3.1 起不再写）")
         close_settings(stw)
         W.park_cursor()
         time.sleep(1.0)
@@ -965,7 +1088,18 @@ def group_interactions() -> None:
         c.ok(is_transparent_blend(p_dark, C.desktop_rgb),
              f"深色半透明底透出桌面色（{p_dark} vs 桌面 {C.desktop_rgb}；DirectComposition 透明）")
         maybe_emit("I05", dark)
-        return c.done(f"light={p_light} dark={p_dark}")
+        # 标题栏的日 / 夜按钮切回浅色（只改本窗口）
+        W.click(*title_button(main, LIST_THEME))
+        W.park_cursor()
+        try:
+            W.wait_until(lambda: (prefs(app, DEFAULT_LIST) or {}).get("dark") == 0, 5, "日 / 夜按钮：window_prefs[list:1].dark = 0")
+            c.ok(True, "标题栏日 / 夜按钮切回浅色并落库")
+        except W.Timeout as e:
+            c.ok(False, str(e))
+        time.sleep(0.8)
+        p_back = W.rgb_at(W.grab_client(main), round(60 * s), round(585 * s))
+        c.ok(W.color_dist(p_back, (255, 255, 255)) <= 12, f"切回后底色为白色（{p_back}）")
+        return c.done(f"light={p_light} dark={p_dark} back={p_back}")
 
     def i06():
         main = main_win()
@@ -1030,11 +1164,11 @@ def group_interactions() -> None:
     run_before = run_value()
     try:
         C.report.case("I00", "交互准备：主窗口列表识别", i00)
-        C.report.case("I01", "FAB → 新建窗口 → 输入标题 → Ctrl+Enter → 落库且主窗口刷新", i01)
+        C.report.case("I01", "FAB → 新建窗口 → 输入标题 → Ctrl+Enter → 落库（默认清单）且列表刷新", i01)
         C.report.case("I02", "点击待办 → 只读详情 → 编辑 → 改标题 → Ctrl+Enter 保存", i02)
         C.report.case("I03", "悬停操作条：完成", i03)
         C.report.case("I04", "悬停操作条：删除 → 确认框 → 删除", i04)
-        C.report.case("I05", "设置 → 深色主题：settings 落库、主窗口变为半透明深色", i05)
+        C.report.case("I05", "设置 → 深色主题：window_prefs 落库、默认清单窗口变为半透明深色；标题栏日 / 夜按钮切回", i05)
         C.report.case("I06", "设置 → 开机自启开 / 关：HKCU Run\\mini-todo 出现 / 消失", i06)
         C.report.case("I07", "托盘图标已注册（Shell_NotifyIconGetRect）", i07)
         C.report.case("I08", "系统通知：到期提醒发出、notified=1、无发送失败", i08)
@@ -1572,56 +1706,18 @@ def group_fence_geometry() -> None:
         except W.Timeout as e:
             c.ok(False, f"{e}；fences={b_row()} fence_layouts={b_layouts()}")
 
-    def held_drag(p0: tuple[int, int], p1: tuple[int, int], *, alt_midway: bool = False, while_held=None,
-                  steps: int = 24) -> object:
-        """左键按下 → 分步拖到 p1（alt_midway：过半时按下 Alt，松开鼠标后再松 Alt）→ 停住时调 while_held → 抬起"""
-        W.mouse_move(*p0)
-        time.sleep(0.15)
-        W._send(W._mouse_input(W.MOUSEEVENTF_LEFTDOWN))
-        time.sleep(0.15)
-        alt_down = False
-        held = None
-        try:
-            for i in range(1, steps + 1):
-                if alt_midway and not alt_down and i > steps // 2:
-                    W._send(W._key_input(W.VK["alt"], False))
-                    alt_down = True
-                    time.sleep(0.05)
-                W.mouse_move(round(p0[0] + (p1[0] - p0[0]) * i / steps), round(p0[1] + (p1[1] - p0[1]) * i / steps))
-                time.sleep(0.03)
-            time.sleep(0.4)
-            if while_held:
-                held = while_held()
-        finally:
-            W._send(W._mouse_input(W.MOUSEEVENTF_LEFTUP))
-            time.sleep(0.1)
-            if alt_down:
-                W._send(W._key_input(W.VK["alt"], True))
-            time.sleep(0.5)
-        return held
-
-    def edge_blue(fence: Win, edge: str) -> bool:
-        """收纳箱窗口内某条边上（中点附近、往里 3 个逻辑像素以内）有没有吸附高亮色 #409EFF"""
-        img = W.grab_client(fence)
-        depth = max(2, round(3 * fence.scale)) + 1
-        if edge in ("top", "bottom"):
-            x = img.width // 2
-            rows = range(depth) if edge == "top" else range(img.height - depth, img.height)
-            px = [W.rgb_at(img, x, y) for y in rows]
-        else:
-            y = img.height // 2
-            cols = range(depth) if edge == "left" else range(img.width - depth, img.width)
-            px = [W.rgb_at(img, x, y) for x in cols]
-        return any(W.color_dist(p, EP_PRIMARY) <= 48 for p in px)
-
     def f12():
         app.start()
         main = app.main(60)
         a = app.wait_window("Snap A", 30)
         b = app.wait_window("Snap B", 30)
         st["a"], st["b"] = a, b
-        # 主窗口（普通窗口）盖在桌面层的收纳箱之上，真实输入可能点到它：先最小化
-        main.show(W.SW_MINIMIZE)
+        # 默认清单窗口（普通窗口）盖在桌面层的收纳箱之上，真实输入可能点到它；它也和收纳箱同一个吸附组，显示着就是吸附目标：
+        # WM_CLOSE 把它隐藏（3.1 起关闭 = 隐藏，进程常驻；隐藏的窗口不算吸附目标）
+        main.post_close()
+        W.wait_until(lambda: not main.visible, 5, "默认清单窗口 WM_CLOSE 后隐藏")
+        if not app.alive():
+            raise AssertionError("WM_CLOSE 默认清单窗口后进程退出了（3.1 起应只隐藏）")
         W.wait_until(lambda: a.owner and a.owner == W.shell_window() and b.owner == a.owner, 10, "两个收纳箱都已嵌入桌面")
         W.park_cursor()
         time.sleep(1.5)
@@ -1718,7 +1814,7 @@ def group_fence_geometry() -> None:
         return c.done(f"B 高 {bh} → {after[3]}（A 高 {ah}）")
 
     try:
-        C.report.case("F12", "拖标题栏移动收纳箱（自绘拖动）：窗口跟手、松手后 fences 与 fence_layouts 落库", f12)
+        C.report.case("F12", "拖标题栏移动收纳箱（自绘拖动；默认清单窗口先 WM_CLOSE 隐藏）：窗口跟手、松手后 fences 与 fence_layouts 落库", f12)
         C.report.case("F13", "移动吸附：B.top 落在 A.top ± 阈值内 → 吸到 A.top；拖动中 A 上边高亮、松手后消失", f13)
         C.report.case("F14", "按住 Alt 拖动不吸附、不高亮；松开后照常吸附", f14)
         C.report.case("F15", "缩放吸附：拖下边让高度接近 A → 等高、上边不动；A 的左右两边高亮", f15)
@@ -1728,11 +1824,347 @@ def group_fence_geometry() -> None:
         app.stop()
 
 
+# ----------------------------------------------------------------------------- L：待办清单窗口与日历窗口（3.1）
+
+def group_lists() -> None:
+    """多待办清单窗口 + 独立日历窗口（issue #14）：新建 → 自动改名 → 双击改名 → 行右键「移动到」→ 拖动落库与吸附 → 锁定 →
+    关闭 = 隐藏、托盘左键全部唤起 → 重置位置 → 删除（待办回默认清单）→ 日历显示 / 锁定嵌入桌面 / Win+D / 关闭。
+    托盘菜单经 WM_COMMAND（tray_menu）、托盘左键经 tray-icon 的回调消息（tray_left_click）触发，不依赖托盘图标可见"""
+    data = fresh_data("l-data")
+    app = App(C.exe, data_dir=data, debug_open="main", tag="L", out_dir=C.out)
+    st: dict = {}
+
+    def need(*keys):
+        missing = [k for k in keys if k not in st]
+        if missing:
+            raise Skip(f"前置用例没有拿到 {missing}")
+        return st[keys[0]] if len(keys) == 1 else tuple(st[k] for k in keys)
+
+    def wait_true(c: Checks, fn, timeout: float, what: str, detail=lambda: "") -> bool:
+        try:
+            W.wait_until(fn, timeout, what)
+            return c.ok(True, what)
+        except W.Timeout as e:
+            return c.ok(False, f"{e}{('；' + str(detail())) if detail() else ''}")
+
+    def rename_by_typing(win: Win, name: str) -> None:
+        """改名输入框已经出现：全选 → 输入 → Enter（ASCII 名字，不经输入法）"""
+        W.key_combo("ctrl", "a")
+        W.type_text(name)
+        W.key_combo("enter")
+        W.park_cursor()
+
+    def l01():
+        app.start()
+        main = app.main(60)
+        st["main"] = main
+        W.park_cursor()
+        time.sleep(2.5)
+        c = Checks()
+        c.eq({r[0] for r in app.q("SELECT id FROM todo_lists")}, {1}, "启动时只有默认清单（id 1）")
+        c.eq(app.windows(CALENDAR), [], "「显示日历」默认关：没有日历窗口")
+        tray_menu(app, "new_list")
+        win = app.wait_window("清单", 15)
+        st["xwin"] = win
+        time.sleep(1.2)
+        new = [r for r in app.q("SELECT id, name FROM todo_lists") if r[0] != 1]
+        c.eq(len(new), 1, f"todo_lists 多了一个清单（{new}）")
+        if new:
+            st["lid"], st["key"] = new[0][0], f"list:{new[0][0]}"
+            c.eq(new[0][1], "清单", "自动取名「清单」")
+            c.eq((prefs(app, st["key"]) or {}).get("hidden"), 0, "window_prefs 有显示中的窗口记录")
+        lw, lh = win.logical_size()
+        c.near(round(lw), 380, 2, "新清单窗口逻辑宽")
+        c.near(round(lh), 600, 2, "新清单窗口逻辑高")
+        f = win.flags()
+        c.ok(win.owner == 0 and f["appWindow"] and not f["toolWindow"], f"未锁定的普通窗口（{f}）")
+        check_no_caption_buttons(win, c, "新清单窗口")
+        shot(win, "L01-new-list-renaming")
+        # 建好直接进入改名（输入框已全选）；新窗口不一定拿到前台（托盘命令是 Post 来的），先点进输入框
+        W.click(*win.pt(80, 27))
+        rename_by_typing(win, "E2E List")
+        wait_true(c, lambda: win.title == "E2E List", 6, "窗口系统标题跟着改名（E2E List）", lambda: repr(win.title))
+        if "lid" in st:
+            wait_true(c, lambda: app.q1("SELECT name FROM todo_lists WHERE id = ?", (st["lid"],)) == "E2E List", 5,
+                      "改名落库", lambda: app.q("SELECT id, name FROM todo_lists"))
+        return c.done(f"list #{st.get('lid')} client={win.client()}")
+
+    def l02():
+        win, lid = need("xwin", "lid")
+        c = Checks()
+        # 双击清单名（x≈32 起）进入改名；双击判断在清单名的 on_mouse_up（BlockDrag::is_double_click_release）
+        W.dblclick(*win.pt(50, 27))
+        time.sleep(0.8)
+        shot(win, "L02-dblclick-rename")
+        rename_by_typing(win, "E2E Work")
+        wait_true(c, lambda: win.title == "E2E Work", 6, "双击改名：窗口标题 = E2E Work", lambda: repr(win.title))
+        wait_true(c, lambda: app.q1("SELECT name FROM todo_lists WHERE id = ?", (lid,)) == "E2E Work", 5, "双击改名落库")
+        return c.done()
+
+    def l03():
+        main, win, lid = need("main", "xwin", "lid")
+        c = Checks()
+        ids = pending_ids(app)
+        if not ids:
+            raise AssertionError("默认清单里没有未完成待办")
+        tid = ids[0]
+        y = row_y(app, main, tid) + 3
+        # 行右键：菜单在按下处弹出，只有「移动到 ▸」（约在按下点 +55, +24）；悬停展开子菜单，贴在主菜单右侧、与它顶边对齐，
+        # 第一项（唯一的其它清单）与「移动到」同高。主菜单宽约 70~190，子菜单宽 ≥120：按下点右边 195 落在子菜单里
+        W.click(*main.pt(60, y), right=True)
+        time.sleep(0.6)
+        W.mouse_move(*main.pt(115, y + 24))
+        time.sleep(0.8)
+        img = shot(main, "L03-row-menu")
+        W.mouse_move(*main.pt(255, y + 24))
+        time.sleep(0.3)
+        W.click(*main.pt(255, y + 24))
+        W.park_cursor()
+        ok = wait_true(c, lambda: app.q1("SELECT list_id FROM todos WHERE id = ?", (tid,)) == lid, 5,
+                       f"「移动到」：待办 #{tid} 的 list_id = {lid}", lambda: app.q1("SELECT list_id FROM todos WHERE id = ?", (tid,)))
+        if not ok:
+            maybe_emit("L03", img)
+        st["moved"] = tid
+        time.sleep(1.0)
+        c.ok(tid not in pending_ids(app), "从默认清单里消失")
+        rows = detect_rows(win)
+        c.eq(len(rows), len(pending_ids(app, lid)), f"出现在目标清单窗口里（识别到 {len(rows)} 行）")
+        shot(win, "L03-target-list")
+        return c.done(f"#{tid} → list {lid}")
+
+    def l04():
+        main, win, key = need("main", "xwin", "key")
+        c = Checks()
+        before = win.client()
+        p0 = win.pt(*TITLE_BLANK)
+        held_drag(p0, (p0[0] - 80, p0[1] + 50))
+        after = win.client()
+        c.ok(abs(after[0] - before[0] + 80) <= 3 and abs(after[1] - before[1] - 50) <= 3 and after[2:] == before[2:],
+             f"拖标题栏：清单窗口跟手移动（自绘）{before} → {after}")
+        wait_layout_is(app, key, win, c, "拖动结束落库", fixed=0)
+        # 吸附（清单 ↔ 清单，规则同收纳箱）：让 X.top 落在默认清单 top + 6（逻辑像素，阈值 10 内）→ 吸到同一高度；
+        # 两个窗口一样高，下边也同时对齐。横向两者离得远，不吸
+        mx, my, mw, mh = main.client()
+        bx, by, _, _ = win.client()
+        if abs(bx - mx) < 40 * win.scale or abs((bx + before[2]) - (mx + mw)) < 40 * win.scale:
+            print(f"    警告：两个清单窗口横向挨得太近（默认 {main.client()} / 新 {win.client()}），横向也可能吸附")
+        off = round(6 * win.scale)
+        p0 = win.pt(*TITLE_BLANK)
+        lit, during = held_drag(p0, (p0[0], p0[1] + (my + off - by)),
+                                while_held=lambda: (edge_blue(main, "top"), win.client()))
+        after = win.client()
+        print(f"    默认清单={main.client()} 新清单 拖动中={during} 松手后={after}")
+        c.eq(during[1], my, f"拖动中 top 吸到默认清单的 top（跟手应为 {my + off}）")
+        c.eq(after[1], my, "松手后 top = 默认清单的 top")
+        c.near(after[0], bx, 1, "横向没有吸附")
+        c.ok(lit, "拖动中默认清单窗口的上边画出高亮线 #409EFF")
+        time.sleep(0.3)
+        c.ok(not edge_blue(main, "top"), "松手后高亮消失")
+        wait_layout_is(app, key, win, c, "吸附后的位置落库", fixed=0)
+        shot(main, "L04-snap-target")
+        return c.done(f"{before} → {after}")
+
+    def l05():
+        main, win, key = need("main", "xwin", "key")
+        c = Checks()
+        W.click(*title_button(win, LIST_LOCK))
+        W.park_cursor()
+        wait_true(c, lambda: win.flags()["toolWindow"], 6, "点本窗口的锁：TOOLWINDOW（不进任务栏 / Alt+Tab）")
+        time.sleep(1.0)
+        f, fm = win.flags(), main.flags()
+        c.ok(f["toolWindow"] and not f["appWindow"] and win.owner == 0, f"经典固定（{f}）")
+        c.ok(fm["appWindow"] and not fm["toolWindow"], f"锁定按窗口：默认清单窗口仍是普通模式（{fm}）")
+        wait_layout_is(app, key, win, c, "锁定落库", fixed=1)
+        c.eq((layout(app, DEFAULT_LIST) or (0,) * 5)[4], 0, "默认清单窗口的 is_fixed 不变")
+        before = win.client()
+        p0 = win.pt(*TITLE_BLANK)
+        W.drag(p0[0], p0[1], p0[0] + 80, p0[1] + 60)
+        W.park_cursor()
+        c.eq(win.client(), before, "锁定后拖标题栏不动")
+        return c.done()
+
+    def l06():
+        main, win, key = need("main", "xwin", "key")
+        c = Checks()
+        # 关闭 = 隐藏：两个清单窗口都 WM_CLOSE → 都隐藏、进程常驻、window_prefs.hidden = 1
+        win.post_close()
+        main.post_close()
+        wait_true(c, lambda: not win.visible and not main.visible, 6, "WM_CLOSE 后两个清单窗口都隐藏")
+        time.sleep(1.0)
+        c.ok(app.alive(), "所有窗口都关了，进程仍在运行")
+        c.ok(win.alive and main.alive, "窗口只是隐藏、没有销毁")
+        c.eq((prefs(app, key) or {}).get("hidden"), 1, f"window_prefs[{key}].hidden = 1")
+        c.eq((prefs(app, DEFAULT_LIST) or {}).get("hidden"), 1, "window_prefs[list:1].hidden = 1")
+        # 托盘左键：唤起所有清单窗口（含隐藏的）；锁定的照样保持锁定
+        tray_left_click(app)
+        wait_true(c, lambda: win.visible and main.visible and not win.iconic and not main.iconic, 6,
+                  "托盘左键：两个清单窗口都重新显示")
+        time.sleep(1.0)
+        c.eq((prefs(app, key) or {}).get("hidden"), 0, f"唤起后 window_prefs[{key}].hidden = 0")
+        c.eq((prefs(app, DEFAULT_LIST) or {}).get("hidden"), 0, "唤起后 window_prefs[list:1].hidden = 0")
+        c.ok(win.flags()["toolWindow"], "唤起后锁定的窗口仍是经典固定")
+        c.ok(not win.flags()["topmost"] and not main.flags()["topmost"], "600ms 后撤掉了唤起时的临时置顶")
+        print(f"    唤起后前台={W.describe_hwnd(W.foreground_window())}（期望默认清单窗口；Post 来的唤起可能拿不到前台权限）")
+        return c.done()
+
+    def l07():
+        main, win, key = need("main", "xwin", "key")
+        c = Checks()
+        # 先把（锁定中的）新清单窗口隐藏：重置位置要取消隐藏、解除锁定、层叠排开
+        win.post_close()
+        wait_true(c, lambda: not win.visible, 6, "新清单窗口隐藏")
+        tray_menu(app, "reset")
+        wait_true(c, lambda: win.visible and not win.flags()["toolWindow"], 8, "重置位置：隐藏的窗口重新出现并解除锁定")
+        time.sleep(1.5)
+        s = main.scale
+        m0, x0 = main.client(), win.client()
+        step = round(32 * s)
+        print(f"    重置后 默认清单={m0} 新清单={x0}")
+        c.ok(abs(x0[0] - m0[0] - step) <= 2 and abs(x0[1] - m0[1] - step) <= 2,
+             f"层叠：第二个窗口在第一个右下 32 逻辑像素（{m0[:2]} → {x0[:2]}）")
+        c.ok(win.flags()["appWindow"] and win.owner == 0, f"新清单窗口回到普通模式（{win.flags()}）")
+        wait_layout_is(app, DEFAULT_LIST, main, c, "默认清单窗口重置后落库", fixed=0)
+        wait_layout_is(app, key, win, c, "新清单窗口重置后落库（解锁）", fixed=0)
+        c.eq((prefs(app, key) or {}).get("hidden"), 0, "取消隐藏落库")
+        # 「显示日历」关着：日历不开窗，只把层叠里的位置写进布局（第 3 个：右下 64 逻辑像素）
+        c.eq(app.windows(CALENDAR), [], "日历没有开窗")
+        cal = layout(app, "calendar")
+        st["cal_layout"] = cal
+        c.ok(bool(cal) and abs(cal[0] - m0[0] - 2 * step) <= 2 and abs(cal[1] - m0[1] - 2 * step) <= 2 and cal[4] == 0,
+             f"日历的布局写在层叠的第 3 个位置、未锁定（{cal}）")
+        shot(main, "L07-reset")
+        return c.done(f"main={m0} list={x0} calendar={cal}")
+
+    def l08():
+        main, win, lid, key = need("main", "xwin", "lid", "key")
+        c = Checks()
+        moved = st.get("moved")
+        # 清单名右键 → 「删除清单」(60,105) → 确认框「删除」(321,348) → 待办移到默认清单、写清单墓碑、关窗
+        W.click(*win.pt(50, 27), right=True)
+        time.sleep(0.6)
+        shot(win, "L08-name-menu")
+        W.click(*win.pt(60, 105))
+        time.sleep(1.0)
+        img = shot(win, "L08-confirm")
+        W.click(*win.pt(321, 348))
+        W.park_cursor()
+        if not wait_true(c, lambda: not win.alive, 8, "确认删除后清单窗口关闭（销毁）"):
+            maybe_emit("L08", img)
+        wait_true(c, lambda: app.q1("SELECT COUNT(*) FROM todo_lists WHERE id = ?", (lid,)) == 0, 5, "todo_lists 删掉了这个清单")
+        c.eq(app.q1("SELECT COUNT(*) FROM list_tombstones WHERE entity_id = ?", (lid,)), 1, "写了清单墓碑（list_tombstones）")
+        c.eq(prefs(app, key), None, "窗口记录（window_prefs）删掉了")
+        if moved is not None:
+            c.eq(app.q1("SELECT list_id FROM todos WHERE id = ?", (moved,)), 1, f"待办 #{moved} 回到默认清单")
+            time.sleep(1.0)
+            c.ok(moved in pending_ids(app), "默认清单窗口里又有它")
+        c.ok(main.visible, "默认清单窗口还在")
+        return c.done()
+
+    def l09():
+        main = need("main")
+        c = Checks()
+        tray_menu(app, "show_calendar")
+        cal = app.wait_window(CALENDAR, 15)
+        st["cal"] = cal
+        W.park_cursor()
+        time.sleep(1.5)
+        lw, lh = cal.logical_size()
+        c.near(round(lw), 596, 2, "日历窗口逻辑宽")
+        c.near(round(lh), 600, 2, "日历窗口逻辑高")
+        f = cal.flags()
+        c.ok(cal.owner == 0 and f["appWindow"] and not f["toolWindow"] and not f["thickFrame"], f"普通模式、自绘缩放（{f}）")
+        check_no_caption_buttons(cal, c, "日历窗口")
+        c.eq((prefs(app, "calendar") or {}).get("hidden"), 0, "window_prefs[calendar].hidden = 0（「显示日历」开）")
+        want = st.get("cal_layout")
+        got = cal.client()
+        if want:
+            c.ok(all(abs(a - b) <= 2 for a, b in zip(got[:2], want[:2])), f"出现在重置时写好的位置（{got[:2]}，布局 {want[:2]}）")
+        img = shot(cal, "L09-calendar")
+        c.ok(has_content(img) >= 12, "日历已渲染")
+        return c.done(f"calendar={got}")
+
+    def l10():
+        main, cal = need("main", "cal")
+        if not C.explorer:
+            raise Skip("没有 Explorer（无桌面宿主），嵌入桌面不适用")
+        c = Checks()
+        W.click(*title_button(cal, CAL_LOCK))
+        W.park_cursor()
+        wait_true(c, lambda: cal.flags()["toolWindow"], 6, "点日历的锁：经典固定（TOOLWINDOW）")
+        wait_layout_is(app, "calendar", cal, c, "日历锁定落库", fixed=1)
+        # 设置窗口从日历的设置按钮打开 → 常规「固定模式时，嵌入桌面中」（第 5 个开关）→ 所有锁定的窗口直接切到嵌入
+        W.click(*title_button(cal, CAL_SETTINGS))
+        stw = app.wait_window("设置", 15)
+        W.park_cursor()
+        time.sleep(1.5)
+        img = shot(stw, "L10-settings-general")
+        sw = detect_switches(stw, img)
+        print(f"    switches={[(round(y), on) for y, on in sw]}")
+        if len(sw) < 6:
+            raise AssertionError(f"常规页只识别到 {len(sw)} 个开关：{sw}")
+        W.click(*stw.pt(646, sw[4][0]))
+        wait_true(c, lambda: app.setting("fixed_embed_desktop") == "true", 5, "fixed_embed_desktop = true")
+        W.click(*stw.pt(636, 28))
+        try:
+            app.wait_gone(stw, 6)
+        except W.Timeout:
+            W.key_combo("esc")
+        time.sleep(1.0)
+        wait_true(c, lambda: cal.owner and cal.owner == W.shell_window(), 8, "日历 owner = 桌面宿主（嵌入桌面）",
+                  lambda: cal.state())
+        f = cal.flags()
+        c.ok(f["toolWindow"] and not f["appWindow"] and not f["minimizeBox"], f"嵌入态样式（{f}）")
+        c.ok(main.owner == 0 and main.flags()["appWindow"], "没锁定的默认清单窗口不受偏好影响")
+        track = watch_shell_action(win_d, [cal])
+        time.sleep(0.5)
+        c.ok(not track[cal.hwnd]["iconic"] and not track[cal.hwnd]["hidden"], f"Win+D 期间日历未最小化 / 隐藏（{track[cal.hwnd]}）")
+        x, y, w, h = cal.client()
+        hit = W.window_from_point(x + w - round(40 * cal.scale), y + h // 2)
+        c.ok(hit == cal.hwnd, f"Win+D 后日历（右侧）命中自己（{W.describe_hwnd(hit)}）")
+        W.grab((x - 10, y - 10, x + w + 10, y + h + 10)).save(C.out / "L10-calendar-after-win-d.png")
+        win_d()
+        time.sleep(1.0)
+        return c.done(f"owner=0x{cal.owner:X}")
+
+    def l11():
+        main, cal = need("main", "cal")
+        c = Checks()
+        cal.post_close()
+        wait_true(c, lambda: not cal.visible, 6, "WM_CLOSE 后日历隐藏")
+        c.eq((prefs(app, "calendar") or {}).get("hidden"), 1, "「显示日历」随之关闭（window_prefs[calendar].hidden = 1）")
+        tray_left_click(app)
+        time.sleep(1.5)
+        c.ok(main.visible, "托盘左键后默认清单窗口显示")
+        c.ok(not cal.visible, "日历关着时托盘左键不唤起日历")
+        c.ok(app.alive(), "进程仍在运行")
+        return c.done()
+
+    try:
+        C.report.case("L01", "托盘「新增待办清单」→ 新窗口（380×600、普通模式）→ 直接改名 → 系统标题与 todo_lists 落库", l01)
+        C.report.case("L02", "双击清单名改名 → 标题与落库", l02)
+        C.report.case("L03", "待办行右键「移动到 ▸」→ 移到新清单（list_id 落库、两个窗口各自刷新）", l03)
+        C.report.case("L04", "拖动清单窗口（自绘）落库 window_layouts；清单 ↔ 清单吸附与高亮", l04)
+        C.report.case("L05", "锁定按窗口：新清单 TOOLWINDOW / is_fixed 落库 / 拖不动；默认清单不受影响", l05)
+        C.report.case("L06", "关闭 = 隐藏（进程常驻、hidden 落库）→ 托盘左键全部唤起", l06)
+        C.report.case("L07", "托盘「重置位置」：层叠 32、解除锁定、取消隐藏；日历关着只写布局", l07)
+        C.report.case("L08", "删除清单：确认 → 窗口关闭、清单墓碑、待办回默认清单", l08)
+        C.report.case("L09", "托盘「显示日历」→ 日历窗口 596×600 出现在重置写好的位置", l09)
+        C.report.case("L10", "日历锁定 + 设置里打开嵌入桌面 → owner=桌面宿主；Win+D 后仍可见", l10)
+        C.report.case("L11", "关闭日历 = 关闭「显示日历」；托盘左键不唤起它", l11)
+    finally:
+        if app.alive():
+            errs = log_errors(app)
+            if errs:
+                print("  L 组日志 ERROR：\n  " + "\n  ".join(errs[:10]))
+        app.stop()
+
+
 # ----------------------------------------------------------------------------- P：平台集成（不隔离）
 
 def group_platform(allow_real: bool) -> None:
     if not allow_real:
-        for cid, t in [("P01", "非隔离启动：主窗口 + 日志位置"), ("P02", "单实例"), ("P03", "关闭主窗口退出进程")]:
+        for cid, t in [("P01", "非隔离启动：默认清单窗口 + 日志位置"), ("P02", "单实例"),
+                       ("P03", "关闭 = 隐藏、托盘退出")]:
             C.report.add(cid, t, "SKIP", "需要 --allow-real-profile（会使用真实的 %LOCALAPPDATA%\\mini-todo）")
         return
     log_path = W.LOCALAPPDATA / "com.tauri-app.mini-todo" / "logs" / "mini-todo.log"
@@ -1807,17 +2239,30 @@ def group_platform(allow_real: bool) -> None:
         main = st.get("main")
         if not main:
             raise Skip("主窗口没有起来")
+        # 3.1：关闭 = 隐藏，所有窗口都关了也不退出（同 macOS）；只有托盘「退出」退出
+        c = Checks()
         main.post_close()
         try:
-            app.proc.wait(15)
-            return f"WM_CLOSE 后进程退出（exit={app.proc.returncode}）"
-        except subprocess.TimeoutExpired:
-            raise AssertionError(f"关闭主窗口 15s 后进程仍在运行（窗口：{[w.title for w in app.windows()]}）")
+            W.wait_until(lambda: not main.visible, 6, "WM_CLOSE 后默认清单窗口隐藏")
+            c.ok(True, "WM_CLOSE：默认清单窗口隐藏")
+        except W.Timeout as e:
+            c.ok(False, str(e))
+        time.sleep(2)
+        c.ok(app.alive(), f"关掉所有窗口后进程仍在运行（可见窗口：{[w.title for w in app.windows()]}）")
+        c.ok(main.alive, "窗口只是隐藏、没有销毁")
+        if app.alive():
+            tray_menu(app, "quit")
+            try:
+                app.proc.wait(15)
+                c.ok(True, f"托盘「退出」后进程退出（exit={app.proc.returncode}）")
+            except subprocess.TimeoutExpired:
+                c.ok(False, "托盘「退出」15s 后进程仍在运行")
+        return c.done()
 
     try:
         C.report.case("P01", f"非隔离启动（{C.suite}）：主窗口、%LOCALAPPDATA% 日志与数据库位置", p01)
         C.report.case("P02", "单实例：再次启动 → 第二个进程退出、已运行实例的主窗口被唤起", p02)
-        C.report.case("P03", "关闭主窗口（WM_CLOSE）→ 进程退出", p03)
+        C.report.case("P03", "WM_CLOSE 默认清单窗口 → 只隐藏、进程常驻；托盘「退出」→ 进程退出", p03)
     finally:
         if app.alive():
             dump_log_tail(app, 20)
@@ -1880,6 +2325,8 @@ def main() -> int:
             if want("F"):
                 group_fences()
                 group_fence_geometry()
+            if want("L"):
+                group_lists()
         if want("P"):
             group_platform(args.allow_real_profile)
     finally:
