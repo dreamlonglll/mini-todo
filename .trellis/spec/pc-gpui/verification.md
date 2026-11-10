@@ -15,7 +15,7 @@
 | 任何改动 | §2 fmt / clippy / test（Linux） |
 | `cfg(windows)` 代码：`platform/`、`services/{tray,single_instance,autostart,notify,window_mode,fences}`、`build.rs`；core 的 `services/secret.rs`、`services/fence_fs/`、`settings::system_fonts` | + §3 Windows 交叉 clippy |
 | 可见界面（窗口布局、控件、`theme.rs`、文案、字体） | + §4 `regress.py`：相关场景 `--only`，逐张看 `compare/`；改共享控件 / `theme.rs` 时跑全部场景并看控件样例（`gallery`）。界面明显改版（新视图、新窗口、主窗口 / 详情 / 收纳箱外观大改）时，按 `scripts/intro-video/README.md` 重新生成介绍视频与 README 截图，避免 README 展示过时界面 |
-| 跨窗口流程（新建 / 编辑 / 子任务 / 设置即时生效 / 导入导出 / 已完成 / 提醒 / 收纳箱新建改名） | + `regress.py --smoke` |
+| 跨窗口流程（新建 / 编辑 / 子任务 / 设置即时生效 / 导入导出 / 已完成 / 提醒 / 收纳箱新建改名 / 新建清单改名） | + `regress.py --smoke` |
 | core 的同步、导入导出、迁移、提醒调度；单实例、日志 | + §5 Linux e2e（F / S / L 组；同步改动跑 S 组 Apache + nginx），并按 [data-compat.md](./data-compat.md) 确认 cloud 侧也改了 |
 | 版本号、`release.yml` / `cache-warm.yml`、NSIS 安装器、`scripts/macos/{bundle.sh,make-dmg.sh}` | 见 [release.md](./release.md)；改 mac 打包脚本另跑 §7.2 的 CI（`pc-gpui-ci.yml` 的 macos 作业或 mac e2e 会调用 `bundle.sh`） |
 | Windows 窗口行为（窗口模式、嵌入桌面、透明、通知窗口定位、收纳箱、托盘、开机自启、单实例、DPAPI、Toast、release 构建） | + §6 Windows e2e（CI 或本机），交付说明里列出需要用户实机验收的项 |
@@ -88,15 +88,17 @@ scripts/shot.sh --open main,gallery --window 控件样例 /tmp/shots    # ui/ �
 ```
 
 - 依赖（Ubuntu）：`xvfb xdotool imagemagick mesa-vulkan-drivers fonts-noto-cjk fonts-liberation`。只依赖 Python 3 标准库。
-- 每个场景是一次全新进程：`seed` 导入 `scripts/sample-data.json` → 按场景改库 → 以 `MINI_TODO_DATA_DIR` / `MINI_TODO_FENCES_ROOT` /
+- 每个场景是一次全新进程：`seed` 导入 `scripts/sample-data.json` → 按场景改库（深色 / 四象限 / 锁定改 `window_prefs` / `window_layouts`；
+  seed 时已迁移到 v31，再改旧的全局键 `text_theme` / `view_mode` / `is_fixed` 无效）→ 以 `MINI_TODO_DATA_DIR` / `MINI_TODO_FENCES_ROOT` /
   `MINI_TODO_DEBUG_OPEN` 启动 debug 构建 → 交互 → 按窗口截图（与参考截图同名）。网络被断开（节假日走缓存、版本检查失败），结果确定。
+  `main-calendar(-dark)` 沿用旧场景名，截的是独立的「日历」窗口；`list-new-rename` 是 `list:new` 新建、标题栏正在改名的清单窗口。
 - 输出：`<out>/<场景>.png`、`<out>/compare/<场景>.png`（左：参考图｜中：`--before`｜右：本次）、`<out>/logs/<场景>.log`，
   冒烟另有 `<out>/results.json`。默认输出目录 `pc-gpui/target/regress`。
 - **基线用 `--before`**（改动前跑一遍的输出）做自身回归——旧 Tauri 版删除后这是唯一能随时生成的基线。
 - `--ref` / 环境变量 `MINI_TODO_REF_DIR`（冒号分隔多个目录）是**可选**的：重写期间由旧 Vue 前端在 Playwright Chromium 里按真实窗口
   逻辑尺寸渲染的参考截图（时间冻结在 2026-10-15 10:00 Asia/Shanghai，1920×1080 @100%，Windows UA），在仓库外生成、不在仓库里，
   旧前端删除后无法再从仓库重新生成（见 `crates/app/README.md` §1）。
-- 看对照图时：透明窗口（主窗口 / 通知 / 收纳箱）圆角外在 Xvfb 下是黑色，忽略四角；日历 / 提醒相关场景与真实时间有关，只比较布局；
+- 看对照图时：透明窗口（清单 / 日历窗口 / 通知 / 收纳箱）圆角外在 Xvfb 下是黑色，忽略四角；日历 / 提醒相关场景与真实时间有关，只比较布局；
   Linux 字体是 Liberation Sans + Noto Sans CJK SC 代替 Segoe UI + 微软雅黑（与参考截图相同）；中文折行位置可能差一个字（GPUI 不做
   避头尾，见 [gpui-conventions.md §2.13](./gpui-conventions.md)）。
 - 界面调整后要同步改脚本开头的 `SCENES` / `SMOKE` / `CALLS`（坐标与场景）；新窗口 / 新状态加场景，并在 `MINI_TODO_DEBUG_OPEN`
@@ -119,10 +121,15 @@ cd .. && python3 pc-gpui/scripts/e2e-linux/run_e2e.py pc-gpui/target/debug/mini-
 
 - 真实的 debug 构建在 Xvfb + lavapipe 上黑盒运行（xdotool 输入、tesseract OCR 读界面），断言数据库、WebDAV 上的
   `sync-data.json.gz`、cloud REST、Skill CLI、应用日志与截图。用例组：`F`（本地功能：新建 / 编辑 / 子任务 / 完成 / 删除 / 四象限拖拽 /
-  时间格式 / 5s 轮询 / 提醒补发与应用内通知 / 单实例 / 日志 / 导入导出 / 主题与日历）、`S`（同步，Apache + nginx 两种 WebDAV 各一遍，
-  PC ↔ cloud ↔ Skill）、`L`（生命周期：旧版本数据库升级迁移等）。前缀过滤如 `F`、`S04[nginx]`。
+  时间格式 / 5s 轮询 / 提醒补发与应用内通知 / 单实例 / 日志 / 导入导出 / 按窗口的日 / 夜与独立日历窗口、清单（新建改名 / 移动到 /
+  表单改清单 / 日历筛选 / 关闭即隐藏与再显示 / 删除，F17~F23））、`S`（同步，Apache + nginx 两种 WebDAV 各一遍，PC ↔ cloud ↔ Skill；
+  多清单同步：旧格式远端补传 `listId`、双设备建 / 删清单开关窗、契约 §13 F1，S12~S15）、`L`（生命周期：v27 → v31 升级（含窗口属性种子）、
+  库版本比程序新等）。前缀过滤如 `F`、`S04[nginx]`。全量约 25 分钟。
+- Linux 上应用摆不了窗（`platform/fallback.rs` 没有原生句柄），自绘拖动、吸附、「重置位置」由 §6 Windows e2e 覆盖；Linux 用例用 xdotool 挪窗，
+  拖动落库改为"挪窗后关闭，按屏幕组合保存几何"（F21）。
 - 依赖、WebDAV 服务准备（`MT_E2E_DAV_ROOT`）与环境变量见 `pc-gpui/scripts/e2e-linux/README.md`；结果在 `$MT_E2E_WORK/run/`
-  （默认 `/tmp/mini-todo-gpui-e2e/run/results.txt`、`shots/`、各进程日志）。
+  （默认 `/tmp/mini-todo-gpui-e2e/run/results.txt`、`shots/`、各进程日志）。WSL（镜像网络）下 cloud 的默认端口可能被 Windows 上的程序占用，
+  用 `MT_E2E_CLOUD_PORTS`（默认 `8787,8797`）换端口。
 - 何时必跑：改 core 的同步 / 合并 / 时间 / 墓碑 / 导入导出 / 迁移 / 提醒，或 app 的同步编排（`services/sync.rs`、`auto_sync.rs`）、
   单实例、日志。同步改动必须 Apache 与 nginx 两种服务器都 PASS（`backend/sync-protocol.md` §6）。
 
