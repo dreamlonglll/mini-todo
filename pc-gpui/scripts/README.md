@@ -97,7 +97,7 @@ pc-gpui/scripts/shot.sh [选项] <输出目录>
 例：
 
 ```bash
-# 主窗口列表（对照 ref-ui/screens/main-list.png）
+# 默认清单窗口的列表（对照 ref-ui/screens/main-list.png；窗口标题仍是 "Mini Todo"）
 pc-gpui/scripts/shot.sh --name main-list --window "Mini Todo" /tmp/shots
 # 悬停第 2 行
 pc-gpui/scripts/shot.sh --no-build --name main-list-hover --window "Mini Todo" --hover 120,112 /tmp/shots
@@ -108,7 +108,7 @@ pc-gpui/scripts/shot.sh --no-build --click 356,576 --sleep 1 --target 新建待�
 ```
 
 注意：
-- Xvfb 没有合成器，透明窗口（主窗口、通知、收纳箱）圆角外的透明像素在截图里是黑色，对照时忽略四个角。
+- Xvfb 没有合成器，透明窗口（清单 / 日历窗口、通知、收纳箱）圆角外的透明像素在截图里是黑色，对照时忽略四个角。
 - 截图时刻是真实时间（本机没有 `faketime`）；参考截图冻结在 2026-10-15 10:00 Asia/Shanghai，日历 / 提醒时间相关的
   对照要么用 `faketime`，要么只比较布局。脚本固定 `TZ=Asia/Shanghai`。
 - 临时数据目录用 `mktemp -d`，结束时删除（`--keep` 时保留，路径会打印出来）。
@@ -119,21 +119,23 @@ pc-gpui/scripts/shot.sh --no-build --click 356,576 --sleep 1 --target 新建待�
 
 | 项 | 打开 |
 |---|---|
-| `main` | 主窗口（总会打开，写不写都一样） |
-| `editor:new`（或 `editor`） | 新建待办 |
+| `main` | 默认清单窗口（以前的主窗口；启动时总会打开，这一项只把它带到前面） |
+| `list:<listId>` | 显示清单 `listId` 的窗口（没开过就开窗） |
+| `list:new` | 新建一个清单（同托盘「新增待办清单」：自动取名、找空位开窗）并进入改名 |
+| `editor:new`（或 `editor`） | 新建待办（「清单」下拉预选默认清单） |
 | `editor:<todoId>` / `editor:<todoId>:view` / `editor:<todoId>:edit` | 待办详情（只读 / 编辑） |
 | `subtask:<subtaskId>` / `subtask:<subtaskId>:view` / `subtask:<subtaskId>:edit` | 子任务窗口 |
 | `settings` / `settings:<general\|appearance\|data\|screen\|about>` | 设置窗口（指定左侧菜单） |
-| `completed` | 已完成 |
+| `completed` | 默认清单的已完成 |
 | `notification` / `notification:<todoId>` | 应用内通知（无 id 时用默认文案；有 id 时用该待办的标题与描述） |
 | `fence:<fenceId>` | 收纳箱窗口 |
 | `fence:new` | 走托盘 / 菜单栏图标「新增收纳箱」同一实现新建一个收纳箱（在光标所在显示器右上角找空位，建收纳文件夹）并打开 |
 | `gallery` | 控件样例窗口（`ui/` 里的 Element Plus 风格控件，改控件后对照用） |
-| `toast:<success\|info\|warning\|error>:<文字>` | 在主窗口里弹一条 ElMessage（3s 后消失，截图用 `--wait 1`） |
-| `confirm:<标题>:<内容>` | 在主窗口里弹 ElMessageBox.confirm（`确定` / `取消`） |
-| `calendar` | 运行时打开日历（与设置里打开「展示日历」相同：主窗口按旧版公式加宽，左栏 = 打开前的宽度） |
+| `toast:<success\|info\|warning\|error>:<文字>` | 在默认清单窗口里弹一条 ElMessage（3s 后消失，截图用 `--wait 1`） |
+| `confirm:<标题>:<内容>` | 在默认清单窗口里弹 ElMessageBox.confirm（`确定` / `取消`） |
+| `calendar` | 显示日历窗口（与设置里打开「展示日历」、托盘勾选「显示日历」相同；3.1 起是独立的窗口（系统标题 `日历`），不再加宽主窗口） |
 
-这些窗口**不走模态关系**（主窗口不显示遮罩、没有 owner），只用于截图；无法识别的项记 warning 并跳过。
+这些窗口**不走模态关系**（清单窗口不显示遮罩、没有 owner），只用于截图；无法识别的项记 warning 并跳过。
 新增窗口种类时：在 `crates/app/src/windows/mod.rs` 的 `DebugOpen` / `parse_debug_open` / `open_debug` 里加一项，并更新本表。
 
 `MINI_TODO_DEBUG_LATEST_VERSION=v2.6.0`（仅 debug）：版本检查不联网、直接当作 GitHub 最新版本，用于截图更新红点 /

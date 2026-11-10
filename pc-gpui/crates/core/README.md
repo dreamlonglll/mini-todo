@@ -9,8 +9,9 @@ PC 端（`pc-gpui/`，GPUI 版，3.0 起是唯一的 PC 实现）的业务核心
   或独立线程调用，再把结果交回前台。`sync::run`、`holiday::fetch`、`sync::test_connection` 用的是
   `reqwest::blocking`，**不能**在 tokio runtime 上下文里调用。
 - 错误类型沿用旧代码的 `String`（面向用户的中文提示），与旧版前端看到的文案一致。
-- 数据完全兼容旧版：同一数据目录（`db::paths`）、同一迁移（v1~v29；v30 起为 GPUI 版新增，只加带默认值的收纳箱列）、同一同步文档（sync-data.json.gz）、
-  同一导出格式（4.0）、同一 settings 键。
+- 数据完全兼容旧版：同一数据目录（`db::paths`）、同一迁移（v1~v29；v30 起为 GPUI 版新增：v30 只加带默认值的收纳箱列，v31 多待办清单——
+  清单表、`todos.list_id` / `list_updated_at` 可空列、设备本地的窗口属性表）、同一同步文档（sync-data.json.gz；3.1 起多两个顶层键
+  `todoLists` / `listTombstones`，旧版本经 extra 原样带回）、同一导出格式（4.1，兼容导入 3.0 / 4.0）、同一 settings 键。
 
 ## 目录
 
@@ -26,7 +27,10 @@ crates/core/
 │   │   ├── webdav.rs          # ← 原样复制
 │   │   ├── secret.rs          # ← 原样复制（Windows DPAPI）
 │   │   └── fence_fs/          # ← 原样复制（ops.rs 中 1 个测试的路径字面量改为按平台拼接）；mac.rs 为 macOS 后端（GPUI 版新增）
-│   ├── todo.rs                # ← commands/todo.rs
+│   ├── todo.rs                # ← commands/todo.rs（+ 待办的清单归属：建到 / 移到清单）
+│   ├── lists.rs               # 新增：待办清单 CRUD、名称校验、删除时待办移到默认清单、有效清单兜底
+│   ├── window_prefs.rs        # 新增：清单 / 日历窗口的设备本地属性与按屏幕组合的布局
+│   ├── ids.rs                 # 新增：新清单 id（毫秒 × 1000 + 随机，与 cloud api/ids.rs 同一算法）
 │   ├── data.rs                # ← commands/data.rs
 │   ├── sync/mod.rs            # ← commands/sync_cmd.rs（测试拆到 sync/tests.rs）
 │   ├── settings.rs            # ← commands/settings_cmd.rs + window.rs 的设置 / screen_configs + fence.rs 的屏幕组合 ID
@@ -38,7 +42,7 @@ crates/core/
 │       ├── mod.rs             # ← commands/fence.rs 中与窗口无关的部分
 │       └── items.rs           # ← commands/fence_items.rs 中与窗口无关的部分
 ├── examples/
-│   └── seed.rs                # 把导出格式 4.0 的 JSON 导入隔离数据目录（截图 / 冒烟测试用，见 pc-gpui/scripts/README.md）
+│   └── seed.rs                # 把导出格式 4.0 / 4.1 的 JSON 导入隔离数据目录（截图 / 冒烟测试用，见 pc-gpui/scripts/README.md）
 └── tests/fixtures/
     ├── gen_lunar.cjs          # 用 lunar-javascript 生成农历对照数据
     └── lunar_fixture.json     # 2024-01-01 ~ 2027-12-31 逐日对照（提交）
@@ -78,13 +82,13 @@ macOS 专属测试（`fence_fs` 的真实 `renamex_np` 移动往返 / 撞名顺�
 | 带 `owner_hwnd` 的收纳箱移动绝不在 UI 主线程调用 | `fence::delete`、`fence::items::{move_in, restore, move_to}`：Windows 上系统"需要管理员权限" / "文件正在使用"对话框以收纳箱窗口为父窗口，会同步给主线程发消息，主线程阻塞等待时死锁。HWND 在主线程取好（`isize`），移动派到后台。macOS 不用 `owner_hwnd`，但「文件与文件夹」隐私授权框、下载 iCloud 云端文件、跨卷复制同样会阻塞调用线程，也只能在后台调用 |
 | 单同步互斥 | `sync::run` 同一时刻只允许一个（含强制拉取 / 推送），重入立即返回 `Err("同步正在进行中")` |
 | 进程级静态量留在 core | 同步互斥 / 轮次计数、收纳箱 `FenceActivity`（删除中 / 移动中登记）、收纳箱临时几何 `SESSION_RECTS` 与屏幕组合检测起点、通知槽位池、通知窗口真实尺寸、托盘唤起代次 |
-| 窗口状态留在 app | 固定 / 嵌入模式标志、Progman owner、`TOP_ON_WAKE` 缓存、`AutoHideState` 实例、收纳箱显示 / 隐藏、嵌入窗口登记 |
+| 窗口状态留在 app | 固定 / 嵌入模式标志、Progman owner、`TOP_ON_WAKE` 缓存、`AutoHideState` 实例、收纳箱显示 / 隐藏、嵌入窗口登记；清单 / 日历窗口的属性与布局持久化在 core `window_prefs`（运行时状态仍在 app） |
 
 ## 旧事件 → 返回值
 
 | 旧 Tauri 事件 / 调用 | 现在 |
 |---|---|
-| `sync-completed`（`SyncReport`，仅 `local_changed()`） | `sync::run` 返回 `SyncReport`；app 在 `report.local_changed()` 时通知各窗口刷新 |
+| `sync-completed`（`SyncReport`，仅 `local_changed()`） | `sync::run` 返回 `SyncReport`；app 在 `report.local_changed()`（含清单）时通知各窗口刷新；`lists_changed()` 时重读清单、开 / 关清单窗口（同步删除的清单 core 已删掉窗口记录，app 只需关窗） |
 | 同步后 `reload_runtime_prefs`（`sync_cmd.rs:605`） | app 在 `report.settings_applied` 时 `settings::runtime_prefs(db)` 并刷新自己的缓存 |
 | 导入后 `reload_runtime_prefs`（`data.rs:245`）+ 前端 `data-imported` | `data::import_json` / `import_from_file` 成功后 app 刷新运行时偏好、重新加载待办与设置 |
 | `save_settings` 里的 `reload_runtime_prefs` | `settings::save_window_settings` 后 app 刷新运行时偏好 |
@@ -98,15 +102,15 @@ macOS 专属测试（`fence_fs` 的真实 `renamex_np` 移动往返 / 撞名顺�
 
 | 项 | 说明 |
 |---|---|
-| `Database::new() -> Result<Database, String>` | 打开 `paths::db_path()`；有待执行迁移时先 `VACUUM INTO` 备份；迁移 v1~v30 |
+| `Database::new() -> Result<Database, String>` | 打开 `paths::db_path()`；有待执行迁移时先 `VACUUM INTO` 备份；迁移 v1~v31 |
 | `Database::open(path: &Path) -> Result<Database, String>` | 打开指定库（同上） |
 | `Database::with_connection(f)` / `with_transaction(f)` | 持锁执行；事务为 `BEGIN IMMEDIATE`，`Err` / panic 回滚 |
 | `Database::new_in_memory()` | 测试用（`cfg(test)` 或 feature `test-util`） |
-| `db::{Todo, SubTask, CreateTodoRequest, UpdateTodoRequest, CreateSubTaskRequest, UpdateSubTaskRequest, AppSettings, ExportData, WindowPosition, WindowSize, ScreenConfig, SaveScreenConfigRequest, Fence, FenceItem, UpdateFenceRequest, Tombstone}` | 模型（serde camelCase，与旧版 / cloud 一致） |
-| `db::{DEFAULT_WINDOW_BG_COLOR, DEFAULT_WINDOW_BG_ALPHA, DEFAULT_FENCE_BG_ALPHA}` | 默认值 |
+| `db::{Todo, SubTask, CreateTodoRequest, UpdateTodoRequest, CreateSubTaskRequest, UpdateSubTaskRequest, AppSettings, ExportData, WindowPosition, WindowSize, ScreenConfig, SaveScreenConfigRequest, Fence, FenceItem, UpdateFenceRequest, Tombstone, TodoList, ListTombstone}` | 模型（serde camelCase，与旧版 / cloud 一致）。`Todo.list_id: Option<i64>`（`None` = 归属未知，显示在默认清单，序列化时不写）与 `Todo.list_updated_at: Option<String>`（归属自己的版本，只给同步 / 导出用；归属未知时恒为 `None`） |
+| `db::{DEFAULT_WINDOW_BG_COLOR, DEFAULT_WINDOW_BG_ALPHA, DEFAULT_FENCE_BG_ALPHA}`、`DEFAULT_LIST_ID` / `DEFAULT_LIST_NAME` / `DEFAULT_LIST_CREATED_AT`（1 /「待办清单」/ `2000-01-01 00:00:00`）、`TODO_LIST_COLUMNS` / `todo_list_from_row` | 默认值 |
 | `db::paths::{app_data_dir, db_path, images_dir, is_safe_image_name, dev_data_dir_override, DEV_DATA_DIR_ENV}` | 数据目录（debug 构建可用 `MINI_TODO_DATA_DIR` 隔离）；app 的日志目录 / 单实例 / 自启判断也看 `dev_data_dir_override()` |
-| `db::time::{now_local, format_canonical, parse_local_datetime, parse_local_datetime_with, normalize_datetime, superseding, DefaultTime, CANONICAL_FORMAT, SQL_SET_UPDATED_AT}` | 统一时间格式 `YYYY-MM-DD HH:MM:SS`（界面解析 / 格式化也用它们，禁止手写） |
-| `db::settings_kv`、`db::sync_store`、`db::backup`、`db::migrations::LATEST_VERSION` | 设置键值（只在值变化时刷新 `updated_at`）、同步存储、备份、迁移 |
+| `db::time::{now_local, format_canonical, parse_local_datetime, parse_local_datetime_with, normalize_datetime, superseding, DefaultTime, CANONICAL_FORMAT, SQL_SET_UPDATED_AT, SQL_SET_LIST_UPDATED_AT, SQL_SET_LIST_UPDATED_AT_IF_MOVED}` | 统一时间格式 `YYYY-MM-DD HH:MM:SS`（界面解析 / 格式化也用它们，禁止手写） |
+| `db::settings_kv`、`db::sync_store`、`db::backup`、`db::migrations::LATEST_VERSION` | 设置键值（只在值变化时刷新 `updated_at`）、同步存储（含清单合并 / 墓碑与待办归属的字段级合并 `ListAssignment`）、备份、迁移 |
 
 ### `todo`
 
@@ -114,9 +118,10 @@ macOS 专属测试（`fence_fs` 的真实 `renamex_np` 移动往返 / 撞名顺�
 |---|---|---|
 | `list(db) -> R<Vec<Todo>>` | 全部待办（含子任务）：未完成在前、手动排序、新建的在前 | `get_todos` |
 | `get(db, id) -> R<Todo>` | 单条（含按 `sort_order, id` 排序的子任务）；不存在 `"待办不存在"` | `get_todo` |
-| `change_seq(db) -> R<i64>` | 本地变更计数（触发器维护），主窗口 5s 轮询，变了才 `list` | `get_change_seq` |
-| `create(db, &CreateTodoRequest) -> R<Todo>` | 时间规范化（仅日期：提醒 09:00 / 开始 00:00 / 截止 23:59），排在未完成最后 | `create_todo` |
-| `update(db, id, &UpdateTodoRequest) -> R<Todo>` | 只改给出字段；`clear_*` 清空；改提醒重置 `notified`；`updated_at` 严格递增 | `update_todo` |
+| `change_seq(db) -> R<i64>` | 本地变更计数（触发器维护，含清单），app 的 5s 轮询（`block_windows`），变了才 `list` | `get_change_seq` |
+| `create(db, &CreateTodoRequest) -> R<Todo>` | 时间规范化（仅日期：提醒 09:00 / 开始 00:00 / 截止 23:59），排在未完成最后；`list_id` 缺省写默认清单 1（新建总是已知，`list_updated_at` = 现在），指定的清单不存在报 `清单不存在` | `create_todo` |
+| `update(db, id, &UpdateTodoRequest) -> R<Todo>` | 只改给出字段；`clear_*` 清空；改提醒重置 `notified`；`updated_at` 严格递增；`list_id: Some` 移到另一个清单（必须存在；清单真的变了才刷新 `list_updated_at`），`None` 不动归属（未知保持未知——界面只有用户真的改了清单才传 `Some`） | `update_todo` |
+| `move_to_list(db, id, list_id) -> R<Todo>` | 只改归属（行右键「移动到」）：`list_updated_at` 与 `updated_at` 都严格递增；存储的已是该清单时不改；未知时显式移动总会写成已知；`sort_order` 不变 | （新增） |
 | `delete(db, id) -> R<()>` | 连带子任务，写墓碑 | `delete_todo` |
 | `reorder(db, &[i64]) -> R<()>` | 下标即 `sort_order`，只更新变化的行 | `reorder_todos` |
 | `reorder_subtasks(db, &[i64]) -> R<()>` | 同上 | `reorder_subtasks` |
@@ -128,13 +133,49 @@ macOS 专属测试（`fence_fs` 的真实 `renamex_np` 移动往返 / 撞名顺�
 | `save_image(bytes: &[u8], ext: &str) -> R<PathBuf>` | 粘贴 / 拖入图片：扩展名白名单 png/jpg/jpeg/webp/gif/bmp（大小写不敏感、可带点）、非空、≤20MB；文件名后端生成 `<毫秒>_<6位>.<ext>`；先写临时文件再改名；返回绝对路径 | `save_subtask_image` |
 | `import_subtasks_from_paths(db, parent_id, &[String]) -> R<Vec<SubTask>>` | .md/.txt 文件或文件夹（≤5 层、≤1000 个、单个 ≤10MB、不跟随符号链接目录）；UTF-8/BOM/UTF-16/GBK；任一失败整体取消；单事务插入 | `import_subtasks_from_paths` |
 
+### `lists`（新增，待办清单）
+
+| 函数 | 说明 |
+|---|---|
+| `list(db) -> R<Vec<TodoList>>` | 全部清单，按 `(sortOrder, id)`；默认清单缺失时先补建 |
+| `get(db, id) -> R<TodoList>` | 不存在报 `清单不存在`（`LIST_NOT_FOUND`） |
+| `create(db, name) -> R<TodoList>` | 去首尾空白、1~50 字、不区分大小写不重名（`已有同名清单「<现有名称>」`）；排最后；id 由 `ids::insert_with_fresh_id` 生成 |
+| `rename(db, id, name) -> R<TodoList>` | 默认清单也可；名称没变不写库；空名报 `清单名称不能为空`（界面"空名恢复原名"） |
+| `delete(db, id) -> R<usize>` | 单事务：其下待办（含已完成）移到默认清单并刷新 `updated_at` / `list_updated_at`、写清单墓碑、删清单、删它的窗口记录并从日历筛选移出；返回移动的待办数。默认清单报 `默认清单不能删除`；归属未知的待办不动 |
+| `todo_count(db, id) -> R<usize>` | 存储的 `list_id = id` 的待办数（含已完成，不含未知），删除确认框"N 项待办将移到「待办清单」"用 |
+| `effective_list_id(Option<i64>, &[TodoList]) -> i64` | 读侧兜底：未知（`None`）或清单不存在 → 1。列表 / 四象限 / 已完成 / 日历筛选的归属都用它 |
+| `normalize_name(&str) -> R<String>`、`names_conflict(a, b) -> bool`、`MAX_LIST_NAME_CHARS`、`LIST_NOT_FOUND` | 输入框预校验 / 常量 |
+
+### `window_prefs`（新增，清单 / 日历窗口的设备本地属性；不同步、不导出、不接 `local_seq`）
+
+| 项 | 说明 |
+|---|---|
+| `WindowKey::{List(i64), Calendar}`（`parse` / `as_key` / `list_id`、`Display`）、`CALENDAR_WINDOW_KEY` / `LIST_WINDOW_KEY_PREFIX` | key 字符串 `list:<id>` / `calendar` |
+| `ViewMode::{List, Quadrant}`（`as_str` / `parse`） | 清单窗口视图 |
+| `WindowPrefs { key, hidden, dark, view_mode, expand_all, calendar_filter: Option<Vec<i64>> }`、`WindowPrefs::new(key)` | 没有记录时的默认值：显示、浅色、列表、不展开、全部清单 |
+| `get_prefs(db, key) -> R<Option<WindowPrefs>>` / `list_prefs(db)` | `None` = 本机没有窗口记录（同步来的新清单 → 自动开窗）；`list_prefs` 跳过看不懂的 key |
+| `update_prefs(db, key, &UpdateWindowPrefs) -> R<Option<WindowPrefs>>` | 只改给出的字段，没有记录先按默认值补建；清单不存在 → `None`、不写 |
+| `set_calendar_filter(db, Option<&[i64]>) -> R<Option<Vec<i64>>>` | `None` = 全部；去掉不存在的清单、去重升序；空 → 全部；返回实际保存值 |
+| `WindowLayout { key, screen_config_id, x, y, width, height, is_fixed }`、`get_layout(db, key, screen_id)` / `layouts_for_screen(db, screen_id)` | 客户区物理像素 + 锁定，按屏幕组合 |
+| `save_layout(db, &WindowLayout) -> R<bool>` / `save_layouts(db, &[WindowLayout]) -> R<usize>` | upsert（没有属性行时按默认值补建）；清单不存在的跳过；「重置位置」用批量版（一个事务） |
+| `delete_window(db, key) -> R<()>` | 删属性 + 全部布局 |
+
+迁移 v31 的种子：`list:1` 继承原主窗口（`text_theme` / `view_mode` / 各 `screen_configs`），`calendar` 隐藏 = `!show_calendar`，开着日历时
+按左 40% / 右 60% 切开。"默认清单窗口启动时总是显示"由 app 忽略 `list:1` 的 `hidden`。
+
+### `ids`（新增）
+
+`compose_id(unix_millis, suffix) -> Option<i64>`、`new_id() -> i64`（毫秒 × 1000 + 随机 0..=999，越界退回 `[FALLBACK_MIN_ID, MAX_SAFE_ID]` 内的随机值；
+随机数用标准库 `RandomState`）、`insert_with_fresh_id(..)`（撞主键换 id 重试，最多 `MAX_ID_ATTEMPTS = 8` 次）、`is_primary_key_conflict(&rusqlite::Error)`；
+常量 `MAX_SAFE_ID = 2^53 − 1`、`FALLBACK_MIN_ID = 1e15` 与 cloud `api/ids.rs` 逐字一致。
+
 ### `data`
 
 | 项 | 说明 | 旧命令 |
 |---|---|---|
-| `EXPORT_VERSION = "4.0"` | 导出 / 同步文档版本 | |
-| `export_json(db) -> R<String>` | pretty JSON（待办 + 子任务 + `AppSettings`） | `export_data` |
-| `import_json(db, &str) -> R<()>` | 恢复备份语义：导入前备份到 `backups/`、单事务整体替换、保留原 id、消失的记录写墓碑、`updated_at` 刷新为导入时刻；兼容 3.0 / 4.0。**成功后 app 刷新运行时偏好并重新加载** | `import_data` |
+| `EXPORT_VERSION = "4.1"` | 导出 / 同步文档版本（旧 PC 与 cloud 都不校验） | |
+| `export_json(db) -> R<String>` | pretty JSON（待办 + 子任务 + `AppSettings` + 顶层 `todoLists`（含默认清单））；归属未知的待办不写 `listId` / `listUpdatedAt`；清单墓碑与窗口属性不导出 | `export_data` |
+| `import_json(db, &str) -> R<()>` | 恢复备份语义：导入前备份到 `backups/`、单事务整体替换、保留原 id、消失的记录写墓碑、`updated_at` 刷新为导入时刻；兼容 3.0 / 4.0 / 4.1。4.1：清单同样按恢复语义（备份里没有的清单写清单墓碑并删除，默认清单始终保留、只取备份里的名字），缺 `listId` 的待办恢复成未知；3.0 / 4.0（没有 `todoLists`）：现有清单不动，待办写成具体的默认清单 1；已知归属的 `list_updated_at` = `superseding(now, 本机原来的版本)`。**成功后 app 刷新运行时偏好并重新加载** | `import_data` |
 | `export_to_file(db, &Path) -> R<()>` | ZIP（内含 `data.json`，Deflated）；默认文件名由 app 生成 `mini-todo-backup-YYYY-MM-DD.zip` | `export_data_to_file` |
 | `import_from_file(db, &Path) -> R<()>` | `PK` 魔数区分 ZIP / JSON，再 `import_json` | `import_data_from_file`（以及旧前端"读 JSON 再 `import_data`"） |
 | `read_app_settings(&Connection) -> AppSettings` / `write_app_settings(&Connection, &AppSettings)` | 设置块读写（唯一来源） | |
@@ -150,8 +191,8 @@ macOS 专属测试（`fence_fs` 的真实 `renamex_np` 移动往返 / 撞名顺�
 | `test_connection(db, url, username, password: Option<&str>) -> R<bool>` | 密码为空用已保存的 | `webdav_test_connection` |
 | `enum SyncMode { Smart { full: bool }, ForcePull, ForcePush }` | `full: true` = 标题栏按钮 / 设置页"立即同步"（无条件 GET）；自动同步传 `false`（每第 10 轮自动无条件） | |
 | `run(db, SyncMode) -> R<SyncReport>` | 单同步互斥（`"同步正在进行中"`）；未配置 `"未配置 WebDAV 服务器"`；返回后见"旧事件 → 返回值" | `webdav_sync` / `webdav_force_pull` / `webdav_force_push` |
-| `SyncReport { status, last_sync_at, todos_*/subtasks_* inserted/updated/deleted, records_skipped, images_uploaded/downloaded, settings_applied }`、`SyncReport::local_changed()`、`SyncStatus { NoChanges, Pulled, Pushed, Merged }` | 结果（界面提示文案按旧 `utils/syncReport.ts`） | |
-| `FULL_GET_EVERY = 10`、`SyncData` | 常量 / 同步文档结构 | |
+| `SyncReport { status, last_sync_at, todos_*/subtasks_*/lists_* inserted/updated/deleted, records_skipped, images_uploaded/downloaded, settings_applied }`、`SyncReport::local_changed()`（含清单）/ `lists_changed()`、`SyncStatus { NoChanges, Pulled, Pushed, Merged }` | 结果（界面提示文案按旧 `utils/syncReport.ts`）；只采纳归属也计入 `todos_updated`（升级后第一次同步会学到存量待办的归属） | |
+| `FULL_GET_EVERY = 10`、`SyncData`（`todo_lists` / `list_tombstones` 是显式字段，不进 `extra`） | 常量 / 同步文档结构 | |
 
 ### `settings`
 
@@ -164,21 +205,24 @@ macOS 专属测试（`fence_fs` 的真实 `renamex_np` 移动往返 / 撞名顺�
 | `font_size(db) -> R<i32>` / `set_font_size(db, i32)` | 默认 14，写入夹到 12~20 | `get_todo_font_size` / `set_todo_font_size` |
 | `notification_type(db) -> R<String>` / `set_notification_type(db, &str)` | `system`（默认）/ `app`，其它值存 `system` | `get_notification_type` / `set_notification_type` |
 | `struct RuntimePrefs { top_on_wake, auto_hide_enabled }`、`runtime_prefs(db) -> RuntimePrefs` | 轮询要用的缓存值（原 `reload_runtime_prefs` 读取的两个键，默认都 true） | （`reload_runtime_prefs`） |
-| `save_window_settings(db, &AppSettings) -> R<()>` | 主窗口保存状态：一个事务写 9 个键，值不变不刷新 `updated_at`；调用方先读真值；**设置窗口里绝不调用**；之后刷新运行时偏好 | `save_settings` |
+| `save_window_settings(db, &AppSettings) -> R<()>` | 旧主窗口保存状态：一个事务写 9 个键，值不变不刷新 `updated_at`；调用方先读真值；**设置窗口里绝不调用**；之后刷新运行时偏好。3.1 起 app 不再调用（几何与锁定按窗口写 `window_prefs`） | `save_settings` |
 | `text_theme(db) -> R<String>` / `set_text_theme(db, &str)` | 默认 `"dark"`；`"light"` = 深色主题开启（浅色文字） | `get_text_theme` / `set_text_theme` |
 | `fixed_embed_desktop(db) -> bool` / `set_fixed_embed_desktop(db, bool)` | 只写键；app 随后按需切换（Windows：已经典固定且开 → 嵌入；已嵌入且关 → 经典固定） | `get_fixed_embed_desktop` / `set_fixed_embed_desktop` |
 | `auto_hide_enabled(db) -> bool` / `set_auto_hide_enabled(db, bool)` | 只写键；状态见 `window_logic::AutoHideState::set_enabled` | `get_auto_hide_enabled` / `set_auto_hide_enabled` |
 | `top_on_wake(db) -> bool` / `set_top_on_wake(db, bool)` | 只写键；关闭时 app 立即撤置顶 | `get_top_on_wake` / `set_top_on_wake` |
 | `struct WindowBackground { color, alpha }`、`window_background(db)` / `set_window_background(db, color, alpha)` | 默认 `#000000` / 0.45；alpha 夹到 0~1 | `get_window_background` / `set_window_background` |
 | `show_calendar(db) -> R<bool>` / `set_show_calendar(db, bool)` | 默认 false | `get_show_calendar` / `set_show_calendar` |
+
+> `view_mode` / `text_theme` / `show_calendar`（以及 settings `is_fixed`）是同步键、旧设备照常读写，3.1 起只作迁移 v31 的初始值，app 不再读写
+> 上面这几组函数——清单 / 日历窗口的视图、日 / 夜、显示日历、锁定在 `window_prefs`。
 | `screen_config_id_of(&[(w, h, scale)]) -> String` | 屏幕组合 ID `"{n}_{W}x{H}@{scale%}_…"`（面积降序、稳定排序；无显示器 `"unknown"`）。输入是**物理像素**与缩放，按 `EnumDisplayMonitors` 顺序 | （前端 `generateScreenConfigId`、`fence.rs::screen_config_id_of`） |
-| `screen_config_id(&[(w, h, scale)]) -> String` | 同上，debug 构建下 `MINI_TODO_SCREEN_ID_FILE` 可覆盖（主窗口与收纳箱都用它） | （`current_screen_config_id`） |
+| `screen_config_id(&[(w, h, scale)]) -> String` | 同上，debug 构建下 `MINI_TODO_SCREEN_ID_FILE` 可覆盖（清单 / 日历窗口与收纳箱都用它） | （`current_screen_config_id`） |
 | `screen_config_display_name(&str) -> String` | `"2屏: 3840x2160 (150%) + 1920x1080 (100%)"`；`unknown` → 未知配置，`legacy` → 旧版配置 | （前端 `generateScreenConfigDisplayName`） |
 | `UNKNOWN_SCREEN_CONFIG` | `"unknown"` | |
 | `get_screen_config(db, id) -> R<Option<ScreenConfig>>` | | `get_screen_config` |
 | `save_screen_config(db, &SaveScreenConfigRequest) -> R<ScreenConfig>` | 按 `config_id` upsert（`display_name: None` 保留旧值） | `save_screen_config` |
 | `list_screen_configs(db) -> R<Vec<ScreenConfig>>` | `updated_at DESC` | `list_screen_configs` |
-| `delete_screen_config(db, id) -> R<()>` | 连带删除该组合的 `fence_layouts` | `delete_screen_config` |
+| `delete_screen_config(db, id) -> R<()>` | 连带删除该组合的 `fence_layouts` 与 `window_layouts`（清单 / 日历窗口布局） | `delete_screen_config` |
 | `update_screen_config_name(db, id, name) -> R<()>` | | `update_screen_config_name` |
 
 ### `holiday`
@@ -245,7 +289,7 @@ app 持有 `AutoHideState` 与 `TOP_ON_WAKE: AtomicBool`，200ms 前台定时器
 | `AutoHideState::should_stay_on_top(top_on_wake) -> bool` / `clear_runtime()` | | `should_stay_on_top` / `clear_auto_hide_runtime_state` |
 | `begin_tray_wake() -> u64` / `is_latest_tray_wake(u64) -> bool`、`TRAY_WAKE_TOPMOST_DURATION`（600ms） | 唤起置顶 600ms 后只由最新一次撤销（且 `!should_stay_on_top`） | 同名 |
 | `accept_tray_click(&Mutex<Option<Instant>>, now) -> bool`、`TRAY_CLICK_DEBOUNCE`（300ms） | 托盘左键去抖 | `lib.rs` 同名 |
-| `needs_reattach(cached_owner, owner_alive, shell_now, current_owner) -> bool` | 嵌入桌面（主窗口 / 收纳箱）Explorer 重启后是否重挂 owner | 同名 |
+| `needs_reattach(cached_owner, owner_alive, shell_now, current_owner) -> bool` | 嵌入桌面（清单 / 日历窗口 / 收纳箱）Explorer 重启后是否重挂 owner | 同名 |
 | `lacks_tool_window_style(ex_style: u32) -> bool`、`EX_TOOLWINDOW_BIT` / `EX_APPWINDOW_BIT` | 样式自愈（GPUI 下为防御） | 同名 |
 | `is_desktop_host_class(&str) -> bool` | `GetShellWindow()` 类名是否 `Progman`（不是只记日志） | 同名 |
 | `reset_window_position(monitor, scale) -> WindowPosition`、`RESET_WINDOW_WIDTH/HEIGHT`（380×600 逻辑） | 托盘「重置位置」：主显示器左上起 10% 边距 | `reset_window_impl` |
