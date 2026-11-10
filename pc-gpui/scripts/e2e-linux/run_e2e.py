@@ -1519,7 +1519,7 @@ def _sync_cases(kind: str, tag: str, a: Session, app: App, cloud: Cloud, ctx: di
         check(b.one("SELECT entity_id FROM list_tombstones WHERE entity_id=?", (lid,)), "no list tombstone on B")
         rows = b.query("SELECT id, list_id FROM todos WHERE id IN (%s)" % ",".join(map(str, mine)))
         check(len(rows) == len(mine) and all(r["list_id"] == 1 for r in rows), f"B todos {rows}")
-        ui.wait_main_shows(app_b, f"{tag} Kilo shared", 10)
+        ui.find_row(app_b, f"{tag} Kilo shared", 10)  # B 的默认清单窗口里（列表很长，往下滚着找）
         for _ in range(2):  # 多轮后不复活
             ui.title_sync(app_b)
             ui.title_sync(app)

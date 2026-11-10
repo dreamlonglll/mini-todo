@@ -46,7 +46,7 @@ cd ../cloud && cargo build               # → target/debug/minitodo-cloud
 
 ```bash
 cd pc-gpui/scripts/e2e-linux
-python3 run_e2e.py ../../target/debug/mini-todo ../../../cloud/target/debug/minitodo-cloud            # 全量（约 40 分钟）
+python3 run_e2e.py ../../target/debug/mini-todo ../../../cloud/target/debug/minitodo-cloud            # 全量（约 25 分钟）
 python3 run_e2e.py <app> <cloud> F                 # 只跑本地组
 python3 run_e2e.py <app> <cloud> S[nginx] L01      # 前缀过滤；方括号只匹配该 WebDAV
 python3 run_e2e.py <app> <cloud> S03[apache] F06b
