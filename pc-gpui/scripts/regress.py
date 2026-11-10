@@ -28,7 +28,9 @@ APP = WORKSPACE / "target" / "debug" / "mini-todo"
 SEED = WORKSPACE / "target" / "debug" / "examples" / "seed"
 SAMPLE = SCRIPT_DIR / "sample-data.json"
 
-MAIN = "Mini Todo"
+MAIN = "Mini Todo"  # 默认清单窗口；其它清单窗口的标题 = 清单名
+NEW_LIST = "清单"  # `list:new` 新建的清单（自动取名）
+CALENDAR = "日历"
 EDITOR = "待办详情"
 NEW_EDITOR = "新建待办"
 SUBTASK_VIEW = "查看子任务"
@@ -60,12 +62,12 @@ FENCE_ITEMS = [
     ("Mini Todo 官网.url", "[InternetShortcut]\nURL=https://example.com\n"),
 ]
 
-DARK = ["UPDATE settings SET value='light' WHERE key='text_theme'"]
-QUADRANT = ["INSERT OR REPLACE INTO settings (key, value) VALUES ('view_mode', 'quadrant')"]
+# 日 / 夜、视图、锁定都按窗口存（v31 的 window_prefs / window_layouts；旧的全局键只作迁移初始值，seed 之后改它们没有效果）
+DARK = ["UPDATE window_prefs SET dark = 1 WHERE window_key IN ('list:1', 'calendar')"]
+QUADRANT = ["UPDATE window_prefs SET view_mode = 'quadrant' WHERE window_key = 'list:1'"]
 FIXED = [
-    "INSERT OR REPLACE INTO screen_configs (config_id, display_name, window_x, window_y, window_width, "
-    "window_height, is_fixed) VALUES ('1_1920x1080@100', '1屏: 1920x1080 (100%)', 770, 240, 380, 600, 1)",
-    "UPDATE settings SET value='true' WHERE key='is_fixed'",
+    "INSERT OR REPLACE INTO window_layouts (window_key, screen_config_id, x, y, width, height, is_fixed, updated_at) "
+    "VALUES ('list:1', '1_1920x1080@100', 770, 240, 380, 600, 1, datetime('now', 'localtime'))",
 ]
 EMPTY = ["DELETE FROM subtasks", "DELETE FROM todos"]
 
@@ -150,14 +152,17 @@ SCENES: list[Scene] = [
     Scene("main-list-expanded", steps=[("click", MAIN, 68, 94), ("move", MAIN, 100, 45), ("sleep", 0.5)]),
     Scene("main-expand-all", ui_state={"subtaskExpandAll": True}),
     Scene("main-quadrant", sql=QUADRANT),
-    Scene("main-calendar", open="main,calendar", steps=[("sleep", 2)]),
+    # 日历是独立的「日历」窗口（贴在默认清单窗口右侧）；场景名沿用加宽主窗口时代的，对照图里能看到拆窗前后
+    Scene("main-calendar", open="main,calendar", window=CALENDAR, steps=[("sleep", 2)]),
     Scene("main-dark", sql=DARK),
     Scene("main-dark-hover", sql=DARK, steps=[("move", MAIN, 120, 133)]),
     Scene("main-quadrant-dark", sql=DARK + QUADRANT),
-    Scene("main-calendar-dark", open="main,calendar", sql=DARK, steps=[("sleep", 2)]),
+    Scene("main-calendar-dark", open="main,calendar", window=CALENDAR, sql=DARK, steps=[("sleep", 2)]),
     Scene("main-fixed", sql=FIXED),
     Scene("main-fixed-dark", sql=FIXED + DARK),
     Scene("main-empty", sql=EMPTY),
+    # 新建清单（同托盘「新增待办清单」）：新窗口标题「清单」，标题栏直接是改名输入框
+    Scene("list-new-rename", open="main,list:new", window=NEW_LIST, park=None, steps=[("away",), ("sleep", 0.6)]),
     Scene(
         "main-delete-confirm",
         steps=[("move", MAIN, 120, 133), ("sleep", 0.3), ("click", MAIN, 338, 137), ("sleep", 0.6)],
@@ -572,8 +577,8 @@ SMOKE: list[Scene] = [
                 "check",
                 "深色主题已写库",
                 lambda ctx: (
-                    q(ctx, "SELECT value FROM settings WHERE key = 'text_theme'") == [("light",)],
-                    str(q(ctx, "SELECT value FROM settings WHERE key = 'text_theme'")),
+                    q(ctx, "SELECT dark FROM window_prefs WHERE window_key = 'list:1'") == [(1,)],
+                    str(q(ctx, "SELECT window_key, dark FROM window_prefs")),
                 ),
             ),
             ("shot", MAIN, "smoke-settings-live-dark"),
@@ -678,6 +683,34 @@ SMOKE: list[Scene] = [
                 ),
             ),
             ("shot", NOTIFICATION, "smoke-reminder-notification"),
+        ],
+        shot=False,
+        group="smoke",
+    ),
+    Scene(
+        "smoke-list-new",
+        open="main,list:new",
+        park=None,
+        steps=[
+            # list:new（同托盘「新增待办清单」）→ 新窗口直接在改名 → 输入 → 回车：清单写库、窗口标题跟着改
+            ("away",),
+            ("check", "list:new 建出清单窗口", window_open(NEW_LIST)),
+            # 没有窗口管理器：键盘焦点不会自动给新窗口，点一下标题栏里的改名输入框（点在框内不会结束改名）
+            ("click", NEW_LIST, 80, 27),
+            ("key", "ctrl+a"),
+            ("type", "Smoke List"),
+            ("key", "Return"),
+            ("sleep", 1.0),
+            (
+                "check",
+                "改名写库、窗口标题同步",
+                lambda ctx: (
+                    q(ctx, "SELECT name FROM todo_lists ORDER BY sort_order") == [("待办清单",), ("Smoke List",)]
+                    and ctx.window_id("Smoke List") is not None,
+                    str(q(ctx, "SELECT id, name FROM todo_lists")),
+                ),
+            ),
+            ("shot", "Smoke List", "smoke-list-new"),
         ],
         shot=False,
         group="smoke",
@@ -881,6 +914,14 @@ class Runner:
                 "is_fixed,created_at,updated_at) VALUES(?,?,?,?,380,600,?,'2026-10-10 10:00:00',?)",
                 (cid, name, x, y, fixed, updated),
             )
+            # 窗口布局（v31 起按窗口记）：第一条组合下是默认清单窗口 + 日历窗口（都锁定），第二条只有默认清单窗口
+            windows = [("list:1", x, 380)] + ([("calendar", x + 380, 596)] if fixed else [])
+            for key, wx, width in windows:
+                con.execute(
+                    "INSERT OR REPLACE INTO window_layouts (window_key, screen_config_id, x, y, width, height, is_fixed, "
+                    "updated_at) VALUES (?, ?, ?, ?, ?, 600, ?, ?)",
+                    (key, cid, wx, y, width, fixed, updated),
+                )
 
     @staticmethod
     def prep_fences(con, data: Path, kind: str):

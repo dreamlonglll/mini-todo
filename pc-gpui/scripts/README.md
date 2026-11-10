@@ -43,13 +43,16 @@ pc-gpui/scripts/regress.py [选项]
   --tmp DIR          临时数据目录的父目录
 ```
 
-输出：`<out>/<场景>.png`（按窗口裁剪，名字与参考截图相同：`main-*`、`editor-*`、`subtask-*`、`completed*`、`notification`、
-`settings-*`、`fence*`；交互场景另有 `editor-color-panel`、`editor-date-panel`、`settings-bg-color-panel`、`fence-move-to` 等）、
+输出：`<out>/<场景>.png`（按窗口标题裁剪，名字与参考截图相同：`main-*`、`editor-*`、`subtask-*`、`completed*`、`notification`、
+`settings-*`、`fence*`；其中 `main-calendar` / `main-calendar-dark` 截的是独立的「日历」窗口（场景名沿用加宽主窗口时代的）；
+`list-new-rename` 是 `list:new` 新建的清单窗口（标题「清单」，正在改名）；交互场景另有 `editor-color-panel`、`editor-date-panel`、
+`settings-bg-color-panel`、`fence-move-to` 等）、
 `<out>/compare/<场景>.png`（左：参考图（透明部分铺黑底）｜中：`--before`｜右：本次，中间用品红竖线分隔）、
 `<out>/logs/<场景>.log`（应用日志）；冒烟另有 `<out>/results.json`，有失败时退出码为 1。
 
 每个场景都是一次全新的进程：`seed` 导入 `sample-data.json` → 生成子任务示例图与 2026 年节假日缓存 → 按场景改库
-（深色主题、四象限、固定模式、空列表、WebDAV 设置与两条屏幕配置、收纳箱及其 6 个样例项目……）→ 以
+（深色、四象限、锁定都按窗口改 `window_prefs` / `window_layouts`——seed 时已经迁移到 v31，再改旧的全局键 `text_theme` / `view_mode` /
+`is_fixed` 没有效果；空列表、WebDAV 设置与两条屏幕配置（连同各自的窗口布局）、收纳箱及其 6 个样例项目……）→ 以
 `MINI_TODO_DATA_DIR` / `MINI_TODO_FENCES_ROOT` / `MINI_TODO_DEBUG_OPEN` 启动 → 停光标 → 交互 → 截图。网络经无效代理断开
 （节假日走缓存、版本检查失败，结果确定）。场景表与坐标都在脚本开头的 `SCENES` / `SMOKE` / `CALLS` 里，界面调整后改这里。
 
@@ -60,10 +63,11 @@ pc-gpui/scripts/regress.py [选项]
 | `smoke-create-todo` | FAB → 新建窗口 → 输入标题 → Ctrl+Enter | 新建窗口关闭、库里有新待办，主窗口截图 |
 | `smoke-edit-todo` | 点第 1 行 → 只读详情 → [编辑] → 改标题 → Ctrl+Enter | 标题写库，主窗口截图 |
 | `smoke-subtasks` | 详情里新增子任务、勾选第 2 个 → Esc | 子任务写库、完成数，主窗口计数截图 |
-| `smoke-settings-live` | 设置里开深色主题、外观里调字号 | 写库，主窗口即时变化截图 |
+| `smoke-settings-live` | 设置里开深色主题（日 / 夜按窗口：改的是打开设置的默认清单窗口）、外观里调字号 | `window_prefs.dark` / 字号写库，主窗口即时变化截图 |
 | `smoke-export-import` | 导出（`MINI_TODO_DEBUG_DIALOG_PATH`）→ 库里删一条 → 导入并确认 | 导出 ZIP 有 11 条、导入后被删的待办回来，主窗口截图 |
 | `smoke-restore-completed` | 已完成窗口里取消完成第 1 条 | 完成数减 1，主窗口截图 |
 | `smoke-reminder` | 应用内通知 + 一条下一分钟到期的待办 | 75 秒内弹出通知窗口、`notified = 1` |
+| `smoke-list-new` | `list:new`（同托盘「新增待办清单」）→ 新窗口直接在改名 → 输入 → 回车 | 清单写库、窗口标题跟着改 |
 | `smoke-fence-new` | `fence:new` → 双击标题改名 | 记录与收纳文件夹都已改名 |
 
 ## shot.sh
@@ -91,8 +95,9 @@ pc-gpui/scripts/shot.sh [选项] <输出目录>
   --sleep SEC        等待
 ```
 
-输出：`<name>-screen.png`（整屏）、`<name>-<窗口>.png`（按窗口几何从整屏裁剪：`main` / `editor` / `subtask` /
-`settings` / `completed` / `notification` / `fence`，同类多个时加 `-1`、`-2`）、`<name>-app.log`（应用日志 / 标准输出）。
+输出：`<name>-screen.png`（整屏）、`<name>-<窗口>.png`（按窗口几何从整屏裁剪：`main`（默认清单窗口）/ `calendar` /
+`list`（其它清单窗口，标题是清单名）/ `editor` / `subtask` / `settings` / `completed` / `notification` / `fence`，同类多个时加 `-1`、`-2`）、
+`<name>-app.log`（应用日志 / 标准输出）。
 
 例：
 
@@ -104,7 +109,10 @@ pc-gpui/scripts/shot.sh --no-build --name main-list-hover --window "Mini Todo" -
 # 编辑窗口只读详情 + 设置窗口
 pc-gpui/scripts/shot.sh --no-build --open main,editor:1:view,settings:data /tmp/shots
 # 点 FAB 打开新建窗口，再按 Esc
-pc-gpui/scripts/shot.sh --no-build --click 356,576 --sleep 1 --target 新建待办 --key Escape /tmp/shots
+pc-gpui/scripts/shot.sh --no-build --click 336,556 --sleep 1 --target 新建待办 --key Escape /tmp/shots
+# 独立的日历窗口；新建清单（改名态）
+pc-gpui/scripts/shot.sh --no-build --open main,calendar --window 日历 /tmp/shots
+pc-gpui/scripts/shot.sh --no-build --open main,list:new --window 清单 /tmp/shots
 ```
 
 注意：
