@@ -15,9 +15,9 @@
 
 ## When to Use
 
-- [ ] 改了主窗口模式：`pc-gpui/crates/app/src/services/window_mode.rs`（`plan_mode` / `apply_mode` / 200ms 轮询 / 贴边隐藏）
+- [ ] 改了清单 / 日历窗口的模式：`pc-gpui/crates/app/src/services/window_mode/`（`plan_mode` / `apply_mode` / 200ms 轮询 / 贴边隐藏）
 - [ ] 改了 `platform/embed.rs`、`platform/subclass.rs`（`FLAG_BOTTOM` / `FLAG_LOCK_GEOMETRY`）、`platform/windows.rs` 的样式 / owner / Z 序 / 几何
-- [ ] 改了启动时 `screen_configs` / `is_fixed` / `fixed_embed_desktop` 的恢复
+- [ ] 改了启动时 `window_layouts`（锁定、几何）/ `fixed_embed_desktop` 的恢复
 - [ ] 改了收纳箱窗口：`services/fences.rs` 的建窗参数与嵌入守护、`windows/fence/` 的移动 / 缩放 / 折叠 / 外部拖入、`fence_layouts` 的写入时机
 - [ ] 改了会移动用户文件的收纳箱路径（core `services/fence_fs`、`fence::items::{move_in, restore, move_to}`、`fence::delete`）
 - [ ] 改了通知窗口定位、托盘、单实例、开机自启、Toast、DPAPI，或 release profile / `build.rs`

@@ -24,7 +24,7 @@
 - tag 含 `-`（如 `v3.0.0-pre`）→ GitHub pre-release；不含 → 正式版
 - 应用内更新检查走 `/releases/latest`（`crates/app/src/services/update_check.rs`），**它不返回 pre-release**：
   发预发布版不会提示已装正式版的用户升级
-- `compare_versions`（`crates/app/src/windows/main_window/logic.rs`）按 semver 认预发布：`3.0.0-pre < 3.0.0`、
+- `compare_versions`（`crates/app/src/windows/list_window/logic.rs`）按 semver 认预发布：`3.0.0-pre < 3.0.0`、
   `2.5.0 < 3.0.0-pre`；装了预发布版的用户在正式版发布后能看到更新红点。改这个函数必须保留 `versions_compare_prerelease` 单测
 
 ## 3. release.yml 流程
@@ -119,8 +119,8 @@ Tauri 2.9.6 的卸载器同样只删自己的文件、`RMDir "$INSTDIR"` 不递�
 3. `/UPDATE`：Tauri 卸载器据此保留开机自启值与快捷方式；本卸载器据此保留开机自启值与旧厂商键（两边同名参数，互相兼容）
 
 清场口径：交互模式先探测（probe）再询问（重试 / 取消），静默模式直接关；**直接 `Stop-Process -Force`**，不发 WM_CLOSE ——
-关主窗口只有在没有别的窗口时才退出进程（收纳箱 / 编辑窗口开着时继续），`CloseMainWindow` 也发不到有 owner（固定 / 嵌入）
-或不可见（贴边隐藏）的主窗口；数据随改随存进 SQLite，强制结束不丢数据。PowerShell 脚本受
+关窗口不会退出进程（3.1 起关闭清单 / 日历窗口只是隐藏，只有托盘「退出」才退出），`CloseMainWindow` 也发不到有 owner（固定 / 嵌入）
+或不可见（隐藏、贴边隐藏）的窗口；数据随改随存进 SQLite，强制结束不丢数据。PowerShell 脚本受
 `NSIS_MAX_STRLEN`（1024）限制，改完核对长度。
 
 ### 5.4 编码与编译

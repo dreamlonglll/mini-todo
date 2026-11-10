@@ -59,17 +59,17 @@
 - 不要给 GPUI 窗口加 `WS_EX_LAYERED`（与 DirectComposition 透明冲突）；不要设 `GPUI_DISABLE_DIRECT_COMPOSITION`（透明失效）。
 - **几何一律按客户区（= 可见区域）**：GPUI 窗口在左 / 右 / 下有系统的不可见边框（96 DPI 下各 8px；不可缩放、`PopUp` 的窗口也有——
   没有 `WS_POPUP` 的顶层窗口会被系统补上 `WS_CAPTION`），只有顶边被 GPUI 的 `WM_NCCALCSIZE` 去掉。旧 Tauri 版（已删除）的无边框窗口外框 = 客户区，
-  库里的主窗口 / 收纳箱几何、通知的定位算法沿用它，都是客户区。摆窗用 `platform::set_client_rect_physical` / `set_client_position_physical`
+  库里的清单 / 日历窗口与收纳箱几何、通知的定位算法沿用它，都是客户区。摆窗用 `platform::set_client_rect_physical` / `set_client_position_physical`
   或 `Hwnd::set_client_rect` / `set_client_position`，读用 `client_rect_physical` / `Hwnd::client_rect`；外框（`window_rect_physical`、
   `Hwnd::rect` / `set_rect`）只用于换算。
 - GPUI 建窗时 `calculate_window_rect` 把只在底部的边框高度对半分到上下，按 `WindowOptions.window_bounds` 建出的客户区比请求的高
-  `height_offset / 2`（96 DPI 下 4px，e2e N02 / 主窗口居中 y=236）。`windows::open_window` 建好后统一按客户区校正一次
+  `height_offset / 2`（96 DPI 下 4px，e2e N02 / 默认清单窗口居中 y=236）。`windows::open_window` 建好后统一按客户区校正一次
   （`WindowSpec::client_rect` 给精确物理矩形，否则 `bounds` × 目标显示器缩放），窗口代码不要再各写一遍。
 - 不要子类化 `WM_NCCALCSIZE` 去掉这圈边框：GPUI 只在建窗和 `WM_DPICHANGED` 时缓存边框差值（`border_offset`），之后改边框会让它的
   `WM_GETMINMAXINFO` 最小尺寸、`resize`、`window_bounds` 都按旧差值算错。代价是外框外沿那圈不可见边框仍会接住鼠标（`HTBORDER`）。
 - **GPUI 窗口不带 `WS_SYSMENU`**：GPUI 建出的无标题栏窗口（`WindowKind::PopUp` 除外，它本来就没有）带 `WS_SYSMENU`、被系统补上
   `WS_CAPTION`，标题栏样式还在（只是 `WM_NCCALCSIZE` 把客户区顶边拉到窗口顶），DWM 照常在右上角布置系统标题栏按钮
-  （`DWMWA_CAPTION_BUTTON_BOUNDS` 非空）并画在客户区内容之下——DirectComposition 透明窗口（收纳箱、深色半透明的主窗口）的半透明处
+  （`DWMWA_CAPTION_BUTTON_BOUNDS` 非空）并画在客户区内容之下——DirectComposition 透明窗口（收纳箱、深色半透明的清单 / 日历窗口）的半透明处
   会透出一个系统 ×，激活时还带红底。`windows::open_window` 建好后在客户区校正的同一个延后任务里先对**所有**窗口
   `Hwnd::set_system_menu(false)`（排在窗口代码自己的 Win32 操作之前，隐藏建窗的收纳箱显示时已经没有按钮），窗口代码不要再各写一遍，
   运行时改样式也不要把它加回来。只去这一位：`WS_CAPTION` / `WS_MINIMIZEBOX` / `WS_MAXIMIZEBOX` / `WS_THICKFRAME` 不动（外框 ↔ 客户区换算、
@@ -82,11 +82,14 @@
 ### 2.3 拖动窗口
 
 - Windows 上 `window.start_window_move()` 是**空操作**。
-- 普通标题栏：`ui::title_bar::drag_region()` 作为标题栏（`relative()`）的**第一个子元素**；Windows 上走 `WindowControlArea::Drag`
-  → `HTCAPTION`（系统拖动：贴边分屏、可缩放窗口双击最大化），其它平台 `start_window_move()`。
+- 普通标题栏（编辑 / 子任务 / 已完成 / 设置等窗口）：`ui::title_bar::drag_region()` 作为标题栏（`relative()`）的**第一个子元素**；
+  Windows 上走 `WindowControlArea::Drag` → `HTCAPTION`（系统拖动：贴边分屏、可缩放窗口双击最大化），其它平台 `start_window_move()`。
+  **清单 / 日历窗口不用它**：与收纳箱一样自绘移动 + 窗口内 8 个缩放手柄（`windows::block::BlockDrag`，建窗 `resizable: false`），
+  代价是没有 Aero Snap、没有标题栏双击最大化。
 - 拖动区之上的**可交互元素必须 `.occlude()`**（`EpButton` 已是），否则 Windows 上点它变成拖窗口；纯文字不用。
-- 不可拖动的状态（主窗口固定模式）不放拖动区即可（`WindowSpec` 不暴露 GPUI 的 `is_movable`，保持默认 `true`；
-  设成 `false` 会让 Drag 区整体失效）。
+- 不可拖动的状态：`drag_region` 的窗口不放拖动区即可（`WindowSpec` 不暴露 GPUI 的 `is_movable`，保持默认 `true`；
+  设成 `false` 会让 Drag 区整体失效）；清单 / 日历窗口锁定时 `BlockDrag::title_bar(.., can_move = false, ..)` 不挂拖动、
+  `resize_handles(false, ..)` 不出手柄。
 - `platform::begin_window_drag(window, cx)`（Windows：延后执行 `ReleaseCapture` + `WM_NCLBUTTONDOWN/HTCAPTION`；macOS / Linux
   `start_window_move`）进的是**系统**拖动循环，到松手前改不了位置、拿不到中间状态（macOS 没有任何钩子）。目前没有调用方。
 - 拖动中要改位置（吸附对齐）、或要"移动超过 3px 才拖"（收纳箱标题栏：双击改名）：**自绘拖动**，与缩放手柄同一套——
@@ -103,14 +106,23 @@
   - `active_drag` 是全应用的，只在 MouseUp 时清掉（任何窗口的松手都会清）：没收到松手时（捕获被拿走）要在之后不带左键的 `on_drag_move` 里
     自己 `cx.stop_active_drag(window)`，被别处清掉时在根元素的 `on_mouse_move` 里收尾。
 
-  实现：`windows/fence/mod.rs`（`on_title_drag_move` / `resize_move`），契约见 [backend/desktop-fences.md](../backend/desktop-fences.md)「移动」「吸附」。
+  - **手柄的层次**：收纳箱的手柄在内容之上且 `occlude()`；清单 / 日历窗口的手柄放在**标题栏之后、内容之前**、不 `occlude()`——标题栏区域的
+    边与角在最上面能缩放，其余边上内容在上面（列表滚动条滑块按下即 `stop_propagation`，照常能拖；轨道与留白处缩放），手柄按下时
+    `stop_propagation`（标题栏不会同时开始拖动、根元素的收尾监听收不到）。子元素顺序：**标题栏 → `resize_handles` → 内容 → 遮罩 → 高亮叠层**。
+  - 清单名双击改名：`BlockDrag::is_double_click_release(position)`（按下时 `click_count >= 2` 且上一次按下没拖动窗口；松手离按下点不超过 3px），
+    清单名不 `occlude()`，在它上面按下照样拖窗口；锁定时不挂拖动、双击照样改名。
+  - 清单 / 日历窗口的 `observe_window_bounds` 里 `!drag.is_busy()` 才 `window_mode::schedule_save`（拖动中不防抖保存，松手 16ms 后直接保存一次）。
+
+  实现：`windows/fence/mod.rs`（`on_title_drag_move` / `resize_move`）、`windows/block.rs`（清单 / 日历窗口的 `BlockDrag` / `BlockDragHost`），
+  公共部分 `windows/drag.rs`（阈值、缩放矩形、光标换算、按客户区摆窗、手柄、高亮叠层），吸附 `windows/snap.rs` + `services/snap.rs`；
+  契约见 [backend/desktop-fences.md](../backend/desktop-fences.md)「移动」「吸附」。
 
 ### 2.4 窗口外观、透明与 Root
 
 - 所有窗口都经 `WindowManager::open_child`（或底层 `windows::open_window`）打开：它负责 `WindowSpec::options()`（无系统标题栏、
   尺寸 / 最小尺寸 / 显示器）、`Root` 包装、登记、模态关系与 owner。不要直接 `cx.open_window`——没有 `gpui_kit::base::Root` 时
   gpui-component 控件与 `UiLayer`（消息 / 确认框）不工作甚至 panic。
-- 透明窗口（主窗口 / 通知 / 收纳箱）：`spec.transparent = true`，`open_window` 会把 Root 背景覆盖为 `transparent_black()`
+- 透明窗口（清单 / 日历窗口 / 通知 / 收纳箱）：`spec.transparent = true`，`open_window` 会把 Root 背景覆盖为 `transparent_black()`
   （Root 默认铺主题背景色）；圆角底色由视图自己画。其它窗口不透明白底。
 - Xvfb 截图里透明像素是黑色（无合成器），对照时忽略圆角外的四个角；真实透明效果只能在 Windows 上看（e2e W01 / I05 取色）。
 
@@ -121,7 +133,10 @@
 - 浮层（下拉、日期 / 时间 / 颜色面板、菜单）统一走 `ui::ep_popper::popper`（`deferred(anchored())`，画在本帧最后）：触发元素里放
   `anchor.measure()`，打开时在 render 末尾追加 `popper(..)`。消息与确认框由 `UiLayer` 插件画在 Root 之上，窗口视图不用管。
 - **弹层只能画在本窗口内**（Windows 后端不支持 `WindowKind::AnchoredPopup`，本应用也不为弹层开系统窗口）：放不下时 `popper` 翻转、
-  水平夹回窗口；在小窗口（主窗口 380×600、收纳箱、通知 320×120）里设计弹层时先确认放得下（`max_height`、换方向）。
+  水平夹回窗口；在小窗口（清单窗口 380×600、最小 320×400，收纳箱、通知 320×120）里设计弹层时先确认放得下（`max_height`、换方向）。
+- 右键菜单 / 级联子菜单：`Anchor::at(point)` 零尺寸锚点（按下位置；`contains` 恒为假），子菜单 `Placement::RightStart`（侧边弹出不画箭头，
+  右边放不下翻到左边，再放不下夹回窗口）。主菜单的 `on_dismiss` 用 `window.mouse_position()` 排除子菜单外框（点在子菜单上不算主菜单外），
+  子菜单的锚点是主菜单外框；窗口失活时收起（清单窗口的行右键「移动到 ▸」`list_window/row_menu.rs`、清单名右键菜单、日历筛选下拉）。
 - 圆角容器**裁不掉**子元素的背景（GPUI 内容遮罩只有矩形）：贴边的子元素自己带对应圆角。
 - GPUI 的外阴影会透过半透明背景显示（CSS 不会）：带阴影的浅色块用 `theme::editor_theme::tint(color, alpha)` 的等效不透明色。
 
@@ -141,7 +156,7 @@
   （`elements/div.rs:3170`），位移为 0 也算；按住不动则保持 `true`。
 - 所以"父行 `on_click` + `on_hover` 决定是否挂载子按钮"有坑：按下子按钮 → 按住时鼠标动一下 → 父行 `on_hover(false)` → 下一帧子按钮被卸载，
   它的 MouseUp 监听也没了 → 松手只有父行的点击成立，子按钮 `on_click` 里的 `stop_propagation` 没有机会执行。现象是偶发点错：
-  移动后隔一帧以上才松手时触发（主窗口点「完成」却打开详情）。
+  移动后隔一帧以上才松手时触发（清单窗口点「完成」却打开详情）。
 - 做法：在条件挂载的容器上拦下左键按下。鼠标监听在 Bubble 阶段倒序派发（子元素先于父元素，`window.rs:5958`），按钮仍能记下按下，
   父元素不再记下，也就不会失去悬停：
 
@@ -188,11 +203,13 @@
 
 ### 2.7 字体与 theme token 是唯一来源
 
-- 颜色 / 尺寸 / 圆角 / 间距 / 阴影 / 时长**只从 `theme.rs` 取**；新增 token 加到对应窗口的分节（主窗口调色板 `light()` /
-  `Palette::for_main`、Element Plus `ep()`、`settings_tokens()`、`fence_tokens()`、`editor_theme::*`），数值照抄 UI 规格。
+- 颜色 / 尺寸 / 圆角 / 间距 / 阴影 / 时长**只从 `theme.rs` 取**；新增 token 加到对应窗口的分节（清单 / 日历窗口调色板 `light()` /
+  `Palette::for_main`、Element Plus `ep()` / `ep_menu(dark)`、`settings_tokens()`、`fence_tokens()`、`editor_theme::*`），数值照抄 UI 规格。
   界面代码里不写字面量颜色。
 - 两套调色板：应用自绘部分 `#3B82F6` 系（`light()` / `Palette`），Element Plus 控件 `#409EFF` 系（`ep()`）；以 UI 规格标注为准。
-  深色主题只作用于主窗口（`AppState::main_palette()`）。
+  深色主题只作用于清单 / 日历窗口，按窗口各自的日 / 夜（`AppState::palette_for(key)`）；窗口里的下拉菜单（行右键、清单名右键、日历筛选）
+  跟着用 EP 暗黑模式的弹层色（`theme::ep_menu(dark)`、`ep_popper::frame_for(dark)`、`EpDropdownMenu::dark(bool)`；不透明，不用窗口的半透明底色）；
+  收纳箱「更多」、编辑窗口导入菜单、各种选择器面板仍是浅色。
 - 每个窗口根元素：`.font(theme::ui_font())`、`.text_size(theme::FONT_SIZE)`、`.line_height(relative(theme::LINE_HEIGHT))`。
   `ui_font()`：Windows `Segoe UI` + `Microsoft YaHei` 回退；macOS `.SystemUIFont` + `PingFang SC`（别名只在主字体族上生效，见 §2.15）；
   Linux `Liberation Sans` + `Noto Sans CJK SC`（与参考截图一致）。
@@ -217,8 +234,15 @@
   `cx.observe(&state, |_, _, cx| cx.notify())`；只属于某个窗口的状态放在该窗口的视图实体里。旧 Tauri 事件到新机制的映射见
   `info.md` §3.2（`sync-completed` → `apply_sync_report`，`data-imported` → 重新加载，`subtask-memory-*` → `Entity<DraftSubtasks>`……）。
 - 拉列表只经 `AppState::fetch_todos` / `reload_todos` / `refresh_if_changed`：**单飞 + 过期丢弃**（拉取期间有本地写操作则丢弃并补拉）。
-- 主窗口有模态子窗口时后台刷新跳过（`WindowManager::main_has_modal_child`）；子窗口关闭后 `WindowManager` 自动 `reload_todos`，
-  设置窗口关闭后再重读设置并 `auto_sync::start`。新增后台刷新路径要遵守同样的规则。
+- 任一清单 / 日历窗口有模态子窗口时后台刷新跳过（`WindowManager::any_block_has_modal_child`）；打开方是清单 / 日历窗口的子窗口关闭后
+  `WindowManager` 自动 `reload_todos`，设置窗口关闭后再重读设置并 `auto_sync::start`。新增后台刷新路径要遵守同样的规则。
+- 清单 / 日历窗口登记为 `WindowKind::List` / `WindowKind::Calendar`，key = core 窗口属性表的 key（`list:<id>` / `calendar`）；按 key 找用
+  `WindowManager::block_window(cx, key)`（含原生隐藏着的），默认清单窗口 `default_list(cx)`。托盘「添加待办项」/「打开设置」、应用菜单「设置…」、
+  `DebugOpen` 的 toast / confirm 以默认清单窗口为打开方。
+- **整个应用的提示**（自动同步失败、加载待办失败、导入成功、托盘新建清单失败）走 `services::notice::{show, show_from, show_topic}`，不要写死
+  默认清单窗口（它可能被隐藏）：只在看得见的清单 / 日历窗口里挑（`window_mode::is_shown`；当前激活的 → 发起操作的 → 最近激活过的 → 默认清单 →
+  其它按 key），都看不见时先存着、下次有窗口被激活时补显示。窗口自己的操作结果（标题栏同步、改名、删除清单、行操作）仍显示在那个窗口里。
+- 清单 / 日历窗口的开关（同步来的新清单开窗、删除的关窗）由 `services::block_windows` 观察 `AppState::lists_revision` 统一对账，窗口自己不处理。
 - 新窗口种类：`WindowKind` + 窗口模块的 `open()`（走 `WindowManager::open_child`）；需要截图时在 `windows/mod.rs` 的
   `DebugOpen` / `parse_debug_open` / `open_debug` 加一项并更新 `pc-gpui/scripts/README.md`。
 
@@ -269,7 +293,7 @@
 - **中文避头尾**：GPUI 的换行器（`gpui-pre/src/text_system/line_wrapper.rs`）在任意 CJK 字符间断行，但不做避头尾——全角标点
   （`，。、；：！？）」`）可能落到行首，折行位置与浏览器可能差一个字。不要为了逐像素一致去改换行器；确有需要时：
   CSS `word-break: break-all` 用 `windows/fence/grid.rs` 的 `break_all`（字符间插零宽空格），按空格折行用
-  `main_window/todo_item.rs` 的 `wrapping_words`。
+  `list_window/todo_item.rs` 的 `wrapping_words`。
 - GPUI 没有文字阴影（收纳箱文件名用错位重绘近似）、线性渐变只有两个色标（取色器色相条分段拼接）、位图不支持变换
   （图片预览旋转在后台用 `image` crate 处理）、自带删除线对中文落在基线附近（`todo_item::strike` 自绘）。
 - 滚轮增量方向与 DOM `deltaY` 相反（向上为正）。
@@ -317,12 +341,13 @@ gpui-pre-macos 能建窗（位置 / 显示器 / 置顶层级 / 可缩放都只�
   `hidesOnDeactivate`、对本该显示的窗口补一次显示。**改 style mask 后 AppKit 可能重建标题栏、红绿灯重新出现，还会换掉第一响应者**（键盘输入
   不再进 GPUI 视图）：所有改 mask 的代码都走 `ns.rs` 的 `update_style`（改完重新隐藏按钮、把第一响应者还回去），不要直接 `setStyleMask`。
 - **`app_owns_titlebar_drag: true`**（`WindowSpec::options()`，只对 mac 生效）不要去掉：否则 AppKit 从顶部那条标题栏区域拖窗、为区分双击而
-  延迟标题栏上的点击。拖窗走 `start_window_move`（`ui::title_bar::drag_region` 的非 Windows 分支，必须在鼠标按下 / 移动的事件处理里同步调用）；
-  收纳箱是自绘拖动（§2.3），不走它。GPUI mac 在左键按住时每 16ms 重放上一次 mouseDragged（`synthetic_drag`，位置与修饰键都是旧的）：
+  延迟标题栏上的点击。编辑等窗口拖窗走 `start_window_move`（`ui::title_bar::drag_region` 的非 Windows 分支，必须在鼠标按下 / 移动的事件处理里同步调用）；
+  清单 / 日历窗口与收纳箱都是自绘拖动（§2.3），不走它。GPUI mac 在左键按住时每 16ms 重放上一次 mouseDragged（`synthetic_drag`，位置与修饰键都是旧的）：
   自绘拖动按全局光标重算位置，重放是无副作用的重复。
 - **激活**：点菜单栏图标 / 菜单项、单实例转交、Dock 唤起时本应用多半不在前台，新开或唤起的窗口会落在前台应用的窗口之后——先 `cx.activate(true)`
-  （`tray::activate_app`、`window_mode::bring_main_to_front`、单实例接收端已处理）。`on_reopen` 只在没有可见窗口时回调：移到屏幕边缘（贴边隐藏）
-  的窗口仍算可见，这类状态要在窗口自己的激活回调里处理（主窗口的 `window_mode::on_main_activated`）。
+  （`tray::activate_app`、`window_mode::bring_all_to_front` / `bring_to_front` / `reset_all`、单实例接收端已处理）。`on_reopen` 只在没有可见窗口时回调：
+  移到屏幕边缘（贴边隐藏）的窗口仍算可见，这类状态要在窗口自己的激活回调里处理（清单 / 日历窗口的 `window_mode::on_activated(key)`）；同理，有清单 /
+  日历窗口显示着时点 Dock 不会带出隐藏的清单窗口（已知限制，只能用菜单栏图标左键）。
 - **AppKit 会约束窗口位置**：带标题栏样式的窗口顶边不能高过菜单栏，`setFrameOrigin:` 可能没到目标位置。依赖"窗口真的到了那里"的逻辑
   （贴边隐藏）要读回实际 frame 判断（mac 的 `Hwnd::set_client_position` 已据实返回成败），不要假设摆窗必然成功。
 - **应用菜单与退出**：GPUI 不会自动建主菜单，没有 `set_menus` 就没有 ⌘Q，系统文件面板里的 ⌘C / ⌘V 也不工作（AppKit 靠菜单项的 key equivalent
@@ -355,7 +380,7 @@ gpui-pre-macos 能建窗（位置 / 显示器 / 置顶层级 / 可缩放都只�
   **整体替换**成 `CanJoinAllSpaces | Stationary | IgnoresCycle | FullScreenNone`、`canHide = NO` 等）再 `orderFrontRegardless`。GPUI 建窗后不再改层级，
   本 crate 里会改的只有 `ns::set_floating`（`set_topmost`）——**收纳箱窗口绝不能调它**，也不调 `setFloatingPanel:` / `bring_to_front`。
   单击、拖动、拖入、打开项目都不激活应用；非激活面板单击不一定成为 key 窗口，所以只有要键盘的改名激活应用：先 `cx.activate(true)` 再
-  `window.activate_window()`，并在宽限期内复查、把 key 从主窗口拿回来（激活应用时 AppKit 会把 key 还给上次的 key 窗口；宽限期内的失去 key /
+  `window.activate_window()`，并在宽限期内复查、把 key 从清单窗口拿回来（激活应用时 AppKit 会把 key 还给上次的 key 窗口；宽限期内的失去 key /
   输入框 Blur 不当作提交，宽限期结束仍不是 key 才提交，`windows/fence/mod.rs` 的 `begin_mac_rename_focus`）。菜单动作（⌘M / ⌘W）对收纳箱跳过。
   契约见 [backend/desktop-fences.md](../backend/desktop-fences.md)「场景：macOS 上的收纳箱」。
 - **系统取色面板**（`fence_win::choose_color` 的 mac 实现，`ns::show_color_panel` / `color_panel_state`）：`NSColorPanel` 是 `MainThreadOnly` 的共享
@@ -390,7 +415,7 @@ gpui-pre-macos 能建窗（位置 / 显示器 / 置顶层级 / 可缩放都只�
    用 `has_active_drag` 区分拖动结束的松手）、`DragMoveEvent.bounds` 是注册监听的元素的 hitbox（图片框的实际大小）、`on_click` 里
    `stop_propagation` 能拦下父元素的 `on_mouse_up`；gpui-pre-windows 的 `read_from_clipboard` 是否仍只取第一个图片格式、不认 MIME 名
    格式（`platform::clipboard` 存在的理由；修好了可以删掉它改回 GPUI 的结果）；`on_hover` 是否仍在元素记着按下时报 `false`、鼠标监听是否仍在 Bubble 阶段倒序派发
-   （§2.5.2，主窗口待办行的操作条依赖它）；透明窗口（DirectComposition）实现；`QuitMode` 默认值；`Root` / `RootPlugin` 接口
+   （§2.5.2，清单窗口待办行的操作条依赖它）；透明窗口（DirectComposition）实现；`QuitMode` 默认值；`Root` / `RootPlugin` 接口
    （`UiLayer` 依赖）；`gpui_kit::base::TextView::markdown(..).image_source(..)`；`img(&str)` 的 URI 判定；换行器规则；
    Windows release 构建的 `fxc.exe` 着色器预编译（`gpui-pre-windows/build.rs`）。
    macOS（§2.15，gpui-pre-macos / gpui-pre-apple）：gpui-kit 是否仍给 `gpui_platform` 开 `font-kit`（漏开时 mac 上退回 `NoopTextSystem`，
@@ -401,7 +426,7 @@ gpui-pre-macos 能建窗（位置 / 显示器 / 置顶层级 / 可缩放都只�
    `did_finish_launching` 是否仍重设激活策略、`on_reopen` 的回调条件；`set_menus` / `MenuItem::os_action`；`setReleasedWhenClosed:NO`。
    收纳箱（desktop-fences.md「场景：macOS 上的收纳箱」）：`PopUp` 是否仍是带 `NonactivatingPanel` 的 NSPanel、层级 / collectionBehavior 是否仍只在
    `MacWindow::open` 里设（运行期不重设）、`PopUp` 是否仍有 `ActiveAlways` 跟踪区；所有窗口是否仍 `registerForDraggedTypes:` 文件类型、外部拖入回报的
-   拖放操作；`start_window_move` 是否仍是 `performWindowDragWithEvent:`（主窗口的 `drag_region`）；收纳箱的自绘拖动：mouseDragged 是否仍只发给按下的面板、
+   拖放操作；`start_window_move` 是否仍是 `performWindowDragWithEvent:`（编辑等窗口的 `drag_region`）；收纳箱与清单 / 日历窗口的自绘拖动：mouseDragged 是否仍只发给按下的面板、
    `synthetic_drag` 是否仍在松开左键后停止；`acceptsFirstMouse` / `canBecomeKeyWindow`。
 2. 对齐 app 的 `windows` crate 版本与 gpui-pre-windows 一致；mac 的 `objc2` / `objc2-foundation` / `objc2-app-kit` 与 gpui-pre-macos 一致
    （同步改 `scripts/mac-check/Cargo.toml`）。
