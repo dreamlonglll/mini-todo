@@ -11,9 +11,9 @@
 //! | [`title_bar`] | 通用自绘标题栏（拖动区 + 标题 + 关闭按钮）与 `drag_region` |
 //! | [`scrollbar`] | 细滚动条（非覆盖式，主列表 6px） |
 //! | [`layers`] | 每个窗口 Root 上的浮层插件（message / message_box 挂在这里，窗口视图不用管） |
-//! | [`ep_popper`] | 浅色弹层（`el-popper is-light`）：`Anchor` 量取触发元素、`popper()` 定位 / 翻转 / 点外关闭、`frame()` 外框与箭头 |
+//! | [`ep_popper`] | 浅色弹层（`el-popper is-light`）：`Anchor` 量取触发元素（右键菜单 `Anchor::at`）、`popper()` 定位 / 翻转 / 点外关闭（含级联子菜单的 `RightStart`）、`frame()` / `frame_for(dark)` 外框与箭头 |
 //! | [`ep_select`] | `el-select`：泛型值（默认 `SharedString`）、可过滤 / 可清空 / small / 禁用、键盘导航、虚拟滚动 |
-//! | [`ep_dropdown`] | `el-dropdown-menu` 菜单面板（图标、分隔线、`max-height`），配合 `popper()` 使用 |
+//! | [`ep_dropdown`] | `el-dropdown-menu` 菜单面板（图标、分隔线、`max-height`、固定宽度截断；深色变体、级联箭头、说明文字、勾选），配合 `popper()` 使用 |
 //! | [`ep_switch`] | `el-switch`（过渡动画、disabled / loading） |
 //! | [`ep_checkbox`] | `el-checkbox` |
 //! | [`ep_color_picker`] | `el-color-picker size="small"`：SV 面板 + 色相条 + 可选预设色 + hex 输入 + Clear / OK |

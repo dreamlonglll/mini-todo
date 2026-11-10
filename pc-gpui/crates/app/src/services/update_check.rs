@@ -11,7 +11,7 @@ use gpui_kit::{App, Task};
 use serde::Deserialize;
 
 use crate::state::{APP_VERSION, AppState, GITHUB_OWNER, GITHUB_REPO};
-use crate::windows::main_window::logic::compare_versions;
+use crate::windows::list_window::logic::compare_versions;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);

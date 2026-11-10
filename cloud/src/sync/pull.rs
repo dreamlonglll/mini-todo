@@ -177,12 +177,15 @@ pub(crate) fn fetch_and_merge(ctx: &SyncCtx, force_full: bool) -> anyhow::Result
             ctx.request_image_mirror();
             info!(
                 target: "minitodo_cloud::pull",
-                "merged remote: todos +{} -{}, subtasks +{} -{}, tombstones +{}, skipped {}{}{}",
+                "merged remote: todos +{} -{}, subtasks +{} -{}, tombstones +{}, lists +{} -{}, list tombstones +{}, skipped {}{}{}",
                 stats.todos_upserted,
                 stats.todos_deleted,
                 stats.subtasks_upserted,
                 stats.subtasks_deleted,
                 stats.tombstones_applied,
+                stats.lists_upserted,
+                stats.lists_deleted,
+                stats.list_tombstones_applied,
                 stats.records_skipped,
                 if stats.legacy_cleanup { " (legacy cleanup)" } else { "" },
                 if remote_behind { " (remote is missing local changes)" } else { "" }

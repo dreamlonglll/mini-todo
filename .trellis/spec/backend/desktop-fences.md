@@ -5,12 +5,14 @@
 >   移回 / 跨箱、打开、图标、目录监听、`FenceActivity` 登记）、`services/fence_fs/`（文件层，与数据库无关；Windows 走 `shell.rs` / `sta.rs`，
 >   macOS 走叶子模块 `mac.rs`）；
 > - app（`pc-gpui/crates/app/src/`）：`services/fences.rs`（建窗与嵌入 / mac 桌面层、启动恢复、托盘 / 菜单栏图标三个入口、监听结果回前台、
->   200ms 嵌入守护（Windows）、约 2 秒一次的屏幕组合检测、吸附高亮的跨窗口状态）、`windows/fence/`（`mod.rs` 标题栏 / 折叠 / 移动 / 缩放 / 改名 / 外部拖入，
->   `grid.rs` 项目网格，`panels.rs` 外观 / 删除确认 / 云同步（OneDrive / iCloud）面板，`logic.rs` 纯函数，`snap.rs` 吸附对齐纯函数）、`platform/embed.rs`
->   （Windows：与主窗口共用的嵌入核心）、`platform/macos/ns.rs`（macOS：`make_desktop_layer`、取色面板）、`platform/fence_win.rs`（「自定义颜色」）。
+>   200ms 嵌入守护（Windows）、约 2 秒一次的屏幕组合检测、登记进吸附组 `services::snap`）、`windows/fence/`（`mod.rs` 标题栏 / 折叠 / 移动 / 缩放 / 改名 / 外部拖入，
+>   `grid.rs` 项目网格，`panels.rs` 外观 / 删除确认 / 云同步（OneDrive / iCloud）面板，`logic.rs` 纯函数）、`windows/drag.rs`（拖动阈值、缩放矩形、光标换算、
+>   按客户区摆窗、手柄、高亮叠层，与清单 / 日历窗口共用）、`windows/snap.rs`（吸附对齐纯函数）、`services/snap.rs`（吸附组运行时：场景快照与跨窗口高亮）、
+>   `platform/embed.rs`（Windows：与清单 / 日历窗口共用的嵌入核心）、`platform/macos/ns.rs`（macOS：`make_desktop_layer`、取色面板）、`platform/fence_win.rs`（「自定义颜色」）。
 >
 > 建立于任务 `10-15-desktop-fence`（2026-10-15，旧 Tauri 版，Win11 10.0.26300、双屏混合 DPI 150% + 125% 上 e2e 实测），随
-> `10-15-gpui-rewrite` 移植到 GPUI；旧 Tauri 版已删除（见 git 历史）。主窗口的三种模式见 [window-modes.md](./window-modes.md)，本文件只讲收纳箱。
+> `10-15-gpui-rewrite` 移植到 GPUI；旧 Tauri 版已删除（见 git 历史）。清单 / 日历窗口的三种模式见 [window-modes.md](./window-modes.md)，本文件只讲收纳箱
+> （吸附组的规则对清单 / 日历窗口同样成立，见 §3.1「吸附」）。
 > 文件层逐函数说明见归档任务文档 `.trellis/tasks/archive/2026-10/10-15-desktop-fence/fence-fs-api.md`。
 > macOS 移植于任务 `10-16-macos-fences`（2026-10-16；**只在 GitHub macOS runner 上验证，未经真机验收**），mac 的差异集中在后文
 > 「场景：macOS 上的收纳箱」，调研资料在该任务的 `research/`（桌面层窗口、文件操作与 TCC）。
@@ -33,7 +35,7 @@
 - 改动以下任何东西前先读本文件：
   - core `fence/**`、`services/fence_fs/**`、`settings::delete_screen_config`、`db/paths.rs` 的隔离变量、`fences` / `fence_items` /
     `fence_layouts` 表
-  - app `services/fences.rs`、`windows/fence/**`、`platform/embed.rs`（主窗口也用）、`platform/macos/ns.rs` 的桌面层 / 取色面板、
+  - app `services/fences.rs`、`windows/fence/**`、`platform/embed.rs`（清单 / 日历窗口也用）、`windows/drag.rs` / `windows/snap.rs` / `services/snap.rs`（吸附组，清单 / 日历窗口也用）、`platform/macos/ns.rs` 的桌面层 / 取色面板、
     `platform/fence_win.rs`、托盘 / 菜单栏图标的收纳箱菜单项（`services/tray.rs`）、`services/mac_menu.rs` 的 ⌘M / ⌘W、
     `scripts/macos/bundle.sh` 的隐私用途说明键
 - 平台：托盘 / 菜单栏图标的收纳箱三项（`tray.rs`，Windows 与 macOS 都编译）与启动恢复（`services::fences::restore_all`）在 Windows 与 macOS 上；
@@ -143,18 +145,23 @@ pub fn icon_png(path: &Path, px: u32) -> Result<Vec<u8>, String>;   // 恰好 px
 pub fn launch(path: &Path) -> Result<(), String>;  pub fn reveal(path: &Path) -> Result<(), String>;
 
 // ===== app services::fences（crates/app/src/services/fences.rs） =====
-pub struct FenceRuntime { hidden: bool, windows: HashMap<i64, FenceWindowRecord { handle, view, hwnd }>, watcher: Option<FenceWatcher>, guard_started: bool,
-                          snap_highlights: HashMap<i64, SnapEdges>, snap_owner: Option<i64> } // Global
-pub fn snap_scene(cx: &App, exclude: i64) -> SnapScene;          // 拖动 / 缩放开始时：其它显示中的收纳箱的可见客户区 + 各显示器（"全部隐藏"中为空）
-pub fn set_snap_guides(cx: &mut App, owner: i64, guides: &[SnapGuide]); // 每帧整体替换高亮，只通知变了的目标窗口（App::notify(entity_id)）
-pub fn clear_snap_guides(cx: &mut App, owner: i64);              // 拖动 / 缩放结束；窗口关闭 / 删除时 forget_snap 也会清
-pub fn snap_edges(cx: &App, fence_id: i64) -> SnapEdges;         // 目标窗口渲染时读
+pub struct FenceRuntime { hidden: bool, windows: HashMap<i64, FenceWindowRecord { handle, view, hwnd }>, watcher: Option<FenceWatcher>, guard_started: bool } // Global
+// 建窗后 snap::register(SnapKey::Fence(id), Member { hwnd, view, suppressed: "全部隐藏"中 })；窗口关闭 / 删除时 snap::unregister
 pub fn open_fence_window(cx, fence: Fence, rect: PxRect, scale: f64) -> Option<AnyWindowHandle>; // 已存在则直接返回
 pub fn restore_all(cx);            // 启动恢复（Windows 与 macOS；Linux 直接返回）
 pub fn create_fence(cx);           // 托盘 / 菜单栏图标「新增收纳箱」/ MINI_TODO_DEBUG_OPEN=fence:new
 pub fn toggle_visibility(cx) -> bool;  pub fn reset_positions(cx);   // 托盘「显示/隐藏所有收纳箱」「重置收纳箱位置」
 pub fn ensure_watcher(cx);  pub fn deliver_refresh(cx, FenceRefresh);  pub fn close_deleted(cx, fence_id);
-pub fn apply_window_rect(window, cx, rect: PxRect, scale: f64);   // Windows：按客户区一次 SetWindowPos；macOS setFrame:（都延后执行）；Linux 只改尺寸
+pub fn apply_window_rect(window, cx, rect: PxRect, scale: f64);   // 委托 windows::drag::place_client_rect：Windows 按客户区一次 SetWindowPos；macOS setFrame:（都延后执行）；Linux 只改尺寸
+
+// ===== app services::snap（crates/app/src/services/snap.rs；吸附组：收纳箱 + 清单窗口 + 日历窗口） =====
+pub struct Member { pub hwnd: Option<Hwnd>, pub view: EntityId, pub suppressed: fn(&App, SnapKey) -> bool } // 收纳箱"全部隐藏"中 / 清单、日历窗口贴边藏起中
+pub fn register(cx, key: SnapKey, member: Member);  pub fn unregister(cx, key: SnapKey); // 注销时清掉它留下的、它身上的高亮
+pub fn scene(cx: &App, exclude: SnapKey) -> SnapScene;           // 拖动 / 缩放开始时：其它显示中组员的可见客户区 + 各显示器
+pub fn targets(scene: &SnapScene, alt: bool) -> Option<Vec<SnapTarget>>; // Alt：None，不吸附
+pub fn set_guides(cx, owner: SnapKey, guides: &[SnapGuide]);     // 每帧整体替换高亮，只通知变了的目标窗口（App::notify(entity_id)）
+pub fn clear_guides(cx, owner: SnapKey);  pub fn edges(cx: &App, key: SnapKey) -> SnapEdges; // 结束时清；目标窗口渲染时读
+pub fn visible_rects(cx: &App) -> Vec<PxRect>;                   // 显示中组员的矩形（新收纳箱 / 新清单窗口找空位用）
 fn embed_after_open(cx, hwnd: Option<Hwnd>, rect);               // 建窗后：Windows 嵌入桌面 / macOS make_desktop_layer → 显示（"全部隐藏"中不显示）
 
 // ===== app platform（macOS 收纳箱专用；Windows / Linux 为 no-op） =====
@@ -169,9 +176,8 @@ const GUARD_TICK: Duration = 200ms;  const SCREEN_CHECK_TICKS: u32 = 10;
 // ===== app windows::fence（crates/app/src/windows/fence/） =====
 pub fn fence_key(fence_id: i64) -> String;     // = core fence_label
 // logic.rs（纯函数，单测向量来自旧前端 fence.test.ts）
-pub fn normalize_fence_title(raw) -> Option<String>;  pub fn exceeds_drag_threshold(dx, dy, threshold) -> bool;
+pub fn normalize_fence_title(raw) -> Option<String>;
 pub struct GeometryCommitGate { arm(now), accept(now) -> bool, is_armed(now) -> bool, disarm() } // "用户正在拖动"；accept 只剩单测用
-pub fn resize_rect(..) -> PxRect;  impl ResizeDir { pub fn has_n / has_s / has_w / has_e }
 pub fn icon_bucket(..);  pub fn icon_request_px(..);  pub fn clamp_icon_size(..);  pub fn next_icon_size(..);
 pub fn summarize_op_results(..) -> OpSummary { moved, cancelled, failed, notes, auto_hidden };
 pub fn describe_move_in(&OpSummary, show_hidden: bool);  pub fn describe_delete_kept(..);  pub fn delete_hint(..);
@@ -181,16 +187,22 @@ pub fn empty_hint(total_items: usize) -> String;                         // "把
 pub const ICON_BUCKETS: [u32; 8] = [16, 24, 32, 48, 64, 96, 128, 256];  pub const ICON_SIZE_STEP: i32 = 8;
 pub mod timing { HOVER_EXPAND_DELAY 150ms, HOVER_COLLAPSE_DELAY 400ms, DRAG_COLLAPSE_DELAY 300ms, GEOMETRY_ARM_MS 3000,
                  GEOMETRY_COMMIT_DELAY 16ms, MAX_ICON_REQUESTS 3, .. }
-// snap.rs（吸附对齐纯函数，不依赖 GPUI；单测向量 = PRD 10-18-fence-snap 的验收用例）
+// ===== app windows::drag（crates/app/src/windows/drag.rs；收纳箱与清单 / 日历窗口共用的自绘拖动） =====
+pub fn exceeds_drag_threshold(dx, dy, threshold) -> bool;  pub fn resize_rect(..) -> PxRect;  impl ResizeDir { pub fn has_n / has_s / has_w / has_e }
+pub fn cursor_point(..);  pub fn cursor_delta(..);  pub fn js_round(v) -> i32;  pub fn place_client_rect(window, cx, rect, scale);
+pub struct EmptyDragView;  pub fn resize_handle(dir);  pub fn resize_cursor(dir);  pub fn render_snap_guides(edges: SnapEdges, radius: Pixels);
+
+// ===== app windows::snap（crates/app/src/windows/snap.rs；吸附对齐纯函数，不依赖 GPUI；单测向量 = PRD 10-18-fence-snap 的验收用例） =====
 pub const SNAP_THRESHOLD_DIP: f64 = 10.;  pub fn snap_threshold(scale: f64) -> i32;   // round(10 × 系数) 物理像素
-pub struct SnapTarget { fence_id: i64, rect: PxRect }   pub struct SnapMonitor { rect: PxRect, work: PxRect }
-pub struct SnapScene { targets: Vec<SnapTarget> /* 按 fence_id 排序 */, monitors: Vec<SnapMonitor> }
+pub enum SnapKey { Fence(i64), Block(BlockKey) }       // Ord：收纳箱在前（按 id），清单 / 日历窗口在后（按 BlockKey，日历最后）
+pub struct SnapTarget { key: SnapKey, rect: PxRect }   pub struct SnapMonitor { rect: PxRect, work: PxRect }
+pub struct SnapScene { targets: Vec<SnapTarget> /* 按 SnapKey 排序 */, monitors: Vec<SnapMonitor> }
 impl SnapScene { pub fn targets_at(&self, cursor: Option<(i32, i32)>) -> Vec<SnapTarget> }  // 光标所在显示器上的目标
-pub enum SnapEdge { Left, Right, Top, Bottom }  pub struct SnapGuide { fence_id, edge }  pub struct SnapEdges(u8) { insert, contains, is_empty }
+pub enum SnapEdge { Left, Right, Top, Bottom }  pub struct SnapGuide { key: SnapKey, edge }  pub struct SnapEdges(u8) { insert, contains, is_empty }
 pub fn snap_move(rect, targets, threshold) -> (PxRect, Vec<SnapGuide>);
 pub fn snap_resize(rect /* resize_rect 的结果 */, dir: ResizeDir, targets, threshold, min_w, min_h) -> (PxRect, Vec<SnapGuide>);
-pub fn group_guides(&[SnapGuide]) -> HashMap<i64, SnapEdges>;  pub fn changed_fences(old, new) -> Vec<i64>;
-// theme.rs：fence_tokens().snap_guide = #409EFF；FENCE_SNAP_GUIDE_WIDTH = 2px
+pub fn group_guides(&[SnapGuide]) -> HashMap<SnapKey, SnapEdges>;  pub fn changed_targets(old, new) -> Vec<SnapKey>;
+// theme.rs：snap_guide_color() = #409EFF；SNAP_GUIDE_WIDTH = 2px（清单 / 日历窗口与收纳箱共用）
 ```
 
 core 与 app 必须成对的常量：`logic::ICON_BUCKETS` ↔ `fence_fs::ICON_SIZE_BUCKETS`；`normalize_fence_title` ↔ core `normalize_title`；
@@ -241,7 +253,7 @@ core 与 app 必须成对的常量：`logic::ICON_BUCKETS` ↔ `fence_fs::ICON_S
 
 **登记与守护**：
 
-- `platform::embed` 内部登记每个嵌入窗口挂上的宿主（与主窗口共用，见 [window-modes.md](./window-modes.md)）。
+- `platform::embed` 内部登记每个嵌入窗口挂上的宿主（与清单 / 日历窗口共用，见 [window-modes.md](./window-modes.md)）。
 - 200ms 守护（`services::fences::ensure_guard`，Windows）：每个 tick 取全部收纳箱句柄，对存活的窗口
   `platform::embed::needs_reattach(h) || (Explorer 在运行 && lacks_tool_window_style(ex))` 时 `set_tool_window(true)` →
   `attach_to_desktop` → `set_always_on_bottom(true)`（在 async 块里、`update` 之外）。
@@ -277,8 +289,8 @@ macOS `performWindowDragWithEvent:` 到松手前都改不了位置（macOS 没�
      （标题栏按钮不变暗、悬停展开的不收回；松手后的"悬停"也就不是一次新的进入，刚拖完的折叠收纳箱不会在 150ms 后展开）；松手后等最后一帧落地
      再按光标核对一次，光标真在窗口外才补上离开（`resync_hover_after_drag`）。
    - 另外 GPUI 的 tooltip 不看拖动（光标在标题上停够 500ms 就弹，窗口跟着光标走、光标一直在标题上）：手势进行中标题不挂 tooltip。
-3. 移动超过 3 逻辑像素（`exceeds_drag_threshold`，按窗口坐标判断，这时窗口还没动）才进入移动会话：读客户区起点 → 先 `flush_geometry`（上一次刚松手、
-   还没落库的先落库）→ 快照吸附目标（`snap_scene`）→ `gate.arm(now)`。之后每次移动：新位置 = 起点 + 光标相对按下时的位移（窗口一开始就追上光标，
+3. 移动超过 3 逻辑像素（`drag::exceeds_drag_threshold`，按窗口坐标判断，这时窗口还没动）才进入移动会话：读客户区起点 → 先 `flush_geometry`（上一次刚松手、
+   还没落库的先落库）→ 快照吸附目标（`snap::scene`）→ `gate.arm(now)`。之后每次移动：新位置 = 起点 + 光标相对按下时的位移（窗口一开始就追上光标，
    抓住的点不变）→ 吸附（见「吸附」）→ `gate.arm` 续期 →
    每帧最多摆一次窗（`on_next_frame`，只保留最新一帧）。**移动只改位置**（`platform::set_client_position_physical`），尺寸取窗口当前值：混合 DPI
    下跨屏时 `WM_DPICHANGED` 改了尺寸，不能用起点的尺寸摆回去。
@@ -293,25 +305,29 @@ macOS `performWindowDragWithEvent:` 到松手前都改不了位置（macOS 没�
 
 **缩放**：窗口是 `resizable: false`，系统不进缩放循环。8 个手柄（n/s/w/e/nw/ne/sw/se）只在 `can_resize()`（未锁定、未折叠、
 不在改名）时显示：按下 → 先 `flush_geometry` → 记客户区起点与光标（同移动，拖左 / 上边时窗口在动，所以用屏幕物理坐标）→ 快照吸附目标；
-移动 → `resize_rect`（拖哪条边改哪条边，对边不动，不小于 `round(160 × 系数)`，系数 = `platform::physical_scale(window)`：Windows / Linux 是
+移动 → `drag::resize_rect`（拖哪条边改哪条边，对边不动，不小于 `round(160 × 系数)`，系数 = `platform::physical_scale(window)`：Windows / Linux 是
 `scale_factor()`，macOS 是统一系数）→ 吸附（`snap_resize`）→ 每帧最多一次 `apply_window_rect`（`on_next_frame`，只保留最新一帧）；
 松开 → 最后一帧落地后（16ms）`commit_geometry`。
 
-**吸附（任务 `10-18-fence-snap`；纯逻辑 `windows/fence/snap.rs`，跨窗口高亮在 `services::fences`）**：
+清单 / 日历窗口（3.1）用同一套自绘移动与缩放（`windows/block.rs` 的 `BlockDrag`，公共部分 `windows/drag.rs`），手柄层次与收纳箱不同，见
+[pc-gpui/gpui-conventions.md §2.3](../pc-gpui/gpui-conventions.md)；它们的几何保存走 `window_mode`（[window-modes.md](./window-modes.md) §3「保存」）。
+
+**吸附（任务 `10-18-fence-snap`，`11-09-multi-list-windows` 扩成吸附组；纯逻辑 `windows/snap.rs`，场景快照与跨窗口高亮在 `services::snap`）**：
 
 | 项 | 规则 |
 |---|---|
+| 吸附组 | 收纳箱、清单窗口、日历窗口是同一个吸附组（PRD R10），双向吸附、规则相同：拖收纳箱会吸清单 / 日历窗口的边并在它们身上画高亮，拖清单 / 日历窗口同样吸收纳箱与彼此。各自建窗后 `snap::register(SnapKey, Member)`，真正关窗 / 删除时 `unregister`（清单 / 日历窗口关闭 = 隐藏，不注销） |
 | 阈值 | `snap_threshold(physical_scale)` = `round(10 × 系数)` 物理像素（100% 下 ±10px，150% 下 ±15px）；移动按窗口当前的系数（混合 DPI 下跨屏会变），缩放按开始时的（与最小尺寸同一个） |
-| 目标 | 除自己以外、当前显示中的收纳箱（含锁定的），取它们**屏幕上的可见客户区**（`Hwnd::client_rect`，折叠的只有标题栏；Windows / macOS 都是物理像素口径；"全部隐藏"中没有目标）。拖动 / 缩放开始时快照一次（`snap_scene`，拖动期间其它收纳箱不会动），按 `fence_id` 排序；每次移动只取光标所在显示器上的（`SnapScene::targets_at`：目标属于交叠面积最大的工作区 `pick_work_area`，与光标所在显示器的工作区相同才算；取不到光标 / 光标不在任何显示器上时不过滤）。Linux 没有原生句柄，没有目标 |
+| 目标 | 除自己以外、吸附组里当前显示中的窗口（含锁定的；**最小化的、收纳箱"全部隐藏"中、清单 / 日历窗口隐藏或贴边藏起时不算**——`Hwnd::is_visible` 与 `Member.suppressed`），取它们**屏幕上的可见客户区**（`Hwnd::client_rect`，折叠的收纳箱只有标题栏；Windows / macOS 都是物理像素口径）。拖动 / 缩放开始时快照一次（`snap::scene`，拖动期间其它窗口不会动），按 `SnapKey` 排序（收纳箱在前按 id，清单 / 日历窗口在后按 `BlockKey`，所以同距离时先吸收纳箱）；每次移动只取光标所在显示器上的（`SnapScene::targets_at`：目标属于交叠面积最大的工作区 `pick_work_area`，与光标所在显示器的工作区相同才算；取不到光标 / 光标不在任何显示器上时不过滤）。Linux 没有原生句柄，没有目标 |
 | 方向 | 横向 / 纵向独立：各取距离最近且 ≤ 阈值的候选，可以同时吸 x 和 y；同距离取目标列表里靠前的（确定性） |
 | 移动 | 同名边对齐 left↔left、right↔right、top↔top、bottom↔bottom；只平移、尺寸不变 |
 | 缩放 | 在 `resize_rect` 之后；只调被拖的边、对边不动。候选 = 同名边对齐（E→right、W→left、N→top、S→bottom）+ 等宽（拖 E / W）/ 等高（拖 N / S），放在一起取最近；吸附后小于最小尺寸的候选跳过 |
 | 不做 | 相邻贴边（我的 left 吸别人的 right）、屏幕工作区边缘、中心线、网格；不加设置项 |
 | Alt | 按住 Alt（macOS Option，GPUI `modifiers.alt`）时完全不吸附、不出高亮；按每次移动事件当时的修饰键判断，松开后下一次移动恢复。Windows 上单按 Alt 松开不会进菜单模式（收纳箱没有 `WS_SYSMENU`，GPUI 处理 `WM_SYSKEYUP` 返回 0） |
-| 高亮 | 画在**目标**收纳箱上：同名边对齐 → 目标的那条边；等宽 → 目标的上、下两边；等高 → 目标的左、右两边。吸附生效的方向上，所有与结果恰好成立的关系都亮（两个目标 left 相同，吸上后两个都亮）。被拖的收纳箱自己不画 |
-| 高亮的样子 | 目标窗口根元素里一个 `absolute().inset_0().rounded(radius::MD)` 的叠层，只给被对齐的边 `border_*(FENCE_SNAP_GUIDE_WIDTH = 2px)`，颜色 `fence_tokens().snap_guide`（`#409EFF`，不随自定义背景色变）；跟着窗口圆角，折叠时就是标题栏的边；没有命中区，不挡鼠标。不新建覆盖窗口、不画跨窗口辅助线 |
-| 高亮状态 | `FenceRuntime.snap_highlights`（目标 id → 边集合）+ `snap_owner`；拖动中的收纳箱每帧 `set_snap_guides` 整体替换，只对变了的目标 `App::notify(entity_id)`（不借用视图：调用方正在自己视图的 update 里）。拖动 / 缩放结束、按住 Alt、脱离吸附时清空；被拖或作目标的窗口关闭 / 删除时 `forget_snap` 清掉，不残留 |
-| 落库 | 落库的就是吸附后的几何（移动 / 缩放结束照常 `commit_geometry` 读窗口客户区） |
+| 高亮 | 画在**目标**窗口上：同名边对齐 → 目标的那条边；等宽 → 目标的上、下两边；等高 → 目标的左、右两边。吸附生效的方向上，所有与结果恰好成立的关系都亮（两个目标 left 相同，吸上后两个都亮）。被拖的窗口自己不画 |
+| 高亮的样子 | `windows::drag::render_snap_guides(edges, radius)`：目标窗口根元素里一个 `absolute().inset_0()` 的叠层，只给被对齐的边 `border_*(theme::SNAP_GUIDE_WIDTH = 2px)`，颜色 `theme::snap_guide_color()`（`#409EFF`，不随自定义背景色变）；收纳箱 `radius::MD`、折叠时就是标题栏的边，清单 / 日历窗口跟着自己的圆角（经典固定为 0）；没有命中区，不挡鼠标。不新建覆盖窗口、不画跨窗口辅助线 |
+| 高亮状态 | `services::snap` 的运行时（目标 `SnapKey` → 边集合 + 当前 owner）；拖动中的窗口每帧 `set_guides` 整体替换，只对变了的目标 `App::notify(entity_id)`（不借用视图：调用方正在自己视图的 update 里）。拖动 / 缩放结束、按住 Alt、脱离吸附时 `clear_guides`；被拖或作目标的窗口注销（关闭 / 删除）时 `unregister` 清掉，不残留 |
+| 落库 | 落库的就是吸附后的几何（收纳箱移动 / 缩放结束照常 `commit_geometry` 读窗口客户区；清单 / 日历窗口松手 16ms 后 `window_mode::save_window_state`） |
 
 **几何落库（只有用户发起的才落库）**：
 
@@ -439,7 +455,7 @@ ALTER TABLE fence_items ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;      -- �
 ALTER TABLE fences ADD COLUMN show_hidden INTEGER NOT NULL DEFAULT 0;      -- 「显示隐藏的图标」
 ```
 
-- `LATEST_VERSION = 30`，迁移表驱动追加 `(29, migration_v29)`、`(30, migration_v30)`。
+- 迁移表驱动追加 `(29, migration_v29)`、`(30, migration_v30)`（当时 `LATEST_VERSION = 30`；之后的 v31 多待办清单不涉及收纳箱表）。
 - v30 两列都有默认值 0：旧库升级后已有项目全部可见、开关关闭。以 `.` 开头的项目按名字自动隐藏，不存标记。
   旧版本（3.0.0 等）打开 v30 库只记警告、按现状继续运行（`db/connection.rs`，没有降级）；它们按显式列名读写这两张表，新列不影响，
   只是看不到隐藏效果（收纳箱数据不同步，只影响同一台机器上装回旧版本的情况，见 [pc-gpui/data-compat.md](../pc-gpui/data-compat.md)）。
@@ -683,7 +699,7 @@ release 不编译。Windows e2e 的 P01 在 release 构建上验证忽略 `MINI_
 | | `onedrive_notice_is_claimed_once_and_stays_device_local` | v29 默认 `'false'`；只返回一次 true；不在 `SYNCED_SETTING_KEYS`、导出的 `AppSettings` JSON 里没有它 |
 | | `deleting_guard_blocks_reentry_and_releases_on_drop` / `moving_blocks_deletion_until_every_move_is_done` / `reconcile_skips_a_fence_that_is_being_deleted` | 登记互斥、drop 注销、删除中对账返回 `None` 且不补行 |
 | | `affected_fences_match_folder_names_case_insensitively` / `sources_inside_another_fence_folder_are_recognized` | 监听匹配；跨箱来源识别（只认第二层） |
-| core `window_logic.rs` | `tool_window_style_is_repaired_only_when_wiped` / `needs_reattach` 各例 | 自愈判定（与主窗口共用） |
+| core `window_logic.rs` | `tool_window_style_is_repaired_only_when_wiped` / `needs_reattach` 各例 | 自愈判定（与清单 / 日历窗口共用） |
 | core `db/migrations.rs` | `v29_creates_fence_tables_with_contract_defaults` / `v29_deleting_a_fence_cascades_to_its_items_and_layouts` / `v29_fence_writes_do_not_count_as_sync_changes`；`LATEST_VERSION == 30` | 列默认值、UNIQUE、外键；`PRAGMA foreign_keys = 1` 后级联；写收纳箱表 `local_seq` 不变、墓碑为 0 |
 | | `v30_adds_hidden_columns_defaulting_to_visible` / `v30_hidden_flags_do_not_count_as_sync_changes` | v29 旧库升级后已有项目可见、`show_hidden` 关闭，旧版本的显式列写法照常可用；写两列不计 `local_seq` |
 | core `db/paths.rs` | `release_builds_ignore_the_dev_data_dir_variable` / `debug_builds_use_a_non_empty_dev_data_dir` | release 恒 None；空值不生效；相对路径转绝对 |
@@ -695,8 +711,9 @@ release 不编译。Windows e2e 的 P01 在 release 构建上验证忽略 `MINI_
 | | `protected_targets_outside_the_root_are_not_listed` | `Reserved::with_policy(root, false)`（macOS 规则）不列举收纳根目录以外的目标目录、只按本批预订去重；根目录内照常列举；`Reserved::new` 只有 macOS 不列举 |
 | | `default_desktop_is_the_system_desktop` | 不设 `MINI_TODO_DESKTOP_DIR` 时 `user_desktop_dir() == dirs::desktop_dir()` |
 | | 命名（`sanitize_*`、`folder_name_validation_rejects_traversal`、`item_name_validation_{windows_rules,unix_rules,follows_the_platform}`、`names_legal_on_unix_can_be_restored_and_moved_between_fences`（非 Windows）、`unique_file_name_adds_suffix_before_extension`、`restore_name_undoes_collision_suffix`）、图标（`bucket_rounds_up`、`cache_key_is_stable_and_case_insensitive`、`strips_shell_frame_around_small_icons`、`prune_cache`）、监听（`watcher_reports_debounced_folder_changes`）、`release_build_ignores_override`（release） | |
-| app `windows/fence/logic.rs` | `titles_follow_backend_rules` / `drag_threshold` / `geometry_gate_vectors` / `resize_vectors` / `icon_size_vectors` / `move_in_messages` / `delete_kept_messages` / `delete_hint_text` 等 | 测试向量来自旧前端 `fence.test.ts`：标题与后端同规则；闸门未 arm 的移动不算数、拖动中续期、超时 / `disarm` 后失效；缩放到最小尺寸不推动对边；图标档位与后端一致；提示文案 |
-| app `windows/fence/snap.rs` | `threshold_is_ten_logical_pixels` | `round(10 × 系数)`：1 → 10、1.25 → 13、1.5 → 15、非法系数按 1 |
+| app `windows/fence/logic.rs`（`drag_threshold` / `resize_vectors` 在 `windows/drag.rs`） | `titles_follow_backend_rules` / `drag_threshold` / `geometry_gate_vectors` / `resize_vectors` / `icon_size_vectors` / `move_in_messages` / `delete_kept_messages` / `delete_hint_text` 等 | 测试向量来自旧前端 `fence.test.ts`：标题与后端同规则；闸门未 arm 的移动不算数、拖动中续期、超时 / `disarm` 后失效；缩放到最小尺寸不推动对边；图标档位与后端一致；提示文案 |
+| app `windows/snap.rs`（原 `windows/fence/snap.rs`，目标 / 高亮的 id 换成 `SnapKey`） | `threshold_is_ten_logical_pixels` | `round(10 × 系数)`：1 → 10、1.25 → 13、1.5 → 15、非法系数按 1 |
+| | `keys_sort_fences_first_then_lists_then_the_calendar` / `a_list_window_snaps_to_fences_and_fences_snap_to_list_windows` / `mixed_targets_break_ties_by_key_order_and_diff_per_window` | 吸附组：收纳箱在前、清单按 id、日历最后；清单窗口与收纳箱双向吸附；混合目标同距离按 key 顺序、高亮按窗口 diff |
 | | `moving_snaps_top_to_top_within_the_threshold` / `moving_snaps_both_axes_independently` / `moving_takes_the_nearest_candidate_and_breaks_ties_by_target_order` / `moving_highlights_every_target_that_ends_up_aligned` | PRD 用例：A(200,100,400,300)，B.top ∈ [90,110] 吸到 100、89 / 111 不吸；right 对齐的同时吸 top / bottom；只平移；取最近、同距离取靠前的目标；等宽时 left / right 都亮；多个目标同时对齐都亮 |
 | | `collapsed_targets_snap_by_their_title_bar` / `no_targets_means_no_snapping` | 折叠的目标按标题栏矩形参与（不按展开高度）；没有目标原样返回 |
 | | `resizing_the_south_edge_snaps_to_the_same_height_and_keeps_the_top` / `resizing_the_east_edge_snaps_to_the_same_width_and_keeps_the_left` / `resizing_the_south_edge_snaps_bottom_to_bottom` / `resizing_west_and_north_moves_only_the_dragged_edge` / `resizing_a_corner_snaps_both_axes` / `resizing_takes_the_nearest_of_edge_and_size_candidates` / `resizing_never_snaps_below_the_minimum_size` / `resize_snapping_runs_after_resize_rect` | 高度 ∈ [290,310] → 300、宽度 ∈ [390,410] → 400、对边不动；bottom↔bottom；W / N 只动被拖的边；角同时吸两个方向；对齐与等宽 / 等高取最近；小于最小尺寸的候选跳过；接在 `resize_rect` 之后右下角不被推走 |
@@ -718,7 +735,7 @@ release 不编译。Windows e2e 的 P01 在 release 构建上验证忽略 `MINI_
 | F03 / F10 / F11 双击标题改名；改名后 / 单击标题后紧接着的拖入 | 文件夹同步改名；第一次拖入不丢 |
 | F07 几何 | 可见区域 = 数据库记录的物理像素几何 |
 | F05 / F06 | Win+D 后仍可见；Explorer 重启后自动重挂 |
-| F12 拖动（另起实例，库里预置 A / B 两个收纳箱，主窗口最小化） | 拖 B 的标题栏：窗口跟手（位移 = 光标位移、尺寸不变）、松手后 `fences` 与当前组合的 `fence_layouts` = 客户区 |
+| F12 拖动（另起实例，库里预置 A / B 两个收纳箱；默认清单窗口先 WM_CLOSE 隐藏——3.1 起关闭 = 隐藏，隐藏的窗口不挡输入、也不算吸附目标） | 拖 B 的标题栏：窗口跟手（位移 = 光标位移、尺寸不变）、松手后 `fences` 与当前组合的 `fence_layouts` = 客户区 |
 | F13 移动吸附 | B.top 落在 A.top + 6（逻辑像素）→ 吸到 A.top（拖动中就吸）；拖动中截图 A 的上边有 `#409EFF`、左边没有；松手后高亮消失；落库的是吸附后的位置 |
 | F14 Alt | 拖到一半按住 Alt → 落在阈值内也不吸、A 不高亮；松开后再拖照常吸附（单按 Alt 不进菜单模式） |
 | F15 缩放吸附 | 拖 B 的下边让高度落在 A.height + 4（逻辑像素）→ 等高、上边与宽度不动；A 的左右两边高亮、上边不亮 |
@@ -841,7 +858,7 @@ fn on_title_drag_move(&mut self, event: &MouseMoveEvent, window: &mut Window, cx
 fn end_move(&mut self, window: &mut Window, cx: &mut Context<Self>) {        // 标题栏 on_mouse_up + on_mouse_up_out
     if self.moving.take().is_none() { return; }
     self.flush_placement(window, cx);                                          // 最后一帧
-    runtime::clear_snap_guides(cx, self.fence_id);                             // 高亮不残留
+    snap_service::clear_guides(cx, SnapKey::Fence(self.fence_id));             // 高亮不残留
     self.commit_after_placement(window, cx);                                   // 16ms 后 commit_geometry，完成后 disarm
 }
 ```
@@ -1027,7 +1044,7 @@ NSPanel + `NSWindowStyleMaskNonactivatingPanel`），再改成桌面层。Window
 - **e2e**（`pc-gpui/scripts/e2e-macos/run_e2e.py` 的 MF 组，smoke 作业，debug `.app`，全部在临时目录）：MF01 新建（层级 = 桌面图标层 + 1、排在所有
   layer ≥ 0 的窗口之后、368×336pt 右上角、库与文件夹、日志自报 `0x251` / `canHide=false` / 非激活面板）、MF02 目录监听、MF03 真实拖入
   （`drag_source.py` 拖放源）与撞名不覆盖、MF04 移回原目录 / 桌面、MF05 删除收纳箱全部移回且 `.DS_Store` 不搬到桌面、MF06 ⌘H 与别的应用隐藏都不藏
-  收纳箱 + 点收纳箱不激活应用、MF07 有收纳箱时 Dock 唤起主窗口、MF08 双击标题改名（激活应用，系统输入流粘贴 + 回车）、MF09 拖标题栏落库、MF10 菜单栏图标三项与重启恢复；M07 断言菜单栏图标
+  收纳箱 + 点收纳箱不激活应用、MF07 有收纳箱时 ⌘W 隐藏默认清单窗口后 Dock 唤起它、MF08 双击标题改名（激活应用，系统输入流粘贴 + 回车）、MF09 拖标题栏落库、MF10 菜单栏图标三项与重启恢复；M07 断言菜单栏图标
   菜单**有**收纳箱三项。窗口枚举不带 `kCGWindowListExcludeDesktopElements`（详见 `pc-gpui/scripts/e2e-macos/README.md`）。
 - **runner 测不了**（写进交付说明）：Spaces / 台前调度 / 调度中心 /「显示桌面」/「点按墙纸显示桌面」、Retina / 多显示器 / 混合缩放、中文输入法、
   真实 `~/Desktop` 的 TCC 流程、iCloud「桌面与文稿」、跨卷移动、打开 / 在访达中显示（会拉起别的应用）、Finder 重启后的层级、光标形状。

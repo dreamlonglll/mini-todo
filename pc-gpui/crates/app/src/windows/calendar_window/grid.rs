@@ -1,5 +1,5 @@
-//! 日历视图（旧 `CalendarView.vue`，规格 §9）：星期头 + 6×7 日格（农历 / 节气 / 节日、休 / 班角标、今天圆点）
-//! + 覆盖在网格上的跨天待办条（全部待办，含已完成；按行拆段、泳道避让、悬停联动、点击打开详情）。
+//! 日历网格（旧 `CalendarView.vue`，规格 §9）：星期头 + 6×7 日格（农历 / 节气 / 节日、休 / 班角标、今天圆点）
+//! + 覆盖在网格上的跨天待办条（所有清单的待办，含已完成，按日历的清单筛选；按行拆段、泳道避让、悬停联动、点击打开详情）。
 //!
 //! 节假日后台加载（每年最多 3 次重试，结果为空时 5s / 10s / 15s 后重载，切月作废旧加载）。
 
@@ -15,7 +15,7 @@ use gpui_kit::{
 use mini_todo_core::lunar::{LunarTextKind, lunar_display_text};
 
 use super::logic::{self, CalendarCell, TodoBar};
-use super::{MainWindow, RenderCtx};
+use super::{CalendarCtx, CalendarWindow};
 use crate::theme::{self, main_window as dims};
 
 /// 节假日每年最多尝试 3 次，间隔 2s × 次数
@@ -71,7 +71,7 @@ impl CalendarState {
     }
 
     /// 午夜 + 1s 刷新"今天"并重新排程（系统休眠导致的延后由窗口聚焦刷新兜底）
-    pub fn start(&mut self, cx: &mut Context<MainWindow>) {
+    pub fn start(&mut self, cx: &mut Context<CalendarWindow>) {
         cx.spawn(async move |this, cx| {
             loop {
                 let now = Local::now();
@@ -90,7 +90,7 @@ impl CalendarState {
         .detach();
     }
 
-    pub fn refresh_today(&mut self, cx: &mut Context<MainWindow>) {
+    pub fn refresh_today(&mut self, cx: &mut Context<CalendarWindow>) {
         let today = local_today();
         if today != self.today {
             self.today = today;
@@ -102,15 +102,15 @@ impl CalendarState {
         logic::month_text(self.year, self.month)
     }
 
-    pub fn prev_month(&mut self, _cx: &mut Context<MainWindow>) {
+    pub fn prev_month(&mut self, _cx: &mut Context<CalendarWindow>) {
         (self.year, self.month) = logic::shift_month(self.year, self.month, -1);
     }
 
-    pub fn next_month(&mut self, _cx: &mut Context<MainWindow>) {
+    pub fn next_month(&mut self, _cx: &mut Context<CalendarWindow>) {
         (self.year, self.month) = logic::shift_month(self.year, self.month, 1);
     }
 
-    pub fn go_to_today(&mut self, cx: &mut Context<MainWindow>) {
+    pub fn go_to_today(&mut self, cx: &mut Context<CalendarWindow>) {
         self.refresh_today(cx);
         self.year = self.today.year();
         self.month = self.today.month();
@@ -139,7 +139,7 @@ impl CalendarState {
     }
 }
 
-impl MainWindow {
+impl CalendarWindow {
     /// 年月变化时重新加载节假日（作废进行中的旧加载与重试）
     fn ensure_holidays(&mut self, cx: &mut Context<Self>) {
         let key = (self.calendar.year, self.calendar.month);
@@ -240,7 +240,7 @@ impl MainWindow {
 
     pub(super) fn render_calendar(
         &mut self,
-        rc: &RenderCtx,
+        rc: &CalendarCtx,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -251,13 +251,13 @@ impl MainWindow {
         let bars = {
             let state = self.state.read(cx);
             let plain: Vec<CalendarCell> = cells.iter().map(|c| c.cell).collect();
-            logic::calendar_bars(&plain, &state.todos)
+            logic::calendar_bars(&plain, &state.calendar_todos())
         };
         let todo_info: HashMap<i64, (SharedString, gpui_kit::Hsla, bool)> = {
             let state = self.state.read(cx);
             state
-                .todos
-                .iter()
+                .calendar_todos()
+                .into_iter()
                 .map(|t| {
                     (
                         t.id,
@@ -335,7 +335,7 @@ impl MainWindow {
         view: &CellView,
         row: usize,
         col: usize,
-        rc: &RenderCtx,
+        rc: &CalendarCtx,
         line: gpui_kit::Hsla,
     ) -> impl IntoElement {
         let palette = rc.palette;
@@ -496,7 +496,10 @@ impl MainWindow {
                             .text_color(theme::hex(0xFFFFFF))
                             .child(title);
                         this.child(if completed {
-                            super::todo_item::strike(text, theme::hex(0xFFFFFF))
+                            crate::windows::list_window::todo_item::strike(
+                                text,
+                                theme::hex(0xFFFFFF),
+                            )
                         } else {
                             text
                         })

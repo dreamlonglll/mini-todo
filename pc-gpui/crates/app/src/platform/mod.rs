@@ -235,8 +235,8 @@ pub fn hwnd(window: &Window) -> Option<Hwnd> {
 /// 其它平台 `window.start_window_move()`。
 ///
 /// 普通的"按住标题栏拖动"请用 [`crate::ui::title_bar::drag_region`]（Windows 上走系统 `HTCAPTION`，
-/// 支持贴边分屏与双击最大化）。目前没有调用方：收纳箱要在拖动中吸附对齐，改成了自绘拖动
-/// （`windows/fence/mod.rs` 模块文档）。
+/// 支持贴边分屏与双击最大化）。目前没有调用方：收纳箱与主窗口（默认清单窗口）要在拖动中吸附对齐，改成了自绘拖动
+/// （`windows/fence/mod.rs` 模块文档、`windows/block.rs` 的 `BlockDrag`）。
 pub fn begin_window_drag(window: &Window, cx: &App) {
     imp::begin_window_drag(window, cx)
 }

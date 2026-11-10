@@ -16,7 +16,8 @@
 //!     （不用 If-Modified-Since：nginx 按整秒比较，同一秒内的写入会被漏掉；
 //!      nginx 的 ETag 也只到秒，同秒等长的改写同样 304，所以要定期无条件 GET 兜底）
 //!   404 → 远端为空；200 → 解析（失败直接报错，绝不上传覆盖读不懂的远端）
-//!   单事务合并：墓碑并集 → 墓碑应用到本地 → 记录级 LWW（平局保留本地）→ 远端设置（K3-5）
+//!   单事务合并：墓碑并集 → 墓碑应用到本地 → 记录级 LWW（平局保留本地）→ 远端设置（K3-5）；
+//!     待办清单（`todoLists` / `listTombstones`，v31）同一套规则，被删清单的窗口记录随之清理
 //!   下载远端列出、本地缺失的图片
 //!   生成上传文档：本地 ∪ 远端（墓碑压制），保留远端的未知顶层键与本地无法识别的记录
 //!   不需要上传（无本地变更且文档与远端等价）→ 记基准，结束
@@ -36,12 +37,14 @@
 //! 删除通过墓碑传播；正常同步里没有"缺席即删除"。手动导入走 [`crate::data::import_json`]。
 
 use crate::data::{adopt_settings_json, read_app_settings, settings_version, EXPORT_VERSION};
-use crate::db::models::Tombstone;
+use crate::db::models::{ListTombstone, Tombstone, DEFAULT_LIST_CREATED_AT, DEFAULT_LIST_ID};
 use crate::db::paths::{self, is_safe_image_name};
 use crate::db::settings_kv::{
     get_bool_setting, get_setting, get_setting_or, set_bool_setting, set_setting,
 };
-use crate::db::sync_store::{self, EntityKind, LocalRecords, MergeStats, TombstoneIndex};
+use crate::db::sync_store::{
+    self, EntityKind, ListAssignment, ListTombstoneIndex, LocalRecords, MergeStats, TombstoneIndex,
+};
 use crate::db::time::{normalize_datetime, now_local, DefaultTime};
 use crate::db::{AppSettings, Database};
 use crate::services::secret;
@@ -49,6 +52,7 @@ use crate::services::webdav::{
     choose_put_precondition, GetOutcome, Precondition, PropMeta, PutOutcome, RemoteVersion,
     WebDavClient,
 };
+use crate::window_prefs;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -257,8 +261,11 @@ pub fn test_connection(
 /// `sync-data.json.gz` 的顶层结构（K2）。
 ///
 /// 反序列化尽量宽容：标量字段类型不对时取默认值；单条墓碑 / 图片名无法识别时跳过；
-/// 但 `todos` / `tombstones` 不是数组（结构都看不懂）时报错，同步随之中止。
+/// 但 `todos` / `tombstones` / `todoLists` / `listTombstones` 不是数组（结构都看不懂）时报错，同步随之中止。
 /// 未声明的顶层键收进 `extra`，下次上传原样写回（前向兼容）。
+///
+/// 清单（v31，格式 4.1）是两个显式的新顶层键 `todoLists` / `listTombstones`，**不**在 `extra` 里：旧版本
+/// （v2.5.0 / 3.0.x）不认识它们，正是经它们自己的 `extra` 原样带回，清单定义与清单墓碑才不会被旧设备抹掉。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncData {
@@ -286,6 +293,21 @@ pub struct SyncData {
     pub images: Vec<String>,
     #[serde(default, deserialize_with = "de_tombstones")]
     pub tombstones: Vec<Tombstone>,
+    /// 待办清单（v31），原始 JSON（看不懂的记录原样带进上传文档）。`None` = 远端文档没有这个键（旧版本写入方 /
+    /// 还没有新版本写过）：视为"远端没有清单信息"，合并与强制拉取都不删本地清单（契约 §1）
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "de_todo_lists"
+    )]
+    pub todo_lists: Option<Vec<Value>>,
+    /// 清单删除墓碑（v31）。不进共用的 `tombstones`（旧版本丢弃未知 `entityType`）；默认清单的墓碑在解析时丢弃
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "de_list_tombstones"
+    )]
+    pub list_tombstones: Option<Vec<ListTombstone>>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -343,6 +365,37 @@ fn de_tombstones<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Tombstone>, D::E
             .collect()),
         Value::Null => Ok(Vec::new()),
         _ => Err(serde::de::Error::custom("tombstones 必须是数组")),
+    }
+}
+
+/// `todoLists`：数组原样保留；`null` 同缺失（远端没有清单信息）；其它类型报错
+fn de_todo_lists<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<Value>>, D::Error> {
+    match Value::deserialize(d)? {
+        Value::Array(items) => Ok(Some(items)),
+        Value::Null => Ok(None),
+        _ => Err(serde::de::Error::custom("todoLists 必须是数组")),
+    }
+}
+
+/// `listTombstones`：逐条宽容解析，无法识别的与默认清单的墓碑跳过；`null` 同缺失；其它类型报错
+fn de_list_tombstones<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<Option<Vec<ListTombstone>>, D::Error> {
+    match Value::deserialize(d)? {
+        Value::Array(items) => Ok(Some(
+            items
+                .iter()
+                .filter_map(|v| {
+                    let parsed = sync_store::parse_list_tombstone(v);
+                    if parsed.is_none() {
+                        log::warn!("[sync] 忽略无法识别 / 默认清单的远端清单墓碑: {}", v);
+                    }
+                    parsed
+                })
+                .collect(),
+        )),
+        Value::Null => Ok(None),
+        _ => Err(serde::de::Error::custom("listTombstones 必须是数组")),
     }
 }
 
@@ -418,7 +471,11 @@ pub struct SyncReport {
     pub subtasks_inserted: u32,
     pub subtasks_updated: u32,
     pub subtasks_deleted: u32,
-    /// 无法识别 / 无法落库而跳过的远端记录（不会被当作删除）
+    /// 待办清单（v31）：清单新增 / 删除时 app 开 / 关对应的清单窗口
+    pub lists_inserted: u32,
+    pub lists_updated: u32,
+    pub lists_deleted: u32,
+    /// 无法识别 / 无法落库而跳过的远端记录（含清单；不会被当作删除）
     pub records_skipped: u32,
     pub images_uploaded: u32,
     pub images_downloaded: u32,
@@ -433,9 +490,17 @@ impl SyncReport {
         self.subtasks_inserted += stats.subtasks_inserted;
         self.subtasks_updated += stats.subtasks_updated;
         self.subtasks_deleted += stats.subtasks_deleted;
+        self.lists_inserted += stats.lists_inserted;
+        self.lists_updated += stats.lists_updated;
+        self.lists_deleted += stats.lists_deleted;
         // 412 重试会把同一份远端再合并一遍，跳过数取最后一次
         self.records_skipped = stats.records_skipped;
         self.settings_applied |= settings_applied;
+    }
+
+    /// 清单是否被改动（新增 / 改名 / 删除）：app 据此重新读清单、开 / 关清单窗口
+    pub fn lists_changed(&self) -> bool {
+        self.lists_inserted + self.lists_updated + self.lists_deleted > 0
     }
 
     /// 本地数据或设置是否被改动（决定是否通知各窗口刷新，原来据此 emit `sync-completed`）
@@ -447,6 +512,7 @@ impl SyncReport {
             + self.subtasks_updated
             + self.subtasks_deleted
             > 0
+            || self.lists_changed()
             || self.settings_applied
     }
 
@@ -659,7 +725,7 @@ impl SyncEngine<'_> {
             .map_err(|e| format!("读取同步状态失败: {}", e))
     }
 
-    /// 单事务合并远端记录、墓碑与设置
+    /// 单事务合并远端记录（待办 / 子任务 / 清单）、墓碑与设置；被删掉的清单的窗口记录随之清理
     fn merge(
         &self,
         remote: &SyncData,
@@ -667,9 +733,20 @@ impl SyncEngine<'_> {
         cutoff: &str,
     ) -> Result<(MergeStats, bool), String> {
         let parsed = sync_store::parse_remote_todos(&remote.todos);
+        let parsed_lists = remote
+            .todo_lists
+            .as_deref()
+            .map(sync_store::parse_remote_lists);
+        let list_tombstones = remote.list_tombstones.as_deref().unwrap_or(&[]);
         self.db
             .with_transaction(|tx| -> rusqlite::Result<(MergeStats, bool)> {
-                let stats = sync_store::merge_remote(tx, &parsed, &remote.tombstones, cutoff)?;
+                let mut stats = sync_store::merge_remote(tx, &parsed, &remote.tombstones, cutoff)?;
+                stats.absorb(sync_store::merge_remote_lists(
+                    tx,
+                    parsed_lists.as_deref(),
+                    list_tombstones,
+                )?);
+                window_prefs::prune_orphans(tx)?;
                 let applied = apply_remote_settings_if_newer(tx, remote, first_sync)?;
                 Ok((stats, applied))
             })
@@ -688,7 +765,8 @@ impl SyncEngine<'_> {
             .map_err(|e| format!("读取本地数据失败: {}", e))
     }
 
-    /// 同步成功收尾：记基准、synced_seq、设置基准、同步时间，清理过期墓碑
+    /// 同步成功收尾：记基准、synced_seq、设置基准、同步时间，清理过期的待办 / 子任务墓碑
+    /// （清单墓碑永不过期，契约 §13-10）
     fn finish(
         &self,
         base: &RemoteVersion,
@@ -891,11 +969,22 @@ impl SyncEngine<'_> {
         };
 
         let parsed = sync_store::parse_remote_todos(&remote.todos);
+        let parsed_lists = remote
+            .todo_lists
+            .as_deref()
+            .map(sync_store::parse_remote_lists);
+        let list_tombstones = remote.list_tombstones.as_deref().unwrap_or(&[]);
         let (stats, settings_applied, seq) = self
             .db
             .with_transaction(|tx| -> rusqlite::Result<(MergeStats, bool, i64)> {
-                let stats =
+                let mut stats =
                     sync_store::force_pull_replace(tx, &parsed, &remote.tombstones, &cutoff)?;
+                stats.absorb(sync_store::force_pull_replace_lists(
+                    tx,
+                    parsed_lists.as_deref(),
+                    list_tombstones,
+                )?);
+                window_prefs::prune_orphans(tx)?;
                 // 没有 settingsUpdatedAt 的 settings（旧版写入方 / cloud 占位）不应用
                 let applied = match (
                     remote.settings_updated_at.as_deref(),
@@ -941,8 +1030,15 @@ impl SyncEngine<'_> {
             if let Some(r) = &remote {
                 let now = now_local();
                 self.db
-                    .with_transaction(|tx| {
-                        sync_store::force_push_prepare(tx, &r.todos, &r.tombstones, &now)
+                    .with_transaction(|tx| -> rusqlite::Result<()> {
+                        sync_store::force_push_prepare(tx, &r.todos, &r.tombstones, &now)?;
+                        sync_store::force_push_prepare_lists(
+                            tx,
+                            r.todo_lists.as_deref(),
+                            r.list_tombstones.as_deref().unwrap_or(&[]),
+                            &now,
+                        )?;
+                        Ok(())
                     })
                     .map_err(|e: rusqlite::Error| format!("准备强制推送失败: {}", e))?;
             }
@@ -1193,11 +1289,128 @@ fn tombstone_set(tombstones: &[Tombstone], cutoff: &str) -> BTreeSet<(String, i6
         .collect()
 }
 
-/// 上传文档与远端是否不等价：记录版本、墓碑（保留期内）、设置版本任一不同即需上传
+/// 清单列表合并（契约 §4，JSON 层面，与 [`merge_todo_values`] 同一套规则）：按 id LWW（平局本地），墓碑压制，并集。
+/// 本地已合并过远端，远端胜出的只可能是本地无法识别 / 无法落库的清单——原样带进上传文档，不因"本地没有"而从远端消失
+fn merge_list_values(
+    local: Vec<Value>,
+    remote: &[Value],
+    tombs: &ListTombstoneIndex,
+) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::with_capacity(local.len() + remote.len());
+    let mut index: HashMap<i64, usize> = HashMap::new();
+    for v in local {
+        if let Some(id) = sync_store::value_id(&v) {
+            if sync_store::is_list_suppressed(tombs, id, &sync_store::value_updated_at(&v)) {
+                continue;
+            }
+            index.insert(id, out.len());
+        }
+        out.push(v);
+    }
+    for r in remote {
+        let Some(id) = sync_store::value_id(r) else {
+            out.push(r.clone());
+            continue;
+        };
+        let remote_at = sync_store::value_updated_at(r);
+        match index.get(&id).copied() {
+            Some(i) => {
+                if remote_at > sync_store::value_updated_at(&out[i]) {
+                    out[i] = r.clone();
+                }
+            }
+            None => {
+                if sync_store::is_list_suppressed(tombs, id, &remote_at) {
+                    continue;
+                }
+                index.insert(id, out.len());
+                out.push(r.clone());
+            }
+        }
+    }
+    out
+}
+
+/// 文档里每个清单的 id → updatedAt（同键取最大）
+fn list_versions(lists: &[Value]) -> BTreeMap<i64, String> {
+    let mut versions: BTreeMap<i64, String> = BTreeMap::new();
+    for list in lists {
+        if let Some(id) = sync_store::value_id(list) {
+            let at = sync_store::value_updated_at(list);
+            let entry = versions.entry(id).or_default();
+            if at > *entry {
+                *entry = at;
+            }
+        }
+    }
+    versions
+}
+
+/// 清单墓碑集合（永不过期，契约 §13-10：不按保留期过滤）
+fn list_tombstone_set(tombstones: &[ListTombstone]) -> BTreeSet<(i64, String)> {
+    tombstones
+        .iter()
+        .map(|t| (t.entity_id, t.deleted_at.clone()))
+        .collect()
+}
+
+/// 文档里每条待办 id → 归属（[`ListAssignment`]；同 id 出现多次取最新的）。畸形记录（`listId` 类型不对、
+/// `updatedAt` 无法识别）不参与（契约 §13-11）
+fn doc_assignments(todos: &[Value]) -> HashMap<i64, ListAssignment> {
+    let mut out: HashMap<i64, ListAssignment> = HashMap::new();
+    for todo in todos {
+        let (Some(id), Some(assignment)) =
+            (sync_store::value_id(todo), ListAssignment::from_value(todo))
+        else {
+            continue;
+        };
+        let newest = match out.remove(&id) {
+            Some(seen) => seen.newest(assignment),
+            None => assignment,
+        };
+        out.insert(id, newest);
+    }
+    out
+}
+
+/// 远端那一版的归属是否比上传文档里的旧（契约 §13-6：需要补传一次，修复文档）。
+///
+/// 合并时归属取所有可见版本里最新的那个、且不改记录的 `updatedAt`（§13-5），所以只比记录版本（[`record_versions`]）
+/// 发现不了"本机的归属比远端新"：旧版本（≤ 3.0.x，不认识清单）上传的待办全都缺 `listId`；落后的副本带着陈旧的归属
+/// 写了更新的记录版本（F1）；降级再升级回来的设备留下的旧归属（F3）。上传文档里的待办（本机合并后的版本，或本机看不懂、
+/// 原样带回的远端版本）与远端同 id 的版本逐条比较归属，文档里的严格更新就上传一次。合并之后两端的归属一致，
+/// 两台新设备之间不会因此来回上传；旧设备只在自己有变更时才上传，补回之后不会再触发
+fn remote_assignments_stale(doc: &SyncData, remote: &SyncData) -> bool {
+    let theirs = doc_assignments(&remote.todos);
+    if theirs.is_empty() {
+        return false;
+    }
+    doc_assignments(&doc.todos).iter().any(|(id, ours)| {
+        theirs
+            .get(id)
+            .is_some_and(|theirs| ours.is_newer_than(theirs))
+    })
+}
+
+/// 文档里清单的版本。没有 `todoLists` 键的文档（还没有新版本写过）等价于"只有迁移种子状态的默认清单"——每个新版本
+/// 写入方本来就有它（PC 迁移建、cloud 惰性补建，值相同），不为它多上传一次；本机新建 / 改名过清单时版本不同，照常上传
+fn doc_list_versions(doc: &SyncData) -> BTreeMap<i64, String> {
+    match doc.todo_lists.as_deref() {
+        Some(lists) => list_versions(lists),
+        None => BTreeMap::from([(DEFAULT_LIST_ID, DEFAULT_LIST_CREATED_AT.to_string())]),
+    }
+}
+
+/// 上传文档与远端是否不等价：记录（待办 / 子任务 / 清单）版本、墓碑（保留期内）与清单墓碑（全部）、设置版本任一不同，
+/// 或远端那一版待办的归属比文档里的旧（见 [`remote_assignments_stale`]），即需上传
 fn doc_differs(doc: &SyncData, remote: &SyncData, cutoff: &str) -> bool {
     record_versions(&doc.todos) != record_versions(&remote.todos)
         || tombstone_set(&doc.tombstones, cutoff) != tombstone_set(&remote.tombstones, cutoff)
         || doc.settings_updated_at != remote.settings_updated_at
+        || doc_list_versions(doc) != doc_list_versions(remote)
+        || list_tombstone_set(doc.list_tombstones.as_deref().unwrap_or(&[]))
+            != list_tombstone_set(remote.list_tombstones.as_deref().unwrap_or(&[]))
+        || remote_assignments_stale(doc, remote)
 }
 
 /// 生成上传文档（K2）。`images` 由调用方在上传图片后填写。
@@ -1248,6 +1461,45 @@ fn build_sync_doc(
             .is_none_or(|updated_at| deleted_at.as_str() < updated_at.as_str())
     });
 
+    // 清单（契约 §1 / §4）：每次都写出全部未删除的清单（含默认清单）与全部清单墓碑（永不过期，契约 §13-10），
+    // 其余规则同待办
+    let mut list_tombs: BTreeMap<i64, String> = BTreeMap::new();
+    let all_list_tombstones = local.records.list_tombstones.iter().chain(
+        remote
+            .and_then(|r| r.list_tombstones.as_deref())
+            .unwrap_or(&[]),
+    );
+    for t in all_list_tombstones {
+        if t.entity_id == DEFAULT_LIST_ID {
+            continue;
+        }
+        let entry = list_tombs.entry(t.entity_id).or_default();
+        if t.deleted_at > *entry {
+            *entry = t.deleted_at.clone();
+        }
+    }
+    let list_index: ListTombstoneIndex = list_tombs.iter().map(|(k, v)| (*k, v.clone())).collect();
+    let local_lists: Vec<Value> = local
+        .records
+        .lists
+        .iter()
+        .filter_map(|l| serde_json::to_value(l).ok())
+        .collect();
+    let todo_lists = match (mode, remote) {
+        (DocMode::Merge, Some(r)) => merge_list_values(
+            local_lists,
+            r.todo_lists.as_deref().unwrap_or(&[]),
+            &list_index,
+        ),
+        _ => local_lists,
+    };
+    let output_lists = list_versions(&todo_lists);
+    list_tombs.retain(|id, deleted_at| {
+        output_lists
+            .get(id)
+            .is_none_or(|updated_at| deleted_at.as_str() < updated_at.as_str())
+    });
+
     let local_settings_at = local.settings_version.clone().unwrap_or_else(now_local);
     let local_settings = serde_json::to_value(&local.settings).unwrap_or(Value::Null);
     let (settings, settings_updated_at) = match (mode, remote) {
@@ -1289,6 +1541,16 @@ fn build_sync_doc(
                 deleted_at,
             })
             .collect(),
+        todo_lists: Some(todo_lists),
+        list_tombstones: Some(
+            list_tombs
+                .into_iter()
+                .map(|(entity_id, deleted_at)| ListTombstone {
+                    entity_id,
+                    deleted_at,
+                })
+                .collect(),
+        ),
         extra: remote.map(|r| r.extra.clone()).unwrap_or_default(),
     }
 }

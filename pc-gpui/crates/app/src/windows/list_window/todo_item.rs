@@ -3,13 +3,13 @@
 
 use gpui_kit::{
     Animation, AnimationExt as _, AnyElement, AppContext as _, Bounds, Context, CursorStyle,
-    InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Pixels, Point, Render,
-    StatefulInteractiveElement as _, Styled as _, Window, canvas, div, ease_in_out,
+    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels,
+    Point, Render, StatefulInteractiveElement as _, Styled as _, Window, canvas, div, ease_in_out,
     prelude::FluentBuilder as _, px, relative,
 };
 
 use super::{
-    DragKind, DraggedTodo, MainWindow, RenderCtx, RowData, SUBTASK_ANIMATION, above_fab, logic,
+    DragKind, DraggedTodo, ListWindow, RenderCtx, RowData, SUBTASK_ANIMATION, above_fab, logic,
 };
 use crate::assets::EpIcon;
 use crate::state;
@@ -32,7 +32,7 @@ pub(crate) enum RowPlace {
 /// 颜色圆点在行内的位置：命中区 24×24 的左上角（圆点 8×8 在 (12, 14)，命中区四周外扩 8px）
 const HANDLE_ORIGIN: (f32, f32) = (4., 6.);
 
-impl MainWindow {
+impl ListWindow {
     pub(crate) fn render_row(
         &mut self,
         row: &RowData,
@@ -103,6 +103,14 @@ impl MainWindow {
                 cx.notify();
             }))
             .on_click(cx.listener(move |this, _, window, cx| this.open_todo(id, window, cx)))
+            // 右键：「移动到 ▸」菜单（`row_menu`）
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    this.open_row_menu(id, event.position, cx);
+                    cx.stop_propagation();
+                }),
+            )
             .child(measure)
             .child(self.render_handle(row, rc, cx))
             .child(self.render_content(row, show_subtasks, expanded, anim, rc, cx))
@@ -378,10 +386,11 @@ impl MainWindow {
                     button("todo-top", EpIcon::Top, "置顶", palette.warning).on_click(cx.listener(
                         move |this, _, window, cx| {
                             cx.stop_propagation();
+                            let list_id = this.list_id();
                             let mut ids: Vec<i64> = this
                                 .state
                                 .read(cx)
-                                .pending_todos()
+                                .pending_todos_in(list_id)
                                 .iter()
                                 .map(|t| t.id)
                                 .filter(|t| *t != id)
@@ -434,17 +443,22 @@ impl MainWindow {
 
     /// 开始拖拽：按当前显示顺序建会话
     pub(crate) fn begin_drag(&mut self, id: i64, cx: &mut Context<Self>) {
+        let list_id = self.list_id();
         let state = self.state.read(cx);
-        let kind = match state.view_mode {
+        let kind = match state.view_mode(self.block) {
             state::ViewMode::List => {
-                let order: Vec<i64> = state.pending_todos().iter().map(|t| t.id).collect();
+                let order: Vec<i64> = state
+                    .pending_todos_in(list_id)
+                    .iter()
+                    .map(|t| t.id)
+                    .collect();
                 DragKind::List {
                     original: order.clone(),
                     order,
                 }
             }
             state::ViewMode::Quadrant => {
-                let groups = state.todos_by_quadrant();
+                let groups = state.todos_by_quadrant_in(list_id);
                 let lists: [Vec<i64>; 4] =
                     std::array::from_fn(|i| groups[i].iter().map(|t| t.id).collect());
                 let origin = lists.iter().position(|l| l.contains(&id)).unwrap_or(0);
@@ -557,7 +571,7 @@ impl MainWindow {
                     let result = task.await;
                     let _ = this.update(cx, |this, cx| {
                         if let Err(e) = result {
-                            log::error!("[main] 保存排序失败: {e}");
+                            log::error!("[list] 保存排序失败: {e}");
                             crate::ui::message::show_in(
                                 handle,
                                 cx,
@@ -587,8 +601,13 @@ impl MainWindow {
                 }
                 // 两个顺序都在第一个 await 之前取快照
                 let quadrant_ids = lists[current].clone();
+                let list_id = self.list_id();
                 let state = self.state.read(cx);
-                let global: Vec<i64> = state.pending_todos().iter().map(|t| t.id).collect();
+                let global: Vec<i64> = state
+                    .pending_todos_in(list_id)
+                    .iter()
+                    .map(|t| t.id)
+                    .collect();
                 let todo = state.todo(id).cloned();
                 let change = (current != origin)
                     .then_some(todo.as_ref())
@@ -608,7 +627,7 @@ impl MainWindow {
                             state.update_todo_quadrant(id, quadrant, Some(color), cx)
                         });
                         if let Err(e) = task.await {
-                            log::error!("[main] 更新待办失败: {e}");
+                            log::error!("[list] 更新待办失败: {e}");
                             let _ = this.update(cx, |this, cx| {
                                 crate::ui::message::show_in(
                                     handle,
@@ -627,7 +646,7 @@ impl MainWindow {
                     let result = task.await;
                     let _ = this.update(cx, |this, cx| {
                         if let Err(e) = result {
-                            log::error!("[main] 保存排序失败: {e}");
+                            log::error!("[list] 保存排序失败: {e}");
                             crate::ui::message::show_in(
                                 handle,
                                 cx,

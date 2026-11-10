@@ -28,6 +28,22 @@ HTTP 客户端的工具）通过本服务读写用户待办，数据最终回写
   config.toml `timezone`（IANA）每次重新换算墙钟时间（夏令时安全）。
 * **记录级合并**（与 PC 同一套规则）：按 `updatedAt` 逐条 LWW，平局保留本地；只在一侧存在的记录保留；
   删除靠墓碑（`tombstones`，随 sync-data 双向传播，保留 30 天）。
+* **待办清单**（PC 3.1 起的多清单）：清单在 sync-data 顶层的 `todoLists`，清单删除墓碑在独立的
+  `listTombstones`（不进 `tombstones`：旧版本会丢掉不认识的墓碑类型），合并规则与 todo 相同，只是
+  **清单墓碑永不过期**（清单很少；这样长期离线的设备带不回已删的清单）；默认清单 id 1（"待办清单"）可改名、
+  不可删除，它的墓碑一律忽略。远端没有 `todoLists`（旧格式）时本地清单一条都不删。待办的 `listId` 指向已删除的
+  清单时按默认清单显示 / 过滤（读侧兜底，记录不改写）。契约见 `.trellis/tasks/11-09-multi-list-windows/contract.md`。
+* **`listId` 缺失 = 未知**（契约 §12）：旧版本 PC 每次上传都会丢掉全部待办的 `listId`，所以缺失（或 `null`）
+  表示"写入方不认识清单"，**不等于**默认清单——只在显示 / 过滤时算默认清单，从不写回成 1。上传时未知不写
+  `listId` / `listUpdatedAt`，cloud 也不替缺 `listId` 的记录补值。
+* **清单归属字段级合并**（契约 §13）：`listId` 有自己的版本 `listUpdatedAt`，归属 `(listId, listUpdatedAt)`
+  不跟着整条记录的 `updatedAt` 走。新旧：未知 < 已知但没有时间 < 已知有时间（按时间），一样新时取较大的 `listId`。
+  记录本身照旧按 `updatedAt` LWW 与墓碑决定；结果记录存在时，归属取所有看得到的版本（本地合并前的版本、远端版本，
+  含被墓碑压制的）里最新的，采纳不改 `updatedAt`、不标脏；合并后远端那一版的归属比本地旧 → 补传一次。
+  畸形记录（`listId` 类型不对、`updatedAt` 无法解析）不参与归属合并。`listUpdatedAt` 只在显式设置清单时刷新
+  （新建、`PATCH` 改了 `listId`、删除清单把待办移进默认清单），由服务端维护。
+* **不支持与 ≤ 2.4.x 混用**：那些版本的写入方不带回不认识的顶层键、也没有墓碑，上传一次就会抹掉
+  `todoLists` / `listTombstones` 与全部归属。
 * **时间戳单调**：改写已有记录时 `updatedAt = max(now, 旧值 + 1 秒)`，同一秒内两次修改也不会丢；
   删除的墓碑 `deletedAt = max(now, 记录的 updatedAt)`，保证压得住被删的版本。
 * **WebDAV 请求**：写前总是先 GET 合并；条件 PUT 只用 `If-Match`（去掉 `W/`），从不用
@@ -164,12 +180,16 @@ PC 端与 cloud 同时填写 `https://yourhost:8443`、`webdavuser`、原始密�
       启动后一次性把旧版 API 写入的别名字段、非规范时间归一化
 - [x] 优雅停机：停止接收新请求、等待在途请求，有待推送内容时限时补推一次
 - [x] `/todos` `/subtasks` `/images` REST CRUD（filter / sort / pagination / merge PATCH / cascade DELETE）
+- [x] `/lists` 待办清单 CRUD（按 id 或名称寻址、重名 409、删除时其下待办移到默认清单）；
+      todo 的 `listId` 写入校验与 `listId=` / `list=` 过滤；`todoLists` / `listTombstones` 随 sync-data 双向同步
+- [x] 待办的清单归属按 `listUpdatedAt` 做字段级合并（契约 §13）；远端那一版的归属比本地旧时补推；清单墓碑永不过期
 
 Skill / AI 集成：
 
 - [x] Claude Code Skill（`cloud/skill/minitodo/`，含 Python CLI、单测、install 脚本、SKILL.md）
-- [x] CLI 覆盖 today / list / add / done / search / show / update / delete / health / sync；
-      `update` 按字段类型转换取值（字符串字段不会被误转成数字）；部分失败退出码 4
+- [x] CLI 覆盖 today / list / add / done / search / show / update / delete / health / sync / lists；
+      `update` 按字段类型转换取值（字符串字段不会被误转成数字）；部分失败退出码 4；
+      待办相关命令带 `--list <清单名称或 id>`（先经 `GET /lists/<清单>` 解析成 id）
 - [x] cloud 端 `C{seq}` 短码：每个 todo 分配自增短码（`todo_seq` 表），CLI 与 API 均可用 `C3` 代替完整 id
 - [x] 同一份 skill 可装到 openclaw workspace（`install.sh --target openclaw`）
 - [x] openclaw cron 临期提醒：cron 唤起 agent 后由 **agent 自己**拉 `list --pending --json` + 判断哪些该推 + 组织格式，`--announce` 推到 default channel
@@ -181,7 +201,7 @@ Skill / AI 集成：
 | Method | Path | 说明 |
 |---|---|---|
 | GET | `/health` | `{status, sync, lastPullAt}` |
-| GET | `/todos` | 列表。query：`completed=true/false`, `priority=high/medium/low`, `quadrant=1..4` 或 `urgent_important` 等别名, `dueDateBefore`, `dueDateAfter`, `startDate=YYYY-MM-DD`, `q=<keyword>`, `sort=[+-]<field>`, `limit`, `offset`, `withSubtasks=true` |
+| GET | `/todos` | 列表。query：`completed=true/false`, `priority=high/medium/low`, `quadrant=1..4` 或 `urgent_important` 等别名, `dueDateBefore`, `dueDateAfter`, `startDate=YYYY-MM-DD`, `q=<keyword>`, `listId=<清单 id>` / `list=<清单名>`（按有效清单，见下）, `sort=[+-]<field>`, `limit`, `offset`, `withSubtasks=true` |
 | GET | `/todos/:id?withSubtasks=true` | 详情；默认嵌套 subtasks，`withSubtasks=false` 扁平化 |
 | POST | `/todos` | 创建；body 必填 `title`；其余字段按下方字段契约校验 |
 | PATCH | `/todos/:id` | merge 更新；未提及字段保留（含更新版 PC 加的、本服务还不认识的字段）；内容没变时不刷新 `updatedAt` |
@@ -189,6 +209,11 @@ Skill / AI 集成：
 | POST | `/todos/:id/subtasks` | 创建子任务；必填 `title` |
 | PATCH | `/subtasks/:id` | merge 更新子任务（`title` / `content` / `completed` / `sortOrder`；改 `parentId` → 400） |
 | DELETE | `/subtasks/:id` | 删除子任务 |
+| GET | `/lists` | 全部清单 `[{id, name, sortOrder, createdAt, updatedAt}]`，按 `(sortOrder, id)`；默认清单 id 1 总在 |
+| GET | `/lists/:id` | 单个清单；`:id` 是数字 id 或 URL 编码的清单名 |
+| POST | `/lists` | 新建；body 必填 `name`，可选 `sortOrder`（缺省排最后）→ 201 |
+| PATCH | `/lists/:id` | 改 `name` / `sortOrder`；内容没变时不刷新 `updatedAt` |
+| DELETE | `/lists/:id` | 删除清单：其下待办移到默认清单（刷新 `updatedAt`）并写 `listTombstones`；返回 200 `{deleted, name, movedTodos, movedTo}`；默认清单 → 400 |
 | GET | `/images/:name` | 返回图片 bytes，按扩展名识别 Content-Type |
 | POST | `/images` | multipart/form-data 上传（字段 `file`），返回 `{name}`；body 上限 32 MiB |
 | POST | `/sync` | 手动触发 pull + push；全部成功 200，部分失败 207，返回 `{pull, push, pullError?, pushError?}` |
@@ -211,14 +236,49 @@ todo 字段契约（以 `src/model.rs` 的 `TODO_FIELDS` 为准，与 PC 端模�
 | `notified` / `completed` | bool |
 | `sortOrder` | 整数 |
 | `repeatEnabled` / `repeatType` / `repeatInterval` / `repeatWeekdays` / `repeatMonthDay` | bool / `daily`\|`weekly`\|`monthly` / ≥ 1 / 如 `"1,3,5"` / 1–31 |
+| `listId` | 所属清单的 id（整数 ≥ 1，必须是未删除的清单，否则 400 `清单不存在`）；`POST` 不带时为 1（默认清单）。PATCH 原样写回当前值时不校验，不带时清单不变。旧版本设备写的记录没有 `listId`（未知），响应里也不带 |
 
 别名：`dueDate` → `endTime`（仅日期补 23:59:00）；`priority`（`high`/`medium`/`low`）→ `color`
 （#EF4444 / #F59E0B / #10B981，同时给了 `color` 时以 `color` 为准）；`notes` → `description`。
-`id` / `createdAt` / `updatedAt` / `seq` / `subtasks` 写入时忽略；其它未知字段或类型错误返回 400，错误信息列出允许的字段。
+`id` / `createdAt` / `updatedAt` / `listUpdatedAt` / `seq` / `subtasks` 写入时忽略；其它未知字段或类型错误返回 400，错误信息列出允许的字段。
+
+`listUpdatedAt`（契约 §13）是 `listId` 自己的版本，服务端维护、只读，响应里照常返回（清单未知时不带）：`POST` 时 = 新建时刻；
+`PATCH` 带了 `listId` 且值变了（含未知 → 已知）时 = `max(now, 旧值 + 1 秒)`；`DELETE /lists/:id` 把待办移进默认清单时同样刷新。
+只改其它字段、原样写回 `listId` 时不动；存量"已知但没有 `listUpdatedAt`"的记录不补时间。同步合并时用它比较归属的新旧（见上文）。
 响应附派生字段 `priority`（自定义颜色时为 null），派生字段不入库。
 
 排序字段白名单：`dueDate`/`startTime`/`priority`/`quadrant`/`sortOrder`/`updatedAt`/`createdAt`/`title`，
 其他字段 fallback 到 `sortOrder asc`。
+
+### 待办清单
+
+清单字段（`todoLists` 的元素，与 PC 模型一致）：
+
+| 字段 | 类型 |
+|---|---|
+| `name` | 字符串（必填）：去首尾空白，不能为空、不超过 50 个字；与其它清单不区分大小写重名 → 409 `已有同名清单「<已有清单的名称>」` |
+| `sortOrder` | 整数；新建不给时 = 现有最大值 + 1 |
+
+`id`（新建时服务端按 `UNIX 毫秒 × 1000 + 随机 0..999` 分配，与 PC 同一算法）/ `createdAt` / `updatedAt` 写入时忽略，
+其它字段 400。清单不分配 `C{seq}` 短码。
+
+* `/lists/:id` 的 `:id`：先当数字 id 找；没有这个 id 再按名称（去首尾空白、不区分大小写）精确匹配。
+  同名的有多个（两台设备各建了一个，同步不处理重名）→ 409，错误体带 `candidates: [{id, name}]`，改用 id 即可；找不到 → 404
+* `GET /todos?listId=<n>` / `?list=<名称>` 按**有效清单**过滤：待办的 `listId` 指向一个未删除的清单时就是它，
+  否则（未知 = 缺失或 null、类型不对、清单已被删除）算在默认清单 1 里；响应里的 `listId` 是存储的原值。清单不存在 → 404，
+  名称重名 → 409，两个参数都给了却指向不同的清单 → 400
+* `DELETE /lists/:id`：单事务里把 `listId` 等于它的待办改到默认清单（刷新 `updatedAt` 与 `listUpdatedAt`，随同步传播），
+  删清单，写清单墓碑 `deletedAt = max(now, 清单的 updatedAt)`（永不过期）；默认清单 → 400 `默认清单不能删除`
+* 收到别的设备的清单墓碑时不改写待办（读侧兜底显示在默认清单）
+
+```bash
+curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"name":"工作"}' https://minitodo.example.com/lists
+# → 201 {"id":1762650000000123,"name":"工作","sortOrder":1,"createdAt":"…","updatedAt":"…"}
+curl -H "Authorization: Bearer $KEY" "https://minitodo.example.com/todos?list=%E5%B7%A5%E4%BD%9C&completed=false"
+curl -X DELETE -H "Authorization: Bearer $KEY" https://minitodo.example.com/lists/%E5%B7%A5%E4%BD%9C
+# → 200 {"deleted":1762650000000123,"name":"工作","movedTodos":3,"movedTo":1}
+```
 
 所有响应附 `X-Sync-Status: healthy | stale | offline` 与 `X-Last-Sync-At`；
 offline 时还会带 `Warning: 110 "sync offline"`。offline 状态下 API 仍可读写，

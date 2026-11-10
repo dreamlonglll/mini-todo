@@ -372,6 +372,73 @@ impl EpPalette {
     }
 }
 
+/// Element Plus 弹层（`el-popper is-light`）与下拉菜单（`el-dropdown-menu`）的颜色。浅色取 [`ep`]；深色是 EP 暗黑模式
+/// （`html.dark`，element-plus `theme-chalk/dark/css-vars.css`）的值：清单 / 日历窗口深色时，窗口里的下拉菜单（待办行右键、
+/// 清单名右键、日历清单筛选）跟着用深色。其它窗口永远是浅色
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EpMenuColors {
+    pub is_dark: bool,
+    /// 底 `--el-bg-color-overlay`：`#FFFFFF` / `#1D1E1F`
+    pub bg: Hsla,
+    /// 外框 `--el-border-color-light`：`#E4E7ED` / `#414243`
+    pub border: Hsla,
+    /// 分隔线 `--el-border-color-lighter`：`#EBEEF5` / `#363637`
+    pub divider: Hsla,
+    /// 菜单项文字 `--el-text-color-regular`：`#606266` / `#CFD3DC`
+    pub text: Hsla,
+    /// 菜单项右侧的说明文字 `--el-text-color-secondary`：`#909399` / `#A3A6AD`
+    pub text_secondary: Hsla,
+    /// 禁用文字 `--el-text-color-disabled`：`#C0C4CC` / `#6C6E72`
+    pub text_disabled: Hsla,
+    /// 悬停底 `--el-color-primary-light-9`：`#ECF5FF` / `rgb(24,34,43)`
+    pub hover_bg: Hsla,
+    /// 悬停 / 勾选的文字 `--el-color-primary` `#409EFF`（深色相同）
+    pub primary: Hsla,
+    /// `--el-box-shadow-light`（`0 0 12px`）的颜色：`rgba(0,0,0,.12)` / `rgba(0,0,0,.72)`
+    pub shadow_color: Hsla,
+}
+
+static EP_MENU_LIGHT: LazyLock<EpMenuColors> = LazyLock::new(|| {
+    let ep = ep();
+    EpMenuColors {
+        is_dark: false,
+        bg: ep.white,
+        border: ep.border_light,
+        divider: ep.border_lighter,
+        text: ep.text_regular,
+        text_secondary: ep.text_secondary,
+        text_disabled: ep.text_disabled,
+        hover_bg: ep.primary_light_9,
+        primary: ep.primary,
+        shadow_color: rgba_css(0, 0, 0, 0.12),
+    }
+});
+
+static EP_MENU_DARK: LazyLock<EpMenuColors> = LazyLock::new(|| EpMenuColors {
+    is_dark: true,
+    bg: hex(0x1D1E1F),
+    border: hex(0x414243),
+    divider: hex(0x363637),
+    text: hex(0xCFD3DC),
+    text_secondary: hex(0xA3A6AD),
+    text_disabled: hex(0x6C6E72),
+    hover_bg: hex(0x18222B),
+    primary: ep().primary,
+    shadow_color: rgba_css(0, 0, 0, 0.72),
+});
+
+/// 弹层 / 下拉菜单的颜色（`dark`：所在窗口是深色主题）
+pub fn ep_menu(dark: bool) -> &'static EpMenuColors {
+    if dark { &EP_MENU_DARK } else { &EP_MENU_LIGHT }
+}
+
+impl EpMenuColors {
+    /// `--el-box-shadow-light`：`0 0 12px` + [`Self::shadow_color`]
+    pub fn shadow(&self) -> Vec<BoxShadow> {
+        vec![shadow(0., 0., 12., 0., self.shadow_color)]
+    }
+}
+
 /// 圆角（`--radius-*`）
 pub mod radius {
     use gpui_kit::{Pixels, px};
@@ -657,11 +724,13 @@ pub fn fab_shadow(hovered: bool) -> Vec<BoxShadow> {
     }
 }
 
-/// 主窗口尺寸 token
+/// 主窗口（清单 / 日历窗口）尺寸 token
 pub mod main_window {
     /// 标题栏按钮 28×28、图标 16
     pub const TITLE_BUTTON: f32 = 28.;
     pub const TITLE_ICON: f32 = 16.;
+    /// 清单名就地改名的输入框宽度（标题栏放不下时收缩）
+    pub const LIST_NAME_INPUT_WIDTH: f32 = 160.;
     /// FAB 48×48，距右下 20
     pub const FAB_SIZE: f32 = 48.;
     pub const FAB_INSET: f32 = 20.;
@@ -799,8 +868,6 @@ pub struct FenceTokens {
     pub menu_divider: Hsla,
     pub menu_note: Hsla,
     pub menu_shadow: Hsla,
-    /// 拖动 / 缩放别的收纳箱吸附到本收纳箱时，被对齐的边上的高亮线 `#409EFF`（Element Plus 主色，不随自定义背景色变）
-    pub snap_guide: Hsla,
 }
 
 static FENCE_TOKENS: LazyLock<FenceTokens> = LazyLock::new(|| FenceTokens {
@@ -830,7 +897,6 @@ static FENCE_TOKENS: LazyLock<FenceTokens> = LazyLock::new(|| FenceTokens {
     menu_divider: rgba_css(255, 255, 255, 0.1),
     menu_note: rgba_css(255, 255, 255, 0.6),
     menu_shadow: rgba_css(0, 0, 0, 0.45),
-    snap_guide: hex(0x409EFF),
 });
 
 /// 收纳箱颜色
@@ -845,8 +911,16 @@ pub const FENCE_FONT_SIZE: Pixels = px(13.);
 /// （同资源管理器里隐藏文件的半透明观感）
 pub const FENCE_HIDDEN_ITEM_OPACITY: f32 = 0.5;
 
-/// 吸附高亮线的宽度（逻辑像素，画在目标收纳箱窗口内的边缘，见 `fence_tokens().snap_guide`）
-pub const FENCE_SNAP_GUIDE_WIDTH: Pixels = px(2.);
+// ---- 吸附对齐（清单窗口 / 日历窗口 / 收纳箱同一个吸附组，`windows::drag::render_snap_guides`） ----
+
+/// 拖动 / 缩放别的窗口吸附到本窗口时，被对齐的边上的高亮线 `#409EFF`（Element Plus 主色；不随收纳箱自定义背景色、
+/// 清单窗口的深浅主题与底色变）
+pub fn snap_guide_color() -> Hsla {
+    hex(0x409EFF)
+}
+
+/// 吸附高亮线的宽度（逻辑像素，画在目标窗口内的边缘）
+pub const SNAP_GUIDE_WIDTH: Pixels = px(2.);
 
 #[cfg(test)]
 mod tests {
@@ -882,6 +956,19 @@ mod tests {
         assert_eq!(dark.primary, light().primary);
         assert!(dark.shadow_md().is_empty());
         assert!(!light().shadow_md().is_empty());
+    }
+
+    #[test]
+    fn menu_colors_follow_the_window_theme() {
+        let (light_menu, dark_menu) = (ep_menu(false), ep_menu(true));
+        // 浅色就是原来的浅色弹层（`ep()`），深色是 EP 暗黑模式的值；主色两边相同
+        assert!(!light_menu.is_dark && dark_menu.is_dark);
+        assert_eq!(light_menu.bg, ep().white);
+        assert_eq!(light_menu.border, ep().border_light);
+        assert_eq!(light_menu.shadow(), ep().box_shadow_light());
+        assert_eq!(dark_menu.bg, hex(0x1D1E1F));
+        assert_eq!(dark_menu.hover_bg, hex(0x18222B));
+        assert_eq!(dark_menu.primary, light_menu.primary);
     }
 
     #[test]

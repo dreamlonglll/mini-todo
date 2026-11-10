@@ -109,7 +109,7 @@ export MINI_TODO_DEBUG_OPEN="$OPEN_SPEC"
 "$APP" >"$OUT_DIR/$NAME-app.log" 2>&1 &
 APP_PID=$!
 
-# 等主窗口出现，再给渲染 / 数据加载留时间
+# 等默认清单窗口（标题「Mini Todo」）出现，再给渲染 / 数据加载留时间
 for _ in $(seq 1 150); do
   xdotool search --onlyvisible --name '^Mini Todo$' >/dev/null 2>&1 && break
   sleep 0.1
@@ -157,13 +157,14 @@ import -window root "$OUT_DIR/$NAME-screen.png"
 slug_of() {
   case "$1" in
     "Mini Todo") echo main ;;
+    "日历") echo calendar ;;
     "待办详情"|"新建待办") echo editor ;;
     "查看子任务"|"编辑子任务") echo subtask ;;
     "设置") echo settings ;;
     "已完成") echo completed ;;
     "通知") echo notification ;;
     收纳箱*) echo fence ;;
-    *) echo "window" ;;
+    *) echo "list" ;;  # 其它清单窗口：标题就是清单名
   esac
 }
 declare -A SEEN=()

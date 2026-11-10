@@ -44,6 +44,11 @@ WS_EX_NOREDIRECTIONBITMAP = 0x00200000
 
 WM_CLOSE = 0x0010
 WM_NCHITTEST = 0x0084
+WM_COMMAND = 0x0111
+WM_LBUTTONUP = 0x0202
+# tray-icon 0.21（Cargo.lock 钉的版本）托盘图标的回调消息：platform_impl/windows/mod.rs 的 WM_USER_TRAYICON，
+# lParam 低字是鼠标消息（WM_LBUTTONUP = 左键单击抬起）
+WM_USER_TRAYICON = 6002
 DWMWA_CAPTION_BUTTON_BOUNDS = 5
 SW_MINIMIZE = 6
 SW_RESTORE = 9
@@ -444,6 +449,50 @@ def tray_icon_rect(hwnd: int, uid: int) -> tuple[int, tuple | None]:
     r = wt.RECT()
     hr = shell32.Shell_NotifyIconGetRect(ctypes.byref(ident), ctypes.byref(r))
     return hr & 0xFFFFFFFF, ((r.left, r.top, r.right, r.bottom) if hr == 0 else None)
+
+
+def post_message(hwnd: int, msg: int, wparam: int = 0, lparam: int = 0) -> bool:
+    return bool(user32.PostMessageW(_h(hwnd), msg, wparam, lparam))
+
+
+# 托盘菜单（muda 0.17）在 Windows 上的命令 id：muda 每建一个菜单 / 菜单项（含 Menu 本身与分隔线）从 1000 起取下一个号，
+# 所以 id 只取决于 services/tray.rs 的 imp::start 里的创建顺序。按源码顺序现算，改了菜单不用改脚本；
+# 源码读不到时用下面这张表（3.1 的顺序，2026-11 在隐藏桌面上用 PostMessage(WM_COMMAND) 逐项验证过）
+TRAY_MENU_IDS_FALLBACK = {
+    "show_calendar": 1000, "auto_start": 1001, "add_todo": 1003, "new_list": 1004, "new_fence": 1006,
+    "toggle_fences": 1007, "reset_fences": 1008, "reset": 1010, "open_settings": 1011, "quit": 1013,
+}
+
+
+def parse_tray_menu_ids(source: str) -> dict[str, int]:
+    """从 tray.rs 源码算 muda 命令 id：{menu_id 常量值: 命令 id}。
+
+    只看 imp::start 里 `if cx.has_global::<Tray>()` 到 `TrayIconBuilder::new()` 之间（Windows / macOS 共用）：按出现顺序数 `(Check)MenuItem::with_id(menu_id::X`、
+    `Menu::new()`、`PredefinedMenuItem::separator()`，第 k 个（从 0 数）的 id = 1000 + k。`menu_id::X` 的值取
+    `pub const X: &str = "...";`"""
+    import re
+    consts = dict(re.findall(r'pub const (\w+): &str = "([^"]+)";', source))
+    start = source.find("if cx.has_global::<Tray>()")
+    if start < 0:
+        return {}
+    body = source[start:]
+    end = body.find("TrayIconBuilder::new()")
+    if end > 0:
+        body = body[:end]
+    out: dict[str, int] = {}
+    pat = re.compile(r"\b(?:Check)?MenuItem::with_id\(\s*menu_id::(\w+)|\bMenu::new\(\)|PredefinedMenuItem::separator\(\)")
+    for k, m in enumerate(pat.finditer(body)):
+        if m.group(1):
+            out[consts.get(m.group(1), m.group(1).lower())] = 1000 + k
+    return out
+
+
+def tray_menu_ids(tray_rs: Path | None) -> dict[str, int]:
+    try:
+        ids = parse_tray_menu_ids(Path(tray_rs).read_text(encoding="utf-8")) if tray_rs else {}
+    except OSError:
+        ids = {}
+    return ids if "quit" in ids and "reset" in ids else dict(TRAY_MENU_IDS_FALLBACK)
 
 
 def redraw_desktop() -> None:

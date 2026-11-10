@@ -769,6 +769,7 @@ impl EditorWindow {
                 arrow: true,
                 width: 186.,
                 height: EpDropdownMenu::estimated_height(2, 0),
+                dark: false,
             },
             menu,
             move |_, cx| {

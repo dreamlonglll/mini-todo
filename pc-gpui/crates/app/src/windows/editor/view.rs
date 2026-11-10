@@ -3,7 +3,7 @@
 //! ```text
 //! div.view-content        flex:1; padding:24px 28px; 滚动
 //! ├─ h1.view-title        22px / 650(粗) / 行高 1.35 / 下边距 14；已完成灰色删除线
-//! ├─ div.view-meta        徽章行：象限徽章（总是）+ 提醒徽章（有文案时）；下边距 18
+//! ├─ div.view-meta        徽章行：象限徽章（总是）+ 所属清单（总是，PRD R8）+ 提醒徽章（有文案时）；下边距 18
 //! └─ Markdown 渲染        或 "暂无描述"（13px #94A3B8）
 //! ```
 
@@ -14,6 +14,7 @@ use gpui_kit::{
 
 use super::{EditorWindow, QUADRANTS, RepeatType, WEEKDAYS};
 use crate::assets::EpIcon;
+use crate::state::AppState;
 use crate::theme::{self, editor_theme, hex, light};
 use crate::ui::button::EpButton;
 use crate::ui::icon::icon;
@@ -27,6 +28,11 @@ pub(super) struct RepeatSummary<'a> {
     pub interval: i32,
     pub weekdays: &'a [u8],
     pub month_day: i32,
+}
+
+/// 只读详情里所属清单徽章的文案
+pub(super) fn list_badge_text(name: &str) -> String {
+    format!("所属清单：{name}")
 }
 
 /// 旧 `notifyStatusText`：只读详情里的提醒徽章文案（空串 = 不显示徽章）
@@ -116,6 +122,8 @@ impl EditorWindow {
             .find(|(id, _, _)| *id == self.quadrant)
             .unwrap_or(QUADRANTS[3]);
         let notify = self.notify_status(cx);
+        // 只读时 `list_id` 跟着待办现在的有效清单（`on_app_state_changed`）
+        let list = list_badge_text(&AppState::global(cx).read(cx).list_name(self.list_id));
         let description = self.description_value(cx);
 
         let badge = || {
@@ -147,6 +155,13 @@ impl EditorWindow {
                             .bg(hex(quadrant_color)),
                     )
                     .child(quadrant_name),
+            )
+            .child(
+                badge()
+                    .text_color(palette.text_secondary)
+                    .bg(palette.bg_tertiary)
+                    .child(icon(EpIcon::List, 13., palette.text_secondary))
+                    .child(list),
             )
             .when(!notify.is_empty(), |this| {
                 this.child(
@@ -215,6 +230,11 @@ impl EditorWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn list_badge_names_the_list() {
+        assert_eq!(list_badge_text("工作"), "所属清单：工作");
+    }
 
     #[test]
     fn notify_status_matches_original_wording() {

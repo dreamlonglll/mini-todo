@@ -1,13 +1,16 @@
 //! 仓储层：list / upsert / patch / delete / meta KV / settings KV / tombstones。
 //!
 //! Schema 是 KV-style（`todos(id, data_json, updated_at)` /
-//! `subtasks(id, todo_id, data_json, updated_at)` / `settings(key, value)` /
-//! `meta(key, value)`）。所有过滤 / 排序通过 SQLite JSON1 函数对 `data_json`
-//! 做提取。
+//! `subtasks(id, todo_id, data_json, updated_at)` / `todo_lists(id, data_json, updated_at)` /
+//! `settings(key, value)` / `meta(key, value)`）。所有过滤 / 排序通过 SQLite JSON1 函数对
+//! `data_json` 做提取。
 
 use std::collections::{HashMap, HashSet};
 
 use rusqlite::{params, Connection, OptionalExtension};
+use serde_json::Value;
+
+use crate::model;
 
 /// `meta` 表里用到的键。集中在一处，避免 worker / API / 健康检查各写各的字符串。
 pub mod meta_keys {
@@ -390,6 +393,9 @@ pub struct ListTodosFilter {
     pub due_date_after: Option<String>,
     pub start_date: Option<String>,
     pub q: Option<String>,
+    /// 按**有效清单**过滤（契约 §3 / §12-4）：`listId` 指向未删除的清单时就是它，否则（含未知）
+    /// 算默认清单 1。
+    pub list_id: Option<i64>,
     /// `(field, asc)`。例如 `("dueDate", true)` 对应 `+dueDate`，`("priority", false)` 对应 `-priority`。
     pub sort: Option<(String, bool)>,
     pub limit: Option<i64>,
@@ -449,6 +455,10 @@ pub fn list_todos_filtered(
         args.push(Box::new(like.clone()));
         args.push(Box::new(like));
     }
+    if let Some(list_id) = filter.list_id {
+        sql.push_str(&format!(" AND {} = ?", EFFECTIVE_LIST_EXPR));
+        args.push(Box::new(list_id));
+    }
 
     let (sort_field_sql, asc) = match &filter.sort {
         Some((field, asc)) => (sort_expr(field.as_str()), *asc),
@@ -494,6 +504,17 @@ const DUE_EXPR: &str = "COALESCE(NULLIF(json_extract(data_json, '$.endTime'), ''
 
 /// PC 呈现的颜色（大写）：缺失 / null 时 PC 用 `#F59E0B`。优先级由它派生。
 const COLOR_EXPR: &str = "UPPER(COALESCE(json_extract(data_json, '$.color'), '#F59E0B'))";
+
+/// 待办的**有效清单**（契约 §3 / §12-4，读侧兜底）：`listId` 是整数且指向一个未删除的清单时就是它，
+/// 否则（未知 = 缺失或 null / 类型不对 / 清单已删除）是默认清单 1。记录本身不改写。外层 CASE 先挡掉坏 JSON
+/// （json_type / json_extract 遇到坏 JSON 会让整条查询报错）；子查询里的列都写全表名
+/// （todo_lists 也有 data_json 列）。
+const EFFECTIVE_LIST_EXPR: &str = "(CASE WHEN json_valid(todos.data_json) THEN \
+       CASE WHEN json_type(todos.data_json, '$.listId') = 'integer' \
+             AND EXISTS (SELECT 1 FROM todo_lists \
+                         WHERE todo_lists.id = CAST(json_extract(todos.data_json, '$.listId') AS TEXT)) \
+            THEN json_extract(todos.data_json, '$.listId') ELSE 1 END \
+     ELSE 1 END)";
 
 fn sort_expr(field: &str) -> String {
     match field {
@@ -594,13 +615,17 @@ pub fn delete_todo_with_children(conn: &Connection, id: &str) -> rusqlite::Resul
     Ok(n_subs)
 }
 
-/// 本地是否有任何需要同步的状态（todo / subtask / 墓碑）。远端 404 时判断要不要重新推送。
+/// 本地是否有任何需要同步的状态（todo / subtask / 墓碑 / 清单 / 清单墓碑）。远端 404 时判断要不要
+/// 重新推送。还是初始值的默认清单不算（每个写入方都会按同样的值补建它，见
+/// `model::is_pristine_default_list`）。
 pub fn has_any_sync_state(conn: &Connection) -> rusqlite::Result<bool> {
     conn.query_row(
         "SELECT EXISTS (SELECT 1 FROM todos)
              OR EXISTS (SELECT 1 FROM subtasks)
-             OR EXISTS (SELECT 1 FROM tombstones)",
-        [],
+             OR EXISTS (SELECT 1 FROM tombstones)
+             OR EXISTS (SELECT 1 FROM todo_lists WHERE NOT (id = ?1 AND updated_at <= ?2))
+             OR EXISTS (SELECT 1 FROM list_tombstones)",
+        params![default_list_key(), model::DEFAULT_LIST_TIME],
         |row| row.get(0),
     )
 }
@@ -844,6 +869,171 @@ pub fn purge_tombstones_before(conn: &Connection, cutoff_local: &str) -> rusqlit
         [cutoff_local],
     )?;
     Ok(n)
+}
+
+// =============================================================================
+// 待办清单 / 清单墓碑（多清单；契约 .trellis/tasks/11-09-multi-list-windows/contract.md）
+// =============================================================================
+
+/// 单条清单在 SQLite 中的快照：`data_json` 是同步文档 `todoLists` 里的清单对象原样存储。
+#[derive(Debug, Clone)]
+pub struct ListRow {
+    pub id: String,
+    pub data_json: String,
+    pub updated_at: String,
+}
+
+/// 默认清单 id 1 的主键形式。
+fn default_list_key() -> String {
+    model::DEFAULT_LIST_ID.to_string()
+}
+
+/// 默认清单（id 1）不存在时按固定初始值补建（契约 §2）；已存在（含已改名）则不动。
+/// 返回是否补建了。
+pub fn ensure_default_list(conn: &Connection) -> rusqlite::Result<bool> {
+    let record = Value::Object(model::default_list_record()).to_string();
+    let n = conn.execute(
+        "INSERT INTO todo_lists (id, data_json, updated_at) VALUES (?1, ?2, ?3)
+         ON CONFLICT(id) DO NOTHING",
+        params![default_list_key(), record, model::DEFAULT_LIST_TIME],
+    )?;
+    Ok(n > 0)
+}
+
+/// 全部清单行（未排序；按 `(sortOrder, id)` 排序由调用方做，见 `sync::doc` / `api::lists`）。
+pub fn all_list_rows(conn: &Connection) -> rusqlite::Result<Vec<ListRow>> {
+    let mut stmt = conn.prepare("SELECT id, data_json, updated_at FROM todo_lists")?;
+    let rows = stmt.query_map([], |row| {
+        Ok(ListRow {
+            id: row.get(0)?,
+            data_json: row.get(1)?,
+            updated_at: row.get(2)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// 会被写进 sync-data 的清单（data_json 是 JSON 对象）的 `id → updated_at`，用途同
+/// `exportable_timestamps`：导不出去的坏行永远到不了远端，不能算作"远端缺少"。
+pub fn exportable_list_timestamps(conn: &Connection) -> rusqlite::Result<HashMap<String, String>> {
+    Ok(all_list_rows(conn)?
+        .into_iter()
+        .filter(|r| {
+            matches!(
+                serde_json::from_str::<Value>(&r.data_json),
+                Ok(Value::Object(_))
+            )
+        })
+        .map(|r| (r.id, r.updated_at))
+        .collect())
+}
+
+/// 是否有这个（未删除的）清单。默认清单总是存在。
+pub fn list_exists(conn: &Connection, id: i64) -> rusqlite::Result<bool> {
+    if id == model::DEFAULT_LIST_ID {
+        return Ok(true);
+    }
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM todo_lists WHERE id = ?1)",
+        [id.to_string()],
+        |row| row.get(0),
+    )
+}
+
+/// 新建清单：普通 INSERT。主键冲突返回 `Err`（调用方换一个 id 重试，见
+/// `api::ids::insert_with_fresh_id`），绝不静默覆盖已有清单。
+pub fn insert_list(
+    conn: &Connection,
+    id: &str,
+    data_json: &str,
+    updated_at: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO todo_lists (id, data_json, updated_at) VALUES (?1, ?2, ?3)",
+        params![id, data_json, updated_at],
+    )?;
+    Ok(())
+}
+
+/// 原始 `listId` 等于 `list_id`（JSON 整数）的全部待办——删除清单时要移到默认清单的那些
+/// （契约 §5）。坏 JSON 的行跳过。
+pub fn todos_in_list(conn: &Connection, list_id: i64) -> rusqlite::Result<Vec<TodoRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, data_json, updated_at FROM todos
+         WHERE CASE WHEN json_valid(data_json)
+                    THEN json_type(data_json, '$.listId') = 'integer'
+                         AND json_extract(data_json, '$.listId') = ?1
+                    ELSE 0 END",
+    )?;
+    let rows = stmt.query_map([list_id], |row| {
+        Ok(TodoRow {
+            id: row.get(0)?,
+            data_json: row.get(1)?,
+            updated_at: row.get(2)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// 直接 upsert 清单（无 LWW）。同步合并与 REST 改写用。
+pub fn upsert_list(
+    conn: &Connection,
+    id: &str,
+    data_json: &str,
+    updated_at: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO todo_lists (id, data_json, updated_at) VALUES (?1, ?2, ?3)
+         ON CONFLICT(id) DO UPDATE SET
+            data_json = excluded.data_json,
+            updated_at = excluded.updated_at",
+        params![id, data_json, updated_at],
+    )?;
+    Ok(())
+}
+
+/// 删除清单行（不写墓碑，墓碑由调用方维护）。默认清单不可删除：传 `"1"` 返回 `false`。
+pub fn delete_list(conn: &Connection, id: &str) -> rusqlite::Result<bool> {
+    if id == default_list_key() {
+        return Ok(false);
+    }
+    let n = conn.execute("DELETE FROM todo_lists WHERE id = ?1", [id])?;
+    Ok(n > 0)
+}
+
+/// 同步合并用：`id → updated_at`（原样，比较前由调用方规范化）。
+pub fn list_timestamps(conn: &Connection) -> rusqlite::Result<HashMap<String, String>> {
+    let mut stmt = conn.prepare("SELECT id, updated_at FROM todo_lists")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    rows.collect()
+}
+
+/// 写入清单墓碑；同键已存在时保留较大的 `deleted_at`。默认清单的墓碑不存（契约 §2）。
+/// `deleted_at` 必须是规范格式，字符串比较即时间比较。
+pub fn add_list_tombstone(
+    conn: &Connection,
+    entity_id: &str,
+    deleted_at: &str,
+) -> rusqlite::Result<()> {
+    if entity_id == default_list_key() {
+        return Ok(());
+    }
+    conn.execute(
+        "INSERT INTO list_tombstones (entity_id, deleted_at) VALUES (?1, ?2)
+         ON CONFLICT(entity_id) DO UPDATE
+         SET deleted_at = MAX(list_tombstones.deleted_at, excluded.deleted_at)",
+        params![entity_id, deleted_at],
+    )?;
+    Ok(())
+}
+
+/// 全部清单墓碑 `(entity_id, deleted_at)`。清单墓碑永不过期（契约 §13-10），没有清理函数。
+pub fn all_list_tombstones(conn: &Connection) -> rusqlite::Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare("SELECT entity_id, deleted_at FROM list_tombstones")?;
+    let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    rows.collect()
 }
 
 #[cfg(test)]
@@ -1325,6 +1515,128 @@ mod tests {
 
     fn tombstone_free(c: &Connection) -> bool {
         list_tombstones(c).unwrap().is_empty()
+    }
+
+    /// 有效清单（契约 §3）：listId 缺失 / 类型不对 / 指向已删除的清单 → 默认清单 1。
+    #[test]
+    fn effective_list_filter_falls_back_to_default_list() {
+        let c = fresh();
+        upsert_list(&c, "5", r#"{"id":5,"name":"工作"}"#, "t").unwrap();
+        insert_todo(&c, "1", r#"{"id":1,"listId":1}"#, "t");
+        insert_todo(&c, "2", r#"{"id":2,"listId":5}"#, "t");
+        insert_todo(&c, "3", r#"{"id":3}"#, "t");
+        insert_todo(&c, "4", r#"{"id":4,"listId":777}"#, "t");
+        insert_todo(&c, "5", r#"{"id":5,"listId":"5"}"#, "t");
+        insert_todo(&c, "6", r#"{"id":6,"listId":5.0}"#, "t");
+        let ids = |list_id: i64| -> Vec<String> {
+            list_todos_filtered(
+                &c,
+                &ListTodosFilter {
+                    list_id: Some(list_id),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect()
+        };
+        assert_eq!(ids(1), vec!["1", "3", "4", "5", "6"]);
+        assert_eq!(ids(5), vec!["2"]);
+        assert!(ids(777).is_empty(), "已删除的清单不是任何待办的有效清单");
+        assert!(list_exists(&c, 1).unwrap());
+        assert!(list_exists(&c, 5).unwrap());
+        assert!(!list_exists(&c, 777).unwrap());
+
+        // 删除清单时只移原始 listId 是这个整数的待办
+        let moving: Vec<String> = todos_in_list(&c, 5)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(moving, vec!["2"]);
+        upsert_todo(&c, "8", "not json", "t").unwrap();
+        assert_eq!(todos_in_list(&c, 5).unwrap().len(), 1, "坏 JSON 的行跳过");
+    }
+
+    #[test]
+    fn insert_list_never_overwrites() {
+        let c = fresh();
+        insert_list(&c, "5", r#"{"id":5,"name":"a"}"#, "t").unwrap();
+        let err = insert_list(&c, "5", r#"{"id":5,"name":"b"}"#, "t").unwrap_err();
+        assert!(is_primary_key_conflict(&err));
+        let err = insert_list(&c, "1", "{}", "t").unwrap_err();
+        assert!(is_primary_key_conflict(&err), "默认清单已存在");
+    }
+
+    /// 远端 404 时要不要重推：初始值的默认清单不算待同步内容，改过名的 / 其它清单 / 清单墓碑算。
+    #[test]
+    fn sync_state_ignores_only_the_pristine_default_list() {
+        let c = fresh();
+        assert!(!has_any_sync_state(&c).unwrap());
+        upsert_list(
+            &c,
+            "1",
+            r#"{"id":1,"name":"收件箱"}"#,
+            "2026-11-01 10:00:00",
+        )
+        .unwrap();
+        assert!(has_any_sync_state(&c).unwrap());
+
+        let c = fresh();
+        add_list_tombstone(&c, "5", "2026-11-01 10:00:00").unwrap();
+        assert!(has_any_sync_state(&c).unwrap());
+
+        let c = fresh();
+        upsert_list(&c, "5", r#"{"id":5,"name":"工作"}"#, "2026-11-01 10:00:00").unwrap();
+        assert!(has_any_sync_state(&c).unwrap());
+        let exportable = exportable_list_timestamps(&c).unwrap();
+        assert_eq!(exportable.len(), 2, "默认清单 + 工作");
+        upsert_list(&c, "6", "corrupt", "2026-11-01 10:00:00").unwrap();
+        assert!(
+            !exportable_list_timestamps(&c).unwrap().contains_key("6"),
+            "导不出去的坏行不算"
+        );
+    }
+
+    #[test]
+    fn list_rows_and_list_tombstones() {
+        let c = fresh();
+        // schema::init 已补建默认清单；再调一次不重复插入
+        assert!(!ensure_default_list(&c).unwrap());
+        upsert_list(&c, "5", r#"{"id":5,"name":"工作"}"#, "2026-11-01 10:00:00").unwrap();
+        let mut ids: Vec<String> = all_list_rows(&c)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        ids.sort();
+        assert_eq!(ids, vec!["1", "5"]);
+        assert_eq!(
+            list_timestamps(&c).unwrap().get("5").map(String::as_str),
+            Some("2026-11-01 10:00:00")
+        );
+        assert!(!delete_list(&c, "1").unwrap(), "默认清单不可删除");
+        assert!(delete_list(&c, "5").unwrap());
+        assert!(!delete_list(&c, "5").unwrap());
+
+        add_list_tombstone(&c, "5", "2026-11-02 10:00:00").unwrap();
+        add_list_tombstone(&c, "5", "2026-11-01 10:00:00").unwrap();
+        add_list_tombstone(&c, "1", "2026-11-03 10:00:00").unwrap();
+        add_list_tombstone(&c, "6", "2026-10-01 10:00:00").unwrap();
+        let mut stones = all_list_tombstones(&c).unwrap();
+        stones.sort();
+        assert_eq!(
+            stones,
+            vec![
+                ("5".to_string(), "2026-11-02 10:00:00".to_string()),
+                ("6".to_string(), "2026-10-01 10:00:00".to_string()),
+            ],
+            "同键取较大 deletedAt；默认清单的墓碑不存"
+        );
+        // todo 墓碑按保留期清理时，清单墓碑一条都不动（永不过期，契约 §13-10）
+        purge_tombstones_before(&c, "2026-11-30 00:00:00").unwrap();
+        assert_eq!(all_list_tombstones(&c).unwrap().len(), 2);
     }
 
     #[test]

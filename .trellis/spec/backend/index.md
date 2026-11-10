@@ -13,15 +13,15 @@
 
 | Guide | Description | Status |
 |-------|-------------|--------|
-| [Window Modes](./window-modes.md) | 主窗口普通 / 经典固定 / 固定 + 嵌入桌面：模式状态表、`services::window_mode` 的切换与 200ms 轮询、`platform::embed` / `subclass`、持久化键、Explorer 重启自愈、e2e；macOS 的固定模式（`setMovable:NO` + 去掉可缩放、唤起临时置顶、最小化即还原、全局光标贴边隐藏，没有嵌入桌面） | Active |
-| [Sync Protocol](./sync-protocol.md) | PC ↔ WebDAV ↔ cloud: document shape, time format, monotonic `updated_at`, record LWW + tombstones, settings LWW, WebDAV precondition rules measured on Apache / nginx | Active |
+| [Window Modes](./window-modes.md) | 清单 / 日历窗口（按窗口）普通 / 经典固定 / 固定 + 嵌入桌面：模式状态表、`services::window_mode` 的按窗口切换与 200ms 轮询、唤起 / 重置位置、清单 / 日历窗口的生命周期（关闭 = 隐藏）、`platform::embed` / `subclass`、持久化键、Explorer 重启自愈、e2e；macOS 的固定模式（`setMovable:NO`、唤起临时置顶、最小化即还原、全局光标贴边隐藏，没有嵌入桌面） | Active |
+| [Sync Protocol](./sync-protocol.md) | PC ↔ WebDAV ↔ cloud: document shape, time format, monotonic `updated_at`, record LWW + tombstones, settings LWW, lists (`todoLists` / `listTombstones`) and field-level `listId` LWW, WebDAV precondition rules measured on Apache / nginx, device-local data (§3.6) | Active |
 | [Desktop Fences](./desktop-fences.md) | 桌面收纳箱：始终在桌面层的窗口（建窗参数、Windows 嵌入守护 / macOS 不激活面板与桌面图标层、移动 / 缩放 / 几何落库）、core `fence` / `fence::items` 接口与 `FenceRefresh`、v29 三张表与 v30 隐藏图标两列（点开头自动隐藏、右键隐藏、显示隐藏的图标）、文件层（文件夹为 source of truth、对账、`FenceActivity`、删除保留语义；macOS `renamex_np(RENAME_EXCL)` 与隐私授权 TCC）、按屏幕组合记忆位置、debug 专用环境变量 | Active |
 
 ---
 
 ## Pre-Development Checklist
 
-改主窗口的样式、owner、Z 序、可最小化或几何锁定（`pc-gpui/crates/app/src/services/window_mode.rs`、`platform/embed.rs`、
+改清单 / 日历窗口的样式、owner、Z 序、可最小化或几何锁定（`pc-gpui/crates/app/src/services/window_mode/`、`services/block_windows.rs`、`platform/embed.rs`、
 `platform/subclass.rs`、`platform/windows.rs`、`platform/macos/`）之前：
 
 - [ ] Read [Window Modes](./window-modes.md) — especially §3 "Ordering rules" and "Wrong vs Correct"; mac 改动另读「Scenario: macOS」

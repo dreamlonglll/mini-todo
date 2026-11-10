@@ -50,6 +50,11 @@ impl ApiError {
         Self::new(StatusCode::NOT_FOUND, "not_found", detail)
     }
 
+    /// 409：与现有数据冲突（清单重名、按名称找到多个清单）。
+    pub fn conflict(detail: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, "conflict", detail)
+    }
+
     /// 内部错误：完整错误写进服务端日志，客户端只看到通用说明。
     pub fn internal(context: &str, err: impl Display) -> Self {
         error!(target: "minitodo_cloud::api", "{}: {}", context, err);

@@ -1,7 +1,7 @@
 ---
 name: minitodo
-description: 通过云端 HTTP API 读写用户的 mini-todo 待办；适合 today / add / done / list / search / show / update / delete 场景，可被 openclaw cron 调度（agent 自行拉数据 + 判断是否推送）做临期提醒。
-version: 2.1.0
+description: 通过云端 HTTP API 读写用户的 mini-todo 待办与待办清单（工作 / 生活等分类）；适合 today / add / done / list / search / show / update / delete / lists 场景，可被 openclaw cron 调度（agent 自行拉数据 + 判断是否推送）做临期提醒。
+version: 2.2.0
 ---
 
 # mini-todo Skill
@@ -23,10 +23,20 @@ WebDAV 与 PC 端共享同一份 `sync-data.json.gz`：AI 的写入约 1.5 秒�
 - "C3 / ID xxx 是什么？" → `show C3`
 - "把 C3 / ID xxx 的截止时间改到 2026-05-20" → `update C3 endTime=2026-05-20`
 - "删除 C3 / ID xxx" → `delete C3`
+- "我有哪些清单？" → `lists`
+- "工作清单里还有什么没做？" → `list --pending --list 工作`
+- "在生活清单里加一个'买菜'" → `add "买菜" --list 生活`
+- "把 C3 移到工作清单" → `update C3 --list 工作`
+- "新建一个'学习'清单" / "把'工作'改名为'公司'" / "删掉'学习'清单" → `lists add 学习` / `lists rename 工作 公司` / `lists delete 学习`
 
 > **`C{seq}` 短码**是 cloud 给每个 todo 分配的递增编号（响应 JSON 里 `seq` 字段），
 > 比 16 位完整 i64 id 更适合用户口语反馈；删除后短码不会被复用。所有 `done` / `show` /
 > `update` / `delete` 的 id 位置都同时接受 `C{seq}` / `c{seq}`（大小写不敏感）和完整 i64 id。
+>
+> **待办清单**是待办的分类（PC 上每个清单是一个独立窗口）：每个待办属于一个清单（字段 `listId`），
+> 默认清单 id 固定为 1、名字默认是"待办清单"（可改名、不能删除）。`--list` 与 `lists` 的清单位置
+> 都接受清单名称或 id：先按 id 找，再按名称（去首尾空格、不区分大小写）匹配；两个清单重名时会报错
+> 并列出候选 id，改用 id 即可。清单没有 `C{seq}` 短码。
 
 非待办相关问题不要调用本 skill；它只覆盖 mini-todo 这一个领域。
 
@@ -75,20 +85,26 @@ pip install tzdata           # 仅 Windows 且在 config.toml 里配置了 timez
 
 | 子命令 | 说明 | 示例 |
 |---|---|---|
-| `today` | 今日相关（今天到期 ∪ 今天开始 ∪ 已逾期未完成）；"今天"按 config 的 `timezone` | `python minitodo.py today --json` |
-| `add <title>` | 新增待办；`--due` 写入 `endTime` | `python minitodo.py add "买菜" --priority high --due 2026-05-20` |
+| `today` | 今日相关（今天到期 ∪ 今天开始 ∪ 已逾期未完成）；"今天"按 config 的 `timezone`；可加 `--list` | `python minitodo.py today --json` |
+| `add <title>` | 新增待办；`--due` 写入 `endTime`；`--list` 建到指定清单（不给时进默认清单） | `python minitodo.py add "买菜" --priority high --due 2026-05-20 --list 生活` |
 | `done <ref>` | 标记完成 | `python minitodo.py done C3` 或 `done 1734567890123456` |
-| `list` | 列表，可叠加 `--pending` / `--completed` / `--priority` / `--quadrant` / `--limit` / `--sort` | `python minitodo.py list --pending --priority high --json` |
-| `search <kw>` | 关键词搜索（标题 + 描述） | `python minitodo.py search "报告" --json` |
-| `show <ref>` | 详情（默认含 subtasks） | `python minitodo.py show C3 --json` |
-| `update <ref> <key=val>...` | 修改字段，支持多个 | `python minitodo.py update C3 endTime="2026-06-01 18:00" priority=medium` |
+| `list` | 列表，可叠加 `--pending` / `--completed` / `--priority` / `--quadrant` / `--limit` / `--sort` / `--list` | `python minitodo.py list --pending --priority high --list 工作 --json` |
+| `search <kw>` | 关键词搜索（标题 + 描述）；可加 `--list` | `python minitodo.py search "报告" --json` |
+| `show <ref>` | 详情（默认含 subtasks；`List` 是所属清单的 id） | `python minitodo.py show C3 --json` |
+| `update <ref> <key=val>... [--list <清单>]` | 修改字段，支持多个；`--list` 把待办移到另一个清单（只移动时可以不写 key=value；`--list` 写在 key=value 之后） | `python minitodo.py update C3 endTime="2026-06-01 18:00" priority=medium`；`update C3 --list 工作` |
 | `delete <ref>` | 删除（连带 subtasks） | `python minitodo.py delete C3` |
+| `lists` | 列出全部清单（`ID` / `ORDER` / `NAME`，按排序） | `python minitodo.py lists --json` |
+| `lists add <名称> [--sort-order N]` | 新建清单（不给 `--sort-order` 时排最后） | `python minitodo.py lists add 学习` |
+| `lists rename <清单> <新名称>` | 改名（默认清单也能改名） | `python minitodo.py lists rename 工作 公司` |
+| `lists delete <清单>` | 删除清单：其下待办**全部移到默认清单**（不会删除待办）；默认清单不能删 | `python minitodo.py lists delete 学习 --json` |
 | `health` | 健康检查（同步降级时照常输出 JSON，stderr 附一行提示） | `python minitodo.py health --json` |
 | `sync` | 手动触发 WebDAV 同步（pull + push） | `python minitodo.py sync --json` |
 | `sync pull` | 仅从 WebDAV 拉取最新数据 | `python minitodo.py sync pull --json` |
 | `sync push` | 仅推送本地变更到 WebDAV | `python minitodo.py sync push --json` |
 
 `<ref>` = `C{seq}` 短码（cloud 端 1, 2, 3... 自增）或完整 i64 id。`C` 大小写不敏感。
+`<清单>` / `--list` = 清单名称或 id（先按 id 找，再按名称不区分大小写匹配）。CLI 先用 `GET /lists/<清单>`
+解析出 id，再按 `listId` 写入 / 过滤；找不到（404）或重名（409）时直接报错退出（退出码 4），不会写入。
 
 - `--due`：规范格式 `YYYY-MM-DD HH:MM:SS`；也可写 `YYYY-MM-DD`（= 当天 `23:59:00`）或
   `YYYY-MM-DD HH:MM`；带 `Z` / `±HH:MM` 时区后缀的值由服务端换算成它配置的时区。
@@ -111,6 +127,10 @@ pip install tzdata           # 仅 Windows 且在 config.toml 里配置了 timez
 | 清空 C3 的提醒时间 | `python ~/.claude/skills/minitodo/minitodo.py update C3 notifyAt=null --json` |
 | 删掉一周前完成的所有 | 先 `list --completed --sort -updatedAt --json`，再分别 `delete C{seq}` |
 | 确保数据是最新的 | `python ~/.claude/skills/minitodo/minitodo.py sync --json` |
+| 有哪些清单 | `python ~/.claude/skills/minitodo/minitodo.py lists --json` |
+| 工作清单里没完成的 | `python ~/.claude/skills/minitodo/minitodo.py list --pending --list 工作 --json` |
+| 把 C3 移到生活清单 | `python ~/.claude/skills/minitodo/minitodo.py update C3 --list 生活 --json` |
+| C3 在哪个清单 | `show C3 --json` 看 `listId`，再对照 `lists --json`（没有 `listId` 或指向已删除的清单时算默认清单） |
 
 ## 直接调用 HTTP API（fallback）
 
@@ -120,7 +140,7 @@ body 是 JSON（`Content-Type: application/json`）。
 | Method | Path | 用途 |
 |---|---|---|
 | `GET /health` | 服务健康与同步状态（降级时 **503**，见下文） |
-| `GET /todos?...` | 列表；query: `completed=true/false`, `priority=high/medium/low`（按颜色派生）, `quadrant=1-4` 或 `urgent_important` 等别名, `dueDateBefore` / `dueDateAfter`（按 `endTime`；见下）, `startDate=YYYY-MM-DD`, `q=<keyword>`（标题 + 描述）, `sort=[+-]<field>`, `limit`, `offset`, `withSubtasks=true` |
+| `GET /todos?...` | 列表；query: `completed=true/false`, `priority=high/medium/low`（按颜色派生）, `quadrant=1-4` 或 `urgent_important` 等别名, `dueDateBefore` / `dueDateAfter`（按 `endTime`；见下）, `startDate=YYYY-MM-DD`, `q=<keyword>`（标题 + 描述）, `listId=<清单 id>` / `list=<清单名>`（按有效清单，见"待办清单"）, `sort=[+-]<field>`, `limit`, `offset`, `withSubtasks=true` |
 | `GET /todos/:id?withSubtasks=true` | 详情（默认嵌套 subtasks） |
 | `POST /todos` | 创建；body 必填 `title`，其它字段见字段表 |
 | `PATCH /todos/:id` | 部分更新；未提及字段保留；内容没变化时不刷新 `updatedAt` |
@@ -128,6 +148,11 @@ body 是 JSON（`Content-Type: application/json`）。
 | `POST /todos/:id/subtasks` | 创建子任务；body 必填 `title` |
 | `PATCH /subtasks/:id` | 部分更新子任务 |
 | `DELETE /subtasks/:id` | 删除子任务 |
+| `GET /lists` | 全部清单 `[{id, name, sortOrder, createdAt, updatedAt}]`，按 `(sortOrder, id)` |
+| `GET /lists/:id` | 单个清单；`:id` 是清单 id 或 URL 编码的清单名 |
+| `POST /lists` | 新建清单；body 必填 `name`，可选 `sortOrder` → 201 |
+| `PATCH /lists/:id` | 改名 / 改排序（`name` / `sortOrder`） |
+| `DELETE /lists/:id` | 删除清单，其下待办移到默认清单；返回 `{deleted, name, movedTodos, movedTo}`；默认清单 → 400 |
 | `GET /images/:name` | 取图片 bytes |
 | `POST /images` | multipart 上传，`file` 字段；返回 `{name}` |
 | `POST /sync` | 手动触发 pull + push（pull 总是重新下载完整文档，不走缓存校验）；全部成功 200，部分失败 207；返回 `{pull, push, pullError?, pushError?}` |
@@ -176,8 +201,10 @@ body 是 JSON（`Content-Type: application/json`）。
 | `repeatInterval` | 整数 ≥ 1 | 间隔；`weekly` + `interval=2` = 每两周 |
 | `repeatWeekdays` | `"1,3,5"` / null | 仅 `weekly`：星期几（1=周一 … 7=周日）；也接受数组 `[1,3,5]` |
 | `repeatMonthDay` | 1-31 / null | 仅 `monthly`：每月几号 |
+| `listId` | 整数 ≥ 1 | 所属清单的 id（见 `GET /lists`）；新建不给时为 1（默认清单）。必须是现有的清单，否则 400 `清单不存在`；把读到的对象原样写回时不校验，PATCH 不带 `listId` 时清单不变。读到的是存储的原值：**没有 `listId` 表示清单未知**（旧版本设备写的，服务端不会替它补值），与指向已删除的清单一样，这条待办算在默认清单里 |
 
-只读 / 服务端维护的字段：`id`、`createdAt`、`updatedAt`、`seq`（cloud 短码）、`subtasks`、
+只读 / 服务端维护的字段：`id`、`createdAt`、`updatedAt`、`listUpdatedAt`（`listId` 自己的版本，只在清单真的
+被设置时刷新：新建、改了 `listId`、删除清单把它移进默认清单；清单未知时不返回）、`seq`（cloud 短码）、`subtasks`、
 `subtaskCount`（列表不嵌套时附带）。写入时这些字段会被**忽略**，所以把读到的对象改几个字段
 后整包写回是安全的；对象里原样带回的 `color` / `endTime` / `description` 不会盖掉你对
 `priority` / `dueDate` / `notes` 的修改（规范字段只有真的改了才优先于别名）。
@@ -195,8 +222,8 @@ body 是 JSON（`Content-Type: application/json`）。
 }
 ```
 
-其它错误码：`unauthorized`（401）、`not_found`（404）、`unsupported_media_type`（415，
-缺 `Content-Type: application/json`）、`internal`（500，详情只在服务端日志）、`sync_failed`
+其它错误码：`unauthorized`（401）、`not_found`（404）、`conflict`（409，清单重名 / 按名称找到多个清单）、
+`unsupported_media_type`（415，缺 `Content-Type: application/json`）、`internal`（500，详情只在服务端日志）、`sync_failed`
 （500，`/sync/pull` / `/sync/push` 失败；detail 给出 WebDAV 层面的原因）。
 
 ### subtask 字段
@@ -210,6 +237,25 @@ body 是 JSON（`Content-Type: application/json`）。
 | `parentId` | 只读 | 所属 todo 的 id。**不能修改**（要移动就删掉再在另一个 todo 下新建）；写入时给了不同的值 → 400，相同的值忽略 |
 
 `id` / `createdAt` / `updatedAt` 写入时忽略，其它字段 400。
+
+### 待办清单
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `id` | 只读 | 清单 id；默认清单固定为 1 |
+| `name` | 字符串 | 创建时必填；去首尾空格后不能为空、不超过 50 个字；与其它清单不区分大小写重名 → **409** `已有同名清单「<已有清单的名称>」` |
+| `sortOrder` | 整数 | 排序（越小越靠前）；新建不给时排最后 |
+| `createdAt` / `updatedAt` | 只读 | 规范时间格式 |
+
+- `/lists/:id` 的 `:id` 与 CLI 的 `<清单>` 同一套规则：先当数字 id 找，再按名称（去首尾空格、不区分大小写）精确匹配；
+  找不到 → 404；同名的有多个（两台设备各建了一个同名清单，同步不处理重名）→ **409**，错误体里
+  `candidates: [{id, name}]` 列出候选，改用 id
+- **有效清单**：待办的 `listId` 指向一个现有清单时就是它；没有 `listId`（未知：旧版本设备写的）、类型不对或指向已删除的
+  清单时，这条待办算在默认清单里（PC 也这样显示）。`GET /todos?listId=` / `?list=` 按有效清单过滤。未知的清单只有在
+  显式设置时才会变成已知（`update <ref> --list …` / `listId=`）；只改其它字段不会把它写成默认清单
+- 删除清单不会删除待办：其下待办全部移到默认清单（`listId` 改为 1，`updatedAt` 与 `listUpdatedAt` 刷新）；默认清单不能删除（400）
+- 清单归属单独合并：两端同时改了同一个待办时，其它字段按 `updatedAt` 整条取较新的一方，**清单归属按
+  `listUpdatedAt` 取较新的一方**——别处刚做的「移动到」不会被另一端只改了标题的旧副本带回原清单
 
 ### 图片
 
@@ -276,6 +322,14 @@ curl -X PATCH -H "Authorization: Bearer $KEY" -H "Content-Type: application/json
 curl -H "Authorization: Bearer $KEY" \
   -F "file=@/tmp/screenshot.png" \
   https://minitodo.example.com/images
+
+# 清单：新建、按名称（URL 编码）查未完成的待办、把待办移过去
+curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"name":"工作"}' https://minitodo.example.com/lists
+curl -H "Authorization: Bearer $KEY" \
+  "https://minitodo.example.com/todos?list=%E5%B7%A5%E4%BD%9C&completed=false"
+curl -X PATCH -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"listId":1762650000000123}' https://minitodo.example.com/todos/C3
 ```
 
 **重复任务的人话描述**（用于 channel 推送）：
@@ -390,8 +444,9 @@ openclaw cron add \
 - 单用户、单 API key（云端 `config.toml` 配）
 - 写入约 1.5 秒后推送到 WebDAV（连续写入最多攒 10 秒），PC 端要在自己的同步周期内才能拉到
 - 删除会留下墓碑并双向同步，30 天内能拦截其它端把已删除记录"复活"；离线超过 30 天的设备
-  再上线时，它手里的旧记录仍可能被恢复
-- 同一条记录两端同时修改时按 `updatedAt` 整条取较新的一方（不做字段级合并）；写后立刻 `show` 校验最稳
+  再上线时，它手里的旧记录仍可能被恢复（清单的删除墓碑永不过期，已删的清单不会这样复活）
+- 同一条记录两端同时修改时按 `updatedAt` 整条取较新的一方，只有清单归属（`listId`）按自己的 `listUpdatedAt`
+  单独取较新的一方；写后立刻 `show` 校验最稳
 - 不支持移动端
 
 ## 安装目录约定

@@ -43,6 +43,8 @@ DAV = {
 }
 TZ = "Asia/Shanghai"
 DISPLAYS = [d.strip() for d in os.environ.get("MT_E2E_DISPLAYS", ":78,:79").split(",") if d.strip()]
+# cloud 的 REST 端口（Apache 一遍、nginx 一遍）。WSL 镜像网络下与 Windows 共用 127.0.0.1，8787 可能被 Windows 上的程序占着
+CLOUD_PORTS = [int(p) for p in os.environ.get("MT_E2E_CLOUD_PORTS", "8787,8797").split(",")]
 SCREEN_W, SCREEN_H = 1600, 1000
 LVP_ICD = "/usr/share/vulkan/icd.d/lvp_icd.json"
 CANON = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
@@ -257,6 +259,17 @@ class XDisplay:
             self.xdo("click", button)
             time.sleep(0.03)
         time.sleep(0.4)
+
+    def raise_window(self, win: Win) -> None:
+        """把窗口提到最上面（没有窗口管理器：后建的窗口盖住先建的，如设置窗口被刚打开的日历窗口盖住）"""
+        self.xdo("windowraise", win.wid, check_rc=False)
+        time.sleep(0.2)
+
+    def move_window(self, win: Win, x: int, y: int) -> Win:
+        """像窗口管理器那样把窗口挪到屏幕坐标 (x, y)（Linux 上应用自绘的移动是 no-op，见 platform/fallback.rs）"""
+        self.xdo("windowmove", "--sync", win.wid, x, y, check_rc=False)
+        time.sleep(0.4)
+        return self.refresh(win)
 
     def focus(self, win: Win) -> None:
         self.xdo("windowfocus", "--sync", win.wid, check_rc=False)
@@ -572,6 +585,16 @@ class Session:
         finally:
             c.close()
 
+    def integrity_check(self) -> tuple[str, bool]:
+        """应用退出后：(PRAGMA integrity_check 的结果, 是否留下了 hot journal)。用读写连接打开（与应用下次启动一样，
+        有 hot journal 时先回滚它；只读连接遇到 hot journal 会报 "attempt to write a readonly database"）"""
+        hot = (self.data_dir / "data.db-journal").exists()
+        c = sqlite3.connect(str(self.db_path), timeout=10)
+        try:
+            return c.execute("PRAGMA integrity_check").fetchone()[0], hot
+        finally:
+            c.close()
+
     def todos_by_title(self) -> dict[str, dict]:
         return {r["title"]: r for r in self.query("SELECT * FROM todos")}
 
@@ -581,6 +604,18 @@ class Session:
 
     def tombstones(self) -> set[tuple[str, int]]:
         return {(r["entity_type"], r["entity_id"]) for r in self.query("SELECT * FROM tombstones")}
+
+    def prefs(self, key: str = "list:1") -> dict:
+        """窗口属性（`window_prefs`，v31）：清单窗口 `list:<清单 id>`、日历窗口 `calendar`；没有这一行时返回空 dict"""
+        return self.one("SELECT * FROM window_prefs WHERE window_key=?", (key,)) or {}
+
+    def layouts(self, key: str = "list:1") -> list[dict]:
+        """窗口在各屏幕组合下的几何（`window_layouts`）"""
+        return self.query("SELECT * FROM window_layouts WHERE window_key=? ORDER BY screen_config_id", (key,))
+
+    def lists(self) -> dict[int, str]:
+        """清单 id → 名称（`todo_lists`）"""
+        return {r["id"]: r["name"] for r in self.query("SELECT id, name FROM todo_lists ORDER BY sort_order, id")}
 
     # -- log ---------------------------------------------------------------------------
     def log_text(self) -> str:
@@ -614,7 +649,7 @@ class LogMark:
 class App:
     """一个运行中的应用实例（一个进程 + 它的窗口）。所有坐标都是窗口内的逻辑像素（缩放 1）。"""
 
-    MAIN = "Mini Todo"
+    MAIN = "Mini Todo"  # 默认清单窗口的系统标题（其它清单窗口 = 清单名，日历窗口「日历」）
 
     def __init__(self, procs: Procs, binary: Path, session: Session, display: XDisplay,
                  extra_env: dict[str, str] | None = None, tag: str = "") -> None:

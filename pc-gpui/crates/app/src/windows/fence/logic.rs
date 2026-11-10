@@ -1,15 +1,15 @@
 //! 收纳箱窗口用到的纯函数（旧 Tauri 版前端 `utils/fence.ts` 的 1:1 移植，测试向量照抄 `fence.test.ts` / 规格 §5；
-//! 旧前端已删除，见 git 历史）。
+//! 旧前端已删除，见 git 历史）。拖动阈值、缩放方向与 `resize_rect`、JS 取整与清单 / 日历窗口共用，在 `windows::drag`。
 
 use std::collections::HashSet;
 use std::time::Instant;
 
+use mini_todo_core::fence::DeleteFenceResult;
 use mini_todo_core::fence::items::{FenceEntry, ItemOpResult, ItemOpStatus, is_auto_hidden_name};
-use mini_todo_core::fence::{
-    DeleteFenceResult, MAX_ICON_SIZE, MAX_TITLE_CHARS, MIN_ICON_SIZE, PxRect,
-};
+use mini_todo_core::fence::{MAX_ICON_SIZE, MAX_TITLE_CHARS, MIN_ICON_SIZE};
 
 use crate::ui::message::MessageKind;
+use crate::windows::drag::js_round;
 
 /// 图标尺寸档位（与 `fence_fs::ICON_SIZE_BUCKETS` 一致）
 pub const ICON_BUCKETS: [u32; 8] = [16, 24, 32, 48, 64, 96, 128, 256];
@@ -64,11 +64,6 @@ pub fn normalize_fence_title(raw: &str) -> Option<String> {
     }
 }
 
-/// 按下后移动超过阈值（逻辑像素，默认 3）才算拖动
-pub fn exceeds_drag_threshold(dx: f64, dy: f64, threshold: f64) -> bool {
-    dx.abs() > threshold || dy.abs() > threshold
-}
-
 /// "用户正在拖动"的闸门（时间单位 ms，旧前端 `GeometryCommitGate` 的移植）：开始拖动时 `arm`，拖动中每次移动续期，
 /// 松手后落库完成再 `disarm`。闸门开着时悬停不展开也不收回。
 ///
@@ -107,97 +102,6 @@ impl GeometryCommitGate {
 
     pub fn disarm(&mut self) {
         self.armed_until = f64::NEG_INFINITY;
-    }
-}
-
-/// 缩放方向（8 个手柄）
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ResizeDir {
-    N,
-    S,
-    W,
-    E,
-    NW,
-    NE,
-    SW,
-    SE,
-}
-
-impl ResizeDir {
-    pub const ALL: [ResizeDir; 8] = [
-        ResizeDir::N,
-        ResizeDir::S,
-        ResizeDir::W,
-        ResizeDir::E,
-        ResizeDir::NW,
-        ResizeDir::NE,
-        ResizeDir::SW,
-        ResizeDir::SE,
-    ];
-
-    /// 拖动的是否含上边（N / NW / NE）；`has_s` / `has_w` / `has_e` 同理
-    pub fn has_n(self) -> bool {
-        matches!(self, ResizeDir::N | ResizeDir::NW | ResizeDir::NE)
-    }
-    pub fn has_s(self) -> bool {
-        matches!(self, ResizeDir::S | ResizeDir::SW | ResizeDir::SE)
-    }
-    pub fn has_w(self) -> bool {
-        matches!(self, ResizeDir::W | ResizeDir::NW | ResizeDir::SW)
-    }
-    pub fn has_e(self) -> bool {
-        matches!(self, ResizeDir::E | ResizeDir::NE | ResizeDir::SE)
-    }
-
-    pub fn key(self) -> &'static str {
-        match self {
-            ResizeDir::N => "n",
-            ResizeDir::S => "s",
-            ResizeDir::W => "w",
-            ResizeDir::E => "e",
-            ResizeDir::NW => "nw",
-            ResizeDir::NE => "ne",
-            ResizeDir::SW => "sw",
-            ResizeDir::SE => "se",
-        }
-    }
-}
-
-/// JS `Math.round`：逢 .5 向 +∞
-pub fn js_round(v: f64) -> i32 {
-    (v + 0.5).floor() as i32
-}
-
-/// 拖哪条边改哪条边，对边不动；不小于最小尺寸（拖左 / 上边缩到最小就停，右下角不被推走）
-pub fn resize_rect(
-    start: PxRect,
-    dir: ResizeDir,
-    dx: f64,
-    dy: f64,
-    min_w: f64,
-    min_h: f64,
-) -> PxRect {
-    let (mut x, mut y) = (start.x as f64, start.y as f64);
-    let (mut w, mut h) = (start.width as f64, start.height as f64);
-    if dir.has_e() {
-        w = (start.width as f64 + dx).max(min_w);
-    }
-    if dir.has_s() {
-        h = (start.height as f64 + dy).max(min_h);
-    }
-    if dir.has_w() {
-        w = (start.width as f64 - dx).max(min_w);
-        x = start.x as f64 + start.width as f64 - w;
-    }
-    if dir.has_n() {
-        h = (start.height as f64 - dy).max(min_h);
-        y = start.y as f64 + start.height as f64 - h;
-    }
-    PxRect {
-        x: js_round(x),
-        y: js_round(y),
-        width: js_round(w),
-        height: js_round(h),
     }
 }
 
@@ -474,14 +378,6 @@ mod tests {
     }
 
     #[test]
-    fn drag_threshold() {
-        assert!(!exceeds_drag_threshold(0., 0., 3.));
-        assert!(!exceeds_drag_threshold(3., -3., 3.));
-        assert!(exceeds_drag_threshold(4., 0., 3.));
-        assert!(exceeds_drag_threshold(0., -4., 3.));
-    }
-
-    #[test]
     fn geometry_gate_vectors() {
         let mut gate = GeometryCommitGate::new(1000.);
         assert!(!gate.accept(0.));
@@ -498,29 +394,6 @@ mod tests {
         gate.arm(2000.);
         gate.disarm();
         assert!(!gate.accept(2001.));
-    }
-
-    #[test]
-    fn resize_vectors() {
-        let start = PxRect {
-            x: 100,
-            y: 200,
-            width: 552,
-            height: 504,
-        };
-        let r = |dir, dx, dy| {
-            let r = resize_rect(start, dir, dx, dy, 240., 240.);
-            (r.x, r.y, r.width, r.height)
-        };
-        assert_eq!(r(ResizeDir::SE, 30., 40.), (100, 200, 582, 544));
-        assert_eq!(r(ResizeDir::E, 30., 40.), (100, 200, 582, 504));
-        assert_eq!(r(ResizeDir::S, 30., 40.), (100, 200, 552, 544));
-        assert_eq!(r(ResizeDir::NW, -20., -10.), (80, 190, 572, 514));
-        assert_eq!(r(ResizeDir::NE, 20., 10.), (100, 210, 572, 494));
-        assert_eq!(r(ResizeDir::SW, 20., 10.), (120, 200, 532, 514));
-        assert_eq!(r(ResizeDir::SE, -1000., -1000.), (100, 200, 240, 240));
-        assert_eq!(r(ResizeDir::NW, 1000., 1000.), (412, 464, 240, 240));
-        assert_eq!(r(ResizeDir::E, 10.4, 0.).2, 562);
     }
 
     #[test]

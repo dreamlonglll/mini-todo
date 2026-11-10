@@ -1,10 +1,11 @@
 //! 已完成窗口（旧 `CompletedView.vue`）。规格：`research/ui-editor-windows.md` §10。
 //!
-//! 窗口 460×550、可缩放、不透明，打开方是主窗口（owner + 遮罩 0.3）。从这里点开的编辑窗口以本窗口为打开方
+//! 窗口 460×550、可缩放、不透明，打开方是清单窗口（owner + 遮罩 0.3）。从这里点开的编辑窗口以本窗口为打开方
 //! （遮罩 0.3，遮罩按下或本窗口获得焦点时把编辑窗口带回前台），关闭后重新加载列表。
 //!
-//! 数据：`core::todo::list` → 只留已完成 → 按 `normalize(updatedAt || createdAt)` 降序（字符串比较）；只在打开时、
-//! 恢复 / 删除后、编辑窗口关闭后重新加载（不轮询）。搜索：标题或描述原文（小写）包含关键字。无快捷键。
+//! 数据：`core::todo::list` → 只留已完成、且有效清单是打开方清单的（`lists::effective_list_id`：归属未知 / 清单不存在的
+//! 按默认清单；PRD R6「已完成只看本清单」，恢复后照旧回到原清单）→ 按 `normalize(updatedAt || createdAt)` 降序（字符串比较）；
+//! 只在打开时、恢复 / 删除后、编辑窗口关闭后重新加载（不轮询）。搜索：标题或描述原文（小写）包含关键字。无快捷键。
 
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::{
@@ -13,7 +14,7 @@ use gpui_kit::{
     StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window, div,
     prelude::FluentBuilder as _, px,
 };
-use mini_todo_core::db::Todo;
+use mini_todo_core::db::{Todo, TodoList};
 
 use super::editor::EditorMode;
 use super::{ChildOf, WindowKind, WindowManager, WindowSpec, logical_size};
@@ -47,6 +48,16 @@ pub fn completed_sorted(todos: Vec<Todo>) -> Vec<Todo> {
     list
 }
 
+/// 清单 `list_id` 的已完成待办（有效清单，见模块文档），按更新时间降序
+pub fn completed_in_list(todos: Vec<Todo>, lists: &[TodoList], list_id: i64) -> Vec<Todo> {
+    completed_sorted(
+        todos
+            .into_iter()
+            .filter(|t| mini_todo_core::lists::effective_list_id(t.list_id, lists) == list_id)
+            .collect(),
+    )
+}
+
 /// 搜索：空 → 全部；否则标题或描述（原始 Markdown）小写包含关键字
 pub fn matches_query(todo: &Todo, query: &str) -> bool {
     let q = query.trim().to_lowercase();
@@ -60,6 +71,8 @@ pub fn matches_query(todo: &Todo, query: &str) -> bool {
 
 /// 已完成窗口视图
 pub struct CompletedWindow {
+    /// 只看这个清单的已完成（打开方清单窗口的清单）
+    list_id: i64,
     todos: Vec<Todo>,
     search: Entity<InputState>,
     hovered: Option<i64>,
@@ -67,7 +80,7 @@ pub struct CompletedWindow {
 }
 
 impl CompletedWindow {
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(list_id: i64, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("搜索已完成的待办..."));
         let subscriptions = vec![
             cx.subscribe_in(&search, window, |_, _, event: &InputEvent, _, cx| {
@@ -82,6 +95,7 @@ impl CompletedWindow {
             cx.observe_global::<WindowManager>(|_, cx| cx.notify()),
         ];
         let mut this = Self {
+            list_id,
             todos: Vec::new(),
             search,
             hovered: None,
@@ -97,7 +111,9 @@ impl CompletedWindow {
             let result = task.await;
             let _ = this.update_in(cx, |this, window, cx| match result {
                 Ok(todos) => {
-                    this.todos = completed_sorted(todos);
+                    // 清单列表取 AppState 的内存副本（与清单窗口按同一份列表判断有效清单）
+                    let lists = AppState::global(cx).read(cx).lists.clone();
+                    this.todos = completed_in_list(todos, &lists, this.list_id);
                     cx.notify();
                 }
                 Err(e) => message::error_with(window, cx, "加载已完成待办失败", &e),
@@ -519,8 +535,8 @@ impl Render for CompletedWindow {
     }
 }
 
-/// 打开已完成窗口（打开方：主窗口 `ChildOf::window(window, cx)`；截图调试 `None`）
-pub fn open(cx: &mut App, parent: Option<ChildOf>) -> Option<AnyWindowHandle> {
+/// 打开清单 `list_id` 的已完成窗口（打开方：清单窗口 `ChildOf::window(window, cx)`；截图调试 `None`）
+pub fn open(cx: &mut App, parent: Option<ChildOf>, list_id: i64) -> Option<AnyWindowHandle> {
     let spec = WindowSpec::new(
         "已完成",
         gpui_kit::Bounds::new(Default::default(), logical_size(WIDTH, HEIGHT)),
@@ -531,7 +547,7 @@ pub fn open(cx: &mut App, parent: Option<ChildOf>) -> Option<AnyWindowHandle> {
         WindowKind::Completed,
         None,
         spec,
-        |window, cx| cx.new(|cx| CompletedWindow::new(window, cx)),
+        |window, cx| cx.new(|cx| CompletedWindow::new(list_id, window, cx)),
     )
 }
 
@@ -566,6 +582,37 @@ mod tests {
         ]);
         let ids: Vec<i64> = list.iter().map(|t| t.id).collect();
         assert_eq!(ids, vec![2, 4, 1]);
+    }
+
+    #[test]
+    fn only_the_opener_lists_completed_todos_are_shown() {
+        let list = |id: i64| -> TodoList {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "name": format!("清单 {id}"), "sortOrder": id,
+                "createdAt": "2026-11-01 00:00:00", "updatedAt": "2026-11-01 00:00:00",
+            }))
+            .unwrap()
+        };
+        let lists = vec![list(1), list(7)];
+        let in_list = |id: i64, list_id: Option<i64>| {
+            let mut t = todo(id, "t", true, &format!("2026-11-0{id} 08:00:00"), "");
+            t.list_id = list_id;
+            t
+        };
+        let todos = || {
+            vec![
+                in_list(1, Some(1)),
+                // 归属未知、清单已删除：按默认清单
+                in_list(2, None),
+                in_list(3, Some(99)),
+                in_list(4, Some(7)),
+                todo(5, "未完成", false, "", ""),
+            ]
+        };
+        let ids = |list: Vec<Todo>| list.iter().map(|t| t.id).collect::<Vec<_>>();
+        assert_eq!(ids(completed_in_list(todos(), &lists, 1)), vec![3, 2, 1]);
+        assert_eq!(ids(completed_in_list(todos(), &lists, 7)), vec![4]);
+        assert!(completed_in_list(todos(), &lists, 8).is_empty());
     }
 
     #[test]

@@ -15,7 +15,7 @@
 | 任何改动 | §2 fmt / clippy / test（Linux） |
 | `cfg(windows)` 代码：`platform/`、`services/{tray,single_instance,autostart,notify,window_mode,fences}`、`build.rs`；core 的 `services/secret.rs`、`services/fence_fs/`、`settings::system_fonts` | + §3 Windows 交叉 clippy |
 | 可见界面（窗口布局、控件、`theme.rs`、文案、字体） | + §4 `regress.py`：相关场景 `--only`，逐张看 `compare/`；改共享控件 / `theme.rs` 时跑全部场景并看控件样例（`gallery`）。界面明显改版（新视图、新窗口、主窗口 / 详情 / 收纳箱外观大改）时，按 `scripts/intro-video/README.md` 重新生成介绍视频与 README 截图，避免 README 展示过时界面 |
-| 跨窗口流程（新建 / 编辑 / 子任务 / 设置即时生效 / 导入导出 / 已完成 / 提醒 / 收纳箱新建改名） | + `regress.py --smoke` |
+| 跨窗口流程（新建 / 编辑 / 子任务 / 设置即时生效 / 导入导出 / 已完成 / 提醒 / 收纳箱新建改名 / 新建清单改名） | + `regress.py --smoke` |
 | core 的同步、导入导出、迁移、提醒调度；单实例、日志 | + §5 Linux e2e（F / S / L 组；同步改动跑 S 组 Apache + nginx），并按 [data-compat.md](./data-compat.md) 确认 cloud 侧也改了 |
 | 版本号、`release.yml` / `cache-warm.yml`、NSIS 安装器、`scripts/macos/{bundle.sh,make-dmg.sh}` | 见 [release.md](./release.md)；改 mac 打包脚本另跑 §7.2 的 CI（`pc-gpui-ci.yml` 的 macos 作业或 mac e2e 会调用 `bundle.sh`） |
 | Windows 窗口行为（窗口模式、嵌入桌面、透明、通知窗口定位、收纳箱、托盘、开机自启、单实例、DPAPI、Toast、release 构建） | + §6 Windows e2e（CI 或本机），交付说明里列出需要用户实机验收的项 |
@@ -88,15 +88,17 @@ scripts/shot.sh --open main,gallery --window 控件样例 /tmp/shots    # ui/ �
 ```
 
 - 依赖（Ubuntu）：`xvfb xdotool imagemagick mesa-vulkan-drivers fonts-noto-cjk fonts-liberation`。只依赖 Python 3 标准库。
-- 每个场景是一次全新进程：`seed` 导入 `scripts/sample-data.json` → 按场景改库 → 以 `MINI_TODO_DATA_DIR` / `MINI_TODO_FENCES_ROOT` /
+- 每个场景是一次全新进程：`seed` 导入 `scripts/sample-data.json` → 按场景改库（深色 / 四象限 / 锁定改 `window_prefs` / `window_layouts`；
+  seed 时已迁移到 v31，再改旧的全局键 `text_theme` / `view_mode` / `is_fixed` 无效）→ 以 `MINI_TODO_DATA_DIR` / `MINI_TODO_FENCES_ROOT` /
   `MINI_TODO_DEBUG_OPEN` 启动 debug 构建 → 交互 → 按窗口截图（与参考截图同名）。网络被断开（节假日走缓存、版本检查失败），结果确定。
+  `main-calendar(-dark)` 沿用旧场景名，截的是独立的「日历」窗口；`list-new-rename` 是 `list:new` 新建、标题栏正在改名的清单窗口。
 - 输出：`<out>/<场景>.png`、`<out>/compare/<场景>.png`（左：参考图｜中：`--before`｜右：本次）、`<out>/logs/<场景>.log`，
   冒烟另有 `<out>/results.json`。默认输出目录 `pc-gpui/target/regress`。
 - **基线用 `--before`**（改动前跑一遍的输出）做自身回归——旧 Tauri 版删除后这是唯一能随时生成的基线。
 - `--ref` / 环境变量 `MINI_TODO_REF_DIR`（冒号分隔多个目录）是**可选**的：重写期间由旧 Vue 前端在 Playwright Chromium 里按真实窗口
   逻辑尺寸渲染的参考截图（时间冻结在 2026-10-15 10:00 Asia/Shanghai，1920×1080 @100%，Windows UA），在仓库外生成、不在仓库里，
   旧前端删除后无法再从仓库重新生成（见 `crates/app/README.md` §1）。
-- 看对照图时：透明窗口（主窗口 / 通知 / 收纳箱）圆角外在 Xvfb 下是黑色，忽略四角；日历 / 提醒相关场景与真实时间有关，只比较布局；
+- 看对照图时：透明窗口（清单 / 日历窗口 / 通知 / 收纳箱）圆角外在 Xvfb 下是黑色，忽略四角；日历 / 提醒相关场景与真实时间有关，只比较布局；
   Linux 字体是 Liberation Sans + Noto Sans CJK SC 代替 Segoe UI + 微软雅黑（与参考截图相同）；中文折行位置可能差一个字（GPUI 不做
   避头尾，见 [gpui-conventions.md §2.13](./gpui-conventions.md)）。
 - 界面调整后要同步改脚本开头的 `SCENES` / `SMOKE` / `CALLS`（坐标与场景）；新窗口 / 新状态加场景，并在 `MINI_TODO_DEBUG_OPEN`
@@ -119,10 +121,15 @@ cd .. && python3 pc-gpui/scripts/e2e-linux/run_e2e.py pc-gpui/target/debug/mini-
 
 - 真实的 debug 构建在 Xvfb + lavapipe 上黑盒运行（xdotool 输入、tesseract OCR 读界面），断言数据库、WebDAV 上的
   `sync-data.json.gz`、cloud REST、Skill CLI、应用日志与截图。用例组：`F`（本地功能：新建 / 编辑 / 子任务 / 完成 / 删除 / 四象限拖拽 /
-  时间格式 / 5s 轮询 / 提醒补发与应用内通知 / 单实例 / 日志 / 导入导出 / 主题与日历）、`S`（同步，Apache + nginx 两种 WebDAV 各一遍，
-  PC ↔ cloud ↔ Skill）、`L`（生命周期：旧版本数据库升级迁移等）。前缀过滤如 `F`、`S04[nginx]`。
+  时间格式 / 5s 轮询 / 提醒补发与应用内通知 / 单实例 / 日志 / 导入导出 / 按窗口的日 / 夜与独立日历窗口、清单（新建改名 / 移动到 /
+  表单改清单 / 日历筛选 / 关闭即隐藏与再显示 / 删除，F17~F23））、`S`（同步，Apache + nginx 两种 WebDAV 各一遍，PC ↔ cloud ↔ Skill；
+  多清单同步：旧格式远端补传 `listId`、双设备建 / 删清单开关窗、契约 §13 F1，S12~S15）、`L`（生命周期：v27 → v31 升级（含窗口属性种子）、
+  库版本比程序新等）。前缀过滤如 `F`、`S04[nginx]`。全量约 25 分钟。
+- Linux 上应用摆不了窗（`platform/fallback.rs` 没有原生句柄），自绘拖动、吸附、「重置位置」由 §6 Windows e2e 覆盖；Linux 用例用 xdotool 挪窗，
+  拖动落库改为"挪窗后关闭，按屏幕组合保存几何"（F21）。
 - 依赖、WebDAV 服务准备（`MT_E2E_DAV_ROOT`）与环境变量见 `pc-gpui/scripts/e2e-linux/README.md`；结果在 `$MT_E2E_WORK/run/`
-  （默认 `/tmp/mini-todo-gpui-e2e/run/results.txt`、`shots/`、各进程日志）。
+  （默认 `/tmp/mini-todo-gpui-e2e/run/results.txt`、`shots/`、各进程日志）。WSL（镜像网络）下 cloud 的默认端口可能被 Windows 上的程序占用，
+  用 `MT_E2E_CLOUD_PORTS`（默认 `8787,8797`）换端口。
 - 何时必跑：改 core 的同步 / 合并 / 时间 / 墓碑 / 导入导出 / 迁移 / 提醒，或 app 的同步编排（`services/sync.rs`、`auto_sync.rs`）、
   单实例、日志。同步改动必须 Apache 与 nginx 两种服务器都 PASS（`backend/sync-protocol.md` §6）。
 
@@ -132,17 +139,22 @@ cd .. && python3 pc-gpui/scripts/e2e-linux/run_e2e.py pc-gpui/target/debug/mini-
 
 - CI：`.github/workflows/pc-gpui-e2e-windows.yml`（`workflow_dispatch`，以及推送到 `claude/**` 分支且改动 `pc-gpui/**` 时）在 GitHub 托管的
   `windows-latest` 上运行（无 GPU 时 GPUI 走 D3D11 WARP）：
-  - `e2e-debug`：debug 构建 + `--suite debug`——W（各窗口外观 / 尺寸 / 透明）、S（普通 → 经典固定 → 嵌入桌面、Z 序、Win+D、
-    Explorer 重启重挂）、N（应用内通知样式与叠放）、I（新建 / 编辑 / 完成 / 删除、深色主题、开机自启、托盘、系统通知）、
-    D（本地 WebDAV：测试连接、DPAPI 密文、同步）、F（收纳箱：嵌入、监听、改名、真实 OLE 拖入、Win+D、Explorer 重启）。
+  - `e2e-debug`：debug 构建 + `--suite debug`——W（各窗口外观 / 尺寸 / 透明，含日历窗口与新清单窗口）、S（默认清单窗口：普通（自绘拖动 /
+    缩放、无 `WS_THICKFRAME`、双击标题栏不最大化）→ 经典固定 → 嵌入桌面、Z 序、Win+D、Explorer 重启重挂；锁定落 `window_layouts.is_fixed`）、
+    N（应用内通知样式与叠放）、I（新建 / 编辑 / 完成 / 删除、按窗口的深色、开机自启、托盘、系统通知）、
+    D（本地 WebDAV：测试连接、DPAPI 密文、同步）、F（收纳箱：嵌入、监听、改名、真实 OLE 拖入、Win+D、Explorer 重启、自绘拖动与吸附）、
+    L（待办清单窗口与日历窗口：新建 / 改名 / 移动待办 / 拖动落库与吸附 / 按窗口锁定 / 关闭 = 隐藏与托盘唤起 / 重置位置 / 删除 /
+    日历显示、锁定嵌入与 Win+D；托盘菜单经 `WM_COMMAND`、托盘左键经 tray-icon 回调消息触发）。
   - `release-smoke`：release 构建（验证 `fxc.exe` 着色器预编译）+ `--suite release`——P（不隔离：真实数据 / 日志位置、release 忽略
-    debug 开关、单实例唤起、关主窗口退出）。
+    debug 开关、单实例唤起、关闭默认清单窗口只隐藏、托盘「退出」退出）。
   - 失败详情与关键截图以注解输出，截图 / 日志作为产物上传。
 - 本机（自己的 Windows 机器）：见 `pc-gpui/scripts/e2e-windows/README.md`。要点：屏幕不锁定、输入法切英文、测试期间不动鼠标键盘；
   不加 `--allow-real-profile` 时跳过不隔离的 P 组（会用真实数据目录、与安装版冲突）；S06 / F06 会重启 `explorer.exe`，
   I06 会写入再删除与安装版共用的 `HKCU\…\Run\mini-todo`。遵守 `guides/desktop-window-e2e-guide.md` 的"并存"与"输入安全"规则。
-- 何时必跑：改 `platform/`、`services/window_mode.rs`、`services/fences.rs`、`windows/fence/`、`windows/notification.rs`、托盘 / 单实例 /
-  开机自启 / Toast / DPAPI，或 `build.rs` / release profile。
+- 何时必跑：改 `platform/`、`services/window_mode/`、`services/block_windows.rs`、`services/snap.rs`、`services/fences.rs`、`windows/fence/`、
+  `windows/{block,drag,snap}.rs`、`windows/list_window/`、`windows/calendar_window/`、`windows/notification.rs`、托盘 / 单实例 /
+  开机自启 / Toast / DPAPI，或 `build.rs` / release profile。改了托盘菜单的顺序不用改脚本（命令 id 按 `tray.rs` 现算），但要跑
+  `python pc-gpui/scripts/e2e-windows/selftest.py`。
 
 ---
 
@@ -187,12 +199,14 @@ cargo clippy --manifest-path scripts/mac-check/Cargo.toml --target aarch64-apple
     只在 mac 上编译的单测（收纳箱的真实 `renamex_np` 移动往返 / 撞名不覆盖 / 已锁定 / iCloud 占位、真实图标提取、`UF_HIDDEN` 列举）在这里跑
   - `smoke`：debug 构建 + seed → `bundle.sh target/debug/mini-todo -` 包成单架构 `.app`（bundle id 才有效）→ `lsregister` 登记 →
     `set_display.py` 尝试把显示器调到 1920×1080（失败不致命，runner 默认 1024×768pt、1x）→ `run_e2e.py --suite smoke --strict-traffic-lights`：
-    M01 主窗口（尺寸、截图有内容、OCR 认出待办标题、bundle id、红绿灯已隐藏）、M02 设置、M03 只读详情、M04 AppleScript quit、M05 ⌘Q、
-    M06 App 菜单、M07 菜单栏图标菜单（含收纳箱三项）、M08 ⌘W 后 `open <app>` 唤起、M09 FAB 新建待办落库、M10 固定模式拖不动 / 改尺寸无效 / `is_fixed` 落库；
+    M01 默认清单窗口（尺寸、截图有内容、OCR 认出待办标题、bundle id、红绿灯已隐藏）、M02 设置、M03 只读详情、M04 AppleScript quit、M05 ⌘Q、
+    M06 App 菜单、M07 菜单栏图标菜单（含「新增待办清单」「显示日历」与收纳箱三项，没有「固定模式」）、M08 ⌘W = 隐藏后 `open <app>` 唤起同一个窗口、
+    M09 FAB 新建待办落库（默认清单）、M10 标题栏锁按钮：普通可拖可缩放 → 锁定拖不动、手柄消失、`window_layouts.is_fixed` 落库 → 解锁、
+    M11 菜单栏「新增待办清单」→ 改名 / 双击改名 / 拖动落库、M12 删除清单（墓碑、待办回默认清单）、M13 清单窗口全部 ⌘W 后 Dock 唤起全部；
     收纳箱 MF01~MF10（全部在临时目录：`MINI_TODO_FENCES_ROOT` + `MINI_TODO_DESKTOP_DIR`，绝不碰真实桌面）：MF01 新建（层级 = 桌面图标层 + 1、在所有
     普通窗口之后、位置与尺寸、库与文件夹、日志自报 collectionBehavior `0x251` / `canHide=false` / 非激活面板）、MF02 目录监听、MF03 `drag_source.py`
     真实拖入与撞名不覆盖、MF04 移回、MF05 删除收纳箱（全部移回、`.DS_Store` 不搬到桌面）、MF06 ⌘H 与别的应用隐藏都不藏收纳箱、点收纳箱不激活应用、
-    MF07 有收纳箱时 Dock 唤起主窗口、MF08 双击标题改名（激活应用，系统输入流粘贴 + 回车）、MF09 拖标题栏落库、MF10 菜单栏图标三项与重启恢复
+    MF07 有收纳箱时 Dock 唤起默认清单窗口、MF08 双击标题改名（激活应用，系统输入流粘贴 + 回车）、MF09 拖标题栏落库、MF10 菜单栏图标三项与重启恢复
   - `release-smoke`：release 构建 → `.app` → `run_e2e.py --suite release --allow-real-profile`（一次性 VM，不隔离）：P01 真实数据库迁移到
     `LATEST_VERSION`、日志在 `~/Library/Logs/com.tauri-app.mini-todo/`、单实例 socket；P02 二次启动 5s 内退出码 0 且唤起已运行实例、`--autostart` 静默；
     P03 LaunchAgent plist（`Label` / `ProgramArguments`）；P04 ⌘Q 退出、socket 被删

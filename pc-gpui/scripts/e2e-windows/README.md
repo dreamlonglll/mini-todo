@@ -10,7 +10,8 @@ GPUI 窗口没有 DOM / CDP，按钮位置按布局常量（逻辑像素，见 `
 | 文件 | 作用 |
 |---|---|
 | `run_e2e.py` | 用例与汇总（PASS / FAIL / SKIP、`summary.md`、`results.json`、`GITHUB_STEP_SUMMARY`），任一 FAIL 退出码 1 |
-| `winlib.py` | ctypes Win32 封装：窗口枚举与状态、输入、截图取色、应用进程（隔离数据目录）、SQLite、用例汇总 |
+| `winlib.py` | ctypes Win32 封装：窗口枚举与状态、输入、截图取色、应用进程（隔离数据目录）、SQLite、托盘菜单命令 id、用例汇总 |
+| `selftest.py` | 不碰窗口的纯逻辑自测（托盘命令 id 解析、按清单取未完成待办）：`python selftest.py` |
 | `set-display.ps1` | 分辨率调到 1920×1080（不支持时取最接近的较小模式）、桌面换成纯色 `rgb(150,40,170)`（透明窗口取色对照） |
 | `probe-window.ps1` | 探针：普通应用窗口（WinForms），验证嵌入桌面的窗口在它之下 |
 | `drag-source.ps1` | OLE 拖放源窗口：`-Mode winforms`（.NET `DataObject` FileDrop）/ `-Mode shell`（`IShellFolder::GetUIObjectOf` 的数据对象） |
@@ -24,14 +25,20 @@ GPUI 窗口没有 DOM / CDP，按钮位置按布局常量（逻辑像素，见 `
 
 | 组 | 内容 | 隔离 |
 |---|---|---|
-| W01–W12 | `MINI_TODO_DEBUG_OPEN` 打开 main / editor:1:view / editor:1:edit / editor:new / subtask:101:view / settings 五个页 / completed / notification:1：窗口存在、类名 `Zed::Window`、无 `WS_SYSMENU` 且 DWM 标题栏按钮区（`DWMWA_CAPTION_BUTTON_BOUNDS`）宽度为 0、逻辑尺寸、已渲染、截图；主窗口四角透出桌面（DirectComposition 透明） | 是 |
-| S01–S08 | 普通模式（APPWINDOW、无 owner、`HTCAPTION` / `HTLEFT`、拖动标题栏移动且落库；真实双击标题栏最大化、再双击还原且几何与落库复原）→ 点锁按钮经典固定（TOOLWINDOW、`WM_NCHITTEST` 不再是拖动 / 缩放区、真实拖动不动、`is_fixed` 落库）→ `fixed_embed_desktop=true` 重启恢复为嵌入桌面（owner=桌面宿主、TOOLWINDOW、无 MINIMIZEBOX）→ 探针窗口验证 Z 序 → Win+D → 重启 Explorer 自动重挂 → 点锁按钮回普通模式 → 单击任务栏按钮（`taskbar-button.ps1` 找按钮、真实点击）最小化、再单击还原到前台（找不到按钮 / 按钮合并了多个窗口时 SKIP）。S01 / S02 / S03 / S07 / S08 每次切换后都断言无 `WS_SYSMENU`、标题栏按钮区宽度为 0 | 是 |
+| W01–W14 | `MINI_TODO_DEBUG_OPEN` 打开 main（默认清单窗口）/ editor:1:view / editor:1:edit / editor:new / subtask:101:view / settings 五个页 / completed / notification:1 / calendar（日历窗口，系统标题「日历」596×600）/ list:new（新清单窗口，标题「清单」380×600）：窗口存在、类名 `Zed::Window`、无 `WS_SYSMENU` 且 DWM 标题栏按钮区（`DWMWA_CAPTION_BUTTON_BOUNDS`）宽度为 0、逻辑尺寸、已渲染、截图；默认清单窗口四角透出桌面（DirectComposition 透明） | 是 |
+| S01–S08 | 默认清单窗口普通模式（APPWINDOW、无 owner、没有 `WS_THICKFRAME`、标题栏 `WM_NCHITTEST` = `HTCLIENT`、外框外沿不是拖动 / 缩放区；真实拖动标题栏移动（自绘）、拖右边手柄缩放，`window_layouts[list:1]` 与 `screen_configs` 落库；双击标题栏**不**最大化、几何不变）→ 点锁按钮经典固定（TOOLWINDOW、`WM_NCHITTEST` 不是拖动 / 缩放区、真实拖动与拖边缘都不动、`window_layouts.is_fixed = 1`、`settings.is_fixed` 不变）→ `fixed_embed_desktop=true` 重启恢复为嵌入桌面（owner=桌面宿主、TOOLWINDOW、无 MINIMIZEBOX）→ 探针窗口验证 Z 序 → Win+D → 重启 Explorer 自动重挂 → 点锁按钮回普通模式（`is_fixed = 0`、真实拖动又能移动）→ 单击任务栏按钮（`taskbar-button.ps1` 找按钮、真实点击）最小化、再单击还原到前台（找不到按钮 / 按钮合并了多个窗口时 SKIP）。S01 / S02 / S03 / S07 / S08 每次切换后都断言无 `WS_SYSMENU`、标题栏按钮区宽度为 0 | 是 |
 | N01–N02 | 3 条应用内通知：TOOLWINDOW\|TOPMOST、无 `WS_SYSMENU` 且标题栏按钮区宽度为 0、不抢焦点、右对齐、自下而上叠放（间距 10）；N02 单独检查客户区距工作区底边正好 20 | 是 |
-| I00–I08 | FAB 新建 → 输入 → Ctrl+Enter 落库、主窗口刷新；点行 → 只读详情 → 编辑 → 改标题保存；悬停操作条完成 / 删除（确认框）；设置切深色主题（落库、主窗口变半透明深色并透出桌面色）；设置开机自启开 / 关（`HKCU\…\Run\mini-todo`）；托盘图标（`Shell_NotifyIconGetRect`）；系统通知（到期提醒 notified=1、日志无发送失败） | 是 |
+| I00–I08 | FAB 新建 → 输入 → Ctrl+Enter 落库（`list_id = 1`）、列表刷新；点行 → 只读详情 → 编辑 → 改标题保存；悬停操作条完成 / 删除（确认框）；设置切深色主题（按窗口：`window_prefs[list:1].dark = 1`、`text_theme` 不变，默认清单窗口变半透明深色并透出桌面色），再用标题栏日 / 夜按钮切回；设置开机自启开 / 关（`HKCU\…\Run\mini-todo`）；托盘图标（`Shell_NotifyIconGetRect`）；系统通知（到期提醒 notified=1、日志无发送失败） | 是 |
 | D00–D04 | 本地 WebDAV（Basic 认证）：测试连接（服务器收到带认证的 PROPFIND）、保存配置（`webdav_password` 为 `dpapi:` 密文、库文件无明文）、立即同步（服务器出现 `mini-todo/sync-data.json.gz`、`webdav_last_sync_at` 更新）、标题栏同步 | 是 |
 | F01–F11 | `fence:new`：嵌入桌面（含无 `WS_SYSMENU`、标题栏按钮区宽度为 0）、收纳文件夹建在 `MINI_TODO_FENCES_ROOT` 下；放文件 → 监听刷新出图标；新实例第一次 OLE 拖入；双击标题改名 → 文件夹同步改名；改名后 / 单击标题后紧接着的拖入；Shell 数据对象拖入；从资源管理器窗口真实拖入；可见区域 = 数据库几何；Win+D 后可见；Explorer 重启后重挂 | 是 |
-| F12–F15 | 另起一个实例，库里预置两个收纳箱 A / B（主显示器工作区右侧，主窗口最小化免得挡住）：F12 拖 B 的标题栏（自绘拖动）→ 窗口跟手、松手后 `fences` 与当前组合的 `fence_layouts` = 客户区；F13 让 B.top 落在 A.top + 6（逻辑像素）→ 吸到 A.top，拖动中 A 的上边截图有 `#409EFF` 高亮、松手后消失；F14 拖到一半按住 Alt → 不吸附、不高亮，松开后照常吸附；F15 拖 B 的下边让高度接近 A → 等高、上边不动，A 的左右两边高亮 | 是 |
-| P01–P03 | **不隔离**：主窗口、日志在 `%LOCALAPPDATA%\com.tauri-app.mini-todo\logs\mini-todo.log`、库在 `%LOCALAPPDATA%\mini-todo`（release 另验证忽略 `MINI_TODO_DATA_DIR` / `MINI_TODO_DEBUG_OPEN`）；单实例（第二个进程退出、已运行实例被唤起到前台）；WM_CLOSE 关主窗口 → 进程退出 | 否 |
+| F12–F15 | 另起一个实例，库里预置两个收纳箱 A / B（主显示器工作区右侧；默认清单窗口先 WM_CLOSE 隐藏，免得挡住、也不当吸附目标）：F12 拖 B 的标题栏（自绘拖动）→ 窗口跟手、松手后 `fences` 与当前组合的 `fence_layouts` = 客户区；F13 让 B.top 落在 A.top + 6（逻辑像素）→ 吸到 A.top，拖动中 A 的上边截图有 `#409EFF` 高亮、松手后消失；F14 拖到一半按住 Alt → 不吸附、不高亮，松开后照常吸附；F15 拖 B 的下边让高度接近 A → 等高、上边不动，A 的左右两边高亮 | 是 |
+| L01–L11 | 待办清单窗口与日历窗口（3.1）：托盘「新增待办清单」→ 新窗口 380×600、普通模式、`todo_lists` 多一行「清单」→ 直接改名（标题与库）；双击清单名改名；待办行右键「移动到 ▸」→ `list_id` 落库、两个窗口各自刷新；拖动落库 `window_layouts`、清单 ↔ 清单吸附（top 落在默认清单 top + 6 → 吸齐，默认清单上边高亮、松手消失）；锁定按窗口（新清单 TOOLWINDOW、`is_fixed = 1`、拖不动，默认清单不变）；两个窗口 WM_CLOSE → 隐藏、进程常驻、`hidden = 1` → 托盘左键全部唤起；托盘「重置位置」→ 隐藏的出现、解锁、层叠错开 32、日历（关着）只写布局在第 3 个位置；删除清单 → 确认 → 窗口销毁、清单墓碑、窗口记录删除、待办回默认清单；托盘「显示日历」→ 596×600 出现在重置写好的位置；锁日历 → 设置里开「嵌入桌面」→ owner=桌面宿主、Win+D 后仍可见；关闭日历 = `hidden = 1`，托盘左键不唤起它 | 是 |
+| P01–P03 | **不隔离**：默认清单窗口、日志在 `%LOCALAPPDATA%\com.tauri-app.mini-todo\logs\mini-todo.log`、库在 `%LOCALAPPDATA%\mini-todo`（release 另验证忽略 `MINI_TODO_DATA_DIR` / `MINI_TODO_DEBUG_OPEN`）；单实例（第二个进程退出、已运行实例被唤起到前台）；WM_CLOSE 默认清单窗口 → 只隐藏、进程常驻 → 托盘「退出」→ 进程退出 | 否 |
+
+托盘菜单项（L 组、P03）不弹菜单：往托盘的隐藏窗口（类名 `tray_icon_app`）Post `WM_COMMAND`，命令 id 是 muda 按 `services/tray.rs`
+建菜单的顺序从 1000 起分配的（含 `Menu` 本身与分隔线；`winlib.parse_tray_menu_ids` 按源码现算，读不到时用验证过的表）；托盘左键 Post
+tray-icon 的回调消息 `WM_USER_TRAYICON`（6002，lParam = `WM_LBUTTONUP`）。两者都不需要托盘图标可见（CI 上图标常在溢出区）。
+`python selftest.py` 自测这些不碰窗口的解析逻辑。
 
 release job 只跑 P 组（加上 release 构建本身：`build.rs` 用 fxc 预编译着色器）。
 
@@ -50,7 +57,7 @@ cargo build -p mini-todo-core --example seed
 # 可选：分辨率 1920x1080 + 纯色桌面（会改你的桌面背景；透明取色用例依赖背景不是纯黑 / 纯白）
 # pwsh -NoProfile -File scripts/e2e-windows/set-display.ps1
 python scripts/e2e-windows/run_e2e.py --exe target/debug/mini-todo.exe --seed target/debug/examples/seed.exe `
-  --out $env:TEMP\mt-e2e-out --only W,S,N,I,D,F
+  --out $env:TEMP\mt-e2e-out --only W,S,N,I,D,F,L
 ```
 
 - 开始时会把屏幕上其它程序的窗口**最小化**（避免挡住桌面、干扰取色与 Z 序断言）。

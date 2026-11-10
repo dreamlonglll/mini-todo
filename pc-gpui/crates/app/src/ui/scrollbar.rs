@@ -16,8 +16,9 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui_kit::{
-    AnyElement, Hsla, InteractiveElement as _, IntoElement, MouseButton, MouseMoveEvent,
-    MouseUpEvent, ParentElement as _, Pixels, ScrollHandle, Styled as _, canvas, div, point, px,
+    AnyElement, CursorStyle, Hsla, InteractiveElement as _, IntoElement, MouseButton,
+    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, ScrollHandle, Styled as _, canvas,
+    div, point, px,
 };
 
 /// 滚动条的运行时状态（视图持有一份；`Rc` 共享给事件回调）
@@ -157,6 +158,9 @@ pub fn vertical(
                 .rounded(px(width / 2.))
                 .bg(if dragging { thumb_hover } else { thumb })
                 .hover(move |s| s.bg(thumb_hover))
+                // 滑块自己的光标：清单窗口右边缘的缩放手柄（5px，画在内容之下）与滚动条重叠，GPUI 取最上层、悬停中的
+                // 元素的光标；滑块不声明光标时显示的是下面手柄的左右缩放光标（按下滑块照常是拖滚动条）
+                .cursor(CursorStyle::Arrow)
                 .on_mouse_down(MouseButton::Left, move |event, _, cx| {
                     drag_cell.set(Some((f32::from(event.position.y), offset)));
                     cx.stop_propagation();

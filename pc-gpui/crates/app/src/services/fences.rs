@@ -23,9 +23,8 @@
 //! `orderOut:`。AppKit 调用同样只在 App 未被借用时执行。收纳箱窗口绝不调 `set_topmost`（会把层级改回 0 / 3）。
 //! Linux 只用于截图 / 冒烟：没有原生句柄，`apply_window_rect` 只改尺寸，启动时不恢复。
 //!
-//! 吸附对齐（`windows::fence::snap`）的跨窗口部分也在这里：拖动 / 缩放开始时 [`snap_scene`] 快照其它收纳箱的可见矩形；
-//! 拖动中的收纳箱每帧 [`set_snap_guides`]，「当前高亮」存在 [`FenceRuntime`]，只通知高亮变了的目标窗口重绘（目标窗口渲染时
-//! [`snap_edges`] 读自己的那份）；拖动结束 [`clear_snap_guides`]，窗口关闭时一并清掉（不残留）。
+//! 吸附对齐：收纳箱与清单 / 日历窗口是同一个吸附组，跨窗口的部分（目标快照、高亮）在 `services::snap`；每个收纳箱窗口建好后
+//! 登记进去（"全部隐藏"中不算目标），关闭 / 删除时注销（它留下的、它身上的高亮一并清掉）。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -39,8 +38,9 @@ use mini_todo_core::services::fence_fs::FenceWatcher;
 
 use crate::db::{Db, spawn_db};
 use crate::platform::{self, Hwnd, PhysRect};
+use crate::services::snap;
 use crate::windows::fence::FenceWindow;
-use crate::windows::fence::snap::{self, SnapEdges, SnapGuide, SnapMonitor, SnapScene, SnapTarget};
+use crate::windows::snap::SnapKey;
 use crate::windows::{self, WindowKind, WindowManager, WindowSpec};
 
 /// 200ms 守护轮询间隔；每 10 个 tick（约 2 秒）检测一次屏幕组合
@@ -51,7 +51,9 @@ const SCREEN_CHECK_TICKS: u32 = 10;
 struct FenceWindowRecord {
     handle: AnyWindowHandle,
     view: WeakEntity<FenceWindow>,
-    /// Windows：嵌入守护 / 显示隐藏；macOS：显示隐藏；两者都用它读吸附目标的可见矩形（Linux 没有原生句柄）
+    /// Windows：嵌入守护 / 显示隐藏；macOS：显示隐藏（吸附组另外登记了一份，读吸附目标的可见矩形；Linux 没有原生句柄，
+    /// 也就没有读它的代码）
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
     hwnd: Option<Hwnd>,
 }
 
@@ -63,9 +65,6 @@ pub struct FenceRuntime {
     windows: HashMap<i64, FenceWindowRecord>,
     watcher: Option<FenceWatcher>,
     guard_started: bool,
-    /// 吸附高亮：目标收纳箱 → 要高亮的边。由正在拖动 / 缩放的收纳箱（`snap_owner`）每帧整体替换；同一时刻只有一个在拖
-    snap_highlights: HashMap<i64, SnapEdges>,
-    snap_owner: Option<i64>,
 }
 
 impl Global for FenceRuntime {}
@@ -108,85 +107,9 @@ pub fn monitor_areas(cx: &App) -> Vec<MonitorArea> {
         .collect()
 }
 
-/// 拖动 / 缩放开始时的吸附快照：除 `exclude` 外当前显示中的收纳箱（含锁定的）屏幕上的可见客户区（物理像素；折叠的只有
-/// 标题栏）+ 各显示器。"全部隐藏"中返回空。
-///
-/// 读 `Hwnd::is_visible` / `client_rect`（Windows `IsWindowVisible` / `GetClientRect` + `ClientToScreen`，macOS 读 frame）：
-/// 只读、不发窗口消息、不触发 GPUI 回调，可以在事件处理里直接调（gpui-conventions §2.2）。Linux 没有原生句柄，没有目标
-pub fn snap_scene(cx: &App, exclude: i64) -> SnapScene {
-    let Some(rt) = cx.try_global::<FenceRuntime>() else {
-        return SnapScene::default();
-    };
-    if rt.hidden {
-        return SnapScene::default();
-    }
-    let mut targets: Vec<SnapTarget> = rt
-        .windows
-        .iter()
-        .filter(|(id, _)| **id != exclude)
-        .filter_map(|(id, record)| {
-            let h = record.hwnd?;
-            if !h.is_visible() {
-                return None;
-            }
-            Some(SnapTarget {
-                fence_id: *id,
-                rect: to_px(h.client_rect()?),
-            })
-        })
-        .collect();
-    // HashMap 的顺序不确定：按 id 排，同距离时取哪个才是确定的
-    targets.sort_by_key(|t| t.fence_id);
-    let monitors = platform::monitors(cx)
-        .into_iter()
-        .map(|m| SnapMonitor {
-            rect: to_px(m.rect),
-            work: to_px(if m.work.width > 0 && m.work.height > 0 {
-                m.work
-            } else {
-                m.rect
-            }),
-        })
-        .collect();
-    SnapScene { targets, monitors }
-}
-
-/// 正在拖动 / 缩放的收纳箱 `owner` 这一帧的吸附高亮（空 = 没吸上 / 按着 Alt）。只通知高亮变了的目标窗口重绘
-pub fn set_snap_guides(cx: &mut App, owner: i64, guides: &[SnapGuide]) {
-    let next = snap::group_guides(guides);
-    let rt = runtime(cx);
-    let changed = snap::changed_fences(&rt.snap_highlights, &next);
-    rt.snap_owner = (!next.is_empty()).then_some(owner);
-    rt.snap_highlights = next;
-    for id in changed {
-        // 按实体 id 通知（不借用视图）：调用方正在自己视图的 update 里，残留的高亮万一在它自己身上也不会重入
-        if let Some(view) = view_of(cx, id) {
-            cx.notify(view.entity_id());
-        }
-    }
-}
-
-/// 拖动 / 缩放结束：清掉 `owner` 留下的高亮（别的收纳箱的不动）
-pub fn clear_snap_guides(cx: &mut App, owner: i64) {
-    let owned = cx
-        .try_global::<FenceRuntime>()
-        .is_some_and(|rt| rt.snap_owner == Some(owner));
-    if owned {
-        set_snap_guides(cx, owner, &[]);
-    }
-}
-
-/// 收纳箱窗口关闭（含删除）：它在拖动中就清掉全部高亮；它是目标就只去掉它那一项（窗口已经没了，不用通知）
-fn forget_snap(cx: &mut App, fence_id: i64) {
-    clear_snap_guides(cx, fence_id);
-    runtime(cx).snap_highlights.remove(&fence_id);
-}
-
-/// 收纳箱 `fence_id` 现在要高亮的边（窗口渲染时读）
-pub fn snap_edges(cx: &App, fence_id: i64) -> SnapEdges {
-    cx.try_global::<FenceRuntime>()
-        .and_then(|rt| rt.snap_highlights.get(&fence_id).copied())
-        .unwrap_or_default()
+/// 吸附组里收纳箱"暂时不算目标"：「全部隐藏」中（隐藏是延后执行的，窗口可能还没真藏起来）
+fn snap_suppressed(cx: &App, _key: SnapKey) -> bool {
+    is_hidden(cx)
 }
 
 pub fn to_px(r: PhysRect) -> PxRect {
@@ -203,22 +126,10 @@ pub fn to_phys(r: PxRect) -> PhysRect {
 }
 
 /// 把收纳箱窗口的客户区（= 可见区域）摆到 `rect`（物理像素）。Windows：换算成外框一次 `SetWindowPos`；macOS：`setFrame:`
-/// （都延后执行，`scale` 用不到）；Linux GPUI 不能移动窗口，只按 `scale` 改尺寸（截图 / 冒烟测试用）
+/// （都延后执行，`scale` 用不到）；Linux GPUI 不能移动窗口，只按 `scale` 改尺寸（截图 / 冒烟测试用）。与清单 / 日历窗口共用
+/// `windows::drag::place_client_rect`
 pub fn apply_window_rect(window: &mut gpui_kit::Window, cx: &App, rect: PxRect, scale: f64) {
-    #[cfg(any(windows, target_os = "macos"))]
-    {
-        let _ = scale;
-        platform::set_client_rect_physical(window, cx, to_phys(rect));
-    }
-    #[cfg(not(any(windows, target_os = "macos")))]
-    {
-        let _ = cx;
-        let s = if scale > 0. { scale } else { 1. } as f32;
-        window.resize(gpui_kit::size(
-            gpui_kit::px(rect.width as f32 / s),
-            gpui_kit::px(rect.height as f32 / s),
-        ));
-    }
+    crate::windows::drag::place_client_rect(window, cx, rect, scale);
 }
 
 /// 建一个收纳箱窗口（已存在则直接返回它）。`rect` 是窗口应占的矩形（`fence_view` 的结果，物理像素），
@@ -282,7 +193,8 @@ pub fn open_fence_window(
             return None;
         }
     };
-    let view = view_slot?.downgrade();
+    let view_entity = view_slot?;
+    let view = view_entity.downgrade();
     WindowManager::register(
         cx,
         WindowKind::Fence,
@@ -296,9 +208,18 @@ pub fn open_fence_window(
     runtime(cx)
         .windows
         .insert(id, FenceWindowRecord { handle, view, hwnd });
+    snap::register(
+        cx,
+        SnapKey::Fence(id),
+        snap::Member {
+            hwnd,
+            view: view_entity.entity_id(),
+            suppressed: snap_suppressed,
+        },
+    );
     WindowManager::on_closed(cx, handle, move |cx| {
         runtime(cx).windows.remove(&id);
-        forget_snap(cx, id);
+        snap::unregister(cx, SnapKey::Fence(id));
         if runtime(cx).windows.is_empty() {
             fence::forget_screen_config();
         }
@@ -697,7 +618,7 @@ pub fn reset_positions(cx: &mut App) {
 /// 收纳箱已删除：注销并关闭窗口
 pub fn close_deleted(cx: &mut App, fence_id: i64) {
     let handle = runtime(cx).windows.remove(&fence_id).map(|r| r.handle);
-    forget_snap(cx, fence_id);
+    snap::unregister(cx, SnapKey::Fence(fence_id));
     if let Some(handle) = handle {
         WindowManager::close(cx, handle);
     }

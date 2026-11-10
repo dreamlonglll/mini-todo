@@ -14,7 +14,7 @@
 //! - 其它动作是全局动作（[`App::on_action`]）。菜单动作在活动窗口的 `update` 里派发（窗口此刻被借用），所以碰窗口的处理
 //!   一律 `cx.defer` 到这次派发之后。
 //! - 关窗口（⌘W）不退出进程（`QuitMode::Explicit`，菜单栏图标常驻）；主窗口关掉后点 Dock 图标 / 在 Finder 里再次打开
-//!   由 [`on_reopen`] 重新打开（GPUI 只在没有可见窗口时回调）。
+//!   由 [`on_reopen`] 唤起所有登记的窗口、主窗口不在则重新打开（GPUI 只在没有可见窗口时回调）。
 //!
 //! 模块全平台编译（Linux / Windows 的 clippy 也能检查这里对 GPUI API 的用法；本仓库的开发机都不是 mac），只在 macOS 上由
 //! `lib.rs` 调用。
@@ -25,6 +25,7 @@ use gpui_kit::{
 };
 
 use crate::services::window_mode;
+use crate::windows::block::BlockKey;
 use crate::windows::settings::{self, SettingsTab};
 use crate::windows::{ChildOf, WindowManager};
 
@@ -99,16 +100,16 @@ pub fn menus() -> Vec<Menu> {
     ]
 }
 
-/// Dock 图标被点 / 在 Finder 里再次打开（没有可见窗口时）：唤起主窗口，主窗口已关闭则重新打开
+/// Dock 图标被点 / 在 Finder 里再次打开（没有可见窗口时）：与托盘左键相同，唤起所有登记的窗口，主窗口已关闭则重新打开
 pub fn on_reopen(cx: &mut App) {
     log::info!("[app] Dock / Finder 唤起");
-    window_mode::bring_main_to_front(cx);
+    window_mode::bring_all_to_front(cx);
 }
 
-/// 设置窗口（与托盘「打开设置」相同：先唤起主窗口，以它为模态打开方；主窗口不在就先打开）
+/// 设置窗口（与托盘「打开设置」相同：先唤起默认清单窗口，以它为模态打开方；它不在就先打开）
 fn open_settings(cx: &mut App, tab: SettingsTab) {
-    window_mode::bring_main_to_front(cx);
-    let parent = WindowManager::main(cx).map(|main| ChildOf::handle(main, cx));
+    window_mode::bring_to_front(cx, BlockKey::DEFAULT_LIST);
+    let parent = WindowManager::default_list(cx).map(|main| ChildOf::handle(main, cx));
     settings::open(cx, parent, tab);
 }
 
@@ -135,15 +136,18 @@ fn minimize_window(window: &mut Window, cx: &mut App) {
     }
 }
 
-/// ⌘W：与点系统关闭按钮一样（主窗口先按关闭请求保存几何）；收纳箱不能关（删除收纳箱才关窗）
+/// ⌘W：与点系统关闭按钮一样——清单 / 日历窗口 = 隐藏（保存几何、记住隐藏，`block_windows::request_close`；有模态子窗口时
+/// 不关、把子窗口带到前台）；收纳箱不能关（删除收纳箱才关窗）；其它窗口关掉
 fn close_window(window: &mut Window, cx: &mut App) {
     let id = window.window_handle().window_id();
-    match WindowManager::kind_of(cx, id) {
-        Some(crate::windows::WindowKind::Fence) => {}
-        Some(crate::windows::WindowKind::Main) => {
-            window_mode::on_main_close_requested(window, cx);
+    if let Some(key) = WindowManager::block_key_of(cx, id) {
+        if crate::services::block_windows::request_close(window, cx, key) {
             window.remove_window();
         }
+        return;
+    }
+    match WindowManager::kind_of(cx, id) {
+        Some(crate::windows::WindowKind::Fence) => {}
         _ => window.remove_window(),
     }
 }

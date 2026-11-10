@@ -19,23 +19,26 @@
 
 | 用例 | 内容 |
 |---|---|
-| M01 | 主窗口：尺寸、截图有内容、OCR 认出未完成待办标题、bundle id；红绿灯 / 菜单 / 状态项（`--strict-traffic-lights` 时红绿灯须隐藏） |
+| M01 | 默认清单窗口：尺寸、截图有内容、OCR 认出未完成待办标题、bundle id；红绿灯 / 菜单 / 状态项（`--strict-traffic-lights` 时红绿灯须隐藏） |
 | M02 | `MINI_TODO_DEBUG_OPEN=settings`：设置窗口尺寸、OCR 认出设置页文字 |
 | M03 | `MINI_TODO_DEBUG_OPEN=editor:1:view`：只读详情尺寸、OCR 认出待办 #1 标题 |
 | M04 | `tell application id … to quit`（不行再 NSRunningApplication.terminate）→ 15s 内退出、退出码 0、无 panic |
 | M05 | 切到前台、确认前台是本应用 → ⌘Q（系统输入流）→ 退出码 0 |
 | M06 | App 菜单（AX 菜单栏 1）：应用菜单（退出 / 设置… / 隐藏）、编辑（剪切 / 拷贝 / 粘贴 / 全选）、窗口（最小化 / 关闭窗口）；AX 点「设置…」→ 设置窗口 |
-| M07 | 菜单栏图标：菜单项齐全（含收纳箱三项）；「打开设置」→ 设置窗口；「退出」→ 退出码 0 |
-| M08 | ⌘W 关主窗口、进程仍在；`open <app>`（LaunchServices reopen）→ 主窗口重新出现、没有第二个进程 |
-| M09 | 点 FAB → 新建窗口 → 输入"E2E 新建待办" → ⌘Enter → 落库（时间格式规范）→ 主窗口 OCR 认出 |
-| M10 | 固定模式（菜单栏图标「固定模式」）：拖标题栏不动、AX 改尺寸无效、`is_fixed` 落库；取消后又能拖 |
+| M07 | 菜单栏图标：菜单项齐全（含「新增待办清单」「显示日历」与收纳箱三项，没有「固定模式」）；「打开设置」→ 设置窗口；「退出」→ 退出码 0 |
+| M08 | ⌘W = 隐藏默认清单窗口（`window_prefs.hidden = 1`）、进程仍在；`open <app>`（LaunchServices reopen）→ 同一个窗口重新出现、没有第二个进程 |
+| M09 | 点 FAB → 新建窗口 → 输入"E2E 新建待办" → ⌘Enter → 落库（时间格式规范、在默认清单）→ 默认清单窗口 OCR 认出 |
+| M10 | 锁定（点标题栏的锁按钮）：普通模式拖标题栏能移动、右边手柄能缩放；锁定后拖不动、手柄消失，`window_layouts.is_fixed` 落库（`settings.is_fixed` 不变）；解锁后又能拖 |
+| M11 | 菜单栏图标「新增待办清单」→ 新清单窗口（380×600，标题「清单」）→ 粘贴 + 回车改名 → 双击清单名再改名 → 拖标题栏移动 → `todo_lists` 与 `window_layouts` 落库 |
+| M12 | 清单名右键「删除清单」→ 确认 → 窗口关闭、清单墓碑、其下待办回默认清单 |
+| M13 | 两个清单窗口都 ⌘W 隐藏 → 进程仍在 → `open <app>`（Dock 唤起）→ 两个窗口都重新出现、`hidden` 清零 |
 | MF01 | 收纳箱 `fence:new`：kCGWindowLayer = 桌面图标层 + 1、排在普通窗口之后、工作区右上角 368×336、日志自报的 behavior / canHide / 面板、库与收纳文件夹、截图 OCR |
 | MF02 | 往收纳文件夹写文件 → fence_items 补行（无原始路径）、收纳箱界面刷新 |
 | MF03 | 拖放源进程（`drag_source.py`）把临时目录里的文件拖进收纳箱 → 移进收纳文件夹、记原始路径；同名再拖 → `a (2).txt`、不覆盖 |
 | MF04 | 预置项目，右键「移回桌面」→ 回原目录；没有原始路径的回 `MINI_TODO_DESKTOP_DIR` |
 | MF05 | 「更多」→「删除收纳箱」→「删除」→ 全部移回、`.DS_Store` 不挡删除、文件夹与记录删掉、窗口关闭 |
 | MF06 | ⌘H / `NSRunningApplication.hide()` 后收纳箱仍在；应用隐藏中点收纳箱：前台不变、不取消隐藏 |
-| MF07 | 有收纳箱可见时 ⌘W 关主窗口 → `open <app>` → 主窗口回来 |
+| MF07 | 有收纳箱可见时 ⌘W 隐藏默认清单窗口 → `open <app>` → 它回来 |
 | MF08 | Finder 在前台时双击收纳箱标题（改名会激活应用）→ 系统输入流输入新标题（逐字输入不行就 pbcopy + ⌘A + ⌘V）→ 回车 → 标题与收纳文件夹改名 |
 | MF09 | 拖标题栏 → 收纳箱移动 → fences 与 fence_layouts 落库 |
 | MF10 | 菜单栏图标「新增收纳箱」/「显示/隐藏所有收纳箱」×2 /「重置收纳箱位置」；「退出」后不带 DEBUG_OPEN 重启 → 原位恢复 |
@@ -74,7 +77,7 @@ import maclib as M  # noqa: E402
 from maclib import App, Checks, Report, Skip, WinInfo  # noqa: E402
 
 BUNDLE_ID = "com.tauri-app.mini-todo"
-MAIN_TITLE, MAIN_SIZE = "Mini Todo", (380, 600)          # windows/main_window.rs DEFAULT_WIDTH / DEFAULT_HEIGHT
+MAIN_TITLE, MAIN_SIZE = "Mini Todo", (380, 600)          # 默认清单窗口（windows/list_window.rs；系统标题固定 Mini Todo）
 SETTINGS_TITLE, SETTINGS_SIZE = "设置", (680, 560)        # windows/settings/mod.rs WIDTH / HEIGHT
 DETAIL_TITLE, NEW_TITLE, EDITOR_SIZE = "待办详情", "新建待办", (1080, 600)   # windows/editor/mod.rs os_title / WIDTH / HEIGHT
 SIZE_TOL = 40
@@ -86,9 +89,21 @@ NEW_TODO_TITLE = "E2E 新建待办"
 APP_MENU_ITEMS = ["退出", "设置…", "隐藏"]                   # 前缀匹配（"退出 Mini Todo"、"隐藏 Mini Todo"）
 EDIT_MENU, EDIT_ITEMS = "编辑", ["剪切", "拷贝", "粘贴", "全选"]
 WINDOW_MENU, WINDOW_ITEMS = "窗口", ["最小化", "关闭窗口"]
-# services/tray.rs imp::start（收纳箱三项：Windows 托盘与 macOS 菜单栏图标都有）
-TRAY_ITEMS = ["添加待办项", "固定模式", "重置位置", "打开设置", "开机自启动", "退出"]
+# services/tray.rs imp::start（收纳箱三项：Windows 托盘与 macOS 菜单栏图标都有）。3.1 删了「固定模式」（锁定按窗口，
+# 用各窗口标题栏的锁），加了「新增待办清单」「显示日历」（勾选）
+TRAY_ITEMS = ["添加待办项", "新增待办清单", "显示日历", "重置位置", "打开设置", "开机自启动", "退出"]
+TRAY_REMOVED_ITEMS = ["固定模式"]
 TRAY_FENCE_ITEMS = ["新增收纳箱", "显示/隐藏所有收纳箱", "重置收纳箱位置"]
+# 清单窗口（windows/list_window/）：标题栏高 52、按钮 28×28 间距 8 右内边距 16（380 宽时锁在 x≈277、设置 349）；
+# 清单名从 x≈32 起（双击改名 / 右键菜单：重命名 (60,70)、删除清单 (60,105)），删除确认框的「删除」在 (321,348)。
+# 标题栏下半截 (60,47) 是空白处：拖动、激活点这里（上沿 5pt 是缩放手柄）
+DEFAULT_LIST_KEY = "list:1"
+NEW_LIST_TITLE = "清单"                   # core lists::create 自动取名的第一个（新清单窗口的系统标题 = 清单名）
+LIST_TITLE_BLANK = (60, 47)
+LIST_NAME = (50, 27)
+LIST_MENU_DELETE = (60, 105)
+LIST_DELETE_CONFIRM = (321, 348)
+LIST_RENAMED, LIST_RENAMED2 = "E2E List", "E2E Work"
 # 真实目录（release 组）：core db/paths.rs、app services/logging.rs、services/single_instance/unix_socket.rs、services/autostart.rs
 REAL_DB = Path.home() / "Library" / "Application Support" / "mini-todo" / "data.db"
 REAL_LOG = Path.home() / "Library" / "Logs" / "com.tauri-app.mini-todo" / "mini-todo.log"
@@ -576,6 +591,8 @@ def m07() -> str:
         print(f"    菜单栏图标菜单（{how}）：{[i.describe() for i in items]}")
         for want in TRAY_ITEMS:
             ck.ok(want in titles, f"菜单栏图标菜单有「{want}」")
+        for gone in TRAY_REMOVED_ITEMS:
+            ck.ok(gone not in titles, f"菜单栏图标菜单没有「{gone}」（3.1 删除，锁定按窗口）")
         for want in TRAY_FENCE_ITEMS:
             ck.ok(want in titles, f"菜单栏图标菜单有收纳箱项「{want}」")
         target = next((i for i in items if i.title == "打开设置"), None)
@@ -617,22 +634,26 @@ def m08() -> str:
         ck.ok(front, "⌘W 之前本应用在前台")
         via = send_cmd_key(app, M.KEY_W, front)
         try:
-            M.wait_until(lambda: main_win(app) is None, 8, "主窗口关闭")
-            ck.ok(True, f"⌘W（{via}）后主窗口关闭")
+            M.wait_until(lambda: main_win(app) is None, 8, "默认清单窗口离开屏幕")
+            ck.ok(True, f"⌘W（{via}）后默认清单窗口离开屏幕")
         except M.Timeout as e:
-            ck.ok(False, f"⌘W（{via}）后主窗口关闭：{e}")
+            ck.ok(False, f"⌘W（{via}）后默认清单窗口离开屏幕：{e}")
             M.dump_windows("⌘W 之后", app.pid)
             return ck.done()
         M.dump_windows("⌘W 之后", app.pid)
         time.sleep(3)
-        ck.ok(app.alive(), "关掉主窗口后进程仍在（菜单栏图标常驻）")
+        ck.ok(app.alive(), "关掉默认清单窗口后进程仍在（菜单栏图标常驻）")
+        # 3.1：关闭 = 隐藏（orderOut，不销毁），记进 window_prefs
+        hidden = app.q("SELECT hidden FROM window_prefs WHERE window_key = ?", (DEFAULT_LIST_KEY,))
+        ck.ok(hidden == [(1,)], f"⌘W 记为隐藏：window_prefs[{DEFAULT_LIST_KEY}].hidden = 1（{hidden}）")
         r = M.run(["open", str(C.app)], timeout=30)
         print(f"    open {C.app} → rc={r.returncode} {(r.stdout + r.stderr).strip()!r}")
         try:
             w2 = wait_for(app, MAIN_TITLE, MAIN_SIZE, timeout=20, strict=True)
-            ck.ok(True, f"open（Dock / Finder 唤起）后主窗口重新出现：{w2.describe()}")
+            ck.ok(True, f"open（Dock / Finder 唤起）后默认清单窗口重新出现：{w2.describe()}")
+            ck.ok(w2.number == win.number, f"重新出现的是同一个窗口（窗口号 {win.number} → {w2.number}，隐藏而不是关掉重建）")
         except M.Timeout as e:
-            ck.ok(False, f"open 后主窗口重新出现：{e}")
+            ck.ok(False, f"open 后默认清单窗口重新出现：{e}")
         time.sleep(1)
         pids = pids_of_exe()
         print(f"    mini-todo 进程：{pids}（本用例 pid {app.pid}）")
@@ -702,6 +723,8 @@ def m09() -> str:
             ck.ok(True, f"库里有新待办「{NEW_TODO_TITLE}」（id={row[0][0]}）")
             ck.ok(bool(CANONICAL_TIME.match(str(created))), f"created_at {created!r} 是 YYYY-MM-DD HH:MM:SS")
             ck.ok(bool(CANONICAL_TIME.match(str(updated))), f"updated_at {updated!r} 是 YYYY-MM-DD HH:MM:SS")
+            lid = app.q("SELECT list_id FROM todos WHERE id = ?", (row[0][0],))
+            ck.ok(lid == [(1,)], f"FAB 新建的待办在本清单（默认清单，list_id={lid}）")
         except M.Timeout as e:
             titles = [r[0] for r in app.q("SELECT title FROM todos ORDER BY id DESC LIMIT 5")]
             ck.ok(False, f"库里有新待办「{NEW_TODO_TITLE}」：{e}；最近的标题 {titles}")
@@ -722,7 +745,9 @@ def m09() -> str:
 
 
 def m10() -> str:
-    """固定模式：拖标题栏是否移动窗口（真实拖动）为主断言；AX 改尺寸是否生效为辅；`is_fixed` 落库"""
+    """锁定（3.1：每个清单窗口标题栏的锁按钮；菜单栏图标不再有「固定模式」）：普通模式拖标题栏能移动、右边手柄能缩放（自绘，
+    `resizable: false`）→ 点锁 → 拖不动、手柄消失、`window_layouts.is_fixed` 落库（旧的 `settings.is_fixed` 不再写）→ 解锁后又能拖。
+    AX 改尺寸只打印（建窗不可缩放，普通模式下 AX 本来就改不了）"""
     M.dump_windows("用例开始前")
     app = start("M10")
     try:
@@ -731,28 +756,49 @@ def m10() -> str:
         time.sleep(2.5)
         front = bring_to_front(app, win)
         ck.ok(front, "拖动前本应用在前台")
+        legacy = setting(app, "is_fixed")
+        unit = M.unit_scale()
 
         def current() -> WinInfo:
             w = main_win(app)
             if w is None:
-                raise AssertionError("找不到主窗口")
+                raise AssertionError("找不到默认清单窗口")
             return w
 
         def drag_title(dx: float, dy: float) -> tuple[float, float]:
             w = current()
-            x0, y0 = w.x + w.w / 2, w.y + 6          # 标题栏上沿的留白（按钮之上），是拖动区
-            M.drag(x0, y0, x0 + dx, y0 + dy)
-            time.sleep(0.8)
+            x0, y0 = at(w, LIST_TITLE_BLANK)          # 标题栏下半截的空白处（上沿 5pt 是缩放手柄）
+            M.drag(x0, y0, x0 + dx, y0 + dy, steps=20)
+            time.sleep(1.0)
             w2 = current()
             d = (w2.x - w.x, w2.y - w.y)
             print(f"    拖动 ({dx:+.0f},{dy:+.0f}) → 窗口 {w.x:.0f},{w.y:.0f} → {w2.x:.0f},{w2.y:.0f}，Δ=({d[0]:+.0f},{d[1]:+.0f})")
             return d
+
+        def drag_right_edge(dx: float) -> float:
+            """右边缩放手柄（可见边缘内侧 5pt）往右拖 dx：返回宽度变化"""
+            w = current()
+            x0, y0 = w.x + w.w - 2.5, w.y + w.h / 2
+            M.drag(x0, y0, x0 + dx, y0, steps=20)
+            time.sleep(1.0)
+            w2 = current()
+            print(f"    拖右边 {dx:+.0f} → 窗口宽 {w.w:.0f} → {w2.w:.0f}")
+            return w2.w - w.w
+
+        def layout_row():
+            rows = app.q("SELECT x, y, width, height, is_fixed FROM window_layouts WHERE window_key = ? "
+                         "ORDER BY updated_at DESC LIMIT 1", (DEFAULT_LIST_KEY,))
+            return rows[0] if rows else None
 
         def moved(d, dx, dy) -> bool:
             return abs(d[0] - dx) <= 25 and abs(d[1] - dy) <= 25
 
         def still(d) -> bool:
             return abs(d[0]) <= 3 and abs(d[1]) <= 3
+
+        def lock_button() -> tuple[float, float]:
+            w = current()
+            return (w.x + w.w - 1 - 16 - 14 - 36 * 2, w.y + 27)
 
         def ax_resize_probe(label: str) -> bool | None:
             """AX 把主窗口加大 60pt：返回尺寸是否变了（读不到 AX 窗口时 None）"""
@@ -786,48 +832,282 @@ def m10() -> str:
             return changed
 
         d0 = drag_title(100, 60)
-        ck.ok(moved(d0, 100, 60), f"普通模式：拖标题栏移动窗口 Δ={d0}")
-        base_resize = ax_resize_probe("普通模式")
-        print(f"    is_fixed（切换前）= {setting(app, 'is_fixed')!r}")
-
-        M.press_status_menu_item(app.pid, "固定模式")
+        ck.ok(moved(d0, 100, 60), f"普通模式：拖标题栏移动窗口（自绘）Δ={d0}")
+        g0 = drag_right_edge(40)
+        ck.ok(abs(g0 - 40) <= 6, f"普通模式：拖右边手柄缩放 Δw={g0:+.0f}")
+        drag_right_edge(-40)
         try:
-            M.wait_until(lambda: setting(app, "is_fixed") == "true", 8, "is_fixed = 'true'")
-            ck.ok(True, "菜单栏图标「固定模式」后 settings.is_fixed = 'true'")
+            w = current()
+            r = M.wait_until(lambda: (lambda r: r if r and abs(r[0] - w.x * unit) <= 2 * unit
+                                      and abs(r[1] - w.y * unit) <= 2 * unit and r[4] == 0 else None)(layout_row()),
+                             6, "window_layouts 记下拖动后的位置")
+            ck.ok(True, f"拖动 / 缩放松手后落库 window_layouts[{DEFAULT_LIST_KEY}] = {r}（窗口 {w.x:.0f},{w.y:.0f} × {unit:g}）")
         except M.Timeout as e:
-            ck.ok(False, f"固定后 settings.is_fixed = 'true'：{e}（现值 {setting(app, 'is_fixed')!r}）")
-        print(f"    screen_configs：{app.q('SELECT config_id, is_fixed FROM screen_configs')}")
+            ck.ok(False, f"拖动后 window_layouts 落库：{e}（{app.q('SELECT * FROM window_layouts')}）")
+        base_resize = ax_resize_probe("普通模式")
+
+        bring_to_front(app)
+        M.click(*lock_button())
+        try:
+            M.wait_until(lambda: (layout_row() or (0,) * 5)[4] == 1, 8, "window_layouts.is_fixed = 1")
+            ck.ok(True, f"点锁按钮后 window_layouts[{DEFAULT_LIST_KEY}].is_fixed = 1")
+        except M.Timeout as e:
+            ck.ok(False, f"锁定落库：{e}（{layout_row()}）")
+        ck.ok(setting(app, "is_fixed") == legacy, f"settings.is_fixed 不变（{legacy!r} → {setting(app, 'is_fixed')!r}；3.1 起不再写）")
         time.sleep(1.0)
         bring_to_front(app)
         d1 = drag_title(100, 60)
-        ck.ok(still(d1), f"固定模式：拖标题栏不移动窗口 Δ={d1}")
-        fixed_resize = ax_resize_probe("固定模式")
-        if base_resize:
-            ck.ok(fixed_resize is False, "固定模式：AX 改尺寸无效（普通模式下可以改）")
-        else:
-            print(f"    普通模式下 AX 改尺寸就没生效（{base_resize}），不据此判断固定模式的可缩放性")
+        ck.ok(still(d1), f"锁定：拖标题栏不移动窗口 Δ={d1}")
+        g1 = drag_right_edge(40)
+        ck.ok(abs(g1) <= 3, f"锁定：没有缩放手柄，拖右边缘不改尺寸 Δw={g1:+.0f}")
+        fixed_resize = ax_resize_probe("锁定")
+        print(f"    AX 改尺寸：普通={base_resize} 锁定={fixed_resize}（只打印）")
         w = current()
         img = M.capture_window(w, C.out / "M10-fixed.png")
         print(f"    截图 M10-fixed.png: {M.content_stats(img)}")
-        try:
-            item, items, _ = M.open_status_menu(app.pid)
-            print(f"    固定后的菜单：{[i.describe() for i in items]}")
-            M.close_open_menu(item)
-        except AssertionError as e:
-            print(f"    (重新读菜单失败: {e})")
 
-        M.press_status_menu_item(app.pid, "固定模式")
+        bring_to_front(app)
+        M.click(*lock_button())
         try:
-            M.wait_until(lambda: setting(app, "is_fixed") == "false", 8, "is_fixed = 'false'")
-            ck.ok(True, "再点「固定模式」后 settings.is_fixed = 'false'")
+            M.wait_until(lambda: (layout_row() or (1,) * 5)[4] == 0, 8, "window_layouts.is_fixed = 0")
+            ck.ok(True, "再点锁按钮后 window_layouts.is_fixed = 0")
         except M.Timeout as e:
-            ck.ok(False, f"取消固定后 settings.is_fixed = 'false'：{e}")
+            ck.ok(False, f"解锁落库：{e}")
         time.sleep(1.0)
         bring_to_front(app)
         d2 = drag_title(-100, -60)
-        ck.ok(moved(d2, -100, -60), f"取消固定后：拖标题栏又能移动窗口 Δ={d2}")
+        ck.ok(moved(d2, -100, -60), f"解锁后：拖标题栏又能移动窗口 Δ={d2}")
         check_no_panic(ck, app)
-        return ck.done(f"普通 Δ{d0} / 固定 Δ{d1} / 取消 Δ{d2}；AX 改尺寸 普通={base_resize} 固定={fixed_resize}")
+        return ck.done(f"普通 Δ{d0} Δw{g0:+.0f} / 锁定 Δ{d1} Δw{g1:+.0f} / 解锁 Δ{d2}")
+    finally:
+        app.dump_logs(20)
+        app.stop()
+        M.dump_windows("用例结束后")
+
+
+# ----------------------------------------------------------------------------- smoke：多待办清单窗口（3.1）
+
+def other_list_win(app: App, main_number: int, title: str | None = None) -> WinInfo | None:
+    """默认清单窗口之外的清单窗口：先按系统标题（= 清单名），读不到标题时按 380×600 的尺寸"""
+    ws = [w for w in app.windows() if w.number != main_number]
+    if title is not None:
+        hit = next((w for w in ws if w.name == title), None)
+        if hit is not None:
+            return hit
+    return next((w for w in ws if w.name != MAIN_TITLE and size_match(w, MAIN_SIZE)), None)
+
+
+def list_rows(app: App) -> list[tuple]:
+    return app.q("SELECT id, name FROM todo_lists ORDER BY sort_order, id")
+
+
+def list_layout(app: App, key: str) -> tuple | None:
+    rows = app.q("SELECT x, y, width, height, is_fixed FROM window_layouts WHERE window_key = ? "
+                 "ORDER BY updated_at DESC LIMIT 1", (key,))
+    return rows[0] if rows else None
+
+
+def list_hidden(app: App, key: str):
+    rows = app.q("SELECT hidden FROM window_prefs WHERE window_key = ?", (key,))
+    return rows[0][0] if rows else None
+
+
+def paste_rename(name: str) -> None:
+    """清单名的改名输入框已经出现（已全选）：剪贴板 + ⌘A + ⌘V + 回车（runner 上逐字注入的 Unicode 按键进不了 GPUI 输入框）"""
+    M.set_clipboard(name)
+    M.post_key_hid(M.KEY_A, M.cmd_flag())
+    M.post_key_hid(M.KEY_V, M.cmd_flag())
+    time.sleep(0.4)
+    M.post_key_hid(M.KEY_RETURN)
+    time.sleep(0.8)
+
+
+def start_with_list(tag: str, name: str, list_id: int = 5001) -> tuple[App, int | None]:
+    """seed 之后、启动之前在库里加一个清单（没有窗口记录 → 启动时 reconcile 给它开窗），并把第一条未完成待办移进去。
+    返回 (App, 被移进去的待办 id)"""
+    d = fresh_data(tag)
+    con = sqlite3.connect(str(d / "data.db"))
+    try:
+        con.execute("INSERT INTO todo_lists (id, name, sort_order, created_at, updated_at) "
+                    "VALUES (?, ?, 1, datetime('now', 'localtime'), datetime('now', 'localtime'))", (list_id, name))
+        row = con.execute("SELECT MIN(id) FROM todos WHERE completed = 0").fetchone()
+        moved = row[0] if row else None
+        if moved is not None:
+            con.execute("UPDATE todos SET list_id = ? WHERE id = ?", (list_id, moved))
+        con.commit()
+    finally:
+        con.close()
+    app = App(C.app, data_dir=d, tag=tag, out_dir=C.out, work_dir=C.work).start()
+    return app, moved
+
+
+def m11() -> str:
+    """菜单栏图标「新增待办清单」→ 新窗口出现并直接进入改名（粘贴 + 回车）→ 双击清单名再改名 → 拖标题栏移动 → 落库"""
+    M.dump_windows("用例开始前")
+    app = start("M11")
+    try:
+        ck = Checks()
+        main = wait_for(app, MAIN_TITLE, MAIN_SIZE)
+        time.sleep(2.5)
+        ck.ok([r[0] for r in list_rows(app)] == [1], f"启动时只有默认清单（{list_rows(app)}）")
+        M.press_status_menu_item(app.pid, "新增待办清单")
+        try:
+            new = M.wait_until(lambda: other_list_win(app, main.number, NEW_LIST_TITLE), 15, "新清单窗口出现")
+        except M.Timeout as e:
+            M.dump_windows("没等到新清单窗口", app.pid)
+            raise AssertionError(f"「新增待办清单」后新窗口出现：{e}") from None
+        print(f"    新清单窗口：{new.describe()}")
+        check_size(ck, new, MAIN_SIZE, "新清单窗口")
+        if new.name is not None:
+            ck.ok(new.name == NEW_LIST_TITLE, f"系统标题 {new.name!r} == {NEW_LIST_TITLE!r}（= 清单名）")
+        rows = [r for r in list_rows(app) if r[0] != 1]
+        ck.ok(len(rows) == 1 and rows[0][1] == NEW_LIST_TITLE, f"todo_lists 多了「{NEW_LIST_TITLE}」（{rows}）")
+        if not rows:
+            return ck.done()
+        lid = rows[0][0]
+        key = f"list:{lid}"
+        time.sleep(1.5)
+        shoot(refresh(app, new), "M11-new-list")
+        print(f"    前台：{M.describe_pid(M.frontmost_pid())}（「新增待办清单」会先激活应用，新窗口拿键盘焦点）")
+        paste_rename(LIST_RENAMED)
+        try:
+            M.wait_until(lambda: dict(list_rows(app)).get(lid) == LIST_RENAMED, 8, "改名落库")
+            ck.ok(True, f"新建后直接改名：todo_lists[{lid}].name = {LIST_RENAMED!r}")
+        except M.Timeout as e:
+            shoot(refresh(app, new), "M11-rename-failed")
+            ck.ok(False, f"新建后直接改名落库：{e}（{list_rows(app)}）")
+        if new.name is not None:
+            try:
+                M.wait_until(lambda: refresh(app, new).name == dict(list_rows(app)).get(lid), 5, "系统标题跟着改名")
+                ck.ok(True, f"系统标题跟着改名（{refresh(app, new).name!r}）")
+            except M.Timeout as e:
+                ck.ok(False, f"系统标题跟着改名：{e}")
+        bring_to_front(app, new)
+        M.double_click(*at(refresh(app, new), LIST_NAME))
+        time.sleep(0.8)
+        shoot(refresh(app, new), "M11-dblclick-rename")
+        paste_rename(LIST_RENAMED2)
+        try:
+            M.wait_until(lambda: dict(list_rows(app)).get(lid) == LIST_RENAMED2, 8, "双击改名落库")
+            ck.ok(True, f"双击清单名改名：{LIST_RENAMED2!r}")
+        except M.Timeout as e:
+            ck.ok(False, f"双击清单名改名落库：{e}（{list_rows(app)}）")
+        # 拖标题栏（自绘）：移动后 window_layouts = 窗口位置 × 统一系数；默认清单窗口也是吸附目标，落点按实际窗口位置核对
+        bring_to_front(app, new)
+        w = refresh(app, new)
+        x0, y0 = at(w, LIST_TITLE_BLANK)
+        dx, dy = -120.0, 60.0
+        M.drag(x0, y0, x0 + dx, y0 + dy, steps=20)
+        time.sleep(1.2)
+        w2 = refresh(app, new)
+        d = (w2.x - w.x, w2.y - w.y)
+        ck.ok(abs(d[0] - dx) <= 25 and abs(d[1] - dy) <= 25, f"拖标题栏移动了新清单窗口 Δ=({d[0]:+.0f},{d[1]:+.0f})")
+        unit = M.unit_scale()
+        try:
+            r = M.wait_until(lambda: (lambda r: r if r and abs(r[0] - w2.x * unit) <= 2 * unit
+                                      and abs(r[1] - w2.y * unit) <= 2 * unit else None)(list_layout(app, key)),
+                             6, f"window_layouts[{key}] = 拖动后的位置")
+            ck.ok(True, f"拖动落库 {r}（窗口 {w2.x:.0f},{w2.y:.0f} × {unit:g}）")
+        except M.Timeout as e:
+            ck.ok(False, f"拖动后 window_layouts 落库：{e}（{list_layout(app, key)}）")
+        check_no_panic(ck, app)
+        return ck.done(f"list #{lid} Δ=({d[0]:+.0f},{d[1]:+.0f})")
+    finally:
+        app.dump_logs(20)
+        app.stop()
+        M.dump_windows("用例结束后")
+
+
+def m12() -> str:
+    """库里预置一个清单（启动时自动开窗）并移进一条待办 → 清单名右键「删除清单」→ 确认 → 窗口关闭、清单墓碑、待办回默认清单"""
+    M.dump_windows("用例开始前")
+    name, lid = "E2E Del", 5001
+    app, moved = start_with_list("M12", name, lid)
+    try:
+        ck = Checks()
+        main = wait_for(app, MAIN_TITLE, MAIN_SIZE)
+        try:
+            other = M.wait_until(lambda: other_list_win(app, main.number, name), 20, "预置清单的窗口（启动时开窗）")
+        except M.Timeout as e:
+            M.dump_windows("没等到预置清单的窗口", app.pid)
+            raise AssertionError(f"没有窗口记录的清单启动时开窗：{e}") from None
+        print(f"    预置清单窗口：{other.describe()}；移进去的待办 #{moved}")
+        time.sleep(2)
+        bring_to_front(app, other)
+        M.click(*at(refresh(app, other), LIST_NAME), button="right")
+        time.sleep(0.8)
+        shoot(refresh(app, other), "M12-name-menu")
+        M.click(*at(refresh(app, other), LIST_MENU_DELETE))
+        time.sleep(1.2)
+        shoot(refresh(app, other), "M12-confirm")
+        M.click(*at(refresh(app, other), LIST_DELETE_CONFIRM))
+        try:
+            M.wait_until(lambda: not [w for w in app.windows() if w.number == other.number], 8, "清单窗口关闭")
+            ck.ok(True, "确认删除后清单窗口关闭")
+        except M.Timeout as e:
+            ck.ok(False, f"确认删除后清单窗口关闭：{e}")
+        try:
+            M.wait_until(lambda: lid not in dict(list_rows(app)), 5, "todo_lists 删掉清单")
+            ck.ok(True, "todo_lists 删掉了这个清单")
+        except M.Timeout as e:
+            ck.ok(False, f"{e}（{list_rows(app)}）")
+        tomb = app.q("SELECT entity_id FROM list_tombstones WHERE entity_id = ?", (lid,))
+        ck.ok(tomb == [(lid,)], f"写了清单墓碑（{tomb}）")
+        if moved is not None:
+            back = app.q("SELECT list_id FROM todos WHERE id = ?", (moved,))
+            ck.ok(back == [(1,)], f"待办 #{moved} 回到默认清单（{back}）")
+        ck.ok(main_win(app) is not None, "默认清单窗口还在")
+        check_no_panic(ck, app)
+        return ck.done()
+    finally:
+        app.dump_logs(20)
+        app.stop()
+        M.dump_windows("用例结束后")
+
+
+def m13() -> str:
+    """两个清单窗口都 ⌘W（= 隐藏）→ 进程仍在、hidden 落库 → `open <app>`（Dock 唤起 = 托盘左键）→ 两个都重新出现"""
+    M.dump_windows("用例开始前")
+    name, lid = "E2E Hide", 5002
+    app, _ = start_with_list("M13", name, lid)
+    key = f"list:{lid}"
+    try:
+        ck = Checks()
+        main = wait_for(app, MAIN_TITLE, MAIN_SIZE)
+        try:
+            other = M.wait_until(lambda: other_list_win(app, main.number, name), 20, "预置清单的窗口")
+        except M.Timeout as e:
+            raise AssertionError(f"预置清单的窗口出现：{e}") from None
+        time.sleep(2)
+        for label, win in (("预置清单窗口", other), ("默认清单窗口", main)):
+            front = bring_to_front(app, win)
+            M.click(*at(refresh(app, win), LIST_TITLE_BLANK))      # 让它成为 key 窗口（⌘W 关的是 key 窗口）
+            time.sleep(0.4)
+            via = send_cmd_key(app, M.KEY_W, front)
+            try:
+                M.wait_until(lambda: not [w for w in app.windows() if w.number == win.number], 8, f"{label}离开屏幕")
+                ck.ok(True, f"⌘W（{via}）后{label}隐藏")
+            except M.Timeout as e:
+                ck.ok(False, f"⌘W 后{label}隐藏：{e}")
+        time.sleep(2)
+        M.dump_windows("都 ⌘W 之后", app.pid)
+        ck.ok(app.alive(), "所有清单窗口都关了，进程仍在")
+        ck.ok(list_hidden(app, key) == 1 and list_hidden(app, DEFAULT_LIST_KEY) == 1,
+              f"两个窗口都记为隐藏（{key}={list_hidden(app, key)}，{DEFAULT_LIST_KEY}={list_hidden(app, DEFAULT_LIST_KEY)}）")
+        r = M.run(["open", str(C.app)], timeout=30)
+        print(f"    open {C.app} → rc={r.returncode} {(r.stdout + r.stderr).strip()!r}")
+        try:
+            M.wait_until(lambda: {w.number for w in app.windows()} >= {main.number, other.number}, 20,
+                         "两个清单窗口都重新出现")
+            ck.ok(True, "Dock 唤起：两个清单窗口都重新出现（同一个窗口号）")
+        except M.Timeout as e:
+            M.dump_windows("open 之后", app.pid)
+            ck.ok(False, f"Dock 唤起后两个清单窗口都重新出现：{e}（on_reopen 只在没有可见窗口时回调）")
+        time.sleep(1)
+        ck.ok(list_hidden(app, key) == 0 and list_hidden(app, DEFAULT_LIST_KEY) == 0, "唤起后 hidden 清零")
+        ck.ok(pids_of_exe() == [app.pid], f"open 没有另起一个进程（{pids_of_exe()}）")
+        check_no_panic(ck, app)
+        return ck.done()
     finally:
         app.dump_logs(20)
         app.stop()
@@ -1210,7 +1490,8 @@ def clear_main_off(app: App, fence: WinInfo) -> WinInfo:
         dy = fence.y + fence.h + 20 - main.y
     print(f"    主窗口 {main.describe()} 盖着收纳箱，拖开 Δ=({dx:+.0f},{dy:+.0f})")
     bring_to_front(app, main)
-    x0, y0 = main.x + main.w / 2, main.y + 6
+    # 3.1：清单窗口是自绘拖动，上沿 5pt 是缩放手柄：按标题栏下半截的空白处
+    x0, y0 = at(main, LIST_TITLE_BLANK)
     M.drag(x0, y0, x0 + dx, y0 + dy)
     time.sleep(0.8)
     m2 = main_win(app)
@@ -1932,7 +2213,8 @@ def drag_fence_title(app: App, fence: WinInfo, dx: float, dy: float) -> tuple[Wi
 
 
 def mf09() -> str:
-    """拖标题栏（自绘拖动：按下后移动超过 3pt 窗口才跟手，每帧 setFrameOrigin:；只有一个收纳箱，没有吸附目标）→ 窗口移动 →
+    """拖标题栏（自绘拖动：按下后移动超过 3pt 窗口才跟手，每帧 setFrameOrigin:；只有一个收纳箱，3.1 起默认清单窗口也是吸附目标，
+    但 clear_main_off 之后离得远、不在 ±10pt 内）→ 窗口移动 →
     松手后 fences 与当前屏幕组合的 fence_layouts 同时落库（= 窗口位置 × 统一系数）"""
     M.dump_windows("用例开始前")
     env = fence_start("MF09")
@@ -2103,17 +2385,20 @@ SMOKE = [
     ("M04", "退出：quit 事件后进程退出、无 panic", m04, 180),
     ("M05", "⌘Q 退出（先切到前台）", m05, 180),
     ("M06", "App 菜单：应用 / 编辑 / 窗口菜单项，点「设置…」打开设置", m06, 180),
-    ("M07", "菜单栏图标：菜单项、打开设置、退出", m07, 180),
-    ("M08", "⌘W 关主窗口、open 唤起（on_reopen）", m08, 180),
-    ("M09", "FAB 新建待办：输入、⌘Enter、落库、主窗口显示", m09, 240),
-    ("M10", "固定模式：拖不动、改不了尺寸、is_fixed 落库；取消后恢复", m10, 240),
+    ("M07", "菜单栏图标：菜单项（新增待办清单 / 显示日历，无固定模式）、打开设置、退出", m07, 180),
+    ("M08", "⌘W 隐藏默认清单窗口、open 唤起同一个窗口（on_reopen）", m08, 180),
+    ("M09", "FAB 新建待办：输入、⌘Enter、落库（默认清单）、列表显示", m09, 240),
+    ("M10", "锁按钮：普通可拖可缩放 → 锁定拖不动、无手柄、window_layouts.is_fixed 落库；解锁后恢复", m10, 240),
+    ("M11", "新增待办清单：新窗口、改名、双击改名、拖动落库", m11, 240),
+    ("M12", "删除清单：窗口关闭、清单墓碑、待办回默认清单", m12, 180),
+    ("M13", "清单窗口全部 ⌘W 隐藏、Dock 唤起全部", m13, 180),
     ("MF01", "收纳箱新建：桌面图标层 + 1、右上角、行为自报、库与文件夹、截图 OCR", mf01, 180),
     ("MF02", "收纳箱目录监听：写进收纳文件夹 → fence_items 补行、界面刷新", mf02, 180),
     ("MF03", "收纳箱真实拖入（拖放源进程）：移进收纳文件夹、记原始路径、同名不覆盖", mf03, 300),
     ("MF04", "收纳箱右键「移回桌面」：回原目录 / 回桌面（MINI_TODO_DESKTOP_DIR）", mf04, 240),
     ("MF05", "删除收纳箱：全部移回、.DS_Store 不挡删除、文件夹与记录删掉、窗口关闭", mf05, 240),
     ("MF06", "⌘H / 隐藏后收纳箱仍在；隐藏中点收纳箱不激活应用", mf06, 240),
-    ("MF07", "有收纳箱可见时 ⌘W 关主窗口、open 唤起主窗口", mf07, 180),
+    ("MF07", "有收纳箱可见时 ⌘W 隐藏默认清单窗口、open 唤起它", mf07, 180),
     ("MF08", "应用不在前台时双击标题改名（激活应用、系统输入流粘贴 + 回车）", mf08, 240),
     ("MF09", "拖标题栏移动收纳箱、几何落库（fences + fence_layouts）", mf09, 180),
     ("MF10", "菜单栏图标：新增 / 显示隐藏 / 重置收纳箱位置；退出后重启恢复", mf10, 300),

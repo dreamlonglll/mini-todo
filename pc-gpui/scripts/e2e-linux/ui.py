@@ -1,7 +1,7 @@
 """GPUI 版界面的操作封装（"页面对象"）。坐标以真实窗口布局为准（缩放 1，逻辑像素 = 物理像素），
 能用 OCR 找到文字的地方都按文字点击，只有图标按钮与输入框按布局常量点击。
 
-布局来源：`crates/app/src/windows/**`（主窗口 380×600、编辑窗口 1080×600、设置 680×560），
+布局来源：`crates/app/src/windows/**`（清单窗口 380×600、日历窗口约 596×600、编辑窗口 1080×600、设置 680×560），
 数值在 Xvfb 截图上核对过（见 README.md「实现要点」）。
 """
 from __future__ import annotations
@@ -11,9 +11,10 @@ import time
 from harness import (DAV, DAV_PASS, DAV_USER, OCR_MODES, App, LogMark, Win, box_center, check, log,
                      wait_until)
 
-# ----------------------------------------------------------------------------- 主窗口
+# ----------------------------------------------------------------------------- 清单窗口（"主窗口" = 默认清单窗口）
 
 TITLE_BAR_H = 52
+CALENDAR = "日历"
 EDITOR_NEW = "新建待办"
 EDITOR = "待办详情"
 SETTINGS = "设置"
@@ -22,14 +23,27 @@ NOTIFICATION = "通知"
 SUBTASK_VIEW = "查看子任务"
 SUBTASK_EDIT = "编辑子任务"
 
-# 标题栏右区按钮（从右往左，28×28、间距 8、右内边距 16、描边 1）
-_TITLE_BUTTONS = ["settings", "sync", "fixed", "theme", "view", "completed"]
+# 清单窗口标题栏右区按钮（从右往左，28×28、间距 8、右内边距 16、描边 1）：设置 / 同步 / 锁定 / 日夜 / 视图 / 已完成
+_TITLE_BUTTONS = ["settings", "sync", "lock", "theme", "view", "completed"]
+# 日历窗口标题栏右区：设置 / 锁定 / 日夜 / 清单筛选（漏斗）
+_CAL_BUTTONS = ["settings", "lock", "theme", "filter"]
+# 标题栏左侧的清单名（双击改名、右键菜单）
+LIST_NAME = (40, 27)
+# 右键清单名的菜单：「重命名」「删除清单」（默认清单的删除置灰）
+LIST_MENU_RENAME = (75, 74)
+LIST_MENU_DELETE = (75, 105)
 
 
 def title_button(main: Win, name: str) -> tuple[int, int]:
-    """标题栏右区按钮中心。`completed` 只在有已完成待办时出现（在 `view` 左边）。"""
+    """清单窗口标题栏右区按钮中心。`completed` 只在本清单有已完成待办时出现（在 `view` 左边）。"""
     i = _TITLE_BUTTONS.index(name)
     return main.w - 1 - 16 - 14 - i * 36, 27
+
+
+def cal_button(cal: Win, name: str) -> tuple[int, int]:
+    """日历窗口标题栏右区按钮中心"""
+    i = _CAL_BUTTONS.index(name)
+    return cal.w - 1 - 16 - 14 - i * 36, 27
 
 
 def wait_no_toast(app: App, main: Win, timeout: float = 8) -> None:
@@ -47,8 +61,9 @@ def wait_no_toast(app: App, main: Win, timeout: float = 8) -> None:
         pass
 
 
-def click_title(app: App, name: str) -> None:
-    main = app.main_win()
+def click_title(app: App, name: str, win: Win | None = None) -> None:
+    """点清单窗口标题栏右区按钮（缺省默认清单窗口）"""
+    main = app.x.refresh(win) if win is not None else app.main_win()
     wait_no_toast(app, main)
     app.x.click(main, *title_button(main, name))
 
@@ -62,16 +77,30 @@ def list_region(main: Win) -> tuple[int, int, int, int]:
     return 0, TITLE_BAR_H, main.w, main.h - TITLE_BAR_H - 70
 
 
-def find_row(app: App, title: str, timeout: float = 12) -> tuple[float, float, float, float]:
-    main = app.main_win()
-    b = app.wait_text(main, title, timeout, region=list_region(main))
-    return b  # type: ignore[return-value]
+def _list_win(app: App, win: Win | None) -> Win:
+    """清单窗口：缺省默认清单窗口（「Mini Todo」），否则按 wid 刷新几何"""
+    return app.x.refresh(win) if win is not None else app.main_win()
 
 
-def row_action(app: App, title: str, action: str) -> None:
+def find_row(app: App, title: str, timeout: float = 12, win: Win | None = None) -> tuple[float, float, float, float]:
+    """列表里某行标题的位置。列表比窗口长时（S 组后半段几十条待办，新建的排在最后）往下滚着找"""
+    main = _list_win(app, win)
+    try:
+        return app.wait_text(main, title, timeout, region=list_region(main))  # type: ignore[return-value]
+    except AssertionError:
+        for _ in range(4):
+            app.x.scroll(main, main.w // 2, main.h // 2, 5)
+            try:
+                return app.wait_text(main, title, 3, region=list_region(main))  # type: ignore[return-value]
+            except AssertionError:
+                pass
+        raise
+
+
+def row_action(app: App, title: str, action: str, win: Win | None = None) -> None:
     """悬停某行后点操作条：complete（✓）/ top（置顶）/ delete（删除）。操作条在行标题那一行的右端。"""
-    main = app.main_win()
-    x, y, w, h = find_row(app, title)
+    main = _list_win(app, win)
+    x, y, w, h = find_row(app, title, win=main)
     cy = y + h / 2
     app.x.move(main, x + w / 2, cy)
     time.sleep(0.5)
@@ -149,8 +178,10 @@ def wait_toast(app: App, win: Win, text: str, timeout: float = 8) -> None:
     app.wait_text(win, text, timeout, region=(0, 0, win.w, 110), fuzzy=0.7)
 
 
-def wait_main_shows(app: App, title: str, timeout: float = 12, present: bool = True) -> None:
-    main = app.main_win()
+def wait_main_shows(app: App, title: str, timeout: float = 12, present: bool = True,
+                    win: Win | None = None) -> None:
+    """清单窗口（缺省默认清单窗口）的列表里出现 / 不再出现 title"""
+    main = _list_win(app, win)
     app.wait_text(main, title, timeout, present=present, region=list_region(main))
 
 
@@ -158,6 +189,66 @@ def close_completed(app: App, cw: Win) -> None:
     """已完成窗口（460×550）：右上角 ×（没有 Esc 快捷键）"""
     app.x.click(cw, cw.w - 26, 20)
     app.x.wait_window_gone(COMPLETED, 8)
+
+
+# ----------------------------------------------------------------------------- 待办清单（多清单窗口）
+
+
+def list_rename(app: App, win: Win, name: str, begin: bool = True) -> None:
+    """改清单名：双击标题栏的清单名进入改名（begin=False：已经在改名中，如 `list:new` 刚建好）→ 全选 → 输入 → Enter。
+    含非 ASCII 的名字走剪贴板（`App.type`）。"""
+    if begin:
+        app.x.click(win, 200, 300)  # 先点列表空白处，避免和上一次点击连成三击
+        time.sleep(0.4)
+        app.x.dblclick(win, *LIST_NAME)
+        time.sleep(0.6)
+    app.key(win, "ctrl+a")
+    app.type(win, name)
+    time.sleep(0.2)
+    app.key(win, "Return")
+
+
+def list_name_menu(app: App, win: Win, item: str) -> None:
+    """右键标题栏的清单名 → 菜单项（「重命名」/「删除清单」；菜单在清单名下方左对齐，每项约 31px）"""
+    app.x.click(win, *LIST_NAME, button=3)
+    time.sleep(0.6)
+    app.click_text(win, item, 6, region=(0, 40, win.w, 120))
+
+
+def list_delete(app: App, win: Win) -> None:
+    """右键清单名 →「删除清单」→ 确认框「删除清单」点「删除」"""
+    list_name_menu(app, win, "删除清单")
+    confirm_dialog(app, win, "删除清单", "删除")
+
+
+def move_to_list(app: App, title: str, target: str, win: Win | None = None) -> None:
+    """右键某行 →「移动到 ▸」（菜单开在按下的位置，唯一一项在光标下方约 21px）→ 悬停展开子菜单 → 点目标清单名"""
+    main = _list_win(app, win)
+    x, y, w, h = find_row(app, title, win=main)
+    cx, cy = x + min(w / 2, 40), y + h / 2
+    app.x.click(main, cx, cy, button=3)
+    time.sleep(0.5)
+    app.x.move(main, cx + 30, cy + 21)
+    time.sleep(0.8)
+    app.click_text(main, target, 6, region=(int(cx), int(cy), main.w - int(cx), 200))
+
+
+def editor_set_list(app: App, ed: Win, target: str) -> None:
+    """编辑表单「四象限」下面的「清单」下拉（滚到表单下部才看得见）：点开 → 点目标清单名"""
+    app.x.scroll(ed, 350, 300, 10)
+    region = (0, 56, 700, 490)
+
+    def label():
+        for psm, variant in OCR_MODES:
+            hits = [b for b in app.ocr(ed, region, psm, variant).find_all_exact("清单") if b[0] < 60]
+            if hits:
+                return hits[0]
+        return None
+    x, y, w, h = wait_until(label, 6, 0.3, "「清单」form label")
+    app.x.click(ed, 300, y + h / 2 + 34)
+    time.sleep(0.6)
+    app.click_text(ed, target, 6, region=(0, int(y + h + 40), 700, 200))
+    time.sleep(0.4)
 
 
 # ----------------------------------------------------------------------------- 编辑窗口（1080×600）
@@ -216,6 +307,7 @@ def open_settings(app: App, tab: str = "常规") -> Win:
 
 
 def close_settings(app: App, st: Win) -> None:
+    app.x.raise_window(st)  # 「展示日历」刚打开的日历窗口可能盖住了右上角的 ×
     app.x.click(st, 636, 28)
     app.x.wait_window_gone(SETTINGS, 10)
     time.sleep(0.5)

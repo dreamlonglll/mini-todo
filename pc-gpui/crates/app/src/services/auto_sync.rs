@@ -2,6 +2,7 @@
 //! - 间隔 `max(1, syncInterval || 15)` 分钟，`SyncMode::Smart { full: false }`（core 每第 10 轮自动无条件 GET）；
 //! - 已有同步在进行（`AppState.syncing`）时跳过这一轮；
 //! - 失败段只提示一次（`AppState.auto_sync_failing`），成功或手动同步成功后复位；"同步正在进行中"不算失败；
+//!   提示显示在看得见的清单 / 日历窗口里（`services::notice`）；都看不见时先存着，任何一次同步成功后撤回（[`super::sync::run_sync`]）；
 //! - 重叠调用只让最后一次生效（代次）：启动、设置窗口关闭、同步设置变化后都会重新 `start`。
 
 use std::time::Duration;
@@ -9,11 +10,11 @@ use std::time::Duration;
 use gpui_kit::{App, Global};
 use mini_todo_core::sync::{self, SyncMode};
 
+use super::notice;
 use super::sync as sync_service;
 use crate::db::spawn_db;
 use crate::state::AppState;
 use crate::ui::message::{self, MessageKind};
-use crate::windows::WindowManager;
 
 #[derive(Default)]
 struct AutoSync {
@@ -97,14 +98,20 @@ fn run_auto_sync(cx: &mut App) {
                         state.auto_sync_failing = true;
                         first
                     });
-                    if first && let Some(main) = WindowManager::main(cx) {
+                    if first {
                         let detail = message::error_detail(&e);
                         let text = if detail.is_empty() {
                             "自动同步失败".to_string()
                         } else {
                             format!("自动同步失败：{detail}")
                         };
-                        message::show_in(main, cx, MessageKind::Error, text);
+                        // 显示在看得见的清单 / 日历窗口里（以前固定在默认清单窗口，它隐藏时看不到）
+                        notice::show_topic(
+                            cx,
+                            notice::Topic::AutoSyncFailed,
+                            MessageKind::Error,
+                            text,
+                        );
                     }
                 }
             }

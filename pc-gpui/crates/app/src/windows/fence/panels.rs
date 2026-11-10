@@ -264,6 +264,8 @@ impl FenceWindow {
                 arrow: true,
                 width,
                 height: EpDropdownMenu::estimated_height(4, 1),
+                // 收纳箱有自己的底色，菜单保持浅色
+                dark: false,
             },
             div().w(px(width)).child(menu),
             move |window, cx| {

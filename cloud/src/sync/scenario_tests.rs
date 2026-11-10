@@ -10,9 +10,11 @@ use chrono_tz::Tz;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
+use crate::api::lists;
 use crate::config::Config;
 use crate::db::repo::{self, meta_keys as mk};
 use crate::db::Db;
+use crate::model::{self, WriteMode};
 use crate::sync::doc::{placeholder_settings, CLOUD_DEVICE_ID};
 use crate::sync::mock_dav::{MockDav, XmlStyle};
 use crate::sync::push::PRECONDITION_RETRY_DELAY;
@@ -1240,4 +1242,920 @@ fn mirror_falls_back_to_document_image_list() {
     assert_eq!(r.missing, 1);
     assert!(e.ctx.cfg.images_dir.join("a.png").exists());
     assert_eq!(e.mock.count("GET", "evil"), 0);
+}
+
+// =============================================================================
+// 多清单：todoLists / listTombstones（契约 .trellis/tasks/11-09-multi-list-windows/contract.md）
+// =============================================================================
+
+/// 新版 PC 写出的清单记录（`{id, name, sortOrder, createdAt, updatedAt}`）。
+fn pc_list(id: i64, name: &str, sort_order: i64, updated_at: &str) -> Value {
+    json!({"id": id, "name": name, "sortOrder": sort_order,
+           "createdAt": "2026-11-01 08:00:00", "updatedAt": updated_at})
+}
+
+fn pc_default_list() -> Value {
+    Value::Object(model::default_list_record())
+}
+
+/// 新版 PC 写出的已知归属的待办：归属就是在这个版本里设置的（`listUpdatedAt = updatedAt`，契约 §13）。
+fn pc_todo_in(id: i64, title: &str, updated_at: &str, list_id: i64) -> Value {
+    pc_todo_owned(id, title, updated_at, list_id, updated_at)
+}
+
+/// 新版 PC 写出的已知归属的待办，归属版本单独给出。
+fn pc_todo_owned(
+    id: i64,
+    title: &str,
+    updated_at: &str,
+    list_id: i64,
+    list_updated_at: &str,
+) -> Value {
+    let mut t = pc_todo(id, title, updated_at, vec![]);
+    t["listId"] = json!(list_id);
+    t["listUpdatedAt"] = json!(list_updated_at);
+    t
+}
+
+/// 远端某条待办的归属 `(listId, listUpdatedAt)`，缺失的键为 Null。
+fn remote_owner(doc: &Value, id: i64) -> (Value, Value) {
+    let t = remote_todo(doc, id).expect("todo exists");
+    (
+        t.get("listId").cloned().unwrap_or(Value::Null),
+        t.get("listUpdatedAt").cloned().unwrap_or(Value::Null),
+    )
+}
+
+/// cloud 本地某条待办的归属 `(listId, listUpdatedAt)`，缺失的键为 Null。
+fn local_owner(db: &Db, id: &str) -> (Value, Value) {
+    let t = local_todo(db, id);
+    (
+        t.get("listId").cloned().unwrap_or(Value::Null),
+        t.get("listUpdatedAt").cloned().unwrap_or(Value::Null),
+    )
+}
+
+/// 新版 PC（多清单）写出的文档：顶层多了 todoLists / listTombstones。
+fn pc_doc_lists(
+    todos: Vec<Value>,
+    lists: Vec<Value>,
+    list_tombstones: Vec<Value>,
+    tombstones: Vec<Value>,
+) -> Value {
+    let mut doc = pc_doc(todos, tombstones);
+    doc["todoLists"] = json!(lists);
+    doc["listTombstones"] = json!(list_tombstones);
+    doc
+}
+
+fn remote_list_names(doc: &Value) -> Vec<(i64, String)> {
+    doc["todoLists"]
+        .as_array()
+        .expect("todoLists 必须写出")
+        .iter()
+        .map(|l| {
+            (
+                l["id"].as_i64().unwrap(),
+                l["name"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+fn remote_list_tombstone_ids(doc: &Value) -> Vec<i64> {
+    doc["listTombstones"]
+        .as_array()
+        .expect("listTombstones 必须写出")
+        .iter()
+        .map(|t| t["entityId"].as_i64().unwrap())
+        .collect()
+}
+
+fn local_list_name(db: &Db, id: &str) -> Option<String> {
+    db.with_conn(|c| repo::all_list_rows(c))
+        .unwrap()
+        .into_iter()
+        .find(|r| r.id == id)
+        .map(|r| {
+            serde_json::from_str::<Value>(&r.data_json).unwrap()["name"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+}
+
+fn local_todo(db: &Db, id: &str) -> Value {
+    let row = db
+        .with_conn(|c| repo::get_todo(c, id))
+        .unwrap()
+        .expect("todo exists");
+    serde_json::from_str(&row.data_json).unwrap()
+}
+
+/// API `POST /lists` 的落库动作（`api::lists::create_list_tx`：查重名、分配 id、插入、标脏），
+/// 返回新清单的 id。
+fn api_create_list(db: &Db, name: &str) -> i64 {
+    let now = now_local_string(tz());
+    let patch = model::validate_list_input(&json!({ "name": name }), WriteMode::Create).unwrap();
+    db.with_conn(|c| {
+        let tx = c.transaction().unwrap();
+        let record = lists::create_list_tx(&tx, &patch, &now).unwrap();
+        tx.commit().unwrap();
+        record["id"].as_i64().unwrap()
+    })
+}
+
+/// API `PATCH /lists/:id` 改名的落库动作（`updatedAt = max(now, 旧值 + 1 秒)` + 标脏）。
+fn api_rename_list(db: &Db, id: &str, name: &str) {
+    let now = now_local_string(tz());
+    let patch = model::validate_list_input(&json!({ "name": name }), WriteMode::Update).unwrap();
+    db.with_conn(|c| {
+        let tx = c.transaction().unwrap();
+        let entry = lists::resolve_list_ref(&tx, id).unwrap();
+        lists::update_list_tx(&tx, &entry, &patch, &now, tz()).unwrap();
+        tx.commit().unwrap();
+    });
+}
+
+/// API `DELETE /lists/:id` 的落库动作（契约 §5）：其下待办移到默认清单并刷新 `updatedAt`、
+/// 删清单、写清单墓碑、标脏。返回移走的待办数。
+fn api_delete_list(db: &Db, id: &str) -> usize {
+    let now = now_local_string(tz());
+    db.with_conn(|c| {
+        let tx = c.transaction().unwrap();
+        let entry = lists::resolve_list_ref(&tx, id).unwrap();
+        let deleted = lists::delete_list_tx(&tx, &entry, &now, tz()).unwrap();
+        tx.commit().unwrap();
+        deleted.moved_todos
+    })
+}
+
+/// 两端同时改同一个清单的名字：按 `updatedAt` 整条 LWW，较新的一方胜出、两端收敛。
+#[test]
+fn concurrent_list_renames_resolve_by_lww() {
+    let e = env(MockDav::start());
+    let t0 = "2026-11-01 10:00:00";
+    e.mock.put_doc(&pc_doc_lists(
+        vec![],
+        vec![
+            pc_default_list(),
+            pc_list(5, "工作", 1, t0),
+            pc_list(6, "生活", 2, t0),
+        ],
+        vec![],
+        vec![],
+    ));
+    pull::pull_once(&e.ctx).unwrap();
+    assert_eq!(local_list_name(&e.db, "5").as_deref(), Some("工作"));
+
+    // 云端（AI）把两个都改了名；PC 同时也改了：5 比云端晚、6 比云端早
+    api_rename_list(&e.db, "5", "工作-AI");
+    api_rename_list(&e.db, "6", "生活-AI");
+    e.mock.put_doc(&pc_doc_lists(
+        vec![],
+        vec![
+            pc_default_list(),
+            pc_list(5, "工作-PC", 1, &ts(60)),
+            pc_list(6, "生活-PC", 2, &ts(-60)),
+        ],
+        vec![],
+        vec![],
+    ));
+    let report = push::push_once(&e.ctx).unwrap();
+    assert!(report.pushed);
+    let remote = e.mock.doc().unwrap();
+    assert_eq!(
+        remote_list_names(&remote),
+        vec![
+            (1, "待办清单".to_string()),
+            (5, "工作-PC".to_string()),
+            (6, "生活-AI".to_string()),
+        ]
+    );
+    assert_eq!(local_list_name(&e.db, "5").as_deref(), Some("工作-PC"));
+    assert_eq!(local_list_name(&e.db, "6").as_deref(), Some("生活-AI"));
+    assert!(!is_dirty(&e.db));
+}
+
+/// 删除双向传播：PC 删清单 → 云端删掉本地清单（待办不改写，读侧兜底）；云端删清单 → 其下待办
+/// 移到默认清单、写出 listTombstones；之后陈旧写入方带回已删清单也不会复活。
+#[test]
+fn list_deletion_propagates_both_ways_without_resurrection() {
+    let e = env(MockDav::start());
+    let t0 = "2026-11-01 10:00:00";
+    let lists = vec![
+        pc_default_list(),
+        pc_list(5, "工作", 1, t0),
+        pc_list(6, "生活", 2, t0),
+    ];
+    e.mock.put_doc(&pc_doc_lists(
+        vec![
+            pc_todo_in(1, "写周报", t0, 5),
+            pc_todo_in(2, "买菜", t0, 6),
+            pc_todo_in(3, "云端也有", t0, 5),
+        ],
+        lists.clone(),
+        vec![],
+        vec![],
+    ));
+    pull::pull_once(&e.ctx).unwrap();
+
+    // PC 删了清单 5：自己把 1 移到默认清单（刷新 updatedAt）；3 在 PC 上没改写（旧设备编辑过等）
+    let deleted_at = ts(-5);
+    e.mock.put_doc(&pc_doc_lists(
+        vec![
+            pc_todo_in(1, "写周报", &ts(-5), 1),
+            pc_todo_in(2, "买菜", t0, 6),
+            pc_todo_in(3, "云端也有", t0, 5),
+        ],
+        vec![pc_default_list(), pc_list(6, "生活", 2, t0)],
+        vec![json!({"entityId": 5, "deletedAt": deleted_at})],
+        vec![],
+    ));
+    let r = pull::pull_once(&e.ctx).unwrap();
+    assert_eq!(r.stats.lists_deleted, 1);
+    assert!(local_list_name(&e.db, "5").is_none());
+    assert_eq!(local_todo(&e.db, "1")["listId"], json!(1));
+    assert_eq!(
+        local_todo(&e.db, "3")["listId"],
+        json!(5),
+        "收到清单墓碑不改写待办（读侧兜底到默认清单）"
+    );
+    assert!(!r.repush_scheduled);
+
+    // 云端删清单 6：2 移到默认清单、updatedAt 与归属版本 listUpdatedAt 都刷新（§13-2）
+    let before = local_todo(&e.db, "2")["updatedAt"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(api_delete_list(&e.db, "6"), 1);
+    push::push_once(&e.ctx).unwrap();
+    let remote = e.mock.doc().unwrap();
+    assert_eq!(
+        remote_list_names(&remote),
+        vec![(1, "待办清单".to_string())]
+    );
+    assert_eq!(remote_list_tombstone_ids(&remote), vec![5, 6]);
+    let moved = remote_todo(&remote, 2).unwrap();
+    assert_eq!(moved["listId"], json!(1));
+    assert!(moved["updatedAt"].as_str().unwrap() > before.as_str());
+    assert!(moved["listUpdatedAt"].as_str().unwrap() > t0);
+    assert_eq!(
+        remote["tombstones"],
+        json!([]),
+        "清单墓碑不进共用的 tombstones（旧版本会丢掉未知 entityType）"
+    );
+
+    // 陈旧写入方（例如还没同步到删除的 PC，在忽略前置条件的服务端上）整包覆盖：
+    // 带回清单 5 / 6、没有清单墓碑
+    e.mock.put_doc(&pc_doc_lists(
+        vec![pc_todo_in(1, "写周报", t0, 5), pc_todo_in(2, "买菜", t0, 6)],
+        lists,
+        vec![],
+        vec![],
+    ));
+    let r = pull::pull_once(&e.ctx).unwrap();
+    assert!(local_list_name(&e.db, "5").is_none(), "墓碑压制陈旧副本");
+    assert!(local_list_name(&e.db, "6").is_none());
+    assert!(r.repush_scheduled, "远端缺本地内容（含清单墓碑）→ 重推");
+    push::push_once(&e.ctx).unwrap();
+    let remote = e.mock.doc().unwrap();
+    assert_eq!(
+        remote_list_names(&remote),
+        vec![(1, "待办清单".to_string())]
+    );
+    assert_eq!(remote_list_tombstone_ids(&remote), vec![5, 6]);
+    assert_eq!(remote_todo(&remote, 2).unwrap()["listId"], json!(1));
+}
+
+/// 远端没有 todoLists 键（旧格式 / 某个写入方丢了它）：本地清单一条都不删，并重推把它补回去；
+/// 本地只有初始值的默认清单时不为此上传。
+#[test]
+fn remote_without_todo_lists_keeps_local_lists() {
+    let e = env(MockDav::start());
+    e.mock.put_doc(&pc_doc(
+        vec![pc_todo(1, "A", "2026-10-01 10:00:00", vec![])],
+        vec![],
+    ));
+    let r = pull::pull_once(&e.ctx).unwrap();
+    assert!(
+        !r.repush_scheduled,
+        "只有初始值的默认清单：远端缺它不算落后"
+    );
+    assert!(!is_dirty(&e.db));
+
+    e.mock.put_doc(&pc_doc_lists(
+        vec![pc_todo_in(1, "A", "2026-10-01 10:00:00", 5)],
+        vec![
+            pc_default_list(),
+            pc_list(5, "工作", 1, "2026-11-01 10:00:00"),
+        ],
+        vec![],
+        vec![],
+    ));
+    pull::pull_once(&e.ctx).unwrap();
+    assert_eq!(local_list_name(&e.db, "5").as_deref(), Some("工作"));
+
+    e.mock.put_doc(&pc_doc(
+        vec![pc_todo_in(1, "A", "2026-10-01 10:00:00", 5)],
+        vec![],
+    ));
+    let r = pull::pull_once(&e.ctx).unwrap();
+    assert_eq!(r.stats.lists_deleted, 0);
+    assert_eq!(local_list_name(&e.db, "5").as_deref(), Some("工作"));
+    assert!(r.repush_scheduled);
+    push::push_once(&e.ctx).unwrap();
+    assert_eq!(
+        remote_list_names(&e.mock.doc().unwrap()),
+        vec![(1, "待办清单".to_string()), (5, "工作".to_string())]
+    );
+}
+
+/// 旧格式文档（todo 没有 listId、没有 todoLists）：记录原样往返（不替 PC 补 listId），
+/// 上传时照常写出默认清单与空的清单墓碑。
+#[test]
+fn legacy_todos_without_list_id_round_trip_unchanged() {
+    let e = env(MockDav::start());
+    let todo1 = pc_todo(1, "A", "2026-10-01 10:00:00", vec![]);
+    assert!(todo1.get("listId").is_none());
+    e.mock.put_doc(&pc_doc(vec![todo1.clone()], vec![]));
+    pull::pull_once(&e.ctx).unwrap();
+    api_create_todo(&e.db, 100, "from AI");
+    push::push_once(&e.ctx).unwrap();
+    let remote = e.mock.doc().unwrap();
+    assert_eq!(remote_todo(&remote, 1).unwrap(), todo1);
+    assert_eq!(remote["todoLists"], json!([pc_default_list()]));
+    assert_eq!(remote["listTombstones"], json!([]));
+}
+
+/// 默认清单（entityId = 1）的清单墓碑一律忽略：不存、不传播；默认清单的改名照常生效。
+#[test]
+fn default_list_tombstone_is_ignored_and_not_propagated() {
+    let e = env(MockDav::start());
+    e.mock.put_doc(&pc_doc_lists(
+        vec![],
+        vec![pc_list(1, "收件箱", 0, &ts(-5))],
+        vec![
+            json!({"entityId": 1, "deletedAt": ts(0)}),
+            json!({"entityId": 9, "deletedAt": ts(-1)}),
+        ],
+        vec![],
+    ));
+    let r = pull::pull_once(&e.ctx).unwrap();
+    assert_eq!(r.stats.list_tombstones_applied, 1);
+    assert_eq!(local_list_name(&e.db, "1").as_deref(), Some("收件箱"));
+    let stones = e.db.with_conn(|c| repo::all_list_tombstones(c)).unwrap();
+    assert_eq!(stones.len(), 1);
+    assert_eq!(stones[0].0, "9");
+
+    api_create_todo(&e.db, 100, "from AI");
+    push::push_once(&e.ctx).unwrap();
+    let remote = e.mock.doc().unwrap();
+    assert_eq!(remote_list_tombstone_ids(&remote), vec![9]);
+    assert_eq!(remote_list_names(&remote), vec![(1, "收件箱".to_string())]);
+}
+
+/// 云端 GET 与 PUT 之间 PC 改了清单：412 → 重新 GET 合并 → 重试；两边的清单与清单墓碑都在。
+#[test]
+fn lists_survive_412_merge_and_retry() {
+    let e = env(MockDav::start());
+    e.mock.put_doc(&pc_doc_lists(
+        vec![],
+        vec![
+            pc_default_list(),
+            pc_list(5, "工作", 1, "2026-11-01 10:00:00"),
+        ],
+        vec![],
+        vec![],
+    ));
+    pull::pull_once(&e.ctx).unwrap();
+    // 新清单排最后：sortOrder = 现有最大值 + 1 = 2
+    let ai_list = api_create_list(&e.db, "AI 建的");
+
+    let pc_v2 = pc_doc_lists(
+        vec![],
+        vec![
+            pc_default_list(),
+            pc_list(5, "工作-PC", 1, &ts(-1)),
+            pc_list(8, "PC 新建", 3, &ts(-1)),
+        ],
+        vec![json!({"entityId": 9, "deletedAt": ts(-1)})],
+        vec![],
+    );
+    e.mock
+        .with(|s| s.before_put = Some(Box::new(move |s| s.write_doc(&pc_v2))));
+    let report = push::push_once(&e.ctx).unwrap();
+    assert_eq!(report.attempts, 2);
+    assert_eq!(
+        sync_data_calls(&e.mock)
+            .into_iter()
+            .filter(|(m, _)| m == "PUT")
+            .map(|(_, s)| s)
+            .collect::<Vec<_>>(),
+        vec![412, 204]
+    );
+    let remote = e.mock.doc().unwrap();
+    assert_eq!(
+        remote_list_names(&remote),
+        vec![
+            (1, "待办清单".to_string()),
+            (5, "工作-PC".to_string()),
+            (ai_list, "AI 建的".to_string()),
+            (8, "PC 新建".to_string()),
+        ],
+        "按 (sortOrder, id) 排序"
+    );
+    assert_eq!(
+        local_list_name(&e.db, &ai_list.to_string()).as_deref(),
+        Some("AI 建的")
+    );
+    assert_eq!(remote_list_tombstone_ids(&remote), vec![9]);
+    assert_eq!(local_list_name(&e.db, "8").as_deref(), Some("PC 新建"));
+}
+
+/// 从不认识清单的旧版 cloud 升级：旧信封里还原样存着 PC 写的 todoLists / listTombstones，本地清单表
+/// 是空的。升级后第一次推送前的 GET 必须是全量 GET 并把清单合并进来，不能 304 后用只有默认清单的
+/// 本地表把它们从远端抹掉。
+#[test]
+fn upgrade_from_cloud_without_lists_merges_remote_lists_before_first_push() {
+    let e = env(MockDav::start());
+    let doc = pc_doc_lists(
+        vec![pc_todo_in(1, "A", "2026-11-01 10:00:00", 5)],
+        vec![
+            pc_default_list(),
+            pc_list(5, "工作", 1, "2026-11-01 10:00:00"),
+        ],
+        vec![json!({"entityId": 9, "deletedAt": ts(-1)})],
+        vec![],
+    );
+    e.mock.put_doc(&doc);
+    // 旧版 cloud 留下的状态：基准 = 当前远端版本，信封里带着清单键，本地清单表里只有默认清单
+    let mut old_envelope = doc.as_object().unwrap().clone();
+    old_envelope.remove("todos");
+    old_envelope.remove("tombstones");
+    let etag = e.mock.with(|s| s.etag_of(SYNC_DATA_FILE)).unwrap();
+    e.db.with_conn(|c| -> rusqlite::Result<()> {
+        repo::upsert_todo(
+            c,
+            "1",
+            &pc_todo_in(1, "A", "2026-11-01 10:00:00", 5).to_string(),
+            "2026-11-01 10:00:00",
+        )?;
+        repo::set_meta(c, mk::BASE_ETAG, &etag)?;
+        repo::set_meta(
+            c,
+            mk::REMOTE_ENVELOPE,
+            &Value::Object(old_envelope).to_string(),
+        )?;
+        repo::delete_meta(c, "lists_base_reset_v1")
+    })
+    .unwrap();
+    // 升级后重启
+    e.db.with_conn(|c| crate::db::schema::init(c)).unwrap();
+
+    api_create_todo(&e.db, 100, "from AI");
+    e.mock.clear_log();
+    push::push_once(&e.ctx).unwrap();
+    assert_eq!(
+        sync_data_calls(&e.mock)[0],
+        ("GET".to_string(), 200),
+        "升级后第一次 GET 不带 If-None-Match"
+    );
+    let remote = e.mock.doc().unwrap();
+    assert_eq!(
+        remote_list_names(&remote),
+        vec![(1, "待办清单".to_string()), (5, "工作".to_string())]
+    );
+    assert_eq!(remote_list_tombstone_ids(&remote), vec![9]);
+    assert_eq!(local_list_name(&e.db, "5").as_deref(), Some("工作"));
+}
+
+// =============================================================================
+// 契约 §12 修订 1：待办的 listId 缺失 = 未知（旧版本每次上传都会丢掉全部 listId）
+// 契约 §13 修订 2：归属 (listId, listUpdatedAt) 按自己的版本做字段级 LWW
+// =============================================================================
+
+/// 与 API `PATCH /todos/:id {"title": …}`（不带 listId）相同的落库动作：只改标题、
+/// `updatedAt = max(now, 旧值 + 1 秒)`、标脏；清单状态不变。
+fn api_patch_title(db: &Db, id: &str, title: &str) {
+    let now = now_local_string(tz());
+    db.with_conn(|c| {
+        let row = repo::get_todo(c, id).unwrap().unwrap();
+        let mut obj: Value = serde_json::from_str(&row.data_json).unwrap();
+        let updated_at = crate::time::bump_updated_at(&now, &[&row.updated_at], tz());
+        obj["title"] = json!(title);
+        obj["updatedAt"] = json!(updated_at);
+        repo::upsert_todo(c, id, &obj.to_string(), &updated_at).unwrap();
+        repo::mark_dirty(c).unwrap();
+    });
+}
+
+/// 再跑两轮"全量拉取 + 推送"：结果稳定，不会来回推送。
+fn assert_stable_for_two_rounds(e: &Env) {
+    let before = e.mock.doc().unwrap();
+    for round in 0..2 {
+        e.mock.clear_log();
+        let r = pull::pull_once_with(&e.ctx, true).unwrap();
+        assert!(!r.repush_scheduled, "第 {} 轮不该再重推", round);
+        assert!(!is_dirty(&e.db), "第 {} 轮", round);
+        push::push_once(&e.ctx).unwrap();
+        assert_eq!(
+            e.mock.count("PUT", "sync-data"),
+            0,
+            "第 {} 轮来回推送",
+            round
+        );
+    }
+    assert_eq!(e.mock.doc().unwrap(), before, "远端文档不再变化");
+}
+
+/// 旧写入方（≤ 3.0.x）改了一条待办后整份上传：所有待办都没有 listId、版本更新。合并后这条的清单
+/// 保持不变（沿用本地已知值）；cloud 补传一次修复文档（不改 updatedAt），之后两轮往返都稳定。
+/// 一直未知的待办保持未知（不补成 1）。
+#[test]
+fn old_writer_upload_without_list_ids_keeps_the_known_list() {
+    let e = env(MockDav::start());
+    let t0 = "2026-11-01 10:00:00";
+    let lists = vec![pc_default_list(), pc_list(5, "工作", 1, t0)];
+    e.mock.put_doc(&pc_doc_lists(
+        vec![
+            pc_todo_in(1, "写周报", t0, 5),
+            pc_todo(2, "从没归过类", t0, vec![]),
+        ],
+        lists.clone(),
+        vec![],
+        vec![],
+    ));
+    pull::pull_once(&e.ctx).unwrap();
+    assert_eq!(local_todo(&e.db, "1")["listId"], 5);
+
+    // 旧版本设备改了 1 的标题后上传：它不认识清单，全部待办都丢了 listId（todoLists 经 extra 原样带回）
+    let edited = ts(-5);
+    e.mock.put_doc(&pc_doc_lists(
+        vec![
+            pc_todo(1, "写周报（改）", &edited, vec![]),
+            pc_todo(2, "从没归过类", t0, vec![]),
+        ],
+        lists,
+        vec![],
+        vec![],
+    ));
+    let r = pull::pull_once(&e.ctx).unwrap();
+    assert_eq!(r.stats.list_ids_carried, 1);
+    let local = local_todo(&e.db, "1");
+    assert_eq!(local["title"], "写周报（改）");
+    assert_eq!(local["listId"], 5, "清单保持不变");
+    assert_eq!(local["updatedAt"], json!(edited), "版本是旧设备的");
+    assert!(
+        local_todo(&e.db, "2").get("listId").is_none(),
+        "一直未知：不补成 1"
+    );
+    assert!(
+        r.repush_scheduled,
+        "远端那一版的归属（未知）比本地旧 → 补传一次修复文档（§13-6）"
+    );
+
+    push::push_once(&e.ctx).unwrap();
+    let remote = e.mock.doc().unwrap();
+    let fixed = remote_todo(&remote, 1).unwrap();
+    assert_eq!(
+        remote_owner(&remote, 1),
+        (json!(5), json!(t0)),
+        "补传带着归属的版本（§13-7）"
+    );
+    assert_eq!(fixed["updatedAt"], json!(edited), "补传不改 updatedAt");
+    assert!(
+        remote_todo(&remote, 2).unwrap().get("listId").is_none(),
+        "未知不写 listId 键（§12-5）"
+    );
+    assert_stable_for_two_rounds(&e);
+}
+
+/// 新写入方（升级后的 PC）上传了真实归属：cloud 本地原本缺 listId（未知）的记录采纳远端的值。
+/// 版本相同（平局）时只补 listId，不改 updatedAt、不标脏、不为它推送。
+#[test]
+fn new_writer_list_ids_fill_unknown_cloud_records_without_a_push() {
+    let e = env(MockDav::start());
+    let t0 = "2026-11-01 10:00:00";
+    // 旧格式文档：cloud 学到的两条都不知道清单
+    e.mock.put_doc(&pc_doc(
+        vec![pc_todo(1, "A", t0, vec![]), pc_todo(2, "B", t0, vec![])],
+        vec![],
+    ));
+    pull::pull_once(&e.ctx).unwrap();
+    assert!(local_todo(&e.db, "1").get("listId").is_none());
+
+    // 升级后的 PC 学到了真实归属（§12-3 在 PC 上同样生效）后上传：版本都没变
+    e.mock.put_doc(&pc_doc_lists(
+        vec![pc_todo_in(1, "A", t0, 5), pc_todo_in(2, "B", t0, 1)],
+        vec![pc_default_list(), pc_list(5, "工作", 1, t0)],
+        vec![],
+        vec![],
+    ));
+    let r = pull::pull_once(&e.ctx).unwrap();
+    assert_eq!(r.stats.list_ids_adopted, 2);
+    assert_eq!(r.stats.todos_upserted, 0, "平局保留本地，只补 listId");
+    for (id, list) in [("1", 5), ("2", 1)] {
+        let t = local_todo(&e.db, id);
+        assert_eq!(t["listId"], list, "{}", id);
+        assert_eq!(t["updatedAt"], t0, "不改 updatedAt");
+    }
+    let row = e.db.with_conn(|c| repo::get_todo(c, "1")).unwrap().unwrap();
+    assert_eq!(row.updated_at, t0);
+    assert!(!r.repush_scheduled, "远端本来就有这些 listId");
+    assert!(!is_dirty(&e.db));
+    e.mock.clear_log();
+    push::push_once(&e.ctx).unwrap();
+    assert_eq!(e.mock.count("PUT", ""), 0, "不为采纳多推一次");
+    assert_stable_for_two_rounds(&e);
+}
+
+/// 本地较新（AI 刚改过、清单仍未知）也采纳远端的 listId：AI 的修改带着它推出去。
+#[test]
+fn new_writer_list_id_is_adopted_under_a_newer_local_edit() {
+    let e = env(MockDav::start());
+    let t0 = "2026-11-01 10:00:00";
+    e.mock
+        .put_doc(&pc_doc(vec![pc_todo(1, "A", t0, vec![])], vec![]));
+    pull::pull_once(&e.ctx).unwrap();
+    api_patch_title(&e.db, "1", "A-ai");
+    let ai_version = local_todo(&e.db, "1")["updatedAt"].clone();
+    assert!(
+        local_todo(&e.db, "1").get("listId").is_none(),
+        "PATCH 不带 listId：仍未知"
+    );
+
+    let new_pc = pc_doc_lists(
+        vec![pc_todo_in(1, "A", t0, 5)],
+        vec![pc_default_list(), pc_list(5, "工作", 1, t0)],
+        vec![],
+        vec![],
+    );
+    e.mock.put_doc(&new_pc);
+    let r = pull::pull_once(&e.ctx).unwrap();
+    assert_eq!(r.stats.list_ids_adopted, 1);
+    let t = local_todo(&e.db, "1");
+    assert_eq!(t["listId"], 5);
+    assert_eq!(t["title"], "A-ai", "本地较新的版本保留");
+    assert_eq!(t["updatedAt"], ai_version, "不改 updatedAt");
+
+    push::push_once(&e.ctx).unwrap();
+    let pushed = remote_todo(&e.mock.doc().unwrap(), 1).unwrap();
+    assert_eq!(pushed["title"], "A-ai");
+    assert_eq!(pushed["listId"], 5);
+    assert_eq!(pushed["updatedAt"], ai_version);
+    assert_stable_for_two_rounds(&e);
+}
+
+/// F1 的初始状态：远端（与 cloud）只有 Z 在 t0 放进清单 5 的版本；随后旧设备 O（不认识清单）
+/// 拿到设备 A 在 t1 把 Z 移到 6 的版本，在 t2 改了标题后整份上传——归属全丢了。cloud 拉到 O 的
+/// 上传时只能沿用自己（陈旧但带版本）的 5@t0，并标脏补传。
+const F1_T0: &str = "2026-11-01 10:00:00";
+const F1_T1: &str = "2026-11-01 11:00:00";
+const F1_T2: &str = "2026-11-01 12:00:00";
+
+fn f1_lists() -> Vec<Value> {
+    vec![
+        pc_default_list(),
+        pc_list(5, "工作", 1, F1_T0),
+        pc_list(6, "生活", 2, F1_T0),
+    ]
+}
+
+/// A 在 t1 移动、又拿到 O 在 t2 的编辑之后的版本（PC 按 §13 合并的结果）。
+fn f1_a_version() -> Value {
+    pc_todo_owned(1, "Z-旧设备改", F1_T2, 6, F1_T1)
+}
+
+fn f1_cloud_after_old_device(e: &Env) {
+    e.mock.put_doc(&pc_doc_lists(
+        vec![pc_todo_in(1, "Z", F1_T0, 5)],
+        f1_lists(),
+        vec![],
+        vec![],
+    ));
+    pull::pull_once(&e.ctx).unwrap();
+    e.mock.put_doc(&pc_doc_lists(
+        vec![pc_todo(1, "Z-旧设备改", F1_T2, vec![])],
+        f1_lists(),
+        vec![],
+        vec![],
+    ));
+    // 全量 GET：nginx 的 ETag 只有秒级精度，同一秒内的两次写入可能 304
+    let r = pull::pull_once_with(&e.ctx, true).unwrap();
+    assert_eq!(r.stats.list_ids_carried, 1);
+    assert_eq!(local_owner(&e.db, "1"), (json!(5), json!(F1_T0)));
+    assert!(r.repush_scheduled, "远端那一版没有归属 → 补传");
+}
+
+/// F1 情形 1：cloud 的补传先落到远端，A 收到后保留自己更新的归属并再补传；cloud 采纳 A 的 6，
+/// 记录平局不动、不标脏、不再推送，两轮往返稳定。（§12 时 A 的移动会被 cloud 的陈旧值覆盖。）
+#[test]
+fn stale_cloud_ownership_yields_to_a_newer_move_after_its_repush() {
+    let e = env(MockDav::start());
+    f1_cloud_after_old_device(&e);
+    push::push_once(&e.ctx).unwrap();
+    assert_eq!(
+        remote_owner(&e.mock.doc().unwrap(), 1),
+        (json!(5), json!(F1_T0)),
+        "cloud 补传的是它自己带版本的归属"
+    );
+
+    e.mock.put_doc(&pc_doc_lists(
+        vec![f1_a_version()],
+        f1_lists(),
+        vec![],
+        vec![],
+    ));
+    let r = pull::pull_once(&e.ctx).unwrap();
+    assert_eq!(r.stats.list_ids_adopted, 1);
+    assert_eq!(r.stats.todos_upserted, 0, "记录平局：保留本地，只换归属");
+    assert_eq!(local_owner(&e.db, "1"), (json!(6), json!(F1_T1)));
+    assert_eq!(local_todo(&e.db, "1")["updatedAt"], F1_T2, "不改 updatedAt");
+    assert!(!r.repush_scheduled);
+    assert!(!is_dirty(&e.db), "采纳不标脏");
+    assert_stable_for_two_rounds(&e);
+}
+
+/// F1 情形 2：cloud 补传前的 GET 之后、PUT 之前，A 的补传先到（A 先收到了 O 的上传）：If-Match
+/// 412 → 重新 GET 合并时采纳 A 的 6 → 推出去的是 6；两轮往返稳定。
+#[test]
+fn newer_move_arriving_during_the_repush_is_adopted_on_412_retry() {
+    let e = env(MockDav::start());
+    f1_cloud_after_old_device(&e);
+    let a_doc = pc_doc_lists(vec![f1_a_version()], f1_lists(), vec![], vec![]);
+    e.mock
+        .with(|s| s.before_put = Some(Box::new(move |s| s.write_doc(&a_doc))));
+    let report = push::push_once(&e.ctx).unwrap();
+    assert_eq!(report.attempts, 2, "第一次 PUT 412，重新合并后成功");
+    let remote = e.mock.doc().unwrap();
+    assert_eq!(remote_owner(&remote, 1), (json!(6), json!(F1_T1)));
+    assert_eq!(remote_todo(&remote, 1).unwrap()["title"], "Z-旧设备改");
+    assert_eq!(local_owner(&e.db, "1"), (json!(6), json!(F1_T1)));
+    assert_stable_for_two_rounds(&e);
+}
+
+/// F1 在忽略前置条件的服务端（nginx）：cloud 的补传盖掉了 A 的补传，远端回到 5@t0。A 看到远端那一版
+/// 的归属比自己旧，再补传一次（§13-6；§12 时远端"已知"就不补传，永久分叉）；cloud 随后采纳 6。
+#[test]
+fn newer_move_overwritten_by_a_stale_repush_still_converges() {
+    let e = env(MockDav::start_nginx());
+    f1_cloud_after_old_device(&e);
+    let a_doc = pc_doc_lists(vec![f1_a_version()], f1_lists(), vec![], vec![]);
+    e.mock
+        .with(|s| s.before_put = Some(Box::new(move |s| s.write_doc(&a_doc))));
+    push::push_once(&e.ctx).unwrap();
+    assert_eq!(
+        remote_owner(&e.mock.doc().unwrap(), 1),
+        (json!(5), json!(F1_T0)),
+        "nginx 忽略 If-Match：cloud 的 PUT 盖掉了 A 的补传"
+    );
+
+    // A 拉到这份文档：记录平局，归属仍是自己的 6@t1，远端那一版落后 → 再补传
+    e.mock.put_doc(&pc_doc_lists(
+        vec![f1_a_version()],
+        f1_lists(),
+        vec![],
+        vec![],
+    ));
+    let r = pull::pull_once_with(&e.ctx, true).unwrap();
+    assert_eq!(r.stats.list_ids_adopted, 1);
+    assert!(!r.repush_scheduled);
+    assert_eq!(local_owner(&e.db, "1"), (json!(6), json!(F1_T1)));
+    assert_stable_for_two_rounds(&e);
+}
+
+/// §13-3：一样新（listUpdatedAt 相同）但 listId 不同 → 两端都取较大的 listId：cloud 持有较大值的
+/// 那条补传一次，持有较小值的那条直接采纳；之后两轮往返稳定。
+#[test]
+fn same_time_ownerships_converge_on_the_larger_list_id() {
+    let e = env(MockDav::start());
+    let t0 = "2026-11-01 10:00:00";
+    let lists = vec![
+        pc_default_list(),
+        pc_list(5, "工作", 1, t0),
+        pc_list(6, "生活", 2, t0),
+    ];
+    e.mock.put_doc(&pc_doc_lists(
+        vec![pc_todo_in(1, "A", t0, 6), pc_todo_in(2, "B", t0, 5)],
+        lists.clone(),
+        vec![],
+        vec![],
+    ));
+    pull::pull_once(&e.ctx).unwrap();
+
+    // 另一个写入方的同一秒：1 在 5、2 在 6（记录版本也相同）
+    e.mock.put_doc(&pc_doc_lists(
+        vec![pc_todo_in(1, "A", t0, 5), pc_todo_in(2, "B", t0, 6)],
+        lists,
+        vec![],
+        vec![],
+    ));
+    let r = pull::pull_once(&e.ctx).unwrap();
+    assert_eq!(r.stats.list_ids_adopted, 1);
+    assert_eq!(
+        local_owner(&e.db, "1"),
+        (json!(6), json!(t0)),
+        "本地的 6 较大：保留"
+    );
+    assert_eq!(
+        local_owner(&e.db, "2"),
+        (json!(6), json!(t0)),
+        "远端的 6 较大：采纳"
+    );
+    assert!(r.repush_scheduled, "远端的 1 落后");
+    push::push_once(&e.ctx).unwrap();
+    let remote = e.mock.doc().unwrap();
+    assert_eq!(remote_owner(&remote, 1), (json!(6), json!(t0)));
+    assert_eq!(remote_owner(&remote, 2), (json!(6), json!(t0)));
+    assert_stable_for_two_rounds(&e);
+}
+
+/// §13-11（F6）：畸形记录（listId 是字符串）不参与归属合并：cloud 不从它采纳；它在记录级胜出时
+/// 归属取本地合法的那个，并补传一次；之后两轮往返稳定，不来回推送。
+#[test]
+fn malformed_remote_records_never_lend_their_list_id() {
+    let e = env(MockDav::start());
+    let t0 = "2026-11-01 10:00:00";
+    let lists = vec![pc_default_list(), pc_list(5, "工作", 1, t0)];
+    e.mock.put_doc(&pc_doc_lists(
+        vec![pc_todo(1, "A", t0, vec![]), pc_todo_in(2, "B", t0, 5)],
+        lists.clone(),
+        vec![],
+        vec![],
+    ));
+    pull::pull_once(&e.ctx).unwrap();
+
+    let mut a = pc_todo(1, "A", t0, vec![]);
+    a["listId"] = json!("5");
+    let mut b = pc_todo(2, "B-改", &ts(-5), vec![]);
+    b["listId"] = json!("1");
+    b["listUpdatedAt"] = json!(ts(-5));
+    e.mock
+        .put_doc(&pc_doc_lists(vec![a, b], lists, vec![], vec![]));
+    let r = pull::pull_once(&e.ctx).unwrap();
+    assert_eq!(r.stats.list_ids_adopted, 0);
+    assert_eq!(
+        local_owner(&e.db, "1"),
+        (Value::Null, Value::Null),
+        "不从畸形记录采纳"
+    );
+    assert_eq!(local_todo(&e.db, "2")["title"], "B-改", "记录级照旧");
+    assert_eq!(
+        local_owner(&e.db, "2"),
+        (json!(5), json!(t0)),
+        "归属仍是本地合法的那个"
+    );
+    assert!(r.repush_scheduled, "远端那一版的归属畸形、本地已知 → 补传");
+    push::push_once(&e.ctx).unwrap();
+    let remote = e.mock.doc().unwrap();
+    assert_eq!(remote_owner(&remote, 1), (Value::Null, Value::Null));
+    assert_eq!(remote_owner(&remote, 2), (json!(5), json!(t0)));
+    assert_stable_for_two_rounds(&e);
+}
+
+/// §13-10：清单墓碑永不过期。早于 todo 墓碑保留期（30 天）的清单墓碑照样合并进来、照样写出，推送后的
+/// 本地清理也不动它；长期离线的设备带回已删的清单时不会复活。todo 墓碑照旧只留 30 天。
+#[test]
+fn list_tombstones_older_than_the_retention_are_kept_and_propagated() {
+    let e = env(MockDav::start());
+    let sixty_days_ago = ts(-60 * 24 * 60);
+    e.mock.put_doc(&pc_doc_lists(
+        vec![],
+        vec![pc_default_list()],
+        vec![json!({"entityId": 5, "deletedAt": sixty_days_ago})],
+        vec![json!({"entityType": "todo", "entityId": 9, "deletedAt": sixty_days_ago})],
+    ));
+    pull::pull_once(&e.ctx).unwrap();
+    api_create_todo(&e.db, 100, "from AI");
+    push::push_once(&e.ctx).unwrap();
+    let remote = e.mock.doc().unwrap();
+    assert_eq!(
+        remote_list_tombstone_ids(&remote),
+        vec![5],
+        "推送后照样写出"
+    );
+    assert_eq!(remote["tombstones"], json!([]), "todo 墓碑照旧 30 天");
+    let stones = e.db.with_conn(|c| repo::all_list_tombstones(c)).unwrap();
+    assert_eq!(stones.len(), 1, "推送后的本地清理不动清单墓碑");
+
+    // 长期离线的设备（在忽略前置条件的服务端上）整包覆盖：带回清单 5（它离线前的版本），
+    // 文档里没有清单墓碑；其余内容与远端相同
+    e.mock.put_doc(&pc_doc_lists(
+        vec![remote_todo(&remote, 100).unwrap()],
+        vec![pc_default_list(), pc_list(5, "工作", 1, &ts(-90 * 24 * 60))],
+        vec![],
+        vec![],
+    ));
+    let r = pull::pull_once(&e.ctx).unwrap();
+    assert!(local_list_name(&e.db, "5").is_none(), "已删的清单不复活");
+    assert!(r.repush_scheduled, "远端缺清单墓碑 → 补传");
+    push::push_once(&e.ctx).unwrap();
+    let remote = e.mock.doc().unwrap();
+    assert_eq!(
+        remote_list_names(&remote),
+        vec![(1, "待办清单".to_string())]
+    );
+    assert_eq!(remote_list_tombstone_ids(&remote), vec![5]);
+    assert_stable_for_two_rounds(&e);
 }
