@@ -430,6 +430,7 @@ impl ListWindow {
         let grow = size * 0.05 / 2.;
         let primary_dark = palette.primary_dark;
         let list_id = self.list_id();
+        let actions = self.actions_bounds.clone();
         div()
             .id("fab-add")
             .group("fab")
@@ -444,6 +445,9 @@ impl ListWindow {
             .bg(palette.primary)
             .shadow(theme::fab_shadow(false))
             .cursor_pointer()
+            // 平时盖住下面的行（旧版 z-index 100）：不 occlude 的话，最后几行的悬停操作条在 FAB 底下，点 FAB 会同时点到
+            // 下面的「删除」等按钮。「操作模式」变暗时沉到操作条之下（旧版 z-index 4 < 操作条 5），点在操作条上的归操作条
+            .when(!dimmed, |this| this.occlude())
             .when(dimmed, |this| this.opacity(0.35))
             .hover(move |s| {
                 s.bg(primary_dark)
@@ -460,6 +464,13 @@ impl ListWindow {
             })
             .tooltip(tooltip::native("新建待办"))
             .on_click(move |_, window, cx| {
+                if dimmed
+                    && actions
+                        .get()
+                        .is_some_and(|b| b.contains(&window.mouse_position()))
+                {
+                    return;
+                }
                 let parent = ChildOf::window(window, cx);
                 editor::open_new(cx, Some(parent), list_id);
             })

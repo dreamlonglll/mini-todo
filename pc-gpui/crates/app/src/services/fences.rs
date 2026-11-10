@@ -51,7 +51,9 @@ const SCREEN_CHECK_TICKS: u32 = 10;
 struct FenceWindowRecord {
     handle: AnyWindowHandle,
     view: WeakEntity<FenceWindow>,
-    /// Windows：嵌入守护 / 显示隐藏；macOS：显示隐藏（吸附组另外登记了一份，读吸附目标的可见矩形；Linux 没有原生句柄）
+    /// Windows：嵌入守护 / 显示隐藏；macOS：显示隐藏（吸附组另外登记了一份，读吸附目标的可见矩形；Linux 没有原生句柄，
+    /// 也就没有读它的代码）
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
     hwnd: Option<Hwnd>,
 }
 

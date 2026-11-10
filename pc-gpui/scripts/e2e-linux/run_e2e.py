@@ -22,7 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 import ui  # noqa: E402
-from harness import (DAV, DISPLAYS, REPO, RUN, App, Cloud, LogMark, NotApplicable,  # noqa: E402
+from harness import (CLOUD_PORTS, DAV, DISPLAYS, REPO, RUN, App, Cloud, LogMark, NotApplicable,  # noqa: E402
                      Procs, Results, Session, XDisplay, box_center, check, dav_get_sync, dav_list,
                      dav_put_sync, dav_reset, is_canon, log, mock_settings, seed, todo_doc, wait_until)
 
@@ -148,13 +148,13 @@ def suite_sample() -> None:
             check(n == 11, f"todos in db: {n}")
             # 四象限截图（对照 ref-ui/screens/main-quadrant.png）
             ui.click_title(app, "view")
-            wait_until(lambda: s.setting("view_mode") == "quadrant", 8, what="view_mode=quadrant")
+            wait_until(lambda: s.prefs()["view_mode"] == "quadrant", 8, what="window_prefs list:1 view_mode=quadrant")
             time.sleep(0.8)
             app.x.move(main, 100, 46)
             q = app.shot("F00-main-quadrant", main)
             app.wait_text(main, "不紧急不重要", 8, region=ui.list_region(main))
             ui.click_title(app, "view")
-            wait_until(lambda: s.setting("view_mode") == "list", 8, what="view_mode=list")
+            wait_until(lambda: s.prefs()["view_mode"] == "list", 8, what="window_prefs list:1 view_mode=list")
             return f"11 todos shown{compare_ref(p, 'main-list.png')}{compare_ref(q, 'main-quadrant.png')}"
         res.run("F00 startup with sample data: main list / quadrant render (screenshots)", f00, on_fail)
     finally:
@@ -299,7 +299,6 @@ def _local_cases(app: App, s: Session, export_zip: Path, yesterday_8: dt.datetim
                       "VALUES (2, 'sub alpha', 0, ?, ?)", (n, n))
         main_ = app.main_win()
         cx_, cy_ = ui.title_button(main_, "completed")
-        state_file = s.data_dir / "ui-state.json"
         ui.wait_no_toast(app, main_)
         app.x.click(main_, cx_ - 28, cy_)
         sub = s.one("SELECT title FROM subtasks WHERE parent_id=2 AND completed=0")
@@ -307,12 +306,13 @@ def _local_cases(app: App, s: Session, export_zip: Path, yesterday_8: dt.datetim
         app.wait_text(main_, sub_title, 8, region=ui.list_region(main_))
         app.x.move(main_, 100, 46)
         app.shot("F03b-expanded", main_)
-        saved = wait_until(lambda: state_file.exists() and json.loads(state_file.read_text()), 5, what="ui-state.json")
-        check(any(v is True for v in saved.values()), f"ui-state.json {saved}")
+        # 展开全部按窗口存（window_prefs.expand_all；ui-state.json 只在首次启动时迁移一次）
+        wait_until(lambda: s.prefs()["expand_all"] == 1, 5, what="window_prefs list:1 expand_all=1")
         app.x.click(main_, cx_ - 28, cy_)
         app.wait_text(main_, sub_title, 8, region=ui.list_region(main_), present=False)
-        return f"expand all shows subtasks in the list; ui-state.json {saved}"
-    res.run("F03b 展开全部子任务 shows subtask titles in the list, persisted to ui-state.json", f03b, on_fail)
+        wait_until(lambda: s.prefs()["expand_all"] == 0, 5, what="window_prefs list:1 expand_all=0")
+        return "expand all shows subtasks in the list; window_prefs.expand_all 1 -> 0"
+    res.run("F03b 展开全部子任务 shows subtask titles in the list, persisted per window (window_prefs)", f03b, on_fail)
 
     def f04():
         seq0 = s.one("SELECT value FROM sync_meta WHERE key='local_seq'")["value"]
@@ -360,7 +360,7 @@ def _local_cases(app: App, s: Session, export_zip: Path, yesterday_8: dt.datetim
 
     def f06():
         ui.click_title(app, "view")
-        wait_until(lambda: s.setting("view_mode") == "quadrant", 8, what="view_mode=quadrant")
+        wait_until(lambda: s.prefs()["view_mode"] == "quadrant", 8, what="window_prefs list:1 view_mode=quadrant")
         time.sleep(1)
         main_ = app.main_win()
         app.x.move(main_, 100, 46)
@@ -386,7 +386,7 @@ def _local_cases(app: App, s: Session, export_zip: Path, yesterday_8: dt.datetim
         finally:
             app.x.move(main_, 100, 46)
             ui.click_title(app, "view")
-            wait_until(lambda: s.setting("view_mode") == "list", 8, what="view_mode=list")
+            wait_until(lambda: s.prefs()["view_mode"] == "list", 8, what="window_prefs list:1 view_mode=list")
         return f"Foxtrot -> q1 {r1['color']}; Golf -> q3 keeps {r2['color']}"
     res.run("F06 quadrant view drag & drop changes quadrant (+ default color follows)", f06, on_fail)
 
@@ -527,7 +527,16 @@ def _local_cases(app: App, s: Session, export_zip: Path, yesterday_8: dt.datetim
         check(export_zip.exists() and zipfile.is_zipfile(export_zip), "export zip missing")
         with zipfile.ZipFile(export_zip) as z:
             data = json.loads(z.read("data.json"))
-        check(data.get("version") == "4.0", f"export version {data.get('version')}")
+        check(data.get("version") == "4.1", f"export version {data.get('version')}")
+        # 4.1 带清单（这里只有默认清单）；seed 导入的 4.0 与界面新建的待办都在清单 1，导出时带 listId；
+        # F08 / F09b 直接写库插入的没有 list_id（归属未知），导出时没有 listId 键
+        check([(x["id"], x["name"]) for x in data.get("todoLists", [])] == [(1, "待办清单")],
+              f"todoLists {data.get('todoLists')}")
+        db_lists = {r["id"]: r["list_id"] for r in s.query("SELECT id, list_id FROM todos")}
+        exp_lists = {t["id"]: t.get("listId") for t in data["todos"]}
+        check(exp_lists == db_lists, f"export listId {exp_lists} vs db {db_lists}")
+        check(all(("listId" in t) == (db_lists[t["id"]] is not None) for t in data["todos"]),
+              "unknown list written as a listId key")
         exported_ids = {t["id"] for t in data["todos"]}
         ui.close_settings(app, st)
         ids_before = {r["id"] for r in s.query("SELECT id FROM todos")}
@@ -560,33 +569,38 @@ def _local_cases(app: App, s: Session, export_zip: Path, yesterday_8: dt.datetim
     def f13():
         main_ = app.main_win()
         light_px = app.x.pixel(main_, 200, 300)
+        # 日 / 夜按窗口存（window_prefs.dark），不再写全局的 text_theme
+        theme0 = s.setting("text_theme")
         ui.click_title(app, "theme")
-        wait_until(lambda: s.setting("text_theme") == "light", 8, what="text_theme=light (dark theme)")
+        wait_until(lambda: s.prefs()["dark"] == 1, 8, what="window_prefs list:1 dark=1")
         time.sleep(0.8)
         app.x.move(main_, 100, 46)
         app.shot("F13-dark", main_)
         dark_px = app.x.pixel(main_, 200, 300)
         check(sum(dark_px) < sum(light_px) - 150, f"background did not darken: {light_px} -> {dark_px}")
         ui.click_title(app, "theme")
-        wait_until(lambda: s.setting("text_theme") == "dark", 8, what="text_theme=dark (light theme)")
-        # 日历：设置 → 常规 → 展示日历
+        wait_until(lambda: s.prefs()["dark"] == 0, 8, what="window_prefs list:1 dark=0")
+        check(s.setting("text_theme") == theme0, f"global text_theme rewritten: {theme0!r} -> {s.setting('text_theme')!r}")
+        # 日历：设置 → 常规 → 展示日历 → 独立的「日历」窗口（默认清单窗口不再加宽）
         st = ui.open_settings(app, "常规")
         x, y = ui.settings_find(app, st, "展示日历", 0)
         app.x.click(st, 636, y + 8)
-        wait_until(lambda: s.setting("show_calendar") == "true", 8, what="show_calendar=true")
+        wait_until(lambda: s.prefs("calendar").get("hidden") == 0, 8, what="window_prefs calendar hidden=0")
         ui.close_settings(app, st)
+        cal = app.win(ui.CALENDAR, 10)
         time.sleep(1.5)
+        cal = app.x.refresh(cal)
         main_ = app.main_win()
-        check(main_.w > 600, f"window did not widen for calendar: {main_.w}")
-        app.x.move(main_, 100, 46)
-        app.shot("F13-calendar", main_)
-        cal = (int(main_.w * 0.4), 0, int(main_.w * 0.6), main_.h)
-        app.wait_text(main_, "今天", 8, region=cal)
+        check((main_.w, main_.h) == (380, 600), f"default list window resized: {main_.w}x{main_.h}")
+        check(cal.h == main_.h and cal.x >= main_.x + main_.w - 2, f"calendar not next to the list window: {cal} vs {main_}")
+        app.x.move(cal, 100, 26)
+        app.shot("F13-calendar", cal)
+        app.wait_text(cal, "今天", 8)
         # 待办在日历上是彩色横条（白字；没有开始时间的按创建日），点它打开只读详情。
         # 横条上的白字很小、还常被截断，OCR 不稳：按颜色找「Golf custom」那条（全表唯一的靛蓝 #6366F1）
-        bar = wait_until(lambda: app.x.find_color(main_, (0x63, 0x66, 0xF1), (cal[0], 90, cal[2], main_.h - 100)),
+        bar = wait_until(lambda: app.x.find_color(cal, (0x63, 0x66, 0xF1), (0, 90, cal.w, cal.h - 100)),
                          8, what="indigo calendar bar")
-        app.x.click(main_, bar[0] + min(bar[2] // 2, 30), bar[1] + bar[3] // 2)
+        app.x.click(cal, bar[0] + min(bar[2] // 2, 30), bar[1] + bar[3] // 2)
         ed = app.win(ui.EDITOR, 10)
         time.sleep(0.8)
         app.wait_text(ed, "Golf custom", 6, region=(0, 56, 700, 120))
@@ -595,12 +609,12 @@ def _local_cases(app: App, s: Session, export_zip: Path, yesterday_8: dt.datetim
         st = ui.open_settings(app, "常规")
         x, y = ui.settings_find(app, st, "展示日历", 0)
         app.x.click(st, 636, y + 8)
-        wait_until(lambda: s.setting("show_calendar") == "false", 8, what="show_calendar=false")
+        wait_until(lambda: s.prefs("calendar").get("hidden") == 1, 8, what="window_prefs calendar hidden=1")
         ui.close_settings(app, st)
-        time.sleep(1)
-        w2 = app.main_win().w
-        return f"bg {light_px}->{dark_px}; calendar width {main_.w} -> {w2}"
-    res.run("F13 theme toggle; 展示日历 widens window, calendar bar opens the detail", f13, on_fail)
+        app.x.wait_window_gone(ui.CALENDAR, 8)  # Linux 不能程序化隐藏：真的关窗
+        check(app.alive(), "app exited when the calendar window closed")
+        return f"bg {light_px}->{dark_px}; calendar window {cal.w}x{cal.h}+{cal.x}+{cal.y}"
+    res.run("F13 per-window day/night; 展示日历 opens the 日历 window, its bar opens the detail", f13, on_fail)
 
     def f16():
         mark = LogMark(s)
@@ -668,6 +682,235 @@ def _local_cases(app: App, s: Session, export_zip: Path, yesterday_8: dt.datetim
     res.run("F15 subtask window: edit Markdown content (Ctrl+Enter) -> view renders it", f15, on_fail)
 
 
+# ---------------------------------------------------------------------------- F17~F23：待办清单（多清单窗口）
+
+WORK_LIST = 5000  # 种子里第二个清单的 id（新清单真实的 id 由 ids::new_id 生成，很大）
+LIST_CASES = ["F17", "F18", "F19", "F20", "F21", "F22", "F23"]
+
+
+def suite_lists() -> None:
+    """清单窗口：新建 + 改名、行右键「移动到」、编辑表单的「清单」下拉、日历筛选、拖动落库、删除清单、关闭后再显示。
+    一个进程按顺序跑（F23 自己重启）；启动时就用 `list:new` 建一个新清单（同托盘「新增待办清单」，进入改名）"""
+    if not any(res.wanted(c) for c in LIST_CASES):
+        return
+    s = Session("lists")
+    ts = fmt(now_local())
+    seed(SEED_BIN, s, {
+        "version": "4.1", "exportedAt": ts, "settings": mock_settings(notificationType="app"),
+        "todoLists": [{"id": 1, "name": "待办清单", "sortOrder": 0, "createdAt": ts, "updatedAt": ts},
+                      {"id": WORK_LIST, "name": "Work", "sortOrder": 1, "createdAt": ts, "updatedAt": ts}],
+        "todos": [todo_doc(1, "Mike default", ts, listId=1, sortOrder=0),
+                  todo_doc(2, "November move", ts, listId=1, sortOrder=1),
+                  todo_doc(3, "Oscar form", ts, listId=1, sortOrder=2, color="#6366F1", quadrant=2),
+                  todo_doc(4, "Papa unknown", ts, listId=1, sortOrder=3),
+                  todo_doc(5, "Quebec work", ts, listId=WORK_LIST, sortOrder=0)],
+    })
+    # 契约 §12：归属未知（旧设备 / 升级前的存量）—— 不动清单编辑后仍是 NULL
+    s.execute("UPDATE todos SET list_id=NULL, list_updated_at=NULL WHERE id=4")
+    app = launch(s, extra_env={"MINI_TODO_DEBUG_OPEN": "list:new"})
+    ctx = {"app": app, "new": None}
+    try:
+        _list_cases(s, ctx)
+    finally:
+        shutdown(ctx["app"])
+
+
+def _list_cases(s: Session, ctx: dict) -> None:
+    def app() -> App:
+        return ctx["app"]
+
+    def new_list() -> tuple[int, str]:
+        return ctx["new"] or (WORK_LIST, "Work")
+
+    def f17():
+        a = app()
+        win = a.win("清单", 15)  # 新清单自动取名「清单」，窗口标题 = 清单名，建好就在改名中
+        time.sleep(0.8)
+        a.shot("F17-list-new-rename", win)
+        rows = wait_until(lambda: set(s.lists()) - {1, WORK_LIST}, 8, what="new todo_lists row")
+        lid = rows.pop()
+        check(s.lists()[lid] == "清单", f"auto name {s.lists()[lid]!r}")
+        ui.list_rename(a, win, "Errands", begin=False)
+        wait_until(lambda: s.lists().get(lid) == "Errands", 8, what="list renamed in db")
+        # Linux 上新窗口找空位时看不到别的窗口（没有 Hwnd，吸附组为空），与 Work 叠在一起：像窗口管理器那样挪开
+        win = a.x.move_window(a.win("Errands", 8), 200, 24)
+        check((win.w, win.h) == (380, 600), f"new list window {win.w}x{win.h}")
+        p = s.prefs(f"list:{lid}")
+        check(p.get("hidden") == 0 and p.get("view_mode") == "list", f"window_prefs list:{lid} {p}")
+        # 双击清单名再改一次（含大小写变化）：同名不写库、只改大小写算改名
+        ui.list_rename(a, win, "errands")
+        wait_until(lambda: s.lists().get(lid) == "errands", 8, what="case-only rename")
+        win = a.win("errands", 8)
+        # 与其它清单重名（不区分大小写）→ 提示、保持原名
+        ui.list_rename(a, win, "WORK")
+        ui.wait_toast(a, win, "已有同名清单", 6)
+        check(s.lists().get(lid) == "errands", f"duplicate name accepted: {s.lists()}")
+        a.key(win, "Escape")
+        ui.list_rename(a, win, "Errands")
+        win = a.win("Errands", 8)
+        # FAB 新建的待办在本清单
+        a.x.click(win, *ui.fab(win))
+        ed = a.win(ui.EDITOR_NEW, 15)
+        time.sleep(0.8)
+        a.type(ed, "Romeo errand")
+        ui.editor_save(a, ed, ui.EDITOR_NEW)
+        r = wait_until(lambda: s.one("SELECT list_id, list_updated_at FROM todos WHERE title='Romeo errand'"), 8,
+                       what="Romeo in db")
+        check(r["list_id"] == lid and is_canon(r["list_updated_at"]), f"FAB todo {r}")
+        ui.wait_main_shows(a, "Romeo errand", 10, win=win)
+        a.shot("F17-list-renamed", win)
+        ctx["new"] = (lid, "Errands")
+        return f"list #{lid}: 清单 -> Errands (case-only rename ok, duplicate WORK refused); FAB todo in it"
+    res.run("F17 list:new -> new window in rename mode -> rename (dup refused) -> FAB todo lands in it", f17, on_fail)
+
+    def f18():
+        a = app()
+        lid, name = new_list()
+        dst = a.win(name, 8)
+        before = s.one("SELECT * FROM todos WHERE id=2")
+        ui.move_to_list(a, "November move", name)
+        r = wait_until(lambda: (lambda x: x if x["list_id"] == lid else None)(
+            s.one("SELECT * FROM todos WHERE id=2")), 8, what="todo 2 moved")
+        check(is_canon(r["list_updated_at"]) and r["list_updated_at"] != before["list_updated_at"],
+              f"list_updated_at {before['list_updated_at']} -> {r['list_updated_at']}")
+        ui.wait_main_shows(a, "November move", 10, present=False)
+        ui.wait_main_shows(a, "November move", 10, win=dst)
+        a.shot("F18-moved-target", a.x.refresh(dst))
+        return f"todo 2 -> list {lid}, list_updated_at {r['list_updated_at']}"
+    res.run("F18 row right-click 移动到 > <list>: list_id + list_updated_at, row moves between windows", f18, on_fail)
+
+    def f19():
+        a = app()
+        ed = ui.open_detail(a, "Oscar form")
+        a.wait_text(ed, "待办清单", 6, region=(0, 56, 700, 200))  # 只读详情的「所属清单」徽章
+        ui.editor_click_edit(a, ed)
+        ui.editor_set_list(a, ed, "Work")
+        a.shot("F19-editor-list-select", ed)
+        ui.editor_save(a, ed)
+        r = s.one("SELECT list_id, list_updated_at FROM todos WHERE id=3")
+        check(r["list_id"] == WORK_LIST and is_canon(r["list_updated_at"]), f"todo 3 {r}")
+        ui.wait_main_shows(a, "Oscar form", 10, present=False)
+        ui.wait_main_shows(a, "Oscar form", 10, win=a.win("Work", 5))
+        # 归属未知的待办（显示在默认清单）只改标题：清单不动 → 仍是 NULL（契约 §12-6）
+        ed = ui.open_detail(a, "Papa unknown")
+        ui.editor_click_edit(a, ed)
+        ui.editor_set_title(a, ed, "Papa still unknown")
+        ui.editor_save(a, ed)
+        r4 = s.one("SELECT title, list_id, list_updated_at FROM todos WHERE id=4")
+        check(r4["title"] == "Papa still unknown" and r4["list_id"] is None and r4["list_updated_at"] is None,
+              f"unknown list touched by a title edit: {r4}")
+        return f"form select -> list {WORK_LIST}; unknown list stays NULL after a title edit"
+    res.run("F19 editor form 清单 select moves a todo; editing an unknown-list todo keeps list_id NULL", f19, on_fail)
+
+    def f20():
+        a = app()
+        st = ui.open_settings(a, "常规")
+        x, y = ui.settings_find(a, st, "展示日历", 0)
+        a.x.click(st, 636, y + 8)
+        ui.close_settings(a, st)
+        cal = a.win(ui.CALENDAR, 10)
+        time.sleep(1.2)
+        cal = a.x.refresh(cal)
+        check(s.prefs("calendar").get("calendar_filter") is None, f"filter {s.prefs('calendar')}")
+
+        def toggle(name: str) -> None:
+            if not a.ocr(cal, (300, 40, cal.w - 300, 220), 11).has("全部清单"):
+                a.x.click(cal, *ui.cal_button(cal, "filter"))
+                time.sleep(0.6)
+            a.click_text(cal, name, 6, region=(300, 40, cal.w - 300, 220))
+            time.sleep(0.6)
+        toggle("Work")
+        a.shot("F20-calendar-filter", cal)
+        ids = sorted(s.lists())
+        rest = [i for i in ids if i != WORK_LIST]
+        f1 = wait_until(lambda: s.prefs("calendar").get("calendar_filter"), 6, what="calendar_filter set")
+        check(json.loads(f1) == rest, f"calendar_filter {f1!r}, want {rest}")
+        toggle("Work")  # 勾满 → NULL（全部）
+        wait_until(lambda: s.prefs("calendar").get("calendar_filter") is None, 6, what="calendar_filter NULL")
+        a.key(cal, "Escape")
+        a.x.wm_close(cal)  # 关闭日历窗口 = 关掉「显示日历」
+        a.x.wait_window_gone(ui.CALENDAR, 8)
+        wait_until(lambda: s.prefs("calendar").get("hidden") == 1, 6, what="calendar hidden")
+        return f"uncheck Work -> {f1}; check again -> NULL"
+    res.run("F20 calendar 清单筛选: unchecking one stores the rest, checking all stores NULL (window_prefs)",
+            f20, on_fail)
+
+    def f21():
+        # 自绘的标题栏拖动在 Linux 上挪不动窗口（platform/fallback.rs 的摆窗是 no-op；拖动 + 吸附由 Windows e2e 覆盖）：
+        # 这里像窗口管理器那样挪窗，验证"关闭（= 隐藏）时按屏幕组合保存几何、记 hidden，重启不开"，F23 再验证恢复
+        a = app()
+        win = a.x.move_window(a.win("Work", 8), 140, 300)
+        check((win.x, win.y) == (140, 300), f"xdotool windowmove failed: {win}")
+        a.x.wm_close(win)  # 关闭 = 隐藏（Linux 不能程序化隐藏：真的关窗，记 hidden）
+        a.x.wait_window_gone("Work", 8)
+        wait_until(lambda: s.prefs(f"list:{WORK_LIST}").get("hidden") == 1, 6, what="Work hidden=1")
+        rows = wait_until(lambda: [r for r in s.layouts(f"list:{WORK_LIST}") if (r["x"], r["y"]) == (140, 300)], 6,
+                          what="layout saved at (140, 300)")
+        r = rows[0]
+        check((r["width"], r["height"]) == (380, 600) and r["is_fixed"] == 0, f"layout {r}")
+        check(a.alive(), "app exited although the default list window is open")
+        ctx["work_screen"] = r["screen_config_id"]
+        return f"closed at (140,300): window_layouts[{r['screen_config_id']}] saved, hidden=1"
+    res.run("F21 closing a list window saves its geometry per screen config and hides it (window_layouts / prefs)",
+            f21, on_fail)
+
+    def f22():
+        a = app()
+        lid, name = new_list()
+        check(lid != WORK_LIST, "F17 did not create a list")
+        win = a.win(name, 8)
+        moved = [r["id"] for r in s.query("SELECT id FROM todos WHERE list_id=?", (lid,))]
+        ui.list_name_menu(a, win, "删除清单")
+        b = a.wait_text(win, "删除清单", 6)
+        a.wait_text(win, f"{len(moved)} 项待办将移到", 6, fuzzy=0.7)
+        a.shot("F22-delete-confirm", win)
+        ui.confirm_dialog(a, win, "删除清单", "删除")
+        a.x.wait_window_gone(name, 10)
+        check(lid not in s.lists(), f"list still there: {s.lists()}")
+        check(s.one("SELECT entity_id FROM list_tombstones WHERE entity_id=?", (lid,)), "no list tombstone")
+        rows = s.query("SELECT id, list_id FROM todos WHERE id IN (%s)" % ",".join(map(str, moved)))
+        check(rows and all(r["list_id"] == 1 for r in rows), f"todos not moved to the default list: {rows}")
+        check(not s.prefs(f"list:{lid}"), f"window_prefs left behind: {s.prefs(f'list:{lid}')}")
+        for t in ("November move", "Romeo errand"):
+            ui.wait_main_shows(a, t, 10)
+        # 默认清单不能删：菜单项置灰，点了没有确认框
+        main_ = a.main_win()
+        a.x.click(main_, *ui.LIST_NAME, button=3)
+        time.sleep(0.6)
+        a.shot("F22-default-list-menu", main_)
+        a.x.click(main_, *ui.LIST_MENU_DELETE)  # 置灰的文字 OCR 认不出：按位置点
+        time.sleep(0.6)
+        check(not a.ocr(main_, None, 6).has("将移到"), "default list offered a delete confirmation")
+        a.key(main_, "Escape")
+        return f"list #{lid} deleted (tombstone), {len(moved)} todos -> list 1, window closed"
+    res.run("F22 right-click list name -> 删除清单 -> confirm: todos go to the default list, window closes",
+            f22, on_fail)
+
+    def f23():
+        a = app()
+        if s.prefs(f"list:{WORK_LIST}").get("hidden") != 1:  # 单独运行时先关掉
+            a.x.wm_close(a.win("Work", 8))
+            a.x.wait_window_gone("Work", 8)
+            wait_until(lambda: s.prefs(f"list:{WORK_LIST}").get("hidden") == 1, 6, what="Work hidden=1")
+        saved = [(r["x"], r["y"]) for r in s.layouts(f"list:{WORK_LIST}")]
+        shutdown(a)
+        a = ctx["app"] = launch(s)
+        time.sleep(2)
+        check(not a.x.find("Work"), "hidden list window was reopened at startup")
+        shutdown(a)
+        # 再显示（Windows / macOS 是托盘左键 / Dock；这里用同一入口 block_windows::show_list 的调试开关）
+        a = ctx["app"] = launch(s, extra_env={"MINI_TODO_DEBUG_OPEN": f"list:{WORK_LIST}"})
+        win = a.win("Work", 15)
+        wait_until(lambda: s.prefs(f"list:{WORK_LIST}").get("hidden") == 0, 6, what="Work hidden=0")
+        # GPUI 的 X11 后端（没有窗口管理器）把新窗口的 x 放偏 2px（默认清单窗口居中算出 610、实际 612），不是应用的问题
+        check(any(abs(win.x - x) <= 2 and win.y == y for x, y in saved),
+              f"Work reopened at ({win.x},{win.y}), saved layouts {saved}")
+        ui.wait_main_shows(a, "Quebec work", 10, win=win)
+        return f"hidden across restart; list:<id> shows it again at the saved ({win.x},{win.y}), hidden=0"
+    res.run("F23 a hidden list window stays closed after restart; showing it again restores geometry, clears hidden",
+            f23, on_fail)
+
+
 def fill_date_time(app: App, ed, placeholder: str | None, date: str | None, time_: str | None,
                    label: bool = False) -> None:
     """编辑表单里的日期 / 时间选择器：点输入框 → 输入 → 回车。label=True 时 placeholder 是表单项标题，
@@ -727,7 +970,7 @@ def ui_delete(app: App, title: str) -> None:
 
 def suite_sync(kind: str) -> None:
     tag = kind[:1].upper()
-    ids = [f"S{n:02d}[{kind}]" for n in range(1, 13)]
+    ids = [f"S{n:02d}[{kind}]" for n in range(1, 16)]
     if not any(res.wanted(i) for i in ids):
         return
     dav_reset(kind)
@@ -737,14 +980,14 @@ def suite_sync(kind: str) -> None:
                        "todos": [todo_doc(1, f"{tag} Alpha one", ts, color="#F59E0B", quadrant=2, sortOrder=0),
                                  todo_doc(2, f"{tag} Bravo two", ts, sortOrder=1)]})
     app = launch(a)
-    cloud = Cloud(procs, CLOUD_BIN, kind, name=f"cloud-{kind}", port=8787 if kind == "apache" else 8797)
-    ctx: dict = {"b": None}
+    cloud = Cloud(procs, CLOUD_BIN, kind, name=f"cloud-{kind}", port=CLOUD_PORTS[0] if kind == "apache" else CLOUD_PORTS[1])
+    ctx: dict = {"b": None, "a": app}  # "a"：设备 A 的当前进程（S13 起会重启 A）
     try:
         _sync_cases(kind, tag, a, app, cloud, ctx)
     finally:
         if ctx["b"] is not None:
             shutdown(ctx["b"])
-        shutdown(app)
+        shutdown(ctx["a"])
         cloud.stop()
 
 
@@ -971,33 +1214,41 @@ def _sync_cases(kind: str, tag: str, a: Session, app: App, cloud: Cloud, ctx: di
     S(7, "images: minitodo-image:// typed in editor -> upload, cloud mirror, rendered in detail", s07)
 
     def s08():
-        ui.click_title(app, "theme")
-        wait_until(lambda: a.setting("text_theme") == "light", 8, what="dark theme")
+        # 参与同步的设置按 settingsUpdatedAt 做 LWW。3.1 起日 / 夜、视图、锁定、显示日历都按窗口存在 window_prefs（设备本地），
+        # 同步键 text_theme / view_mode / show_calendar 只作迁移初始值：远端改了也只落进 settings，不改窗口
         ui.title_sync(app)
         doc = dav_get_sync(kind)
-        check(doc["settings"].get("textTheme") == "light", f"remote textTheme {doc['settings'].get('textTheme')}")
-        doc["settings"]["textTheme"] = "dark"
+        before = a.setting("notification_type")
+        want_nt = "app" if before == "system" else "system"
+        check(doc["settings"].get("notificationType") == before, f"remote notificationType {doc['settings']}")
+        doc["settings"]["notificationType"] = want_nt
+        doc["settings"]["textTheme"] = "light"  # 旧语义"深色主题"
         doc["settings"]["windowPosition"] = {"x": 4000, "y": 4000}
         doc["settingsUpdatedAt"] = fmt(now_local() + dt.timedelta(minutes=5))
         doc["e2eFutureKey"] = {"keep": True}
         dav_put_sync(kind, doc)
+        prefs0 = a.prefs()
         line = ui.title_sync(app)
         check("已应用云端设置" in line, f"settings not applied: {line}")
-        check(a.setting("text_theme") == "dark", f"text_theme {a.setting('text_theme')}")
+        check(a.setting("notification_type") == want_nt, f"notification_type {a.setting('notification_type')}")
+        check(a.setting("text_theme") == "light", f"text_theme {a.setting('text_theme')}")
         pos = a.setting("window_position") or ""
         check("4000" not in pos, f"device geometry applied from remote: {pos}")
         time.sleep(1)
+        check(a.prefs()["dark"] == prefs0["dark"] == 0, f"window day/night changed by a synced key: {a.prefs()}")
         main_ = app.main_win()
         check(main_.x < 2000, f"window moved off-screen: {main_}")
         app.x.move(main_, 100, 46)
         p = app.x.pixel(main_, 190, main_.h - 120)
-        check(sum(p) > 600, f"main window did not switch back to the light theme: pixel {p}")
+        check(sum(p) > 600, f"default list window is not light any more: pixel {p}")
         ui_create(app, f"{tag} Golf after settings")
         ui.title_sync(app)
         cloud.call("/sync")
         check(dav_get_sync(kind).get("e2eFutureKey") == {"keep": True}, "unknown top-level key dropped")
-        return "newer remote settings applied (geometry excluded), unknown key kept by PC + cloud"
-    S(8, "settings LWW from remote (window geometry excluded) + unknown top-level keys preserved", s08)
+        return (f"notificationType {before}->{want_nt} applied (geometry excluded, window stays light), "
+                "unknown key kept by PC + cloud")
+    S(8, "settings LWW from remote (geometry and per-window prefs excluded) + unknown top-level keys preserved",
+      s08)
 
     def s09():
         base = {"description": None, "color": "#10B981", "quadrant": 4, "notifyAt": None, "notifyBefore": 0,
@@ -1127,26 +1378,195 @@ def _sync_cases(kind: str, tag: str, a: Session, app: App, cloud: Cloud, ctx: di
     S(11, "auto sync (interval 1 min, enabled in settings) pulls a cloud write without clicks", s11)
 
 
+    # ---- 多清单（v31 / 导出 4.1 / 同步文档的 todoLists、listTombstones、listId / listUpdatedAt）----
+
+    def device_b() -> App:
+        """设备 B（第二个 Xvfb）：S05 建好的 B 已退出时按原数据目录重启；没跑过 S05 时新建并直接写库配置 WebDAV"""
+        if ctx["b"] is not None and ctx["b"].alive():
+            return ctx["b"]
+        b = Session(f"sync-{kind}-b", fresh=False)
+        if not b.db_path.exists():
+            seed(SEED_BIN, b, {"version": "4.0", "exportedAt": fmt(now_local()), "todos": [],
+                               "settings": mock_settings()})
+        ensure_configured(b, kind)
+        ctx["b"] = app_b = launch(b, 1)
+        ui.title_sync(app_b)
+        return app_b
+
+    def shared_list() -> tuple[int, str]:
+        """A 用 `list:new`（同托盘「新增待办清单」）建一个清单并改名，移进一条待办，同步上去。返回 (id, 名称)"""
+        nonlocal app
+        if ctx.get("shared"):
+            return ctx["shared"]
+        name = f"{tag}Shared"
+        shutdown(app)
+        app = ctx["a"] = launch(a, extra_env={"MINI_TODO_DEBUG_OPEN": "list:new"})
+        win = app.win("清单", 15)
+        time.sleep(0.8)
+        ui.list_rename(app, win, name, begin=False)
+        lid = wait_until(lambda: next((i for i, n in a.lists().items() if n == name), None), 8,
+                         what=f"list {name!r} in db")
+        # Linux 上新窗口找空位时看不到别的窗口（与 B 的同步开窗一样都落在右上角）：像窗口管理器那样挪开
+        app.x.move_window(app.win(name, 8), 200, 24)
+        title = f"{tag} Kilo shared"
+        ui_create(app, title)
+        ui.move_to_list(app, title, name)
+        wait_until(lambda: a.one("SELECT list_id FROM todos WHERE title=?", (title,))["list_id"] == lid, 8,
+                   what=f"{title!r} moved")
+        line = ui.title_sync(app)
+        check("推送" in line or "合并" in line, f"list not uploaded: {line}")
+        doc = dav_get_sync(kind)
+        check(any(x["id"] == lid and x["name"] == name for x in doc.get("todoLists", [])),
+              f"remote todoLists {doc.get('todoLists')}")
+        check(any(t["title"] == title and t.get("listId") == lid and t.get("listUpdatedAt") for t in doc["todos"]),
+              f"remote todo without listId: {[t for t in doc['todos'] if t['title'] == title]}")
+        ctx["shared"] = (lid, name)
+        return ctx["shared"]
+
+    def s12():
+        ui.title_sync(app)
+        local0 = {r["id"]: (r["list_id"], r["list_updated_at"])
+                  for r in a.query("SELECT id, list_id, list_updated_at FROM todos WHERE list_id IS NOT NULL")}
+        check(local0, "no todo with a known list on A")
+        # 旧版本（≤ 3.0.6）写回的文档：待办上没有 listId / listUpdatedAt（它们丢掉不认识的字段）
+        doc = dav_get_sync(kind)
+        for t in doc["todos"]:
+            t.pop("listId", None)
+            t.pop("listUpdatedAt", None)
+        dav_put_sync(kind, doc)
+        line = ui.title_sync(app)
+        check("推送" in line, f"stale assignments on the remote were not re-uploaded: {line}")
+        back = {t["id"]: (t.get("listId"), t.get("listUpdatedAt")) for t in dav_get_sync(kind)["todos"]}
+        lost = {i: (v, back.get(i)) for i, v in local0.items() if back.get(i) != v}
+        check(not lost, f"remote did not get listId / listUpdatedAt back: {lost}")
+        local1 = {r["id"]: (r["list_id"], r["list_updated_at"])
+                  for r in a.query("SELECT id, list_id, list_updated_at FROM todos WHERE list_id IS NOT NULL")}
+        check(local1 == local0, "local assignments changed")
+        line2 = ui.title_sync(app)
+        check("已是最新" in line2, f"second sync should be a no-op: {line2}")
+        return f"{len(local0)} todos: listId / listUpdatedAt re-uploaded once ({line.split('）: ', 1)[-1]}), then no-op"
+    S(12, "old-format remote (todos without listId) + known local lists -> one upload restores listId/listUpdatedAt",
+      s12)
+
+    def s13():
+        app_b = device_b()
+        lid, name = shared_list()
+        b = app_b.session
+        line = ui.title_sync(app_b)
+        bwin = app_b.win(name, 15)  # 同步来的新清单：B 自动开窗（窗口标题 = 清单名）
+        check(b.lists().get(lid) == name, f"B lists {b.lists()}")
+        check(b.prefs(f"list:{lid}").get("hidden") == 0, f"B window_prefs {b.prefs(f'list:{lid}')}")
+        r = b.one("SELECT list_id, list_updated_at FROM todos WHERE title=?", (f"{tag} Kilo shared",))
+        ra = a.one("SELECT list_id, list_updated_at FROM todos WHERE title=?", (f"{tag} Kilo shared",))
+        check(r == ra, f"B assignment {r} != A {ra}")
+        ui.wait_main_shows(app_b, f"{tag} Kilo shared", 10, win=bwin)
+        app_b.shot(f"S13-{kind}-deviceB-list-window", app_b.x.refresh(bwin))
+        return f"A created list #{lid} {name!r}; B: {line.split('）: ', 1)[-1]}, window opened"
+    S(13, "two PCs: a list created on A (list:new + rename + 移动到) opens its window on B after sync", s13)
+
+    def s14():
+        app_b = device_b()
+        lid, name = shared_list()
+        b = app_b.session
+        ui.title_sync(app_b)
+        out = []
+        for order, title in (("move first", f"{tag} Lima F1a"), ("edit first", f"{tag} Mike F1b")):
+            ui_create(app, title)
+            ui.title_sync(app)
+            ui.title_sync(app_b)
+            check(b.one("SELECT list_id FROM todos WHERE title=?", (title,))["list_id"] == 1, f"B lacks {title!r}")
+            renamed = f"{title} b"
+            if order == "move first":
+                ui.move_to_list(app, title, name)  # A「移动到」并先同步
+                ui.title_sync(app)
+                ui_rename(app_b, title, renamed)  # B 拿旧副本（还在默认清单）改标题，后同步
+                ui.title_sync(app_b)
+                ui.title_sync(app)
+            else:
+                ui_rename(app_b, title, renamed)  # B 先改标题并同步
+                ui.title_sync(app_b)
+                ui.move_to_list(app, title, name)  # A 拿旧副本「移动到」，后同步
+                ui.title_sync(app)
+                ui.title_sync(app_b)
+            tid = a.one("SELECT id FROM todos WHERE title IN (?, ?)", (title, renamed))["id"]
+            ra = a.one("SELECT title, list_id, list_updated_at FROM todos WHERE id=?", (tid,))
+            rb = b.one("SELECT title, list_id, list_updated_at FROM todos WHERE id=?", (tid,))
+            check(ra["list_id"] == lid and rb["list_id"] == lid, f"{order}: A {ra} B {rb} (want list {lid})")
+            check(ra == rb, f"{order}: devices diverged: A {ra} B {rb}")
+            out.append(f"{order}: list {lid}, title {ra['title']!r}")
+        return "; ".join(out)
+    S(14, "contract §13 F1: 移动到 on A vs title edit of a stale copy on B, both orders converge on the moved list", s14)
+
+    def s15():
+        app_b = device_b()
+        lid, name = shared_list()
+        b = app_b.session
+        ui.title_sync(app_b)
+        bwin = app_b.win(name, 10)
+        mine = [r["id"] for r in a.query("SELECT id FROM todos WHERE list_id=?", (lid,))]
+        check(mine, f"no todos in list {lid}")
+        ui.list_delete(app, app.win(name, 8))
+        app.x.wait_window_gone(name, 10)
+        check(lid not in a.lists(), f"A still has the list: {a.lists()}")
+        ui.title_sync(app)
+        doc = dav_get_sync(kind)
+        check(lid not in {x["id"] for x in doc.get("todoLists", [])}, "list still in remote todoLists")
+        check(any(int(x.get("entityId", -1)) == lid for x in doc.get("listTombstones", [])),
+              f"remote listTombstones {doc.get('listTombstones')}")
+        ui.title_sync(app_b)
+        app_b.x.wait_window_gone(name, 10)  # B：清单没了 → 窗口关掉
+        check(lid not in b.lists(), f"B still has the list: {b.lists()}")
+        check(b.one("SELECT entity_id FROM list_tombstones WHERE entity_id=?", (lid,)), "no list tombstone on B")
+        rows = b.query("SELECT id, list_id FROM todos WHERE id IN (%s)" % ",".join(map(str, mine)))
+        check(len(rows) == len(mine) and all(r["list_id"] == 1 for r in rows), f"B todos {rows}")
+        ui.find_row(app_b, f"{tag} Kilo shared", 10)  # B 的默认清单窗口里（列表很长，往下滚着找）
+        for _ in range(2):  # 多轮后不复活
+            ui.title_sync(app_b)
+            ui.title_sync(app)
+        check(lid not in a.lists() and lid not in b.lists(), "deleted list came back")
+        shutdown(app_b)
+        ctx["b"] = None
+        ctx["shared"] = None
+        return f"A deleted list #{lid}; B closed its window, {len(mine)} todos -> default list, no resurrection"
+    S(15, "two PCs: a list deleted on A closes its window on B, its todos land in the default list", s15)
+
+
 # ============================================================================ L：生命周期
 
 V28_TRIGGERS = [f"trg_{t}_{e}_local_seq" for t in ("todos", "subtasks") for e in ("insert", "update", "delete")]
+V31_TRIGGERS = [f"trg_todo_lists_{e}_local_seq" for e in ("insert", "update", "delete")]
+# 旧版（v27）屏幕配置：开着日历的加宽主窗口 1000×600（v31 按左 40% / 右 60% 拆给默认清单窗口与日历窗口）
+LEGACY_SCREEN = ("e2e-legacy-screen", 100, 80, 1000, 600)
 
 
 def make_legacy_db(s: Session) -> None:
-    """造一个 v27 结构的旧库：先让 core 建出最新库（v30），再按 v28 / v29 / v30 迁移的内容逆向剥掉
-    （触发器、sync_meta、tombstones、三张收纳箱表（含 v30 的两列）、两次迁移新增的 settings 键与迁移记录），
-    最后按旧版写法插入 `T` 分隔 / 无秒 / 小数秒 / 仅日期 的存量时间。
+    """造一个 v27 结构的旧库：先让 core 建出最新库（v31），再按 v28 ~ v31 迁移的内容逆向剥掉
+    （v31 的清单 / 窗口属性表、三个 `todo_lists` 触发器、`todos.list_id` / `list_updated_at` 两列与索引；
+    v28 的触发器、sync_meta、tombstones；三张收纳箱表（含 v30 的两列）；迁移新增的 settings 键与迁移记录），
+    最后按旧版写法插入 `T` 分隔 / 无秒 / 小数秒 / 仅日期 的存量时间，以及一条"开着日历"的旧屏幕配置。
     v1~v27 的表结构就是 core 迁移表里的同一份 SQL，与旧版 Tauri 应用建出来的库一致。"""
     seed(SEED_BIN, s, {"version": "4.0", "exportedAt": fmt(now_local()), "todos": [],
                        "settings": mock_settings(notificationType="system")})
     for f in (s.data_dir / "backups").glob("*.db") if (s.data_dir / "backups").exists() else []:
         f.unlink()
-    stmts = [f"DROP TRIGGER IF EXISTS {t}" for t in V28_TRIGGERS] + [
+    cid, sx, sy, sw, sh = LEGACY_SCREEN
+    stmts = [f"DROP TRIGGER IF EXISTS {t}" for t in V28_TRIGGERS + V31_TRIGGERS] + [
+        "DROP TABLE IF EXISTS window_layouts", "DROP TABLE IF EXISTS window_prefs",
+        "DROP TABLE IF EXISTS list_tombstones", "DROP TABLE IF EXISTS todo_lists",
+        "DROP INDEX IF EXISTS idx_todos_list_id",
+        "ALTER TABLE todos DROP COLUMN list_id", "ALTER TABLE todos DROP COLUMN list_updated_at",
         "DROP TABLE IF EXISTS sync_meta", "DROP TABLE IF EXISTS tombstones",
         "DROP TABLE IF EXISTS fence_layouts", "DROP TABLE IF EXISTS fence_items", "DROP TABLE IF EXISTS fences",
         "DELETE FROM migrations WHERE version >= 28",
         "DELETE FROM settings WHERE key IN ('webdav_remote_etag', 'webdav_synced_settings_at', "
         "'fence_onedrive_notice_shown')",
+        # 旧版主窗口：浅色、列表视图、开着日历（v31 的种子从这几个全局键来）
+        "UPDATE settings SET value='dark' WHERE key='text_theme'",
+        "UPDATE settings SET value='list' WHERE key='view_mode'",
+        "UPDATE settings SET value='true' WHERE key='show_calendar'",
+        "DELETE FROM screen_configs",
+        f"INSERT INTO screen_configs (config_id, display_name, window_x, window_y, window_width, window_height, "
+        f"is_fixed) VALUES ('{cid}', 'legacy', {sx}, {sy}, {sw}, {sh}, 0)",
         "DELETE FROM todos", "DELETE FROM subtasks",
         "INSERT INTO todos (id, title, color, quadrant, notify_at, notify_before, start_time, end_time, sort_order, "
         "created_at, updated_at) VALUES (1, 'Legacy one', '#EF4444', 1, '2030-01-02T03:04', 0, "
@@ -1163,6 +1583,8 @@ def make_legacy_db(s: Session) -> None:
         c.commit()
         ver = c.execute("SELECT MAX(version) FROM migrations").fetchone()[0]
         check(ver == 27, f"legacy db version {ver}")
+        cols = {r[1] for r in c.execute("PRAGMA table_info(todos)")}
+        check(not cols & {"list_id", "list_updated_at"}, f"v31 columns left in the legacy db: {cols}")
     finally:
         c.close()
 
@@ -1179,7 +1601,7 @@ def suite_lifecycle() -> None:
             check(backups, f"no pre-migration backup in {s.data_dir / 'backups'}")
             check(any("v27" in b.name for b in backups), f"backup name lacks the old version: {backups}")
             vers = {r["version"] for r in s.query("SELECT version FROM migrations")}
-            check({28, 29, 30} <= vers, f"migrations {sorted(vers)}")
+            check({28, 29, 30, 31} <= vers, f"migrations {sorted(vers)}")
             r = s.one("SELECT * FROM todos WHERE id=1")
             check((r["notify_at"], r["start_time"], r["end_time"]) ==
                   ("2030-01-02 03:04:00", "2030-01-01 00:00:00", "2030-01-05 23:59:00"), f"times {r}")
@@ -1190,51 +1612,83 @@ def suite_lifecycle() -> None:
             check(s.one("SELECT value FROM sync_meta WHERE key='local_seq'"), "sync_meta missing")
             check(s.query("SELECT name FROM sqlite_master WHERE name='fences'"), "v29 tables missing")
             check(s.setting("fence_onedrive_notice_shown") == "false", "v29 settings key missing")
+            # v31：默认清单；存量待办归属未知（两列都是 NULL，界面按默认清单显示）；升级后第一次同步无条件 GET
+            check(s.lists() == {1: "待办清单"}, f"todo_lists {s.lists()}")
+            unknown = s.query("SELECT id, list_id, list_updated_at FROM todos ORDER BY id")
+            check(all(t["list_id"] is None and t["list_updated_at"] is None for t in unknown),
+                  f"legacy todos must stay unknown: {unknown}")
+            check(s.setting("webdav_remote_etag") == "", f"webdav_remote_etag {s.setting('webdav_remote_etag')!r}")
+            # 窗口属性的种子：默认清单窗口继承旧主窗口（浅色、列表）；开着日历 → 日历显示，加宽的矩形按 40% / 60% 拆开
+            p1, pc = s.prefs("list:1"), s.prefs("calendar")
+            check(p1.get("dark") == 0 and p1.get("view_mode") == "list" and p1.get("hidden") == 0, f"list:1 {p1}")
+            check(pc.get("hidden") == 0, f"calendar {pc}")
+            cid, sx, sy, sw, sh = LEGACY_SCREEN
+            left = round(sw * 0.4)
+            got = {k: [(x["x"], x["y"], x["width"], x["height"]) for x in s.layouts(k) if x["screen_config_id"] == cid]
+                   for k in ("list:1", "calendar")}
+            check(got == {"list:1": [(sx, sy, left, sh)], "calendar": [(sx + left, sy, sw - left, sh)]},
+                  f"split layouts {got}")
+            app.win(ui.CALENDAR, 15)
             text = s.log_text()
-            check("数据库将从 v27 升级到 v30" in text, f"migration backup not logged: {text[-400:]!r}")
+            check("数据库将从 v27 升级到 v31" in text, f"migration backup not logged: {text[-400:]!r}")
             ui.wait_main_shows(app, "Legacy one", 10)
             ui.wait_main_shows(app, "Legacy two", 4)
             app.wait_text(app.main_win(), "1/1", 8, region=ui.list_region(app.main_win()), fuzzy=0.9)
             app.shot("L01-upgraded-main", app.main_win())
-            return f"backup {backups[0].name}; v27 -> v30; times normalized; data intact"
-        res.run("L01 legacy v27 database: auto backup + v28~v30 migrations + data intact + shown", l01, on_fail)
+            return f"backup {backups[0].name}; v27 -> v31; times normalized; list_id NULL; calendar split; data intact"
+        res.run("L01 legacy v27 database: auto backup + v28~v31 migrations + data intact + shown", l01, on_fail)
 
         def l02():
             nonlocal app
             tid = ui_create(app, "Lifecycle persisted")
+            check(s.one("SELECT list_id FROM todos WHERE id=?", (tid,))["list_id"] == 1, "FAB todo not in list 1")
             ui.click_title(app, "view")
-            wait_until(lambda: s.setting("view_mode") == "quadrant", 8, what="quadrant")
+            wait_until(lambda: s.prefs()["view_mode"] == "quadrant", 8, what="window_prefs list:1 quadrant")
+            # 关闭 = 隐藏（记 hidden）；Linux 不能程序化隐藏，真的关窗，最后一个窗口关掉才退出
+            cal = app.x.find(ui.CALENDAR)
+            if cal:
+                app.x.wm_close(cal[0])
+                app.x.wait_window_gone(ui.CALENDAR, 8)
+                wait_until(lambda: s.prefs("calendar").get("hidden") == 1, 8, what="calendar hidden=1")
+                check(app.alive(), "process exited although the list window is still open")
             main_ = app.main_win()
-            app.x.wm_close(main_)  # 关闭主窗口 → Linux 上最后一个窗口关闭即退出
+            app.x.wm_close(main_)
             rc = wait_until(lambda: app.proc.poll() is not None and (app.proc.returncode,), 15, what="process exit")
             check(rc[0] == 0, f"exit code {rc[0]}")
             shutdown(app)
-            check(s.one("PRAGMA integrity_check")["integrity_check"] == "ok", "integrity_check failed")
+            # Linux 上关掉最后一个窗口立即 quit，关窗时后台写库（hidden / 几何）可能还没提交：会留下 hot journal，
+            # 下次打开时回滚（只丢这一笔窗口属性）。记进结果，不算失败
+            ok, hot = s.integrity_check()
+            check(ok == "ok", f"integrity_check failed: {ok}")
             app = launch(s)
             ui.wait_main_shows(app, "Lifecycle persisted", 10)
             app.wait_text(app.main_win(), "不紧急不重要", 8, region=ui.list_region(app.main_win()))  # 四象限视图
+            check(not app.x.find(ui.CALENDAR), "calendar closed before the restart came back")
             app.shot("L02-restarted", app.main_win())
             ui.click_title(app, "view")
-            wait_until(lambda: s.setting("view_mode") == "list", 8, what="list")
+            wait_until(lambda: s.prefs()["view_mode"] == "list", 8, what="window_prefs list:1 list")
             # 异常退出（SIGKILL）后再启动：库完好、数据都在
             ui_create(app, "Lifecycle killed")
             shutdown(app, signal.SIGKILL)
-            check(s.one("PRAGMA integrity_check")["integrity_check"] == "ok", "integrity_check after SIGKILL")
+            ok2, _ = s.integrity_check()
+            check(ok2 == "ok", f"integrity_check after SIGKILL: {ok2}")
             app = launch(s)
             ui.wait_main_shows(app, "Lifecycle killed", 10)
-            return f"graceful close rc=0 (todo #{tid}, quadrant view restored); SIGKILL -> restart ok"
-        res.run("L02 close main window (WM_DELETE_WINDOW) exits; data + view persist; SIGKILL recovery", l02, on_fail)
+            return (f"graceful close rc=0 (todo #{tid}, quadrant view + calendar hidden restored"
+                    f"{'; hot journal left at exit' if hot else ''}); SIGKILL -> restart ok")
+        res.run("L02 close windows (WM_DELETE_WINDOW) -> exit; data + per-window view persist; SIGKILL recovery",
+                l02, on_fail)
 
         def l03():
             nonlocal app
             shutdown(app)
-            s.execute("INSERT INTO migrations (version) VALUES (31)")
+            s.execute("INSERT INTO migrations (version) VALUES (32)")
             mark = LogMark(s)
             app = launch(s)
-            mark.wait(r"比本程序支持的 v30 新", 10)
+            mark.wait(r"比本程序支持的 v31 新", 10)
             ui.wait_main_shows(app, "Legacy one", 10)
             return "newer schema version: warning logged, app runs"
-        res.run("L03 database from a newer version (v31): warns and keeps working", l03, on_fail)
+        res.run("L03 database from a newer version (v32): warns and keeps working", l03, on_fail)
     finally:
         shutdown(app)
 
@@ -1248,6 +1702,7 @@ def main() -> int:
         if want("F"):
             suite_sample()
             suite_local()
+            suite_lists()
         if want("S"):
             suite_sync("apache")
             suite_sync("nginx")
