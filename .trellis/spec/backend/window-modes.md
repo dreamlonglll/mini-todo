@@ -262,16 +262,33 @@ E2E（Windows，`pc-gpui/scripts/e2e-windows/run_e2e.py` 的 S 组；CI `.github
 
 | 用例 | 断言 |
 |---|---|
-| S01 普通模式 | APPWINDOW、无 owner；3.1 起标题栏 `WM_NCHITTEST` = `HTCLIENT`、外框外沿 `HTBORDER`、没有 `WS_THICKFRAME`，双击标题栏**不**最大化；真实拖动标题栏移动且位置落库（自绘）（以前断言 `HTCAPTION` / `HTLEFT` 与双击最大化，脚本随第 6 步 e2e 一起改） |
-| S02 点锁按钮 → 经典固定 | TOOLWINDOW、真实拖动不动、锁定落库（3.1 起在 `window_layouts.is_fixed`） |
+| S01 普通模式（默认清单窗口） | APPWINDOW、无 owner、有 `WS_MINIMIZEBOX`、没有 `WS_THICKFRAME`；标题栏 `WM_NCHITTEST` = `HTCLIENT`，外框与客户区不重合时外沿不是 `HTCAPTION` / 缩放码（规格值 `HTBORDER`）；真实拖动标题栏下半截空白处 (60, 47) 移动（自绘）、拖右边手柄缩放再拖回，松手后 `window_layouts[list:1]` = 客户区、`is_fixed = 0`，`screen_configs` 也记下新位置；双击标题栏**不**最大化、几何不变（3.0 断言 `HTCAPTION` / `HTLEFT` 与双击最大化还原） |
+| S02 点锁按钮 → 经典固定 | TOOLWINDOW、owner 0；`window_layouts[list:1].is_fixed = 1`（`screen_configs.is_fixed` 也是 1）、`settings.is_fixed` 不变；`WM_NCHITTEST` 不是拖动 / 缩放区；真实拖标题栏、拖右边缘都不动 |
 | S03 `fixed_embed_desktop=true` 重启恢复 | owner = 桌面宿主、TOOLWINDOW、无 MINIMIZEBOX |
 | S04 Z 序 | 普通应用窗口（探针）在它之上 |
 | S05 Win+D | 之后仍可见 |
 | S06 Explorer 重启 | 自动重挂 owner |
-| S07 点锁按钮回普通模式 | 状态表"普通"一行；标题栏又能拖动（3.1 起用真实拖动判断，不再看 `HTCAPTION`） |
+| S07 点锁按钮回普通模式 | 状态表"普通"一行；`window_layouts.is_fixed = 0`；真实拖动标题栏又能移动（不再看 `HTCAPTION`），拖回原处后再落库一次 |
 | S08 普通模式单击任务栏按钮 | 真实点击（UIA 找按钮）：前台时最小化、再单击还原到前台 |
 
 S01 / S02 / S03 / S07 / S08 每次切换后都另外断言无 `WS_SYSMENU`、DWM 标题栏按钮区宽度为 0。
+
+多窗口（同一个脚本的 L 组，隔离数据目录；托盘菜单项经托盘隐藏窗口的 `WM_COMMAND`、托盘左键经 tray-icon 的 `WM_USER_TRAYICON` 回调消息触发）：
+
+| 用例 | 断言 |
+|---|---|
+| L01 / L02 新建与改名 | 托盘「新增待办清单」→ 380×600 的普通窗口、`todo_lists` 多一行「清单」、`window_prefs` 记显示中 → 直接改名 / 双击清单名改名 → 系统标题 = 清单名、落库 |
+| L03 移动待办 | 行右键「移动到 ▸」→ 子菜单第一项 → `list_id` 落库，默认清单窗口少一行、目标窗口多一行 |
+| L04 拖动与吸附 | 自绘拖动跟手、松手后 `window_layouts[list:<id>]` = 客户区；top 落在默认清单 top + 6 → 吸齐，拖动中默认清单的上边有 `#409EFF`、松手后消失 |
+| L05 按窗口锁定 | 新清单窗口 TOOLWINDOW、`is_fixed = 1`、拖不动；默认清单窗口仍 APPWINDOW、`is_fixed = 0` |
+| L06 关闭 = 隐藏与唤起 | 两个窗口 WM_CLOSE → 不可见但没销毁、进程常驻、`window_prefs.hidden = 1` → 托盘左键 → 都显示、`hidden = 0`、锁定的仍锁定、600ms 后没有 TOPMOST |
+| L07 重置位置 | 隐藏中的锁定窗口重新出现、解锁；层叠：第 2 个在第 1 个右下 32 逻辑像素；「显示日历」关着时日历不开窗，布局写在第 3 个位置、未锁定 |
+| L08 删除清单 | 清单名右键「删除清单」→ 确认 → 窗口销毁、`todo_lists` 删掉、`list_tombstones` 有它、`window_prefs` 记录删掉、待办回默认清单 |
+| L09 显示日历 | 托盘「显示日历」→ 596×600 普通窗口（无 `WS_THICKFRAME`）出现在 L07 写好的位置、`window_prefs[calendar].hidden = 0` |
+| L10 日历嵌入桌面 | 点日历的锁 → 经典固定、`is_fixed = 1` → 日历设置按钮打开设置 → 常规第 5 个开关「嵌入桌面」→ 日历 owner = 桌面宿主、无 MINIMIZEBOX，未锁定的默认清单不受影响 → Win+D 期间不最小化 / 不隐藏、之后右侧命中自己 |
+| L11 关闭日历 | WM_CLOSE → 隐藏、`window_prefs[calendar].hidden = 1`；托盘左键只唤起清单窗口、不唤起日历 |
+
+另外 P03（不隔离）：WM_CLOSE 默认清单窗口只隐藏、进程常驻，托盘「退出」后进程退出；F12：拖收纳箱前默认清单窗口 WM_CLOSE 隐藏。
 
 ### 7. Wrong vs Correct
 
@@ -372,9 +389,12 @@ SetWindowPos(h, HWND_TOP, …);
 ### 5. Tests
 
 - 单测：`target_mode_follows_embed_preference_only_on_windows`（已有）；坐标换算 `platform/mac_geometry.rs`（Linux 上跑）。
-- e2e：`pc-gpui/scripts/e2e-macos/` 的 M10（普通模式拖标题栏能移动 → 锁定 → 拖不动 → 解锁后又能拖），CI `pc-gpui-e2e-macos.yml`。
-  3.1 删掉了菜单栏「固定模式」、锁定改记在 `window_layouts.is_fixed`、建窗不带 `Resizable`（AX 改尺寸在普通模式下多半也无效），
-  M10 要改成点标题栏锁按钮，断言"手柄缩放能改、固定后手柄消失"（随第 6 步 e2e 一起改）。
+- e2e：`pc-gpui/scripts/e2e-macos/`，CI `pc-gpui-e2e-macos.yml`：
+  - M10：普通模式拖标题栏下半截 (60, 47) 能移动、拖右边缘内侧 2.5pt 的手柄能缩放，`window_layouts[list:1]` = 窗口 × 统一系数 → 点标题栏的锁按钮
+    （3.1 删了菜单栏「固定模式」）→ `window_layouts.is_fixed = 1`、`settings.is_fixed` 不变、拖不动、拖右边缘不改尺寸（手柄消失）→ 再点锁 →
+    `is_fixed = 0`、又能拖。建窗不带 `Resizable`，AX 改尺寸普通模式下也无效，只打印
+  - M07：菜单栏图标菜单有「新增待办清单」「显示日历」、没有「固定模式」；M08：⌘W = 隐藏（`hidden = 1`），`open <app>` 唤起同一个窗口号
+  - M11–M13：菜单栏「新增待办清单」→ 改名 / 双击改名 / 拖动落库；删除清单（墓碑、待办回默认清单）；两个清单窗口都 ⌘W 后 Dock 唤起全部
 - **没有覆盖**（待补用例 / 待真机反馈）：贴边隐藏与唤起置顶在 mac 上的实际效果（左 / 右 / 下边能否藏进去、往顶边藏被挡回时的回滚、
   贴边隐藏中经 Dock / ⌘Tab 激活后拉回）；被 ⌘M 最小化后的还原；固定模式在 Spaces / 全屏 / 调度中心下的表现（没有设置 `collectionBehavior`）；
   多显示器 / 混合缩放下的贴边判定。

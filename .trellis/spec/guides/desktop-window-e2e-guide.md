@@ -65,7 +65,8 @@
 3. **Something must be able to cover it** — 普通顶层窗口（`probe-window.ps1` 探针）盖在上面时必须赢 `WindowFromPoint`。
 4. **Real input** — 编辑类窗口从主窗口打开后第一次点击就拿到前台并接受按键；固定模式下拖标题栏 / 边框不动。
 5. **Explorer restart** — 窗口存活、重挂到新 Progman、Win+D 仍免疫。
-6. **Process restart** — 按 PID 结束再启动，状态与几何从 `screen_configs` / `fences` / `fence_layouts` 恢复。
+6. **Process restart** — 按 PID 结束再启动，状态与几何从 `window_layouts`（清单 / 日历窗口，3.1）/ `fences` / `fence_layouts` 恢复。
+   3.1 起 WM_CLOSE 只隐藏窗口、进程常驻：收尾用托盘「退出」（e2e 往托盘隐藏窗口 Post `WM_COMMAND`）或按 PID 结束，不要等"关了最后一个窗口就退出"。
 7. **Loop the transitions** several times — 同一 HWND、进程存活、每一步之后几何不变。
 8. **Put the user's mode back** before you leave (they run fixed mode daily) and delete test todos through the app, not raw SQL.
 
@@ -79,12 +80,13 @@
 3. Explorer 重启：全部收纳箱第一次守护 tick 内重挂到新 Progman。
 4. 拖动 / 缩放结束后 `fences` 与当前组合 `fence_layouts` 同时落库，且可见区域 = 库里的几何；启动夹回、屏幕组合切换、程序挪窗**不**落库。
    吸附（e2e F12–F15）：落在阈值内吸到目标的边、拖动中**目标**收纳箱的对应边截图有 `#409EFF`、松手后消失；按住 Alt 不吸。手势要够长
-   （GPUI 的拖动移动超过 2px 才开始、窗口超过 3px 才动：只想挪 3px 时顺带横向挪一段），主窗口先最小化（它盖在桌面层的收纳箱之上）。
+   （GPUI 的拖动移动超过 2px 才开始、窗口超过 3px 才动：只想挪 3px 时顺带横向挪一段），默认清单窗口先 WM_CLOSE 隐藏（它盖在桌面层的收纳箱之上，
+   3.1 起又和收纳箱同一个吸附组；关闭 = 隐藏，进程常驻）。
 5. 混合 DPI：折叠高度按目标显示器缩放（150% → 48px，125% → 40px）——CI 虚拟机是单屏，需用户实机验收。
 6. 外部拖入：新实例第一次拖入、改名回车后 / 单击标题后紧接着的第一次拖入都要生效（GPUI 输入模态问题，e2e F04 / F10 / F11）。
 7. 文件层只在测试收纳根目录与桌面上 `__fence_e2e_` 前缀的测试文件上操作；绝不移动、改名、删除用户真实的桌面文件。
 8. macOS（runner，MF 组）：上面 1–3 是 Windows 的状态；mac 上断言的是层级（`kCGWindowLayer` = 桌面图标层 + 1、排在所有 layer ≥ 0 的窗口之后）、
-   应用日志自报的 collectionBehavior / `canHide` / 非激活面板，以及行为（⌘H 后仍在、点它前台应用不变、有它时 Dock 唤起主窗口）。
+   应用日志自报的 collectionBehavior / `canHide` / 非激活面板，以及行为（⌘H 后仍在、点它前台应用不变、有它时 Dock 唤起默认清单窗口）。
    文件层一律在临时目录（`MINI_TODO_FENCES_ROOT` + `MINI_TODO_DESKTOP_DIR` + 临时来源目录），**绝不碰** `~/Desktop` / `~/Documents` / `~/Downloads`。
 
 ---
@@ -130,8 +132,10 @@
   同样的事件用 `CGEventPostToPid` 直接投给进程却能进。所以文字一律 `pbcopy` + ⌘A + ⌘V（键盘事件仍走 HID），逐字注入只作首选尝试
   （OCR 认不出就改粘贴）；`CGEventPostToPid` 只用来诊断（它绕过前台应用 / key 窗口的路由，证明不了真实键盘到得了窗口）。不要把
   "逐字注入没进去"当成应用的焦点问题去改应用（MF08 就这样误判过一轮）。
-- **拖窗口**：左键在标题栏上沿（y + 6pt，按钮之上的留白）按下 → 分步拖动 → 抬起，按 CGWindowList 前后的位置判定；AX 设置窗口位置 / 尺寸
-  （`AXPosition` / `AXSize`）用来判定固定模式下"改尺寸无效"。
+- **拖窗口**：3.1 起清单 / 日历窗口与收纳箱一样是自绘移动与缩放（建窗 `resizable: false`，可见边缘内侧 5pt 是缩放手柄）：左键在标题栏下半截的空白处
+  （清单窗口 (60, 47)，按钮与清单名之下）按下 → 分步拖动（每步留 30ms 左右，自绘拖动每帧最多摆一次窗）→ 抬起，按 CGWindowList 前后的位置判定；
+  缩放就拖右边缘内侧 2.5pt。**不要**再按标题栏上沿（y + 6pt 离上边手柄只差 1pt）。不可缩放的窗口 AX `AXSize` 普通模式下也改不了，
+  锁定只按"拖不动 + 手柄消失"判定（M10），AX 只打印。
 - **断言数据**：debug 套件读 `<MINI_TODO_DATA_DIR>/data.db`；release 套件不隔离，读 `~/Library/Application Support/mini-todo/data.db`、
   `~/Library/Logs/com.tauri-app.mini-todo/mini-todo.log`、`/tmp/com_tauri_app_mini_todo_si.sock`、`~/Library/LaunchAgents/mini-todo.plist`
   ——**只在一次性 VM 上跑**（`--allow-real-profile`）。
@@ -147,8 +151,8 @@
   - **真实文件拖放源**：访达窗口里的图标位置难定位，用 pyobjc 起一个小拖放源进程（`e2e-macos/drag_source.py`：窗口里按下即
     `beginDraggingSessionWithItems:` 放文件 `NSURL`），CGEvent 在它上面按下、慢速拖到收纳箱内容区再松开；没生效时换旧式 `NSFilenamesPboardType`
     再试一次作诊断。
-  - **主窗口挡着收纳箱**：主窗口（layer 0）盖住的地方点不到收纳箱、也拖不进；1024×768 的 runner 上居中的主窗口常与右上角的收纳箱重叠，
-    交互前先把主窗口拖开（`clear_main_off`）。
+  - **默认清单窗口挡着收纳箱**：它（layer 0）盖住的地方点不到收纳箱、也拖不进；1024×768 的 runner 上居中的默认清单窗口常与右上角的收纳箱重叠，
+    交互前先把它拖开（`clear_main_off`，按标题栏下半截 (60, 47) 拖）。它也是收纳箱的吸附目标，拖开后离收纳箱 30pt 以上（阈值 10pt）。
   - **非激活**：先 `activate_other("Finder")` 再点收纳箱，断言 `frontmost_pid()` 仍是 Finder；别的应用发起的隐藏用
     `NSRunningApplication.hide()` 模拟。改名（MF08）同样从访达在前台时开始，但改名会**有意激活应用**（预期前台变成 mini-todo，面板成为 key）；
     输入按上面的"文字输入用粘贴"（⌘A + ⌘V，回车也走 HID），失败时再用 `CGEventPostToPid` 区分"按键没路由到面板"与"面板没进入改名"
