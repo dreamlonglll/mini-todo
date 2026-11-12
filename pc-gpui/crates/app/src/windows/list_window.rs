@@ -586,9 +586,11 @@ impl ListWindow {
         self.open_new_todo(quadrant, window, cx);
     }
 
-    /// 焦点不在本窗口的元素树里（改名输入框已卸载、别处拿走过焦点……）时交给根元素：[`NewTodo`] 才派发得到
+    /// 焦点不在本窗口的元素树里（改名输入框已卸载、别处拿走过焦点……）时交给根元素：[`NewTodo`] 才派发得到。
+    /// 改名中不动：新建清单后 `begin_rename` 先聚焦输入框、窗口激活可能早于输入框画出来的那一帧（`contains_focused`
+    /// 按上一帧判断），这时抢回焦点会让输入框失焦、改名立刻被提交
     fn ensure_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.focus.contains_focused(window, cx) {
+        if !self.name.is_renaming() && !self.focus.contains_focused(window, cx) {
             window.focus(&self.focus, cx);
         }
     }
