@@ -3,8 +3,8 @@
 //! 模块都是 `pub` 的：基础框架提供的接口在各窗口实现之前还没有调用方，作为库导出不会被当成死代码。
 //!
 //! 启动顺序：日志 → 单实例 → 数据库（失败弹原生消息框后退出）→ `Application`（`QuitMode::Explicit`，托盘常驻；
-//! macOS 另注册 Dock 唤起）→ `gpui_kit::init` → 主题 →（macOS）应用菜单 → 浮层插件 → 全局状态 → 单实例唤起监听 → 主窗口
-//! → 加载设置与待办 →（debug）`MINI_TODO_DEBUG_OPEN` 指定的窗口。
+//! macOS 另注册 Dock 唤起）→ `gpui_kit::init` → 主题 →（macOS）应用菜单 → 浮层插件 → 全局状态 → 单实例唤起监听 → 清单 / 日历窗口
+//! → 托盘与后台服务 → 加载设置与待办 → 更新日志（升级后第一次运行时弹出，`services::changelog`）→（debug）`MINI_TODO_DEBUG_OPEN` 指定的窗口。
 //!
 //! 托盘、提醒调度、自动同步、200ms 窗口守护等后台服务由各窗口实现者接到 `services/` 与对应窗口里。
 
@@ -103,6 +103,8 @@ pub fn run() {
         let load = state.update(cx, |state, cx| state.load_initial(cx));
         cx.spawn(async move |cx| {
             load.await;
+            // 升级后第一次运行：以默认清单窗口为打开方弹出更新日志（debug 数据隔离时默认不判定，见 services::changelog）
+            cx.update(services::changelog::check_on_startup);
             if !debug_open.is_empty() {
                 cx.update(|cx| windows::open_debug(cx, &debug_open));
             }

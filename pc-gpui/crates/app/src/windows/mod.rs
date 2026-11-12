@@ -10,6 +10,7 @@
 //! | `editor/` | 待办详情 / 编辑（只读 ⇄ 编辑、表单、子任务面板、描述放大编辑） |
 //! | `subtask.rs` | 子任务查看 / 编辑 |
 //! | `completed.rs` | 已完成 |
+//! | `changelog.rs` | 更新日志（升级后自动弹出 / 设置 → 关于） |
 //! | `notification.rs` | 应用内通知（透明、置顶、不抢焦点） |
 //! | `settings/` | 设置（常规 / 外观 / 数据与同步 / 屏幕配置 / 关于） |
 //! | `fence/` | 桌面收纳箱（透明；Windows 嵌入桌面层，macOS 是桌面图标层之上的不激活应用的面板） |
@@ -32,6 +33,7 @@
 
 pub mod block;
 pub mod calendar_window;
+pub mod changelog;
 pub mod completed;
 pub mod drag;
 pub mod editor;
@@ -69,6 +71,8 @@ pub enum WindowKind {
     Subtask,
     Settings,
     Completed,
+    /// 更新日志（升级后自动弹出、设置 → 关于）
+    Changelog,
     Notification,
     Fence,
     /// 调试用的控件样例窗口（`MINI_TODO_DEBUG_OPEN=gallery`）
@@ -607,9 +611,11 @@ pub enum DebugOpen {
     Calendar,
     /// 新建一个收纳箱（`fence:new`，与托盘「新增收纳箱」相同）
     NewFence,
+    /// 更新日志窗口，显示全部版本（`changelog`，同设置 → 关于「更新日志」）
+    Changelog,
 }
 
-/// 解析 `main,list:3,list:new,editor:1:view,editor:new,subtask:3:edit,settings:general,completed,notification:1,fence:1`；
+/// 解析 `main,list:3,list:new,editor:1:view,editor:new,subtask:3:edit,settings:general,completed,changelog,notification:1,fence:1`；
 /// 无法识别的项记 warning 并跳过
 pub fn parse_debug_open(spec: &str) -> Vec<DebugOpen> {
     spec.split(',')
@@ -649,6 +655,7 @@ pub fn parse_debug_open(spec: &str) -> Vec<DebugOpen> {
                 ["settings"] => Some(DebugOpen::Settings(settings::SettingsTab::General)),
                 ["settings", tab] => settings::SettingsTab::parse(tab).map(DebugOpen::Settings),
                 ["completed"] => Some(DebugOpen::Completed),
+                ["changelog"] => Some(DebugOpen::Changelog),
                 ["notification"] => Some(DebugOpen::Notification { todo_id: None }),
                 ["notification", id] => id
                     .parse()
@@ -702,6 +709,9 @@ pub fn open_debug(cx: &mut App, items: &[DebugOpen]) {
             }
             DebugOpen::Completed => {
                 completed::open(cx, None, block::DEFAULT_LIST_ID);
+            }
+            DebugOpen::Changelog => {
+                changelog::open_all(cx, None);
             }
             DebugOpen::Notification { todo_id } => {
                 let todo = todo_id.and_then(|id| {
@@ -814,11 +824,12 @@ mod tests {
             vec![DebugOpen::NewFence, DebugOpen::Fence(3)]
         );
         assert_eq!(
-            parse_debug_open("list:new,list:1731000000000123,list:x,calendar"),
+            parse_debug_open("list:new,list:1731000000000123,list:x,calendar,changelog"),
             vec![
                 DebugOpen::NewList,
                 DebugOpen::List(1_731_000_000_000_123),
-                DebugOpen::Calendar
+                DebugOpen::Calendar,
+                DebugOpen::Changelog
             ]
         );
         assert_eq!(

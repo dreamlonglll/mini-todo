@@ -743,6 +743,31 @@ pub mod main_window {
     pub const BAR_TOP_OFFSET: f32 = 28.;
 }
 
+/// 更新日志窗口尺寸 token（`windows::changelog`；颜色取 [`light()`]：白底、`text_primary` 版本号、`text_tertiary` 日期、
+/// `border_light` 版本之间的分隔线、`bg_secondary` + `border` 底部按钮区）
+pub mod changelog_window {
+    /// 520×600，可缩放，最小 420×400
+    pub const WIDTH: f32 = 520.;
+    pub const HEIGHT: f32 = 600.;
+    pub const MIN_WIDTH: f32 = 420.;
+    pub const MIN_HEIGHT: f32 = 400.;
+    /// 内容区内边距：左右 24、上下 16；版本之间 20，中间一条 1px 分隔线
+    pub const PADDING_X: f32 = 24.;
+    pub const PADDING_Y: f32 = 16.;
+    pub const SECTION_GAP: f32 = 20.;
+    /// 版本号 16 / 600，后面的日期 12；版本号与内容间距 8
+    pub const VERSION_SIZE: f32 = 16.;
+    pub const DATE_SIZE: f32 = 12.;
+    pub const HEADER_GAP: f32 = 8.;
+    /// 自动弹出时开头的一句说明 13
+    pub const INTRO_SIZE: f32 = 13.;
+    /// 底部按钮区：上下 12、左右 20
+    pub const FOOTER_PADDING_Y: f32 = 12.;
+    pub const FOOTER_PADDING_X: f32 = 20.;
+    /// 内容区滚动条宽 6（同主列表）
+    pub const SCROLLBAR: f32 = 6.;
+}
+
 // ---- 设置窗口（ui-settings-fence.md §2；Tailwind slate 系，与 `light()` 重合的直接取 `light()`） ----
 
 /// 设置窗口专用颜色

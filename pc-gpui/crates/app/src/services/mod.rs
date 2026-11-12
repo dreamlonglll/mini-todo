@@ -14,6 +14,7 @@
 //! | [`block_windows`] | 桌面块窗口（清单窗口 / 日历窗口）的生命周期：启动开窗、关闭 = 隐藏、唤起时显示隐藏的清单窗口、同步来的清单开 / 关窗、「显示日历」、5 秒变更轮询 |
 //! | [`window_mode`] | 桌面块窗口按窗口的锁定 / 嵌入桌面 / 贴边隐藏、几何与锁定的持久化（`store`，core 的窗口布局表）、唤起所有窗口、重置位置、200ms 轮询 |
 //! | [`update_check`] | GitHub 版本检查（启动检查 + 设置「关于 → 检查更新」共用） |
+//! | [`changelog`] | 应用内更新日志：解析嵌入的 `assets/changelog.md`、升级后第一次运行时弹出（本机记录 `last_run_version`，设备本地） |
 //! | [`fences`] | 桌面收纳箱生命周期：恢复 / 新建 / 显示隐藏 / 重置位置、目录监听、嵌入守护（Windows）/ 桌面层（macOS）、屏幕组合检测 |
 //! | [`snap`] | 吸附组（清单窗口 / 日历窗口 / 收纳箱）的跨窗口运行时：参与者登记、拖动开始时的目标快照、目标窗口上的高亮 |
 //! | [`mac_menu`] | macOS 应用菜单（⌘Q / ⌘, / ⌘H / ⌘W / ⌘M、编辑菜单）与 Dock 唤起（全平台编译，只在 macOS 上调用） |
@@ -24,6 +25,7 @@
 pub mod auto_sync;
 pub mod autostart;
 pub mod block_windows;
+pub mod changelog;
 pub mod fences;
 pub mod logging;
 pub mod mac_menu;
