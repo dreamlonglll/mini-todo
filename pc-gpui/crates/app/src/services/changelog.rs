@@ -5,7 +5,8 @@
 //!
 //! - 每个版本一个二级标题 `## <版本号>`，后面可带日期：`## 3.1.0-pre（2026-11-10）`（全角 / 半角括号都行，也可以只用空格隔开）；
 //!   版本号可带前缀 `v`，按 [`compare_versions`]（semver，含预发布）比较
-//! - 段落内容是 Markdown（列表、`###` 小标题……），原样交给 `ui::markdown` 只读渲染
+//! - 段落内容是 Markdown（列表、`###` 小标题……），交给 `ui::markdown` 只读渲染；显示时小标题降一级、至少四级
+//!   （[`Section::display_body`]：`###` 按三级标题渲染比版本号还大）
 //! - `## 未发布`：已合入、还没发版的改动，应用里**不显示**；发版改版本号时把它改成 `## <版本号>（日期）`
 //!   （单测 `current_version_has_a_changelog_section` 兜底：工作区版本在更新日志里没有段落时 CI 失败）
 //! - 容错：第一个二级标题之前的内容、标题不是版本号的段落、内容为空的段落、重复的版本（保留先出现的）都忽略并记日志；
@@ -186,6 +187,49 @@ fn closes_fence(line: &str, (marker, count): (char, usize)) -> bool {
     }
     let run = trimmed.chars().take_while(|c| *c == marker).count();
     run >= count && trimmed[run * marker.len_utf8()..].trim().is_empty()
+}
+
+/// 段落内容中的小标题至少显示成几级：版本号是这一段的标题（`theme::changelog_window::VERSION_SIZE`），内容里的 `###`
+/// 照常按三级标题渲染会比它还大，所以显示时一律降到四级及以下
+const MIN_BODY_HEADING_LEVEL: usize = 4;
+
+impl Section {
+    /// 窗口里显示的 Markdown：内容里的 ATX 标题降一级、至少 [`MIN_BODY_HEADING_LEVEL`] 级（`###` → `####`），
+    /// 围栏代码块里的不动
+    pub fn display_body(&self) -> String {
+        let mut fence: Option<(char, usize)> = None;
+        let mut out: Vec<String> = Vec::new();
+        for line in self.body.lines() {
+            if let Some(open) = fence {
+                if closes_fence(line, open) {
+                    fence = None;
+                }
+                out.push(line.to_string());
+            } else if let Some(open) = opens_fence(line) {
+                fence = Some(open);
+                out.push(line.to_string());
+            } else {
+                out.push(demote_heading(line));
+            }
+        }
+        out.join("\n")
+    }
+}
+
+/// ATX 标题行（行首最多 3 个空格、1~6 个 `#`、后面是空白或行尾）降级，见 [`Section::display_body`]；其它行原样
+fn demote_heading(line: &str) -> String {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    let rest = &line[indent..];
+    let level = rest.len() - rest.trim_start_matches('#').len();
+    let after = &rest[level..];
+    if indent > 3
+        || !(1..=6).contains(&level)
+        || !(after.is_empty() || after.starts_with([' ', '\t']))
+    {
+        return line.to_string();
+    }
+    let demoted = (level + 1).clamp(MIN_BODY_HEADING_LEVEL, 6);
+    format!("{}{}{after}", &line[..indent], "#".repeat(demoted))
 }
 
 /// 标题文字 → 种类：`未发布` / `<版本号>[（日期）]` / 其它
@@ -409,6 +453,16 @@ mod tests {
         assert_eq!(sections[2].date.as_deref(), Some("2026-11-08"));
         assert_eq!(sections[3].date, None);
         assert!(sections.iter().all(|s| !s.body.contains("还没发版")));
+    }
+
+    #[test]
+    fn body_headings_render_below_the_version_title() {
+        let mut s = section("3.2.0");
+        s.body = "# 一级\n### 新功能\n#### 细节\n###### 最小\n####### 不是标题\n#没有空格\n    ### 缩进 4 格\n- ### 列表里\n```\n### 代码块里\n```\n###".into();
+        assert_eq!(
+            s.display_body(),
+            "#### 一级\n#### 新功能\n##### 细节\n###### 最小\n####### 不是标题\n#没有空格\n    ### 缩进 4 格\n- ### 列表里\n```\n### 代码块里\n```\n####"
+        );
     }
 
     #[test]

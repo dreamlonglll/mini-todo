@@ -99,7 +99,7 @@ impl ChangelogWindow {
             )
             .child(MarkdownView::new(
                 SharedString::from(format!("changelog-{index}")),
-                SharedString::from(section.body.clone()),
+                SharedString::from(section.display_body()),
                 self.images_dir.clone(),
             ))
     }

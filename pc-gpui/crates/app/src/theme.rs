@@ -755,8 +755,9 @@ pub mod changelog_window {
     pub const PADDING_X: f32 = 24.;
     pub const PADDING_Y: f32 = 16.;
     pub const SECTION_GAP: f32 = 20.;
-    /// 版本号 16 / 600，后面的日期 12；版本号与内容间距 8
-    pub const VERSION_SIZE: f32 = 16.;
+    /// 版本号 20 / 600，后面的日期 12；版本号与内容间距 8。内容里的小标题显示时降到四级（16，见
+    /// `services::changelog::Section::display_body`），比版本号小
+    pub const VERSION_SIZE: f32 = 20.;
     pub const DATE_SIZE: f32 = 12.;
     pub const HEADER_GAP: f32 = 8.;
     /// 自动弹出时开头的一句说明 13
