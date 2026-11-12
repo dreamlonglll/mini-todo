@@ -270,6 +270,8 @@ pub fn decide(
 }
 
 /// 是否在启动时自动判定：debug 构建、数据隔离（`MINI_TODO_DATA_DIR`）中默认不判定，`MINI_TODO_DEBUG_CHANGELOG=auto` 恢复
+/// （release 不读环境变量、总是判定，见 [`auto_check_enabled`]）
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
 fn auto_check_allowed(debug_mode: Option<&str>, isolated: bool) -> bool {
     debug_mode.is_some_and(|mode| mode.trim().eq_ignore_ascii_case("auto")) || !isolated
 }
