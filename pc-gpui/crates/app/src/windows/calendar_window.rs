@@ -9,7 +9,8 @@
 //! | [`logic`] | 纯逻辑（日历网格、跨天条、第一次显示的位置，带单测） |
 //!
 //! - 显示**所有清单**的待办（含已完成），按日历的清单筛选（[`filter`]：`window_prefs.calendar_filter`，
-//!   `AppState::calendar_todos`）；点击待办条打开只读详情；不能新建待办
+//!   `AppState::calendar_todos`）；点击待办条打开只读详情；双击某天（待办条以外的地方，含灰色的上 / 下月格子；锁定与否都行）
+//!   新建待办：开始时间预填那天 00:00，清单按筛选（恰好只选了一个清单时建到它，否则默认清单，[`logic::new_todo_list_id`]）
 //! - 是否显示 = 日历窗口的属性 `!hidden`（设置 → 常规「显示日历」、托盘「显示日历」勾选）；关闭 = 隐藏 = 关掉「显示日历」。
 //!   生命周期在 `services::block_windows`
 
@@ -18,9 +19,11 @@ pub mod grid;
 pub mod logic;
 pub mod title_bar;
 
+use chrono::NaiveDate;
 use gpui_kit::{
-    AnyElement, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px, relative,
+    AnyElement, Context, Entity, InteractiveElement as _, IntoElement, MouseDownEvent,
+    ParentElement as _, Render, Styled as _, Subscription, Window, div,
+    prelude::FluentBuilder as _, px, relative,
 };
 
 use super::block::{BlockDrag, BlockDragHost, BlockKey};
@@ -109,6 +112,32 @@ impl CalendarWindow {
         }
         let parent = ChildOf::window(window, cx);
         editor::open(cx, Some(parent), Some(id), editor::EditorMode::View);
+    }
+
+    /// 双击日格（按下时 `click_count >= 2`；待办条上的双击被条拦下）：新建待办，开始时间 = 那天 00:00，
+    /// 清单按筛选（[`logic::new_todo_list_id`]：恰好只选了一个清单时建到它，否则默认清单）。以日历窗口为打开方（模态；
+    /// 已有模态子窗口时 `open_child` 只把它带到前台）
+    pub(crate) fn on_day_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        day: NaiveDate,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.click_count < 2 || cx.has_active_drag() {
+            return;
+        }
+        // 处理了：下面的缩放手柄（边上的日格）不再开始缩放
+        cx.stop_propagation();
+        let list_id = {
+            let state = self.state.read(cx);
+            let filter = state.calendar_filter();
+            logic::new_todo_list_id(filter.as_deref(), |id| state.list(id).is_some())
+        };
+        let preset = editor::NewTodoPreset::in_list(list_id)
+            .with_start_time(logic::new_todo_start_time(day));
+        let parent = ChildOf::window(window, cx);
+        editor::open_new(cx, Some(parent), preset);
     }
 }
 
