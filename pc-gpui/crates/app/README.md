@@ -37,15 +37,17 @@ src/
 ├── lib.rs            run()：日志 → 单实例 → 数据库 → Application(QuitMode::Explicit) → init → 主题 → UiLayer →
 │                     Db / WindowManager / AppState → 整个应用的提示（notice）→ 单实例唤起监听 → 清单 / 日历窗口
 │                     （block_windows::start）→ 后台服务（托盘 / 自动同步 / 提醒调度 / 收纳箱恢复）→ 开机自启自愈 → 加载
-│                     → （debug）MINI_TODO_DEBUG_OPEN
+│                     → 更新日志（升级后第一次运行时弹出，services::changelog）→ （debug）MINI_TODO_DEBUG_OPEN
 ├── main.rs           bin 入口（release 为 Windows 子系统）
-├── assets.rs         AppAssets（EpIcon / AppIcon 嵌入表 + gpui-kit 默认资源）
+├── assets.rs         AppAssets（EpIcon / AppIcon 嵌入表 + gpui-kit 默认资源）；应用内更新日志的原文是 assets/changelog.md
+│                     （services::changelog 用 include_str! 嵌入，写法见文件头）
 ├── theme.rs          颜色 / 字体 / 圆角 / 间距 / 阴影 / 时长 token（按窗口分节：清单 / 日历窗口、设置 `settings_tokens()`、
 │                     收纳箱 `fence_tokens()`、编辑类窗口与 Markdown `editor_theme::*`、下拉菜单 `ep_menu(dark)`、吸附高亮）；颜色工具；
 │                     gpui-component 主题调成 EP
 ├── db.rs             Db 全局（Arc<Database>）、spawn_db
 ├── state.rs          AppState（全局状态 + 待办 / 子任务 / 清单 / 窗口属性 / 设置写操作；替代 Pinia store 与跨 WebView 事件）
-├── util/             旧前端 utils 的 1:1 移植（datetime、image_ref、file_link、editor_shortcuts），带原 vitest 用例
+├── util/             旧前端 utils 的 1:1 移植（datetime、image_ref、file_link、editor_shortcuts），带原 vitest 用例；
+│                     version（版本号比较 compare_versions，含 semver 预发布排序；版本检查与更新日志共用）
 ├── windows/
 │   ├── mod.rs        WindowManager（登记 / 模态子窗口 / 关闭回调 / 居中）、WindowSpec、modal_overlay、DebugOpen
 │   ├── block.rs      BlockKey { List(id), Calendar }（DEFAULT_LIST = List(1)）、BlockDrag + BlockDragHost（清单 / 日历窗口的自绘移动、
@@ -55,7 +57,7 @@ src/
 │   ├── list_window.rs + list_window/   清单窗口（原主窗口，每个清单一个）：title_bar（清单名 / 版本红点（只在默认清单窗口）/
 │   │                 同步 / 展开全部 / 已完成 / 视图 / 日夜 / 锁 / 设置）、name（双击改名、右键「重命名 / 删除清单」、删除确认）、
 │   │                 list、todo_item（行 / 子任务 / 拖拽手柄 / 删除确认）、quadrant、row_menu（待办行右键「移动到 ▸」）、
-│   │                 logic（纯逻辑：提醒文案、拖拽排序、版本比较）；新建到本清单：FAB（锁定时不显示）与操作模式、
+│   │                 logic（纯逻辑：提醒文案、拖拽排序）；新建到本清单：FAB（锁定时不显示）与操作模式、
 │   │                 Ctrl+N / ⌘N（动作 NewTodo，key context MiniTodoList，根元素 track_focus）、双击空白 / 象限（on_blank_mouse_down）；遮罩
 │   ├── calendar_window.rs + calendar_window/   日历窗口（单例）：title_bar（月份导航 / 今天 / 清单筛选 / 日夜 / 锁 / 设置）、
 │   │                 grid（农历 / 节假日 / 跨天条、双击日格新建）、filter（清单筛选下拉）、
@@ -65,9 +67,10 @@ src/
 │   │                 从文件导入）、desc_dialog（描述放大编辑：源码 / 预览分栏）
 │   ├── subtask.rs    子任务查看 / 编辑（库内子任务或新建待办的暂存子任务）
 │   ├── completed.rs  已完成（只列打开它的清单；搜索、恢复、删除）
+│   ├── changelog.rs  更新日志（升级后自动弹出：默认清单窗口为打开方、只显示升级区间；设置 → 关于：设置窗口为打开方、全部版本）
 │   ├── notification.rs  应用内通知（透明、置顶、不抢焦点；core 槽位与叠放算法）
 │   ├── settings/     设置：mod（窗口、菜单、加载）、general、appearance、data（导入导出 / WebDAV / 强制同步）、
-│   │                 screen（屏幕配置）、about（版本 / 检查更新）
+│   │                 screen（屏幕配置）、about（版本 / 检查更新 / 更新日志）
 │   ├── fence/        桌面收纳箱：mod（窗口、标题栏、拖动 / 缩放（自绘拖动 + 吸附高亮，公共部分在 drag.rs / snap.rs）/ 折叠 / 改名、拖入）、grid（项目网格、图标懒加载、
 │   │                 右键菜单（含隐藏 / 取消隐藏；macOS「在访达中显示」）、隐藏项过滤与半透明、箱内排序、Ctrl+滚轮
 │   │                 （macOS 另认 ⌘+滚轮））、panels（外观 / 删除确认 / 云同步提示（Windows OneDrive、macOS iCloud）、
@@ -196,6 +199,7 @@ cx.observe(&state, |_, _, cx| cx.notify()).detach();         // 视图跟着刷�
 | `notice` | 整个应用的提示（自动同步失败、加载待办失败、导入成功、托盘新建清单失败）：`show` / `show_from` / `show_topic` / `retract`，只在看得见的清单 / 日历窗口里挑（`pick_target`：当前激活的 → 发起操作的 → 最近激活过的 → 默认清单），都看不见时先存着（最多 3 条，同类型同文字 / 同主题去重），下次有窗口被激活后 300ms 补显示 |
 | `mac_menu` | macOS 应用菜单：Mini Todo（关于 / 设置… ⌘, / 服务 / 隐藏 ⌘H / 隐藏其他 ⌥⌘H / 全部显示 / 退出 ⌘Q）、编辑（撤销 / 重做 / 剪切 / 拷贝 / 粘贴 / 全选，动作是输入框的 `input::*`，剪切等映射系统选择器）、窗口（最小化 ⌘M / 关闭窗口 ⌘W；收纳箱是活动窗口时两者都不做）；`on_reopen`（Dock / Finder 唤起 = `window_mode::bring_all_to_front`；GPUI 只在没有可见窗口时回调）。全平台编译，只在 macOS 上由 `lib.rs` 调用 |
 | `update_check` | GitHub 最新 release：`check_for_updates(cx)`（启动，失败静默）、`check(cx) -> Task<Result<UpdateInfo, String>>`（设置「关于 → 检查更新」）、`releases_url(cx)`；结果写进 `AppState.has_update / latest_version / release_url` |
+| `changelog` | 应用内更新日志：`parse`（容错：未知标题 / 空段落 / 重复版本 / 代码块里的 `##` 都忽略，按版本从新到旧）、`sections()`（嵌入的 `assets/changelog.md`，`## 未发布` 不显示）、`sections_between(sections, after, upto)`（`(after, upto]`）、`decide(last_run, schema_at_open, current, sections) -> StartupDecision`（纯函数：记录 = 当前什么都不做；没有记录时新装（迁移前库版本 0）只写记录、`< 31` 显示 `<=` 当前的全部、`>= 31` 按上次是 3.1.0-pre；记录较旧显示 `(记录, 当前]`；降级 / 区间为空只写记录）、`check_on_startup(cx)`（`lib.rs` 加载完数据后调用：后台读 core `settings::last_run_version` 与 `Database::schema_version_at_open` → 以默认清单窗口为打开方（`ChildOf::handle(..).unowned()`）弹出 → 写回当前版本）。debug 构建 + `MINI_TODO_DATA_DIR` 时默认不判定、不写记录（`MINI_TODO_DEBUG_CHANGELOG=auto` 恢复）。单测 `current_version_has_a_changelog_section`：工作区版本在更新日志里没有段落时失败 |
 | `fences` | 桌面收纳箱生命周期：建窗 + 嵌入（Windows）/ 桌面层（macOS：`PopUp` 面板 → `Hwnd::make_desktop_layer` → 显示，日志自报层级与行为）、启动恢复（Windows / macOS）、新增 / 显示隐藏 / 重置位置、目录监听 → 前台刷新、200ms 嵌入守护（Windows）、约 2 秒一次的屏幕组合检测；建窗后登记进吸附组（`services::snap`），窗口关闭 / 删除时注销 |
 
 ### 4.3 `windows`：WindowManager 与各窗口入口
@@ -216,6 +220,7 @@ editor::open(cx, parent, None, EditorMode::Edit);
 | `editor::open(cx, parent, todo_id: Option<i64>, EditorMode::{View, Edit}) -> Option<AnyWindowHandle>`、`editor::open_new(cx, parent, NewTodoPreset)` | 待办详情 / 新建 | 1080×600，可缩放；`todo_id = None` 为新建（总是编辑，「清单」下拉预选默认清单）；清单 / 日历窗口新建用 `open_new` 带预设：`NewTodoPreset::in_list(id)`（FAB / Ctrl+N / 双击空白）`.with_quadrant(q)`（双击象限，颜色同表单里点了它）`.with_start_time(..)`（日历双击某天 = 那天 00:00），预设在拍干净快照前填入，没改过按 Esc 不弹确认；表单「四象限」下有「清单」下拉，保存时只有选择 ≠ 预选才带 `list_id`；只读详情有「所属清单」徽章；系统标题 `待办详情` / `新建待办` |
 | `subtask::open(cx, parent, subtask_id, SubtaskMode::{View, Edit})`、`subtask::open_draft(cx, parent, drafts, pending_id, mode)` | 子任务 | 800×750；标题 `查看子任务` / `编辑子任务`；`open_draft` 直接读写新建待办窗口的 `DraftSubtasks` |
 | `completed::open(cx, parent, list_id)` | 已完成 | 460×550；只列该清单（有效清单）的已完成，恢复后回原清单 |
+| `changelog::open(cx, parent, sections, upgraded)`、`changelog::open_all(cx, parent)` | 更新日志（`WindowKind::Changelog`） | 520×600，可缩放（最小 420×400）；自绘标题栏「更新日志」、可滚动的 Markdown 只读渲染（每个版本一个标题：版本号 + 日期）、底部「知道了」，Esc 关闭；`upgraded`（升级后自动弹出，打开方默认清单窗口、不设 owner）开头说明"已更新到 x"；`open_all` 显示 `<=` 当前版本的全部段落（设置 → 关于「更新日志」：打开方是设置窗口，设置窗口显示遮罩 0.3、获得焦点时转交） |
 | `settings::open(cx, parent, SettingsTab::{General, Appearance, Data, Screen, About})` | 设置 | 680×560，不可缩放；`SettingsTab::label()` = 菜单文案。「深色主题」切的是打开它的清单 / 日历窗口；常规「展示日历」= `set_calendar_visible`（与托盘勾选同一个设备本地状态）；屏幕配置页每个组合一行，汇总保存了几个清单窗口、日历、几个收纳箱的位置与锁定数（`screen::load_layout_summaries`），删除确认写明连带删除这些布局，当前组合不能删 |
 | `notification::open(cx, NotificationContent { todo_id, title, description }) -> Option<AnyWindowHandle>`、`notification::close_all(cx)` | 应用内通知 | 320×120，透明、`WindowKind::PopUp`（置顶、不进任务栏）、不抢焦点；core 槽位与叠放算法，关窗归还槽位 |
 | `fence::open(cx, fence_id)`、`fence::restore_all(cx)`、`fence::tray_create_fence / tray_toggle_fences / tray_reset_fences(cx)`、`fence::fence_key(id)` | 收纳箱 | 透明、不可缩放、不可最小化、建窗不显示（定位后再显示）；macOS 上 `kind = PopUp`（不激活应用的 NSPanel；只有双击标题改名时先 `cx.activate(true)` 再 `activate_window()`，宽限期内把 key 从清单窗口拿回来，见 `windows/fence/mod.rs` 模块文档）；登记 key `fence-{id}`；实现在 `services::fences` |
@@ -232,7 +237,7 @@ editor::open(cx, parent, None, EditorMode::Edit);
 | `block_window(cx, key)`（含原生隐藏着的）/ `default_list(cx)` / `block_key_of(cx, id)` / `all(cx, kind)` / `find(cx, kind, key)` / `kind_of(cx, id)` | 查询 |
 | `modal_child(cx, opener_id)` / `has_modal_child` / `any_block_has_modal_child(cx)` / `focus_modal_child(cx, opener_id)` | 模态关系（`any_block_has_modal_child`：任一清单 / 日历窗口开着模态子窗口时 5 秒轮询与同步后的刷新跳过） |
 | `forward_activation(window, cx) -> bool` | 打开方在 `cx.observe_window_activation` 里调用：有模态子窗口就把焦点交给它 |
-| `windows::modal_overlay(window, cx, alpha) -> Option<AnyElement>` | 打开方 render 的**最后一个**子元素（清单 / 日历窗口 / 已完成 0.3，编辑窗口 0.15）；打开方要 `cx.observe_global::<WindowManager>(|_, cx| cx.notify())` |
+| `windows::modal_overlay(window, cx, alpha) -> Option<AnyElement>` | 打开方 render 的**最后一个**子元素（清单 / 日历窗口 / 已完成 / 设置 0.3，编辑窗口 0.15）；打开方要 `cx.observe_global::<WindowManager>(|_, cx| cx.notify())` |
 | `windows::centered_bounds(monitor, opener_bounds, size)` | 居中公式：`x = round(mon.x/s + (mon.w/s − W)/2)` |
 
 ### 4.4 `ui`：Element Plus 风格控件（每种一个实现）
@@ -292,11 +297,12 @@ editor::open(cx, parent, None, EditorMode::Edit);
 
 | 变量 | 作用 |
 |---|---|
-| `MINI_TODO_DATA_DIR` | 数据目录（库 / 图片 / 备份 / 图标缓存）、日志 `<dir>/logs`；不启用单实例、不刷新开机自启项（与安装版并存实测时必须带上） |
+| `MINI_TODO_DATA_DIR` | 数据目录（库 / 图片 / 备份 / 图标缓存）、日志 `<dir>/logs`；不启用单实例、不刷新开机自启项、不自动弹更新日志也不写本机版本记录（`MINI_TODO_DEBUG_CHANGELOG=auto` 恢复）（与安装版并存实测时必须带上） |
 | `MINI_TODO_FENCES_ROOT` | 收纳根目录（代替 `%USERPROFILE%\MiniTodo收纳箱`；macOS `~/MiniTodo收纳箱`） |
 | `MINI_TODO_DESKTOP_DIR` | "用户桌面"（core `fence_fs::user_desktop_dir`：收纳箱移回的兜底目标、"不能收纳桌面本身"的保护、云同步提示的"来自桌面"判断）改为该目录；mac e2e 用它避开真实 `~/Desktop`（隐私授权框在 runner 上没人点） |
 | `MINI_TODO_SCREEN_ID_FILE` | 文件内容非空时替代屏幕组合 ID（模拟显示器组合变化） |
-| `MINI_TODO_DEBUG_OPEN` | 加载完数据后额外打开的窗口，逗号分隔：`main`（默认清单窗口，带到前面）、`list:<id>`（显示清单窗口，没开过就开窗）、`list:new`（同托盘「新增待办清单」，进入改名）、`editor:new`、`editor:<id>[:view\|:edit]`、`subtask:<id>[:view\|:edit]`、`settings[:general\|appearance\|data\|screen\|about]`、`completed`（默认清单的已完成）、`notification[:<todoId>]`、`fence:<id>`、`fence:new`、`calendar`（显示日历窗口，同「展示日历」）、`gallery`、`toast:<success\|info\|warning\|error>:<文字>`、`confirm:<标题>:<内容>`（toast / confirm 在默认清单窗口里；不走模态关系，详见 `../../scripts/README.md`） |
+| `MINI_TODO_DEBUG_OPEN` | 加载完数据后额外打开的窗口，逗号分隔：`main`（默认清单窗口，带到前面）、`list:<id>`（显示清单窗口，没开过就开窗）、`list:new`（同托盘「新增待办清单」，进入改名）、`editor:new`、`editor:<id>[:view\|:edit]`、`subtask:<id>[:view\|:edit]`、`settings[:general\|appearance\|data\|screen\|about]`、`completed`（默认清单的已完成）、`notification[:<todoId>]`、`fence:<id>`、`fence:new`、`calendar`（显示日历窗口，同「展示日历」）、`changelog`（更新日志窗口，全部版本，同设置 → 关于「更新日志」）、`gallery`、`toast:<success\|info\|warning\|error>:<文字>`、`confirm:<标题>:<内容>`（toast / confirm 在默认清单窗口里；不走模态关系，详见 `../../scripts/README.md`） |
+| `MINI_TODO_DEBUG_CHANGELOG` | `auto`：数据隔离（`MINI_TODO_DATA_DIR`）下也按正常规则判定是否弹出更新日志、写本机记录（默认隔离时既不弹也不写，e2e / regress 不受干扰；手测时先删掉 settings 的 `last_run_version` 或用旧库） |
 | `MINI_TODO_DEBUG_LATEST_VERSION` | 版本检查不联网，直接当作 GitHub 最新版本（如 `v2.6.0`，截图更新红点 / 「版本更新」确认框） |
 | `MINI_TODO_DEBUG_DIALOG_PATH` | 设置窗口导出 / 导入的文件对话框不弹出，直接返回该路径（导入导出冒烟） |
 | `MINI_TODO_DEBUG_WINDOWS_UI` | `1` 时 Linux 上也显示 Windows 专有的设置项（「固定模式时，嵌入桌面中」），与按 Windows 渲染的参考截图对照 |

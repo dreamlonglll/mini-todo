@@ -104,6 +104,7 @@ macOS 专属测试（`fence_fs` 的真实 `renamex_np` 移动往返 / 撞名顺�
 |---|---|
 | `Database::new() -> Result<Database, String>` | 打开 `paths::db_path()`；有待执行迁移时先 `VACUUM INTO` 备份；迁移 v1~v31 |
 | `Database::open(path: &Path) -> Result<Database, String>` | 打开指定库（同上） |
+| `Database::schema_version_at_open() -> i32` | （新增）本次打开时、迁移**之前**的库结构版本：`0` = 全新的库（文件刚建 / 空文件 / 内存库），`< 31` = 3.0.x 及更早留下的库，`31` = 3.1.0-pre；app 的更新日志弹窗据此区分"新装"与"从哪个版本升上来"（`services::changelog`） |
 | `Database::with_connection(f)` / `with_transaction(f)` | 持锁执行；事务为 `BEGIN IMMEDIATE`，`Err` / panic 回滚 |
 | `Database::new_in_memory()` | 测试用（`cfg(test)` 或 feature `test-util`） |
 | `db::{Todo, SubTask, CreateTodoRequest, UpdateTodoRequest, CreateSubTaskRequest, UpdateSubTaskRequest, AppSettings, ExportData, WindowPosition, WindowSize, ScreenConfig, SaveScreenConfigRequest, Fence, FenceItem, UpdateFenceRequest, Tombstone, TodoList, ListTombstone}` | 模型（serde camelCase，与旧版 / cloud 一致）。`Todo.list_id: Option<i64>`（`None` = 归属未知，显示在默认清单，序列化时不写）与 `Todo.list_updated_at: Option<String>`（归属自己的版本，只给同步 / 导出用；归属未知时恒为 `None`） |
@@ -212,6 +213,7 @@ macOS 专属测试（`fence_fs` 的真实 `renamex_np` 移动往返 / 撞名顺�
 | `top_on_wake(db) -> bool` / `set_top_on_wake(db, bool)` | 只写键；关闭时 app 立即撤置顶 | `get_top_on_wake` / `set_top_on_wake` |
 | `struct WindowBackground { color, alpha }`、`window_background(db)` / `set_window_background(db, color, alpha)` | 默认 `#000000` / 0.45；alpha 夹到 0~1 | `get_window_background` / `set_window_background` |
 | `show_calendar(db) -> R<bool>` / `set_show_calendar(db, bool)` | 默认 false | `get_show_calendar` / `set_show_calendar` |
+| `last_run_version(db) -> R<Option<String>>` / `set_last_run_version(db, &str)`、`LAST_RUN_VERSION_KEY` | 本机上次运行的程序版本（settings `last_run_version`，键不存在 / 空串 = `None`；没有迁移）。**设备本地**：不进 `AppSettings` / `SYNCED_SETTING_KEYS`、不导出不同步（同 `fence_onedrive_notice_shown`）；app 的更新日志弹窗用 | （新增） |
 
 > `view_mode` / `text_theme` / `show_calendar`（以及 settings `is_fixed`）是同步键、旧设备照常读写，3.1 起只作迁移 v31 的初始值，app 不再读写
 > 上面这几组函数——清单 / 日历窗口的视图、日 / 夜、显示日历、锁定在 `window_prefs`。

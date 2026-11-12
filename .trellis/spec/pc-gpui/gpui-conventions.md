@@ -272,10 +272,11 @@
 
 | 变量 | 作用 |
 |---|---|
-| `MINI_TODO_DATA_DIR` | 数据目录（库 / 图片 / 备份 / 图标缓存）、日志 `<dir>/logs`；**不启用单实例、不刷新开机自启项**。与安装版并存实测时必须带上 |
+| `MINI_TODO_DATA_DIR` | 数据目录（库 / 图片 / 备份 / 图标缓存）、日志 `<dir>/logs`；**不启用单实例、不刷新开机自启项**、不自动弹更新日志也不写本机版本记录。与安装版并存实测时必须带上 |
 | `MINI_TODO_FENCES_ROOT` | 收纳根目录（代替 `%USERPROFILE%\MiniTodo收纳箱`；macOS `~/MiniTodo收纳箱`） |
 | `MINI_TODO_SCREEN_ID_FILE` | 文件内容非空时替代屏幕组合 ID |
 | `MINI_TODO_DEBUG_OPEN` | 加载完数据后额外打开的窗口（截图 / e2e 用，格式见 `pc-gpui/scripts/README.md`）；这些窗口不走模态关系 |
+| `MINI_TODO_DEBUG_CHANGELOG` | `auto`：数据隔离下也按正常规则判定启动时是否弹出更新日志、写 settings `last_run_version`（`services::changelog`；默认隔离时既不弹也不写，e2e / regress 先 seed 再启动不会被弹窗打乱） |
 | `MINI_TODO_DEBUG_LATEST_VERSION` | 版本检查不联网，直接当作最新版本 |
 | `MINI_TODO_DEBUG_DIALOG_PATH` | 导出 / 导入的文件对话框不弹出，直接返回该路径 |
 | `MINI_TODO_DEBUG_WINDOWS_UI` | `1` 时 Linux / macOS 上也显示 Windows 专有的设置项 |

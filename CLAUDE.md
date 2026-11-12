@@ -70,22 +70,25 @@ mini-todo/
 │   │       ├── README.md                   # 模块地图、约定、接口表、调试开关（维护者必读）
 │   │       ├── build.rs                    # Windows：嵌 exe 图标（资源 ID 1）+ 版本信息；manifest 由 gpui 嵌，不要重复（其它目标直接 return）
 │   │       ├── assets/                     # icon.ico；icon.icns（mac bundle 图标，取自 2.5.0）、tray-template.png（mac 菜单栏模板图标）；
-│   │       │                               # icons/ep/*.svg（Element Plus）、icons/app/*.svg（自定义）
+│   │       │                               # icons/ep/*.svg（Element Plus）、icons/app/*.svg（自定义）；
+│   │       │                               # changelog.md（应用内更新日志，include_str! 嵌入，写法见文件头）
 │   │       └── src/
 │   │           ├── lib.rs / main.rs        # run()：日志 → 单实例 → 数据库 → Application(QuitMode::Explicit) → 清单 / 日历窗口 → 后台服务
 │   │           ├── theme.rs                # 颜色 / 字体 / 圆角 / 间距 / 阴影 token 的唯一来源（按窗口分节）
 │   │           ├── state.rs                # AppState（Entity + Global）：跨窗口共享状态（待办、清单、窗口属性的内存副本）与待办 / 清单 / 设置写操作
 │   │           ├── db.rs                   # Db 全局（Arc<Database>）、spawn_db（阻塞调用放后台）
 │   │           ├── assets.rs               # EpIcon / AppIcon 嵌入表
-│   │           ├── util/                   # datetime、image_ref（minitodo-image://）、file_link（链接白名单）、editor_shortcuts
+│   │           ├── util/                   # datetime、image_ref（minitodo-image://）、file_link（链接白名单）、editor_shortcuts、version（版本比较）
 │   │           ├── windows/                # WindowManager（mod.rs，含 DebugOpen）+ list_window/（清单窗口：标题栏、清单名改名 / 删除、
 │   │           │                           # 列表、四象限、行右键 row_menu）、calendar_window/（日历窗口：网格、清单筛选 filter）、
 │   │           │                           # block.rs（BlockKey、清单 / 日历窗口的自绘移动与缩放 BlockDrag）、drag.rs（与收纳箱共用的自绘拖动）、
-│   │           │                           # snap.rs（吸附纯逻辑）、editor/、subtask、completed、notification、settings/、fence/、gallery（控件样例，仅调试）
+│   │           │                           # snap.rs（吸附纯逻辑）、editor/、subtask、completed、changelog（更新日志）、notification、settings/、fence/、
+│   │           │                           # gallery（控件样例，仅调试）
 │   │           ├── ui/                     # Element Plus 风格共享控件（button、input、ep_*、message、message_box、markdown*…）
 │   │           ├── services/               # 托盘 / 菜单栏图标、单实例、开机自启、同步编排、自动同步、提醒调度、系统通知、
 │   │           │                           # 清单 / 日历窗口生命周期（block_windows）、窗口模式（window_mode/：按窗口的状态机、几何持久化）、
-│   │           │                           # 吸附组（snap）、整个应用的提示（notice）、收纳箱、版本检查、日志；mac_menu.rs（macOS 应用菜单与 Dock 唤起）
+│   │           │                           # 吸附组（snap）、整个应用的提示（notice）、收纳箱、版本检查、更新日志（changelog）、日志；
+│   │           │                           # mac_menu.rs（macOS 应用菜单与 Dock 唤起）
 │   │           └── platform/               # GPUI 没有的窗口能力：windows.rs（Win32）、macos/（mod.rs GPUI 胶水 + ns.rs AppKit 原始调用，含收纳箱桌面层）、
 │   │                                       # mac_geometry.rs（mac 坐标换算，全平台编译带单测）、fallback.rs（Linux）、embed.rs、subclass.rs…
 │   └── scripts/
@@ -323,6 +326,22 @@ mini-todo/
 - 开机自启（Windows 注册表 Run 项 / macOS LaunchAgent）、版本更新检查（GitHub `releases/latest`，默认清单窗口标题栏版本号旁红点；不会提示预发布版）
 - 运行日志落盘（2MB 轮转，保留 1 份旧日志）
 
+### 更新日志
+- 内容是随程序嵌入的 `pc-gpui/crates/app/assets/changelog.md`（`include_str!`）：每个版本一个二级标题 `## <版本号>（YYYY-MM-DD）`，下面是面向普通用户的
+  简短中文要点（Markdown，可有 `###` 小标题；不写下载、安装放行、云端组件；禁止 emoji）；`## 未发布` 放已合入还没发版的改动，应用里不显示，
+  发版改版本号时把它改成版本号。解析容错（未知标题 / 空段落 / 重复版本 / 代码块里的 `##` 都忽略），按版本号从新到旧显示。
+  单测 `current_version_has_a_changelog_section`：工作区版本在更新日志里没有段落时 CI 失败
+- **升级后第一次运行时弹出**（`services::changelog::check_on_startup`，`lib.rs` 加载完数据后）：本机记录 settings `last_run_version`（设备本地，见「当前同步覆盖范围」），
+  判定是纯函数 `decide`：记录 = 当前版本什么都不做；没有记录时按 core `Database::schema_version_at_open`（本次启动迁移前的库版本）区分——0（新装）只写记录，
+  `< 31`（3.0.x 及更早）显示所有 `<=` 当前版本的段落，`>= 31` 按上次是 3.1.0-pre（显示 `(3.1.0-pre, 当前]`）；记录较旧显示 `(记录, 当前]`；降级或区间里没有段落只写记录。
+  弹出（窗口打开成功）或判定不弹时把记录更新为当前版本；以默认清单窗口为打开方（模态、不设 owner，同托盘「打开设置」）
+- 设置 → 关于「更新日志」随时查看全部版本（`<=` 当前，以设置窗口为打开方的模态子窗口）
+- 窗口 `windows/changelog.rs`：520×600 可缩放，自绘标题栏 + 可滚动的 Markdown 只读渲染（每个版本一个标题：版本号 + 日期）+ 底部「知道了」，Esc 关闭；
+  自动弹出时开头一句"已更新到 x"
+- 测试环境：debug 构建 + `MINI_TODO_DATA_DIR` 时**不自动判定、不写记录**（e2e / regress / 介绍视频常先 seed 再启动 = 已有数据库、没有记录），
+  `MINI_TODO_DEBUG_CHANGELOG=auto` 恢复；`MINI_TODO_DEBUG_OPEN=changelog` 直接打开窗口（全部版本）。release 一律按正常规则
+  （CI 的 release 冒烟 / P 组都在一次性虚拟机的全新数据目录上跑 = 新装，不弹）
+
 ### macOS（预览）
 - 能力对齐 2.5.0 mac 版（再加上 3.0 的全部界面与功能），另有桌面收纳箱（2.5.0 没有，见「桌面收纳箱」）与 3.1 的多清单 / 日历窗口（没有 mac 专属代码，
   走共用路径，没在 Mac 上跑过）；清单 / 日历窗口没有嵌入桌面；**未经真机验收**，
@@ -492,6 +511,7 @@ mini-todo/
 | `window_prefs` / `window_layouts` | 否 | 清单 / 日历窗口的设备本地属性与布局（同 `screen_configs`）；也不进导入导出 |
 | `fences` / `fence_items` / `fence_layouts` | 否 | 桌面收纳箱：路径与屏幕坐标是设备相关数据，性质同 `screen_configs`；也不进导入导出 |
 | settings `fence_onedrive_notice_shown` | 否 | 设备本地提示标记（Windows 的 OneDrive 与 macOS 的 iCloud 提示共用），有意不进 `AppSettings` / `SYNCED_SETTING_KEYS` |
+| settings `last_run_version` | 否 | 本机上次运行的程序版本（更新日志弹窗用；没有迁移，键不存在 = 没记录过），有意不进 `AppSettings` / `SYNCED_SETTING_KEYS`、不导出 |
 | `sync_meta` / `migrations` | 否 | 本机状态 / 结构性表 |
 
 #### 向后兼容
@@ -509,7 +529,7 @@ mini-todo/
 当新增数据库迁移时，请检查（路径均在 `pc-gpui/crates/core/src/` 下，另注明的除外）：
 1. 新增的 **settings 键值** 是否已加入 `AppSettings`（含 `#[serde(default)]`）、`data.rs` 的 `read_app_settings` / `write_app_settings`；
    需要跨设备同步的再加入 `SYNCED_SETTING_KEYS`（设备相关的不要加）；需要界面的再改 `crates/app`（`state.rs`、`windows/settings/`）。
-   例外：纯设备本地的提示 / 状态键（如 v29 的 `fence_onedrive_notice_shown`）有意不进 `AppSettings`，
+   例外：纯设备本地的提示 / 状态键（如 v29 的 `fence_onedrive_notice_shown`、更新日志的 `last_run_version`）有意不进 `AppSettings`，
    登记在 `.trellis/spec/backend/sync-protocol.md` §3.6
 2. 所有 settings 写入走 `db::settings_kv::set_setting`（禁止 `INSERT OR REPLACE`，否则每次写都会刷新同步版本）
 3. 新增的 **数据表** 是否需要同步：需要则加触发器维护 `local_seq`、在 `db/sync_store.rs` 中实现读写/合并/墓碑，
@@ -567,7 +587,8 @@ macOS（与 2.5.0 mac 版 `mini-todo_2.5.0_universal.dmg` 的实物 Info.plist �
   → 主题 →（macOS）应用菜单 → UiLayer / Db / WindowManager / AppState → 整个应用的提示（notice）→ 单实例唤起监听
   → 清单 / 日历窗口（`block_windows::start`：迁移 ui-state → 同步读清单、窗口属性、运行时偏好、屏幕组合 → 默认清单窗口（总是显示）
     →「显示日历」开着时开日历 → 其它没隐藏的清单窗口（隐藏的启动时不建）；按当前屏幕组合恢复几何与锁定 → 观察清单列表、5 秒变更轮询、检查更新）
-  → 托盘 / 菜单栏图标 → 自动同步定时器 → 提醒调度 → 恢复收纳箱窗口 → 开机自启自愈 → 加载设置与待办 →（debug）MINI_TODO_DEBUG_OPEN
+  → 托盘 / 菜单栏图标 → 自动同步定时器 → 提醒调度 → 恢复收纳箱窗口 → 开机自启自愈 → 加载设置与待办
+  → 更新日志（`services::changelog::check_on_startup`：升级后第一次运行时以默认清单窗口为打开方弹出）→（debug）MINI_TODO_DEBUG_OPEN
 ```
 
 ### 跨窗口状态与通信
@@ -598,12 +619,13 @@ macOS（与 2.5.0 mac 版 `mini-todo_2.5.0_universal.dmg` 的实物 Info.plist �
 | 待办详情 / 编辑 | `editor::open(cx, parent, todo_id, EditorMode::{View, Edit})`；清单 / 日历窗口新建用 `editor::open_new(cx, parent, NewTodoPreset)`（FAB / Ctrl+N / 双击空白 / 双击象限 / 双击日历某天） | 1080×600；`todo_id = None` 为新建（「清单」下拉预选默认清单 / 预设的清单；预设还可带象限、开始时间，算作初始基线） |
 | 子任务 | `subtask::open` / `subtask::open_draft` | 800×750，查看 / 编辑 |
 | 已完成 | `completed::open(cx, parent, list_id)` | 460×550，只列本清单（有效清单）的已完成；搜索、恢复、删除 |
+| 更新日志 | `changelog::open(cx, parent, sections, upgraded)` / `changelog::open_all(cx, parent)` | `WindowKind::Changelog`，520×600、可缩放（最小 420×400）；升级后自动弹出（打开方默认清单窗口、不设 owner，只显示升级区间）/ 设置 → 关于（打开方设置窗口，全部版本）；Esc / 「知道了」关闭 |
 | 设置 | `settings::open(cx, parent, SettingsTab::{General, Appearance, Data, Screen, About})` | 680×560；常规 / 外观 / 数据与同步 / 屏幕配置 / 关于 |
 | 应用内通知 | `notification::open` | 320×120，透明、`WindowKind::PopUp`、不抢焦点 |
 | 收纳箱 | `services::fences`（`fence::open` 等转发） | 每个收纳箱一个窗口，key `fence-{id}`；Windows 始终嵌入桌面层，macOS 是桌面图标层之上的不激活面板（`PopUp`）；不可关闭（删除走 `close_deleted`） |
 | 控件样例 | `gallery::open` | 仅调试（`MINI_TODO_DEBUG_OPEN=gallery`） |
 
-打开方是清单 / 日历窗口、已完成、编辑窗口时，子窗口是模态的（同一时刻一个，打开方显示遮罩，Windows 上以打开方为 owner；macOS 没有 owner 关系）；
+打开方是清单 / 日历窗口、已完成、编辑窗口、设置窗口（关于页打开的更新日志）时，子窗口是模态的（同一时刻一个，打开方显示遮罩，Windows 上以打开方为 owner；macOS 没有 owner 关系）；
 打开方是任一清单 / 日历窗口时，子窗口关闭后自动 `reload_todos`，设置窗口关闭后再重读设置并重启自动同步。托盘「添加待办项」/「打开设置」、
 应用菜单「设置…」以默认清单窗口为打开方；设置里的「深色主题」切的是打开它的那个窗口。
 
@@ -846,11 +868,12 @@ debug 专用环境变量（**只在 debug 构建读取，release 一律忽略**�
 
 | 变量 | 作用 |
 |---|---|
-| `MINI_TODO_DATA_DIR` | 数据目录（库 / 图片 / 备份 / 图标缓存）、日志（`<dir>\logs`）都改到该目录；不启用单实例、不刷新开机自启注册表项；托盘提示"Mini Todo（开发版）" |
+| `MINI_TODO_DATA_DIR` | 数据目录（库 / 图片 / 备份 / 图标缓存）、日志（`<dir>\logs`）都改到该目录；不启用单实例、不刷新开机自启注册表项；不自动弹更新日志、不写本机版本记录；托盘提示"Mini Todo（开发版）" |
 | `MINI_TODO_FENCES_ROOT` | 收纳根目录改为该目录（代替 `%USERPROFILE%\MiniTodo收纳箱` / macOS `~/MiniTodo收纳箱`） |
 | `MINI_TODO_DESKTOP_DIR` | "用户桌面"改为该目录（收纳箱移回的兜底目标、"不能收纳桌面本身"的保护、云同步提示的"来自桌面"判断）；mac e2e 用它避开真实 `~/Desktop` 的隐私授权框 |
 | `MINI_TODO_SCREEN_ID_FILE` | 文件内容非空时替代屏幕组合 ID，用于模拟显示器组合变化 |
-| `MINI_TODO_DEBUG_OPEN` | 加载完数据后额外打开的窗口（`main` = 默认清单窗口、`list:<id>` / `list:new`、`calendar`、`editor:<id>[:view\|:edit]`、`settings[:<页>]`、`fence:new` 等，格式见 `pc-gpui/scripts/README.md`） |
+| `MINI_TODO_DEBUG_OPEN` | 加载完数据后额外打开的窗口（`main` = 默认清单窗口、`list:<id>` / `list:new`、`calendar`、`editor:<id>[:view\|:edit]`、`settings[:<页>]`、`changelog`（更新日志，全部版本）、`fence:new` 等，格式见 `pc-gpui/scripts/README.md`） |
+| `MINI_TODO_DEBUG_CHANGELOG` | `auto`：数据隔离（`MINI_TODO_DATA_DIR`）下也按正常规则判定启动时是否弹出更新日志、写本机记录 `last_run_version`（默认隔离时既不弹也不写） |
 | `MINI_TODO_DEBUG_LATEST_VERSION` | 版本检查不联网，直接当作 GitHub 最新版本（如 `v2.6.0`） |
 | `MINI_TODO_DEBUG_DIALOG_PATH` | 导出 / 导入的文件对话框不弹出，直接返回该路径 |
 | `MINI_TODO_DEBUG_WINDOWS_UI` | `1` 时 Linux / macOS 上也显示 Windows 专有的设置项（截图对照用） |
@@ -873,6 +896,8 @@ debug 专用环境变量（**只在 debug 构建读取，release 一律忽略**�
 - `cloud-ci.yml`：fmt / clippy / test + Skill 单测
 - **版本号只有一处**：`pc-gpui/Cargo.toml` 的 `[workspace.package] version`（改完 `Cargo.lock` 同步），当前 `3.1.0-pre`。cloud 版本在
   `cloud/Cargo.toml`，与 tag 无关。发布步骤与安装器契约见 `.trellis/spec/pc-gpui/release.md`
+- 改版本号时同步改应用内更新日志 `pc-gpui/crates/app/assets/changelog.md`：把 `## 未发布` 改成 `## <版本号>（日期）`（或补写该版本的段落）；
+  忘了写时单测 `current_version_has_a_changelog_section` 让 `cargo test` / CI 失败
 
 ## 注意事项
 
