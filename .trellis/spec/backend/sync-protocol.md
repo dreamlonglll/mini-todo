@@ -76,7 +76,7 @@ Persisted PC settings keys (device-local, never synced): `webdav_remote_etag`, `
 (recorded only), `webdav_synced_settings_at`, `webdav_last_sync_at`, `webdav_device_id`. Change
 counters live in `sync_meta(local_seq, synced_seq)`, maintained by triggers on `todos` / `subtasks` / `todo_lists`
 (`list_tombstones`, like `tombstones`, has no trigger). Migration v31 clears `webdav_remote_etag` once.
-其他设备本地数据（屏幕配置、桌面收纳箱、`fence_onedrive_notice_shown`）见 §3.6。
+其他设备本地数据（屏幕配置、桌面收纳箱、`fence_onedrive_notice_shown`、`last_run_version`）见 §3.6。
 cloud keeps the equivalent in `meta` (`dirty`, `base_etag`, `base_last_modified`, `remote_envelope`, one-shot `lists_base_reset_v1`).
 
 ### 3. Contracts
@@ -202,6 +202,7 @@ cloud keeps the equivalent in `meta` (`dirty`, `base_etag`, `base_last_modified`
 | `fence_items` 表 | v29（v30 加 `hidden`） | 收纳箱项目的排序、原始路径与隐藏标记（内容以本机收纳文件夹为准） |
 | `fence_layouts` 表 | v29 | 收纳箱按屏幕组合记忆的位置 |
 | settings `fence_onedrive_notice_shown` | v29 | 首次收纳时的云同步一次性提示是否已显示（Windows OneDrive；macOS 的 iCloud 提示共用这个键，键名不变） |
+| settings `last_run_version` | 3.1 更新日志（**没有迁移**，键不存在 = 没记录过） | 本机上次运行的程序版本（core `settings::LAST_RUN_VERSION_KEY`，`last_run_version` / `set_last_run_version`）：app 的更新日志弹窗据此判断"升级后第一次运行"、显示哪些版本（`services::changelog`）。每台电脑各自升级、各自弹一次，所以不同步 |
 | settings `webdav_remote_etag` / `webdav_last_modified` / `webdav_synced_settings_at` / `webdav_last_sync_at` / `webdav_device_id` | 多个版本 | 同步自身的本机状态（见 §2），WebDAV 连接配置同样不同步 |
 
 规则：
@@ -212,13 +213,15 @@ cloud keeps the equivalent in `meta` (`dirty`, `base_etag`, `base_last_modified`
 - 同步键 `is_fixed` / `text_theme` / `view_mode` / `show_calendar` 仍在 `SYNCED_SETTING_KEYS`（旧设备照常读写），但 3.1 起只作迁移 v31 的
   初始值，界面改读写上面两张设备本地表。
 - 设备本地的 settings 键不进 `AppSettings`、不进 `db::settings_kv::SYNCED_SETTING_KEYS`，`read_app_settings` / `write_app_settings`
-  不读写它们，因此导入备份、强制拉取（`SyncMode::ForcePull`）应用远端设置时也不会覆盖它们。`fence_onedrive_notice_shown` 是对 `CLAUDE.md`
-  「维护检查清单」第 1 条的**有意偏离**（原因见 [desktop-fences.md §3.3](./desktop-fences.md)）。
+  不读写它们，因此导入备份、强制拉取（`SyncMode::ForcePull`）应用远端设置时也不会覆盖它们。`fence_onedrive_notice_shown` 与 `last_run_version`
+  是对 `CLAUDE.md`「维护检查清单」第 1 条的**有意偏离**（前者原因见 [desktop-fences.md §3.3](./desktop-fences.md)；后者是本机状态，
+  放进 `AppSettings` 会随导入备份 / 强制拉取被改写，导致升级后不弹或重复弹）。
 - 新增设备本地数据时：在本表登记，并在 `CLAUDE.md`「当前同步覆盖范围」表里标"否"。
 - 测试：`migrations::v29_fence_writes_do_not_count_as_sync_changes`（增删改收纳箱表后 `local_seq` 不变、墓碑数为 0）、
   `migrations::v30_hidden_flags_do_not_count_as_sync_changes`（写 `hidden` / `show_hidden` 不计 `local_seq`）、
   `fence::items` 的 `onedrive_notice_is_claimed_once_and_stays_device_local`（不在 `SYNCED_SETTING_KEYS`，导出的 `AppSettings` JSON 里没有它）、
-  `migrations::v31_window_tables_are_device_local_and_layouts_cascade`、`window_prefs::window_prefs_are_device_local`。
+  `migrations::v31_window_tables_are_device_local_and_layouts_cascade`、`window_prefs::window_prefs_are_device_local`、
+  `settings::last_run_version_round_trips_and_stays_device_local`（不在 `SYNCED_SETTING_KEYS`、不改设置版本与 `local_seq`、`AppSettings` 与导出文件里都没有它）。
 
 ### 4. Validation & Error Matrix
 

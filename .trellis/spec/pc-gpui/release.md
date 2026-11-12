@@ -18,13 +18,17 @@
 - mac 的 `Info.plist` 由 `pc-gpui/scripts/macos/bundle.sh` 从同一个 `[workspace.package] version` 读（awk），`CFBundleShortVersionString` /
   `CFBundleVersion` 取 `-` / `+` 之前的部分（`3.0.2-pre` → `3.0.2`，§6.2）；完整版本号由应用内关于页显示
 - cloud 有自己的版本（`cloud/Cargo.toml`），与 tag 无关，只进 cloud 资产名
+- **应用内更新日志** `pc-gpui/crates/app/assets/changelog.md`（编进程序，升级后第一次运行时弹出、设置 → 关于随时查看）必须有当前版本的段落：
+  改版本号时把 `## 未发布` 改成 `## <version>（YYYY-MM-DD）`（没有「未发布」段落就新写一段，放在最上面），写法见文件头。
+  单测 `services::changelog::tests::current_version_has_a_changelog_section` 兜底：工作区版本在更新日志里没有段落时 `cargo test` 失败、CI 变红。
+  内容是给普通用户看的简短要点（从发布说明里提炼），不写下载、安装放行、云端组件、升级兼容
 
 ## 2. 预发布
 
 - tag 含 `-`（如 `v3.0.0-pre`）→ GitHub pre-release；不含 → 正式版
 - 应用内更新检查走 `/releases/latest`（`crates/app/src/services/update_check.rs`），**它不返回 pre-release**：
   发预发布版不会提示已装正式版的用户升级
-- `compare_versions`（`crates/app/src/windows/list_window/logic.rs`）按 semver 认预发布：`3.0.0-pre < 3.0.0`、
+- `compare_versions`（`crates/app/src/util/version.rs`，版本检查与更新日志共用）按 semver 认预发布：`3.0.0-pre < 3.0.0`、
   `2.5.0 < 3.0.0-pre`；装了预发布版的用户在正式版发布后能看到更新红点。改这个函数必须保留 `versions_compare_prerelease` 单测
 
 ## 3. release.yml 流程
@@ -212,7 +216,8 @@ mini-todo.app/Contents/
 
 ## 7. 发版步骤
 
-1. 改 `pc-gpui/Cargo.toml` 版本 → `cargo update --workspace` → 写好 `.github/release-notes/v<ver>.md`（中文，版式照上一版）→ 提交
+1. 改 `pc-gpui/Cargo.toml` 版本 → `cargo update --workspace` → 写好 `.github/release-notes/v<ver>.md`（中文，版式照上一版）→
+   把 `pc-gpui/crates/app/assets/changelog.md` 的 `## 未发布` 改成 `## <ver>（发版日期）`（核对要点与发布说明一致，§1）→ `cargo test --workspace --locked` → 提交
 2. 推 main，等 `PC (GPUI) CI` 绿（含 macOS 作业）；`Cache warm` 会因 `Cargo.lock` 变化触发，等它跑完发版能命中缓存
 3. `git tag v<ver> && git push origin v<ver>` → `Release` 运行：`gh run list --workflow Release --limit 3`
    （同一 tag 出现多份运行时它们会排队，必要时 `gh run cancel` 多余的）

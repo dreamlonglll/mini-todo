@@ -162,6 +162,7 @@ slug_of() {
     "查看子任务"|"编辑子任务") echo subtask ;;
     "设置") echo settings ;;
     "已完成") echo completed ;;
+    "更新日志") echo changelog ;;
     "通知") echo notification ;;
     收纳箱*) echo fence ;;
     *) echo "list" ;;  # 其它清单窗口：标题就是清单名

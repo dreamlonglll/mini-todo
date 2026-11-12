@@ -96,7 +96,7 @@ pc-gpui/scripts/shot.sh [选项] <输出目录>
 ```
 
 输出：`<name>-screen.png`（整屏）、`<name>-<窗口>.png`（按窗口几何从整屏裁剪：`main`（默认清单窗口）/ `calendar` /
-`list`（其它清单窗口，标题是清单名）/ `editor` / `subtask` / `settings` / `completed` / `notification` / `fence`，同类多个时加 `-1`、`-2`）、
+`list`（其它清单窗口，标题是清单名）/ `editor` / `subtask` / `settings` / `completed` / `changelog` / `notification` / `fence`，同类多个时加 `-1`、`-2`）、
 `<name>-app.log`（应用日志 / 标准输出）。
 
 例：
@@ -135,6 +135,7 @@ pc-gpui/scripts/shot.sh --no-build --open main,list:new --window 清单 /tmp/sho
 | `subtask:<subtaskId>` / `subtask:<subtaskId>:view` / `subtask:<subtaskId>:edit` | 子任务窗口 |
 | `settings` / `settings:<general\|appearance\|data\|screen\|about>` | 设置窗口（指定左侧菜单） |
 | `completed` | 默认清单的已完成 |
+| `changelog` | 更新日志窗口，显示全部版本（`<=` 当前版本，不含「未发布」；同设置 → 关于「更新日志」） |
 | `notification` / `notification:<todoId>` | 应用内通知（无 id 时用默认文案；有 id 时用该待办的标题与描述） |
 | `fence:<fenceId>` | 收纳箱窗口 |
 | `fence:new` | 走托盘 / 菜单栏图标「新增收纳箱」同一实现新建一个收纳箱（在光标所在显示器右上角找空位，建收纳文件夹）并打开 |
@@ -149,13 +150,15 @@ pc-gpui/scripts/shot.sh --no-build --open main,list:new --window 清单 /tmp/sho
 `MINI_TODO_DEBUG_LATEST_VERSION=v2.6.0`（仅 debug）：版本检查不联网、直接当作 GitHub 最新版本，用于截图更新红点 /
 「版本更新」确认框。
 
-其它 debug 专用环境变量（与旧版相同）：`MINI_TODO_DATA_DIR`（数据目录、日志 `<dir>/logs`；不启用单实例、不刷新开机自启项）、
+其它 debug 专用环境变量（与旧版相同）：`MINI_TODO_DATA_DIR`（数据目录、日志 `<dir>/logs`；不启用单实例、不刷新开机自启项；
+GPUI 版另外：不自动弹出更新日志、也不写本机版本记录，见下表 `MINI_TODO_DEBUG_CHANGELOG`）、
 `MINI_TODO_FENCES_ROOT`（收纳根目录）、`MINI_TODO_SCREEN_ID_FILE`（文件内容非空时替代屏幕组合 ID）。
 
 GPUI 版新增的 debug 专用环境变量（release 一律忽略）：
 
 | 变量 | 作用 |
 |---|---|
+| `MINI_TODO_DEBUG_CHANGELOG` | `auto`：数据隔离下也按正常规则判定启动时是否弹出更新日志、写本机记录 settings `last_run_version`。默认（不设）时隔离运行既不弹也不写——e2e / regress / 介绍视频常先用 `seed` 灌数据（= 已有数据库、没有记录），按正常规则会弹窗、打乱窗口断言。手测「从 3.0.x 升级」：用 v30 及更早的库；「从 3.1.0-pre 升级」：v31 库、删掉 `last_run_version` |
 | `MINI_TODO_DEBUG_DIALOG_PATH` | 非空时设置窗口的导出 / 导入文件对话框不弹出，直接返回该路径（导入导出冒烟测试） |
 | `MINI_TODO_DEBUG_WINDOWS_UI` | `1` 时 Linux 上也显示 Windows 专有的设置项（「固定模式时，嵌入桌面中」），与按 Windows 渲染的参考截图对照 |
 | `MINI_TODO_DEBUG_FENCE_STATE` | `onedrive`：收纳箱窗口打开即显示云同步提示面板（Windows / Linux OneDrive 文案，macOS iCloud 文案）；`drag-hover`：显示外部拖入悬停的虚线框（两者在 Linux 上无法真实触发） |
