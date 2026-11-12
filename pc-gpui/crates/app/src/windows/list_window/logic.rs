@@ -1,4 +1,4 @@
-//! 清单窗口的纯逻辑（无 GPUI）：重复提醒文案、提醒时间、象限、拖拽排序。
+//! 清单窗口的纯逻辑（无 GPUI）：重复提醒文案、提醒时间、象限、拖拽排序、双击空白的判定。
 //! 前几项逐字移植自旧前端（`TodoItem.vue`、`utils/quadrant.ts`、`utils/color.ts`），
 //! 都带单测。日历网格与跨天条在 `windows::calendar_window::logic`；版本比较（旧 `appStore.compareVersions`）在 `util::version`。
 
@@ -191,9 +191,42 @@ pub fn move_to(order: &mut Vec<i64>, id: i64, index: usize) {
     order.insert(index, id);
 }
 
+// ----------------------------------------------------------------------
+// 双击空白新建
+// ----------------------------------------------------------------------
+
+/// 双击的两下之间最多隔多久（Windows 双击时间的上限 5 秒；平台已按自己的双击时间算出 `click_count >= 2`，这里只防
+/// 把很久以前的一下错认成第一下）
+pub const DOUBLE_CLICK_MAX: std::time::Duration = std::time::Duration::from_secs(5);
+/// 两下的位置最多差多少（逻辑像素，比平台的双击判定距离宽松）
+pub const DOUBLE_CLICK_SLOP: f32 = 8.;
+
+/// 记下的第一下（`elapsed` 之前、窗口坐标 `first`）与这次的第二下 `second` 是不是同一个双击
+pub fn same_press(elapsed: std::time::Duration, first: (f32, f32), second: (f32, f32)) -> bool {
+    elapsed <= DOUBLE_CLICK_MAX
+        && (first.0 - second.0).abs() <= DOUBLE_CLICK_SLOP
+        && (first.1 - second.1).abs() <= DOUBLE_CLICK_SLOP
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blank_double_click_needs_the_same_first_press() {
+        use std::time::Duration;
+        let ms = Duration::from_millis;
+        assert!(same_press(ms(300), (100., 200.), (102., 199.)));
+        assert!(same_press(ms(300), (100., 200.), (108., 192.)));
+        // 离得太远 / 太久以前的一下不算
+        assert!(!same_press(ms(300), (100., 200.), (109., 200.)));
+        assert!(!same_press(ms(300), (100., 200.), (100., 191.)));
+        assert!(!same_press(
+            Duration::from_secs(6),
+            (100., 200.),
+            (100., 200.)
+        ));
+    }
 
     fn todo(id: i64) -> Todo {
         Todo {

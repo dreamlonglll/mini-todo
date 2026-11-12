@@ -32,7 +32,7 @@ pub mod todo_item;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui_kit::{
     AnyElement, App, Bounds, Context, Entity, FocusHandle, Font, Global, Hsla,
@@ -217,6 +217,10 @@ pub struct ListWindow {
     pub(crate) actions_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     pub(crate) drag: Option<DragSession>,
     pub(crate) fab_dimmed: bool,
+    /// 双击空白新建：上一次按在空白上的第一下（时间、窗口坐标），见 [`ListWindow::on_blank_mouse_down`]
+    blank_press: Option<(Instant, Point<Pixels>)>,
+    /// 这一次按下先经过了待办行（冒泡阶段行的处理先于外层内容区执行；内容区按位置认出同一次按下后清掉）
+    pub(crate) row_press: Option<Point<Pixels>>,
     pointer_in_actions: bool,
     fab_enter: Option<Task<()>>,
     fab_leave: Option<Task<()>>,
@@ -292,6 +296,8 @@ impl ListWindow {
             actions_bounds: Rc::default(),
             drag: None,
             fab_dimmed: false,
+            blank_press: None,
+            row_press: None,
             pointer_in_actions: false,
             fab_enter: None,
             fab_leave: None,
@@ -565,9 +571,13 @@ impl ListWindow {
         self.open_new_todo(None, window, cx);
     }
 
-    /// 双击空白处（列表的空白 / 空状态、四象限网格外：`quadrant = None`；某个象限里：该象限）新建待办。
-    /// 在按下时判断（`click_count >= 2`）；待办行对双击的第二下 `stop_propagation`，到不了这里。处理了就 `stop_propagation`
-    /// （外层的空白处理与下面的缩放手柄不再收到）
+    /// 双击空白处（列表的空白 / 空状态、四象限网格外：`quadrant = None`，挂在内容区 `main-content` 上；某个象限里：该象限）
+    /// 新建待办。在按下时判断（`click_count >= 2`）；待办行对双击的第二下 `stop_propagation`，到不了这里。处理了就
+    /// `stop_propagation`（外层的空白处理与下面的缩放手柄不再收到）。
+    ///
+    /// 两下都要按在空白上：`click_count` 只看两次按下的时间与距离，双击行上的「完成」等按钮时，第一下让行消失（象限 / 列表里
+    /// 只剩这一行时），第二下就落在空白上。所以第一下由最外层的内容区记进 [`ListWindow::blank_press`]（经过待办行的不算，
+    /// 见 [`ListWindow::row_press`]），第二下要与它对得上
     pub(crate) fn on_blank_mouse_down(
         &mut self,
         event: &MouseDownEvent,
@@ -576,6 +586,21 @@ impl ListWindow {
         cx: &mut Context<Self>,
     ) {
         if event.click_count < 2 {
+            // 第一下：象限的处理先于内容区执行，只由内容区（同一次按下的最后一个空白处理）记录
+            if quadrant.is_none() {
+                let on_row = self.row_press.take() == Some(event.position);
+                self.blank_press = (!on_row).then(|| (Instant::now(), event.position));
+            }
+            return;
+        }
+        let first_on_blank = self.blank_press.take().is_some_and(|(at, first)| {
+            logic::same_press(
+                at.elapsed(),
+                (f32::from(first.x), f32::from(first.y)),
+                (f32::from(event.position.x), f32::from(event.position.y)),
+            )
+        });
+        if !first_on_blank {
             return;
         }
         // 拖拽排序中 / 刚松手还在落库：不新建（松手后的下一次按下 click_count 本来就从 1 算起，这里兜底）

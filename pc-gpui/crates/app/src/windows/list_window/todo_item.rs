@@ -104,12 +104,18 @@ impl ListWindow {
             }))
             .on_click(cx.listener(move |this, _, window, cx| this.open_todo(id, window, cx)))
             // 双击行只打开详情：第二下按下不冒泡到外层的"双击空白新建"（列表内容区 / 象限）。行自己的单击记录先于这里
-            // （同一元素里点击的按下记录后注册、冒泡阶段先执行），不受影响
-            .on_mouse_down(MouseButton::Left, |event: &MouseDownEvent, _, cx| {
-                if event.click_count >= 2 {
-                    cx.stop_propagation();
-                }
-            })
+            // （同一元素里点击的按下记录后注册、冒泡阶段先执行），不受影响。第一下照常冒泡，但记下"按在行上"：
+            // 双击行上的「完成」时行会消失、第二下落在空白上，这一下不能算双击空白的第一下（`on_blank_mouse_down`）
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    if event.click_count >= 2 {
+                        cx.stop_propagation();
+                    } else {
+                        this.row_press = Some(event.position);
+                    }
+                }),
+            )
             // 右键：「移动到 ▸」菜单（`row_menu`）
             .on_mouse_down(
                 MouseButton::Right,
