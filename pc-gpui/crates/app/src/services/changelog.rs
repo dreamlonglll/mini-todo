@@ -5,7 +5,7 @@
 //!
 //! - 每个版本一个二级标题 `## <版本号>`，后面可带日期：`## 3.1.0-pre（2026-11-10）`（全角 / 半角括号都行，也可以只用空格隔开）；
 //!   版本号可带前缀 `v`，按 [`compare_versions`]（semver，含预发布）比较
-//! - 段落内容是 Markdown（列表、`###` 小标题……），交给 `ui::markdown` 只读渲染；显示时小标题降一级、至少四级
+//! - 段落内容是 Markdown（列表、`###` 小标题……），交给 `ui::markdown` 只读渲染；显示时小标题降一级、至少四级并加粗
 //!   （[`Section::display_body`]：`###` 按三级标题渲染比版本号还大）
 //! - `## 未发布`：已合入、还没发版的改动，应用里**不显示**；发版改版本号时把它改成 `## <版本号>（日期）`
 //!   （单测 `current_version_has_a_changelog_section` 兜底：工作区版本在更新日志里没有段落时 CI 失败）
@@ -155,17 +155,7 @@ fn level2_heading(line: &str) -> Option<&str> {
     if !(rest.is_empty() || rest.starts_with([' ', '\t'])) {
         return None;
     }
-    let text = rest.trim();
-    // ATX 标题的结尾 `#`（前面要有空白）
-    let without_closing = text.trim_end_matches('#');
-    let text = if without_closing.len() < text.len()
-        && (without_closing.is_empty() || without_closing.ends_with([' ', '\t']))
-    {
-        without_closing.trim_end()
-    } else {
-        text
-    };
-    Some(text)
+    Some(strip_closing_hashes(rest.trim()))
 }
 
 /// 围栏代码块的开始行：行首最多 3 个空格 + 至少 3 个 `` ` `` 或 `~`
@@ -194,8 +184,8 @@ fn closes_fence(line: &str, (marker, count): (char, usize)) -> bool {
 const MIN_BODY_HEADING_LEVEL: usize = 4;
 
 impl Section {
-    /// 窗口里显示的 Markdown：内容里的 ATX 标题降一级、至少 [`MIN_BODY_HEADING_LEVEL`] 级（`###` → `####`），
-    /// 围栏代码块里的不动
+    /// 窗口里显示的 Markdown：内容里的 ATX 标题降一级、至少 [`MIN_BODY_HEADING_LEVEL`] 级并加粗（`### 新功能` →
+    /// `#### **新功能**`；已含 `**` 的不再包），围栏代码块里的不动
     pub fn display_body(&self) -> String {
         let mut fence: Option<(char, usize)> = None;
         let mut out: Vec<String> = Vec::new();
@@ -229,7 +219,31 @@ fn demote_heading(line: &str) -> String {
         return line.to_string();
     }
     let demoted = (level + 1).clamp(MIN_BODY_HEADING_LEVEL, 6);
-    format!("{}{}{after}", &line[..indent], "#".repeat(demoted))
+    // 三级及以下的标题在 `ui::markdown` 里是中等字重（Windows 上实际是常规），降级后与正文列表分不开：整行加粗
+    let text = strip_closing_hashes(after.trim());
+    let text = if text.is_empty() || text.contains("**") {
+        text.to_string()
+    } else {
+        format!("**{text}**")
+    };
+    let hashes = "#".repeat(demoted);
+    if text.is_empty() {
+        format!("{}{hashes}", &line[..indent])
+    } else {
+        format!("{}{hashes} {text}", &line[..indent])
+    }
+}
+
+/// ATX 标题文字去掉结尾的 `#`（前面要有空白，否则是文字的一部分）
+fn strip_closing_hashes(text: &str) -> &str {
+    let without_closing = text.trim_end_matches('#');
+    if without_closing.len() < text.len()
+        && (without_closing.is_empty() || without_closing.ends_with([' ', '\t']))
+    {
+        without_closing.trim_end()
+    } else {
+        text
+    }
 }
 
 /// 标题文字 → 种类：`未发布` / `<版本号>[（日期）]` / 其它
@@ -458,10 +472,10 @@ mod tests {
     #[test]
     fn body_headings_render_below_the_version_title() {
         let mut s = section("3.2.0");
-        s.body = "# 一级\n### 新功能\n#### 细节\n###### 最小\n####### 不是标题\n#没有空格\n    ### 缩进 4 格\n- ### 列表里\n```\n### 代码块里\n```\n###".into();
+        s.body = "# 一级\n### 新功能\n#### 细节 ##\n###### 最小\n### 已经**加粗**\n####### 不是标题\n#没有空格\n    ### 缩进 4 格\n- ### 列表里\n```\n### 代码块里\n```\n###".into();
         assert_eq!(
             s.display_body(),
-            "#### 一级\n#### 新功能\n##### 细节\n###### 最小\n####### 不是标题\n#没有空格\n    ### 缩进 4 格\n- ### 列表里\n```\n### 代码块里\n```\n####"
+            "#### **一级**\n#### **新功能**\n##### **细节**\n###### **最小**\n#### 已经**加粗**\n####### 不是标题\n#没有空格\n    ### 缩进 4 格\n- ### 列表里\n```\n### 代码块里\n```\n####"
         );
     }
 
