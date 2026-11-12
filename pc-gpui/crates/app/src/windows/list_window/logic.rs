@@ -1,8 +1,6 @@
-//! 清单窗口的纯逻辑（无 GPUI）：重复提醒文案、提醒时间、象限、拖拽排序、版本比较。
-//! 前几项逐字移植自旧前端（`TodoItem.vue`、`utils/quadrant.ts`、`utils/color.ts`、`appStore.compareVersions`），
-//! 都带单测。日历网格与跨天条在 `windows::calendar_window::logic`。
-
-use std::cmp::Ordering;
+//! 清单窗口的纯逻辑（无 GPUI）：重复提醒文案、提醒时间、象限、拖拽排序、双击空白的判定。
+//! 前几项逐字移植自旧前端（`TodoItem.vue`、`utils/quadrant.ts`、`utils/color.ts`），
+//! 都带单测。日历网格与跨天条在 `windows::calendar_window::logic`；版本比较（旧 `appStore.compareVersions`）在 `util::version`。
 
 use mini_todo_core::db::Todo;
 use mini_todo_core::db::time::{DefaultTime, parse_local_datetime_with};
@@ -194,69 +192,41 @@ pub fn move_to(order: &mut Vec<i64>, id: i64, index: usize) {
 }
 
 // ----------------------------------------------------------------------
-// 版本
+// 双击空白新建
 // ----------------------------------------------------------------------
 
-/// `compareVersions`：去掉前缀 `v`，按 `.` 逐段数值比较（非数字段按 0）。
-///
-/// 预发布号按 semver 排序：主版本段相同时 `3.0.0-pre < 3.0.0`（装了预发布版的用户在正式版发布后
-/// 也能看到更新提示）；两边都是预发布时逐个标识符比较（数字按数值、数字 < 字母、前缀相同则短的小）。
-/// `+` 之后的构建元数据不参与比较。
-pub fn compare_versions(a: &str, b: &str) -> Ordering {
-    // (数值段, 预发布标识符)
-    let split = |v: &str| -> (Vec<i64>, Option<String>) {
-        let v = v.trim();
-        let v = v.strip_prefix('v').unwrap_or(v);
-        let v = v.split('+').next().unwrap_or(v);
-        let (core, pre) = match v.split_once('-') {
-            Some((core, pre)) => (core, Some(pre.to_string())),
-            None => (v, None),
-        };
-        let nums = core
-            .split('.')
-            .map(|p| p.trim().parse::<i64>().unwrap_or(0))
-            .collect();
-        (nums, pre)
-    };
-    let ((na, pa), (nb, pb)) = (split(a), split(b));
-    for i in 0..na.len().max(nb.len()) {
-        let (x, y) = (
-            na.get(i).copied().unwrap_or(0),
-            nb.get(i).copied().unwrap_or(0),
-        );
-        match x.cmp(&y) {
-            Ordering::Equal => {}
-            other => return other,
-        }
-    }
-    match (pa, pb) {
-        (None, None) => Ordering::Equal,
-        (None, Some(_)) => Ordering::Greater,
-        (Some(_), None) => Ordering::Less,
-        (Some(pa), Some(pb)) => compare_prerelease(&pa, &pb),
-    }
-}
+/// 双击的两下之间最多隔多久（Windows 双击时间的上限 5 秒；平台已按自己的双击时间算出 `click_count >= 2`，这里只防
+/// 把很久以前的一下错认成第一下）
+pub const DOUBLE_CLICK_MAX: std::time::Duration = std::time::Duration::from_secs(5);
+/// 两下的位置最多差多少（逻辑像素，比平台的双击判定距离宽松）
+pub const DOUBLE_CLICK_SLOP: f32 = 8.;
 
-/// semver 预发布标识符比较（`compare_versions` 用）
-fn compare_prerelease(a: &str, b: &str) -> Ordering {
-    let (ia, ib): (Vec<&str>, Vec<&str>) = (a.split('.').collect(), b.split('.').collect());
-    for (x, y) in ia.iter().zip(ib.iter()) {
-        let ord = match (x.parse::<u64>(), y.parse::<u64>()) {
-            (Ok(x), Ok(y)) => x.cmp(&y),
-            (Ok(_), Err(_)) => Ordering::Less,
-            (Err(_), Ok(_)) => Ordering::Greater,
-            (Err(_), Err(_)) => x.cmp(y),
-        };
-        if ord != Ordering::Equal {
-            return ord;
-        }
-    }
-    ia.len().cmp(&ib.len())
+/// 记下的第一下（`elapsed` 之前、窗口坐标 `first`）与这次的第二下 `second` 是不是同一个双击
+pub fn same_press(elapsed: std::time::Duration, first: (f32, f32), second: (f32, f32)) -> bool {
+    elapsed <= DOUBLE_CLICK_MAX
+        && (first.0 - second.0).abs() <= DOUBLE_CLICK_SLOP
+        && (first.1 - second.1).abs() <= DOUBLE_CLICK_SLOP
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blank_double_click_needs_the_same_first_press() {
+        use std::time::Duration;
+        let ms = Duration::from_millis;
+        assert!(same_press(ms(300), (100., 200.), (102., 199.)));
+        assert!(same_press(ms(300), (100., 200.), (108., 192.)));
+        // 离得太远 / 太久以前的一下不算
+        assert!(!same_press(ms(300), (100., 200.), (109., 200.)));
+        assert!(!same_press(ms(300), (100., 200.), (100., 191.)));
+        assert!(!same_press(
+            Duration::from_secs(6),
+            (100., 200.),
+            (100., 200.)
+        ));
+    }
 
     fn todo(id: i64) -> Todo {
         Todo {
@@ -379,40 +349,5 @@ mod tests {
         assert_eq!(order, vec![4, 2, 3, 1]);
         move_to(&mut order, 9, 99);
         assert_eq!(order, vec![4, 2, 3, 1, 9]);
-    }
-
-    #[test]
-    fn versions_compare_numerically() {
-        assert_eq!(compare_versions("v2.6.0", "2.5.0"), Ordering::Greater);
-        assert_eq!(compare_versions("v2.5", "2.5.0"), Ordering::Equal);
-        assert_eq!(compare_versions("2.10.0", "2.9.9"), Ordering::Greater);
-        assert_eq!(compare_versions("v2.4.9", "2.5.0"), Ordering::Less);
-        assert_eq!(compare_versions("vX", "0"), Ordering::Equal);
-    }
-
-    #[test]
-    fn versions_compare_prerelease() {
-        // 预发布版低于同号正式版，高于上一个正式版
-        assert_eq!(compare_versions("v3.0.0", "3.0.0-pre"), Ordering::Greater);
-        assert_eq!(compare_versions("v3.0.0-pre", "3.0.0"), Ordering::Less);
-        assert_eq!(compare_versions("v2.5.0", "3.0.0-pre"), Ordering::Less);
-        assert_eq!(compare_versions("v3.0.1-pre", "3.0.0"), Ordering::Greater);
-        assert_eq!(compare_versions("v3.0.0-pre", "3.0.0-pre"), Ordering::Equal);
-        // 预发布之间按 semver 标识符规则
-        assert_eq!(
-            compare_versions("v3.0.0-pre.2", "3.0.0-pre"),
-            Ordering::Greater
-        );
-        assert_eq!(
-            compare_versions("v3.0.0-pre.10", "3.0.0-pre.9"),
-            Ordering::Greater
-        );
-        assert_eq!(
-            compare_versions("v3.0.0-rc", "3.0.0-pre"),
-            Ordering::Greater
-        );
-        assert_eq!(compare_versions("v3.0.0-1", "3.0.0-pre"), Ordering::Less);
-        // 构建元数据不参与比较
-        assert_eq!(compare_versions("v3.0.0+abc", "3.0.0"), Ordering::Equal);
     }
 }

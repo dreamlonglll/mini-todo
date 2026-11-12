@@ -1,7 +1,8 @@
-//! 「关于」面板（§2.11）：Logo、名称、版本（打开即显示，旧版缺陷 §2.13-2 按预期行为修好）、新版本徽标、检查更新。
+//! 「关于」面板（§2.11）：Logo、名称、版本（打开即显示，旧版缺陷 §2.13-2 按预期行为修好）、新版本徽标、检查更新、
+//! 更新日志（GPUI 版新增：以设置窗口为打开方的模态子窗口，显示全部版本，见 `windows::changelog`）。
 
 use gpui_kit::{
-    Context, InteractiveElement as _, IntoElement, ParentElement as _,
+    Context, Div, ElementId, InteractiveElement as _, IntoElement, ParentElement as _, Stateful,
     StatefulInteractiveElement as _, Styled as _, Window, div, linear_color_stop, linear_gradient,
     prelude::FluentBuilder as _, px,
 };
@@ -14,8 +15,37 @@ use crate::theme::{self, settings_tokens};
 use crate::ui::icon::{icon, spinning};
 use crate::ui::message;
 use crate::ui::message_box::{self, BoxKind, ConfirmOptions};
+use crate::windows::{ChildOf, changelog};
+
+/// 关于页的整行描边按钮（「检查更新」「更新日志」）：居中、gap 8、`padding 12px 16px`、1px 边、圆角 8、14px / 500
+fn outline_button(id: impl Into<ElementId>) -> Stateful<Div> {
+    let t = settings_tokens();
+    div()
+        .id(id)
+        .w_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(8.))
+        .px(px(16.))
+        .py(px(12.))
+        .border_1()
+        .border_color(t.border)
+        .rounded(theme::radius::MD)
+        .bg(t.surface)
+        .text_size(px(14.))
+        .font_weight(theme::WEIGHT_MEDIUM)
+        .text_color(t.label)
+}
 
 impl SettingsWindow {
+    /// 「更新日志」：以本窗口为打开方的模态子窗口（本窗口显示遮罩、获得焦点时把它带回前台），显示全部版本
+    fn open_changelog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let parent = ChildOf::window(window, cx);
+        changelog::open_all(cx, Some(parent));
+        cx.notify();
+    }
+
     fn check_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.checking_update {
             return;
@@ -130,22 +160,7 @@ impl SettingsWindow {
         } else {
             icon(EpIcon::Refresh, 16., t.label).into_any_element()
         };
-        let button = div()
-            .id("check-update")
-            .w_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .gap(px(8.))
-            .px(px(16.))
-            .py(px(12.))
-            .border_1()
-            .border_color(t.border)
-            .rounded(theme::radius::MD)
-            .bg(t.surface)
-            .text_size(px(14.))
-            .font_weight(theme::WEIGHT_MEDIUM)
-            .text_color(t.label)
+        let button = outline_button("check-update")
             .when(checking, |this| {
                 this.opacity(0.6)
                     .cursor(gpui_kit::CursorStyle::OperationNotAllowed)
@@ -161,6 +176,13 @@ impl SettingsWindow {
             } else {
                 "检查更新"
             });
+        let changelog_button = outline_button("open-changelog")
+            .mt(px(12.))
+            .cursor_pointer()
+            .hover(move |s| s.bg(t.window_bg).border_color(t.hover_border))
+            .on_click(cx.listener(|this, _, window, cx| this.open_changelog(window, cx)))
+            .child(icon(EpIcon::Document, 16., t.label))
+            .child("更新日志");
 
         div()
             .flex()
@@ -175,5 +197,6 @@ impl SettingsWindow {
                     .child(info),
             )
             .child(button)
+            .child(changelog_button)
     }
 }

@@ -6,8 +6,10 @@
 //! | [`image_ref`] | `imageRef.ts` | `minitodo-image://` 引用、旧 asset URL 兼容、图片扩展名（K5） |
 //! | [`file_link`] | `fileLink.ts` | 链接协议白名单（http/https/mailto、file:/// 定位、其余拦截） |
 //! | [`editor_shortcuts`] | `editorShortcuts.ts` | 编辑窗口 Esc / Ctrl+Enter |
+//! | [`version`] | `appStore.compareVersions` | 版本号比较（含 semver 预发布排序；版本检查与更新日志共用） |
 
 pub mod datetime;
 pub mod editor_shortcuts;
 pub mod file_link;
 pub mod image_ref;
+pub mod version;

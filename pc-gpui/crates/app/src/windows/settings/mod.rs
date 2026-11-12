@@ -7,6 +7,8 @@
 //! 屏幕配置 / 关于）→ 右侧内容区（`padding 20px 24px`、可滚动、底 `#F8FAFC`）。五个面板的状态都保存在本视图里，
 //! 切换菜单不丢失（旧版 `v-show`）。
 //!
+//! 关于页的「更新日志」以本窗口为打开方（模态：遮罩 0.3、本窗口获得焦点时把它带回前台，同已完成窗口打开编辑窗口）。
+//!
 //! 与旧版的差异：设置窗口与主窗口同进程，所有设置直接改 [`AppState`]（替代 `app-settings-changed` /
 //! `todo-font-changed` / `data-imported` 事件），主窗口观察它刷新。旧版三个缺陷按预期行为修好（§2.13）：
 //! 屏幕配置标出「当前」并禁止删除；关于页直接显示版本号；清空字体下拉 = 恢复默认字体。
@@ -213,6 +215,10 @@ impl SettingsWindow {
                 cx.notify();
             }),
             cx.observe_global::<WindowManager>(|_, cx| cx.notify()),
+            // 关于页打开的更新日志是本窗口的模态子窗口：本窗口获得焦点时把它带回前台
+            cx.observe_window_activation(window, |_, window, cx| {
+                WindowManager::forward_activation(window, cx);
+            }),
             cx.subscribe_in(&url_input, window, |_, _, event: &InputEvent, _, cx| {
                 if matches!(event, InputEvent::Change) {
                     // http:// 明文提示随输入实时出现 / 消失
@@ -392,6 +398,7 @@ impl Render for SettingsWindow {
             SettingsTab::About => self.render_about(window, cx).into_any_element(),
         };
         div()
+            .relative()
             .size_full()
             .flex()
             .flex_col()
@@ -423,6 +430,8 @@ impl Render for SettingsWindow {
                             .child(div().px(px(24.)).py(px(20.)).child(panel)),
                     ),
             )
+            // 关于页打开的更新日志（模态子窗口）期间的遮罩，必须是最后一个子元素
+            .children(super::modal_overlay(window, cx, 0.3))
     }
 }
 

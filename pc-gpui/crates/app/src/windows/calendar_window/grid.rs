@@ -1,6 +1,7 @@
 //! 日历网格（旧 `CalendarView.vue`，规格 §9）：星期头 + 6×7 日格（农历 / 节气 / 节日、休 / 班角标、今天圆点）
 //! + 覆盖在网格上的跨天待办条（所有清单的待办，含已完成，按日历的清单筛选；按行拆段、泳道避让、悬停联动、点击打开详情）。
 //!
+//! 双击日格（待办条以外的地方）新建待办（`CalendarWindow::on_day_mouse_down`）。
 //! 节假日后台加载（每年最多 3 次重试，结果为空时 5s / 10s / 15s 后重载，切月作废旧加载）。
 
 use std::collections::HashMap;
@@ -8,9 +9,9 @@ use std::time::Duration;
 
 use chrono::{Datelike, Local, NaiveDate, Timelike};
 use gpui_kit::{
-    Context, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Task, Window, div, prelude::FluentBuilder as _,
-    px, relative,
+    Context, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Task, Window, div,
+    prelude::FluentBuilder as _, px, relative,
 };
 use mini_todo_core::lunar::{LunarTextKind, lunar_display_text};
 
@@ -290,16 +291,18 @@ impl CalendarWindow {
                 }),
         );
 
-        let rows = (0..6).map(|row| {
-            div()
-                .flex_1()
-                .min_h(px(60.))
-                .flex()
-                .children((0..7).map(|col| {
-                    let view = &cells[row * 7 + col];
-                    self.render_calendar_cell(view, row, col, rc, line)
-                }))
-        });
+        let rows: Vec<_> = (0..6)
+            .map(|row| {
+                div()
+                    .flex_1()
+                    .min_h(px(60.))
+                    .flex()
+                    .children((0..7).map(|col| {
+                        let view = &cells[row * 7 + col];
+                        self.render_calendar_cell(view, row, col, rc, line, cx)
+                    }))
+            })
+            .collect();
 
         let mut bar_elements = Vec::with_capacity(bars.len());
         for bar in bars.iter().filter(|bar| bar.end_col >= bar.start_col) {
@@ -337,9 +340,11 @@ impl CalendarWindow {
         col: usize,
         rc: &CalendarCtx,
         line: gpui_kit::Hsla,
+        cx: &Context<Self>,
     ) -> impl IntoElement {
         let palette = rc.palette;
         let cell = view.cell;
+        let day = cell.date;
         let faded = |el: gpui_kit::Div| {
             if cell.is_current_month {
                 el
@@ -406,6 +411,15 @@ impl CalendarWindow {
             .py(px(3.))
             .when(col < 6, |this| this.border_r_1().border_color(line))
             .when(row < 5, |this| this.border_b_1().border_color(line))
+            // 手形指针提示格子可以操作（双击新建）；待办条在格子之上，指针按条自己的
+            .cursor_pointer()
+            // 双击格子（含灰色的上 / 下月格子；待办条对双击的第二下 stop_propagation，到不了这里）：新建待办
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.on_day_mouse_down(event, day, window, cx)
+                }),
+            )
             .child(
                 div()
                     .flex()
@@ -488,6 +502,13 @@ impl CalendarWindow {
                         cx.stop_propagation();
                         this.open_todo(id, window, cx);
                     }))
+                    // 双击待办条只打开详情：第二下按下不落到下面日格的"双击新建"（条与日格是兄弟元素，不 occlude；
+                    // 条后绘制、监听先执行）。条自己的单击记录先于这里，不受影响
+                    .on_mouse_down(MouseButton::Left, |event: &MouseDownEvent, _, cx| {
+                        if event.click_count >= 2 {
+                            cx.stop_propagation();
+                        }
+                    })
                     .when(bar.is_start, |this| {
                         let text = div()
                             .min_w_0()

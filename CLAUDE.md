@@ -44,7 +44,7 @@ mini-todo/
 │   └── video/                              # 功能介绍视频 mini-todo-intro.mp4（同上；README 内嵌的是它上传到 GitHub 后的附件链接）
 ├── pc-gpui/                                # PC 端（Cargo workspace；详见各 crate README）
 │   ├── Cargo.toml                          # [workspace] members = crates/core、crates/app；[workspace.package] version 是
-│   │                                       # 版本号唯一来源（当前 3.1.0-pre）；release thin LTO + strip
+│   │                                       # 版本号唯一来源（当前 3.1.1-pre）；release thin LTO + strip
 │   ├── Cargo.lock                          # 提交；CI 一律 --locked
 │   ├── crates/
 │   │   ├── core/                           # mini-todo-core：业务核心（不依赖 GPUI / Tauri / tokio，全部阻塞函数）
@@ -70,22 +70,25 @@ mini-todo/
 │   │       ├── README.md                   # 模块地图、约定、接口表、调试开关（维护者必读）
 │   │       ├── build.rs                    # Windows：嵌 exe 图标（资源 ID 1）+ 版本信息；manifest 由 gpui 嵌，不要重复（其它目标直接 return）
 │   │       ├── assets/                     # icon.ico；icon.icns（mac bundle 图标，取自 2.5.0）、tray-template.png（mac 菜单栏模板图标）；
-│   │       │                               # icons/ep/*.svg（Element Plus）、icons/app/*.svg（自定义）
+│   │       │                               # icons/ep/*.svg（Element Plus）、icons/app/*.svg（自定义）；
+│   │       │                               # changelog.md（应用内更新日志，include_str! 嵌入，写法见文件头）
 │   │       └── src/
 │   │           ├── lib.rs / main.rs        # run()：日志 → 单实例 → 数据库 → Application(QuitMode::Explicit) → 清单 / 日历窗口 → 后台服务
 │   │           ├── theme.rs                # 颜色 / 字体 / 圆角 / 间距 / 阴影 token 的唯一来源（按窗口分节）
 │   │           ├── state.rs                # AppState（Entity + Global）：跨窗口共享状态（待办、清单、窗口属性的内存副本）与待办 / 清单 / 设置写操作
 │   │           ├── db.rs                   # Db 全局（Arc<Database>）、spawn_db（阻塞调用放后台）
 │   │           ├── assets.rs               # EpIcon / AppIcon 嵌入表
-│   │           ├── util/                   # datetime、image_ref（minitodo-image://）、file_link（链接白名单）、editor_shortcuts
+│   │           ├── util/                   # datetime、image_ref（minitodo-image://）、file_link（链接白名单）、editor_shortcuts、version（版本比较）
 │   │           ├── windows/                # WindowManager（mod.rs，含 DebugOpen）+ list_window/（清单窗口：标题栏、清单名改名 / 删除、
 │   │           │                           # 列表、四象限、行右键 row_menu）、calendar_window/（日历窗口：网格、清单筛选 filter）、
 │   │           │                           # block.rs（BlockKey、清单 / 日历窗口的自绘移动与缩放 BlockDrag）、drag.rs（与收纳箱共用的自绘拖动）、
-│   │           │                           # snap.rs（吸附纯逻辑）、editor/、subtask、completed、notification、settings/、fence/、gallery（控件样例，仅调试）
+│   │           │                           # snap.rs（吸附纯逻辑）、editor/、subtask、completed、changelog（更新日志）、notification、settings/、fence/、
+│   │           │                           # gallery（控件样例，仅调试）
 │   │           ├── ui/                     # Element Plus 风格共享控件（button、input、ep_*、message、message_box、markdown*…）
 │   │           ├── services/               # 托盘 / 菜单栏图标、单实例、开机自启、同步编排、自动同步、提醒调度、系统通知、
 │   │           │                           # 清单 / 日历窗口生命周期（block_windows）、窗口模式（window_mode/：按窗口的状态机、几何持久化）、
-│   │           │                           # 吸附组（snap）、整个应用的提示（notice）、收纳箱、版本检查、日志；mac_menu.rs（macOS 应用菜单与 Dock 唤起）
+│   │           │                           # 吸附组（snap）、整个应用的提示（notice）、收纳箱、版本检查、更新日志（changelog）、日志；
+│   │           │                           # mac_menu.rs（macOS 应用菜单与 Dock 唤起）
 │   │           └── platform/               # GPUI 没有的窗口能力：windows.rs（Win32）、macos/（mod.rs GPUI 胶水 + ns.rs AppKit 原始调用，含收纳箱桌面层）、
 │   │                                       # mac_geometry.rs（mac 坐标换算，全平台编译带单测）、fallback.rs（Linux）、embed.rs、subclass.rs…
 │   └── scripts/
@@ -111,7 +114,11 @@ mini-todo/
 ## 核心功能
 
 ### 待办管理
-- 创建、编辑、删除待办事项
+- 创建、编辑、删除待办事项。新建入口：清单窗口右下角「+」FAB（锁定时不显示）、清单窗口有焦点时 Ctrl+N（macOS ⌘N，GPUI `secondary-n`，
+  锁定与否都行，清单名改名中不响应）、双击清单窗口的空白处（列表：行以外的空白 / 空状态；四象限：双击某个象限里行以外的地方并预选该象限，
+  颜色同在表单里点了它；网格外的空白不预选象限）——都建到本清单；双击日历的某天（见「视图模式」）；托盘「添加待办项」（默认清单）。
+  双击在按下时判定（`click_count >= 2`）：待办行 / 日历的待办条 / FAB 拦下第二下，双击它们只是打开；拖拽排序中不触发。
+  这些入口都走 `editor::open_new(cx, parent, NewTodoPreset { list_id, quadrant, start_time })`，预设算作表单的初始基线（没改过按 Esc 不弹确认）
 - 描述字段支持 Markdown（存于 `description`）：编辑为"源码 + 预览"——平时显示渲染结果，单击切到源码编辑，失焦回到渲染；
   粘贴普通文字 / Markdown 源码原样插入；渲染支持 GFM 表格 / 任务清单 / 删除线 / 自动链接。编辑模式另有源码 / 预览分栏的放大编辑弹窗
   （`windows/editor/desc_dialog.rs`，「最大化」联动窗口最大化）
@@ -147,11 +154,12 @@ mini-todo/
   空名 / 重名提示并恢复原名）；右键清单名「重命名 / 删除清单」（默认清单的删除置灰）。实现 `windows/list_window/name.rs`
 - 删除：确认框 `确定删除清单「X」吗？N 项待办将移到「待办清单」。` → core `lists::delete`（单事务：其下待办移到默认清单并刷新 `updated_at` /
   `list_updated_at`、删清单、写清单墓碑、删它的窗口记录、从日历筛选移出）→ 关掉它的窗口
-- 待办在清单间移动：编辑表单「四象限」下的「清单」下拉（新建预选打开方的清单：FAB = 本清单，托盘「添加待办项」= 默认清单；编辑已有待办时
+- 待办在清单间移动：编辑表单「四象限」下的「清单」下拉（新建预选打开方的清单：FAB / Ctrl+N / 双击空白 = 本清单，日历双击某天 = 筛选恰好
+  只选了一个清单时是它、否则默认清单，托盘「添加待办项」= 默认清单；编辑已有待办时
   **只有用户真的改了选择**才在 `UpdateTodoRequest` 带 `list_id`，否则归属未知的待办会被写成 1）；列表 / 四象限的待办行右键「移动到 ▸」
   （子菜单列出其它清单，只有默认清单时置灰并提示"没有其它清单"；`windows/list_window/row_menu.rs`，`AppState::move_todo_to_list` 先改本地副本、
   失败回滚）。不做跨窗口拖动
-- 清单窗口的 FAB 建到本清单；「已完成」只看本清单（恢复后回原清单）；日历显示所有清单的待办（可按清单筛选，见「视图模式」）
+- 清单窗口里新建（FAB / Ctrl+N / 双击空白）建到本清单；「已完成」只看本清单（恢复后回原清单）；日历显示所有清单的待办（可按清单筛选，见「视图模式」）
 - 清单定义与删除随 WebDAV 同步（顶层 `todoLists` / `listTombstones`）；同步来的新清单（本机没有窗口记录）自动开窗，同步删除的清单自动关窗
 
 ### 子任务
@@ -180,7 +188,9 @@ mini-todo/
 - **列表视图**：按排序/优先级展示
 - **四象限视图**：拖拽分类
 - **日历窗口**（单例，设置 → 常规「展示日历」/ 托盘「显示日历」勾选，两者同一个设备本地状态 = 日历窗口的 `hidden`）：按日期展示所有清单的待办
-  （含农历、节气、传统节日、法定节假日与调休；跨天条用待办自己的颜色，点击打开只读详情；不能新建待办）。标题栏：月份导航、今天、清单筛选、日 / 夜、锁、设置。
+  （含农历、节气、传统节日、法定节假日与调休；跨天条用待办自己的颜色，点击打开只读详情）。**双击某天**（待办条以外的地方，含灰色的上 / 下月格子；
+  锁定与否都行）新建待办：只预填开始时间 = 那天 00:00（截止、提醒留空；日历按开始时间放格子，保存后就在那天），清单 = 筛选恰好只选了一个且它还在时
+  建到它、否则默认清单（`calendar_window::logic::new_todo_list_id`）。标题栏：月份导航、今天、清单筛选、日 / 夜、锁、设置。
   **清单筛选**（漏斗按钮下拉多选，`windows/calendar_window/filter.rs`，存 `window_prefs.calendar_filter`：`NULL` = 全部，否则清单 id 数组）：
   「全部清单」包含以后新建的清单；从全部取消一个 = 其余清单；勾满或一个不剩回到全部；选了具体清单时新清单不勾；被删除的清单自动移出；
   兜底到默认清单的待办按默认清单参与筛选；不是全部时按钮显示主色。第一次显示且当前屏幕组合没有布局时贴默认清单窗口右侧、与它等高
@@ -220,6 +230,7 @@ mini-todo/
   「背景透明度」（透出桌面）
 - **固定模式**（每个窗口标题栏的锁按钮，`window_mode::toggle_fixed(cx, key)`；托盘不再有「固定模式」）：
   - 固定在用户指定位置：不可拖动、不可缩放（自绘拖动与手柄不挂；`platform::subclass` 的 `FLAG_LOCK_GEOMETRY` 拦截命中测试）
+  - 清单窗口不显示右下角「+」FAB（含嵌入桌面），新建用 Ctrl+N / ⌘N 或双击空白处（见「待办管理」）；空状态文案随之只提示后两者
   - 不在任务栏、不参与 Alt+Tab（`WS_EX_TOOLWINDOW`）；被 Win+D / Win+M 最小化后由 200ms 轮询立即还原
   - 可选贴边自动隐藏、唤起时置顶（设置 → 常规）；经典固定时没有圆角与描边
 - **固定模式时嵌入桌面**（设置 → 常规「固定模式时，嵌入桌面中」，仅 Windows 显示，Win11 24H2+ 保证 Win+D 免疫）：
@@ -314,6 +325,22 @@ mini-todo/
 - 单实例：再次启动时把参数转交给已运行的实例并唤起所有清单窗口（同托盘左键；开机自启拉起的不唤起）；Windows 命名互斥量 + `WM_COPYDATA`，macOS Unix socket
 - 开机自启（Windows 注册表 Run 项 / macOS LaunchAgent）、版本更新检查（GitHub `releases/latest`，默认清单窗口标题栏版本号旁红点；不会提示预发布版）
 - 运行日志落盘（2MB 轮转，保留 1 份旧日志）
+
+### 更新日志
+- 内容是随程序嵌入的 `pc-gpui/crates/app/assets/changelog.md`（`include_str!`）：每个版本一个二级标题 `## <版本号>（YYYY-MM-DD）`，下面是面向普通用户的
+  简短中文要点（Markdown，可有 `###` 小标题；不写下载、安装放行、云端组件；禁止 emoji）；`## 未发布` 放已合入还没发版的改动，应用里不显示，
+  发版改版本号时把它改成版本号。解析容错（未知标题 / 空段落 / 重复版本 / 代码块里的 `##` 都忽略），按版本号从新到旧显示。
+  单测 `current_version_has_a_changelog_section`：工作区版本在更新日志里没有段落时 CI 失败
+- **升级后第一次运行时弹出**（`services::changelog::check_on_startup`，`lib.rs` 加载完数据后）：本机记录 settings `last_run_version`（设备本地，见「当前同步覆盖范围」），
+  判定是纯函数 `decide`：记录 = 当前版本什么都不做；没有记录时按 core `Database::schema_version_at_open`（本次启动迁移前的库版本）区分——0（新装）只写记录，
+  `< 31`（3.0.x 及更早）显示所有 `<=` 当前版本的段落，`>= 31` 按上次是 3.1.0-pre（显示 `(3.1.0-pre, 当前]`）；记录较旧显示 `(记录, 当前]`；降级或区间里没有段落只写记录。
+  弹出（窗口打开成功）或判定不弹时把记录更新为当前版本；以默认清单窗口为打开方（模态、不设 owner，同托盘「打开设置」）
+- 设置 → 关于「更新日志」随时查看全部版本（`<=` 当前，以设置窗口为打开方的模态子窗口）
+- 窗口 `windows/changelog.rs`：520×600 可缩放，自绘标题栏 + 可滚动的 Markdown 只读渲染（每个版本一个标题：版本号 + 日期）+ 底部「知道了」，Esc 关闭；
+  自动弹出时开头一句"已更新到 x"
+- 测试环境：debug 构建 + `MINI_TODO_DATA_DIR` 时**不自动判定、不写记录**（e2e / regress / 介绍视频常先 seed 再启动 = 已有数据库、没有记录），
+  `MINI_TODO_DEBUG_CHANGELOG=auto` 恢复；`MINI_TODO_DEBUG_OPEN=changelog` 直接打开窗口（全部版本）。release 一律按正常规则
+  （CI 的 release 冒烟 / P 组都在一次性虚拟机的全新数据目录上跑 = 新装，不弹）
 
 ### macOS（预览）
 - 能力对齐 2.5.0 mac 版（再加上 3.0 的全部界面与功能），另有桌面收纳箱（2.5.0 没有，见「桌面收纳箱」）与 3.1 的多清单 / 日历窗口（没有 mac 专属代码，
@@ -484,6 +511,7 @@ mini-todo/
 | `window_prefs` / `window_layouts` | 否 | 清单 / 日历窗口的设备本地属性与布局（同 `screen_configs`）；也不进导入导出 |
 | `fences` / `fence_items` / `fence_layouts` | 否 | 桌面收纳箱：路径与屏幕坐标是设备相关数据，性质同 `screen_configs`；也不进导入导出 |
 | settings `fence_onedrive_notice_shown` | 否 | 设备本地提示标记（Windows 的 OneDrive 与 macOS 的 iCloud 提示共用），有意不进 `AppSettings` / `SYNCED_SETTING_KEYS` |
+| settings `last_run_version` | 否 | 本机上次运行的程序版本（更新日志弹窗用；没有迁移，键不存在 = 没记录过），有意不进 `AppSettings` / `SYNCED_SETTING_KEYS`、不导出 |
 | `sync_meta` / `migrations` | 否 | 本机状态 / 结构性表 |
 
 #### 向后兼容
@@ -501,7 +529,7 @@ mini-todo/
 当新增数据库迁移时，请检查（路径均在 `pc-gpui/crates/core/src/` 下，另注明的除外）：
 1. 新增的 **settings 键值** 是否已加入 `AppSettings`（含 `#[serde(default)]`）、`data.rs` 的 `read_app_settings` / `write_app_settings`；
    需要跨设备同步的再加入 `SYNCED_SETTING_KEYS`（设备相关的不要加）；需要界面的再改 `crates/app`（`state.rs`、`windows/settings/`）。
-   例外：纯设备本地的提示 / 状态键（如 v29 的 `fence_onedrive_notice_shown`）有意不进 `AppSettings`，
+   例外：纯设备本地的提示 / 状态键（如 v29 的 `fence_onedrive_notice_shown`、更新日志的 `last_run_version`）有意不进 `AppSettings`，
    登记在 `.trellis/spec/backend/sync-protocol.md` §3.6
 2. 所有 settings 写入走 `db::settings_kv::set_setting`（禁止 `INSERT OR REPLACE`，否则每次写都会刷新同步版本）
 3. 新增的 **数据表** 是否需要同步：需要则加触发器维护 `local_seq`、在 `db/sync_store.rs` 中实现读写/合并/墓碑，
@@ -559,7 +587,8 @@ macOS（与 2.5.0 mac 版 `mini-todo_2.5.0_universal.dmg` 的实物 Info.plist �
   → 主题 →（macOS）应用菜单 → UiLayer / Db / WindowManager / AppState → 整个应用的提示（notice）→ 单实例唤起监听
   → 清单 / 日历窗口（`block_windows::start`：迁移 ui-state → 同步读清单、窗口属性、运行时偏好、屏幕组合 → 默认清单窗口（总是显示）
     →「显示日历」开着时开日历 → 其它没隐藏的清单窗口（隐藏的启动时不建）；按当前屏幕组合恢复几何与锁定 → 观察清单列表、5 秒变更轮询、检查更新）
-  → 托盘 / 菜单栏图标 → 自动同步定时器 → 提醒调度 → 恢复收纳箱窗口 → 开机自启自愈 → 加载设置与待办 →（debug）MINI_TODO_DEBUG_OPEN
+  → 托盘 / 菜单栏图标 → 自动同步定时器 → 提醒调度 → 恢复收纳箱窗口 → 开机自启自愈 → 加载设置与待办
+  → 更新日志（`services::changelog::check_on_startup`：升级后第一次运行时以默认清单窗口为打开方弹出）→（debug）MINI_TODO_DEBUG_OPEN
 ```
 
 ### 跨窗口状态与通信
@@ -587,15 +616,16 @@ macOS（与 2.5.0 mac 版 `mini-todo_2.5.0_universal.dmg` 的实物 Info.plist �
 |---|---|---|
 | 清单窗口 | `services::block_windows`（`show_list` / `create_list` / `reconcile`；`windows/list_window/`） | 每个清单一个，`WindowKind::List`、key `list:<清单 id>`（= `window_prefs` 的 key）；380×600，最小 320×400，透明，自绘移动与缩放（不可系统缩放、没有 Aero Snap / 双击最大化）；系统标题：默认清单窗口固定 `Mini Todo`（e2e 按它找窗口），其它 = 清单名；关闭 = 隐藏 |
 | 日历窗口 | `block_windows::set_calendar_visible`（`windows/calendar_window/`） | 单例，`WindowKind::Calendar`、key `calendar`；最小 420×480，第一次显示贴默认清单窗口右侧、等高；系统标题 `日历`；关闭 = 隐藏（关掉「显示日历」） |
-| 待办详情 / 编辑 | `editor::open(cx, parent, todo_id, EditorMode::{View, Edit})`；清单窗口 FAB 用 `editor::open_new(cx, parent, list_id)` | 1080×600；`todo_id = None` 为新建（「清单」下拉预选默认清单 / `open_new` 的清单） |
+| 待办详情 / 编辑 | `editor::open(cx, parent, todo_id, EditorMode::{View, Edit})`；清单 / 日历窗口新建用 `editor::open_new(cx, parent, NewTodoPreset)`（FAB / Ctrl+N / 双击空白 / 双击象限 / 双击日历某天） | 1080×600；`todo_id = None` 为新建（「清单」下拉预选默认清单 / 预设的清单；预设还可带象限、开始时间，算作初始基线） |
 | 子任务 | `subtask::open` / `subtask::open_draft` | 800×750，查看 / 编辑 |
 | 已完成 | `completed::open(cx, parent, list_id)` | 460×550，只列本清单（有效清单）的已完成；搜索、恢复、删除 |
+| 更新日志 | `changelog::open(cx, parent, sections, upgraded)` / `changelog::open_all(cx, parent)` | `WindowKind::Changelog`，520×600、可缩放（最小 420×400）；升级后自动弹出（打开方默认清单窗口、不设 owner，只显示升级区间）/ 设置 → 关于（打开方设置窗口，全部版本）；Esc / 「知道了」关闭 |
 | 设置 | `settings::open(cx, parent, SettingsTab::{General, Appearance, Data, Screen, About})` | 680×560；常规 / 外观 / 数据与同步 / 屏幕配置 / 关于 |
 | 应用内通知 | `notification::open` | 320×120，透明、`WindowKind::PopUp`、不抢焦点 |
 | 收纳箱 | `services::fences`（`fence::open` 等转发） | 每个收纳箱一个窗口，key `fence-{id}`；Windows 始终嵌入桌面层，macOS 是桌面图标层之上的不激活面板（`PopUp`）；不可关闭（删除走 `close_deleted`） |
 | 控件样例 | `gallery::open` | 仅调试（`MINI_TODO_DEBUG_OPEN=gallery`） |
 
-打开方是清单 / 日历窗口、已完成、编辑窗口时，子窗口是模态的（同一时刻一个，打开方显示遮罩，Windows 上以打开方为 owner；macOS 没有 owner 关系）；
+打开方是清单 / 日历窗口、已完成、编辑窗口、设置窗口（关于页打开的更新日志）时，子窗口是模态的（同一时刻一个，打开方显示遮罩，Windows 上以打开方为 owner；macOS 没有 owner 关系）；
 打开方是任一清单 / 日历窗口时，子窗口关闭后自动 `reload_todos`，设置窗口关闭后再重读设置并重启自动同步。托盘「添加待办项」/「打开设置」、
 应用菜单「设置…」以默认清单窗口为打开方；设置里的「深色主题」切的是打开它的那个窗口。
 
@@ -618,7 +648,8 @@ services::scheduler（后台线程）
 
 ```
 列表 / 四象限 / 日历 / 已完成
-  └── 点击待办 → editor::open(.., Some(id), EditorMode::View)（新建：FAB → editor::open_new(.., 本清单)；托盘「添加待办项」→ None = 默认清单，直接编辑）
+  └── 点击待办 → editor::open(.., Some(id), EditorMode::View)（新建：FAB / Ctrl+N / 双击空白 → editor::open_new(.., 本清单 [+ 象限])；
+       日历双击某天 → open_new(.., 筛选定的清单 + 开始时间)；托盘「添加待办项」→ None = 默认清单，直接编辑）
        └── 编辑窗口：只读详情（标题 + MD 渲染 + 通知状态 + 优先级 + 所属清单）⇄ [编辑] 原地切换表单（含「清单」下拉）
             ├── 写操作经 AppState（create_todo / update_todo / …，后台执行、更新本地副本）
             └── 描述字段使用 ui::markdown_editor（源码 + 预览，值为存储形式 minitodo-image://）
@@ -696,7 +727,8 @@ WebDAV 服务端差异（实测，见 `.trellis/spec/backend/sync-protocol.md`�
    - 系统通知拿不到投递结果（授权被拒也视为已投递），`cargo run` 的裸二进制收不到通知；runner 上测不了通知横幅与授权
    - 清单 / 日历窗口没有嵌入桌面，固定模式没有"不进 Dock / ⌘Tab"；固定模式在 Spaces / 全屏下的行为（`collectionBehavior`）没有处理
    - 多清单 / 日历窗口（3.1）没有新增 mac 专属代码，共用路径没在 Mac 上跑过：⌘W 隐藏（`orderOut:`）、全部隐藏后点 Dock 带出隐藏的清单窗口、
-     新清单窗口进入改名时能否拿到 key、隐藏状态下 `setFrame:` 后再显示（「重置位置」）、清单 / 日历窗口的自绘拖动、缩放与吸附；
+     新清单窗口进入改名时能否拿到 key、隐藏状态下 `setFrame:` 后再显示（「重置位置」）、清单 / 日历窗口的自绘拖动、缩放与吸附、
+     ⌘N 与双击空白 / 日历某天新建（应用菜单里没有「新建待办」项，⌘N 只靠清单窗口的 key context）；
      有清单 / 日历窗口显示着时点 Dock 只激活应用、不带出隐藏的清单窗口（GPUI 只在没有可见窗口时回调 `on_reopen`），只能用菜单栏图标左键
    - 收纳箱（3.0.3-pre 起）只在 runner 上跑过 e2e（MF 组：桌面层层级、监听、真实拖入、移回、删除、⌘H、Dock 唤起、改名、拖动落库、菜单栏三项、
      重启恢复），全部在临时目录里、没碰过真实 `~/Desktop`。改名（MF08）在 runner 上用粘贴 + 回车验证（系统输入流的 ⌘V / 回车；runner 上逐字注入的
@@ -836,11 +868,12 @@ debug 专用环境变量（**只在 debug 构建读取，release 一律忽略**�
 
 | 变量 | 作用 |
 |---|---|
-| `MINI_TODO_DATA_DIR` | 数据目录（库 / 图片 / 备份 / 图标缓存）、日志（`<dir>\logs`）都改到该目录；不启用单实例、不刷新开机自启注册表项；托盘提示"Mini Todo（开发版）" |
+| `MINI_TODO_DATA_DIR` | 数据目录（库 / 图片 / 备份 / 图标缓存）、日志（`<dir>\logs`）都改到该目录；不启用单实例、不刷新开机自启注册表项；不自动弹更新日志、不写本机版本记录；托盘提示"Mini Todo（开发版）" |
 | `MINI_TODO_FENCES_ROOT` | 收纳根目录改为该目录（代替 `%USERPROFILE%\MiniTodo收纳箱` / macOS `~/MiniTodo收纳箱`） |
 | `MINI_TODO_DESKTOP_DIR` | "用户桌面"改为该目录（收纳箱移回的兜底目标、"不能收纳桌面本身"的保护、云同步提示的"来自桌面"判断）；mac e2e 用它避开真实 `~/Desktop` 的隐私授权框 |
 | `MINI_TODO_SCREEN_ID_FILE` | 文件内容非空时替代屏幕组合 ID，用于模拟显示器组合变化 |
-| `MINI_TODO_DEBUG_OPEN` | 加载完数据后额外打开的窗口（`main` = 默认清单窗口、`list:<id>` / `list:new`、`calendar`、`editor:<id>[:view\|:edit]`、`settings[:<页>]`、`fence:new` 等，格式见 `pc-gpui/scripts/README.md`） |
+| `MINI_TODO_DEBUG_OPEN` | 加载完数据后额外打开的窗口（`main` = 默认清单窗口、`list:<id>` / `list:new`、`calendar`、`editor:<id>[:view\|:edit]`、`settings[:<页>]`、`changelog`（更新日志，全部版本）、`fence:new` 等，格式见 `pc-gpui/scripts/README.md`） |
+| `MINI_TODO_DEBUG_CHANGELOG` | `auto`：数据隔离（`MINI_TODO_DATA_DIR`）下也按正常规则判定启动时是否弹出更新日志、写本机记录 `last_run_version`（默认隔离时既不弹也不写） |
 | `MINI_TODO_DEBUG_LATEST_VERSION` | 版本检查不联网，直接当作 GitHub 最新版本（如 `v2.6.0`） |
 | `MINI_TODO_DEBUG_DIALOG_PATH` | 导出 / 导入的文件对话框不弹出，直接返回该路径 |
 | `MINI_TODO_DEBUG_WINDOWS_UI` | `1` 时 Linux / macOS 上也显示 Windows 专有的设置项（截图对照用） |
@@ -861,8 +894,10 @@ debug 专用环境变量（**只在 debug 构建读取，release 一律忽略**�
 - `pc-gpui-e2e-macos.yml`：macOS 编译门 + e2e（`checks` clippy / test、`smoke` debug `.app` 的 M 组与收纳箱 MF 组、`release-smoke` release `.app` 不隔离的 P 组）；
   触发条件同 Windows e2e。mac 代码没有别的编译门，改了就推分支看它
 - `cloud-ci.yml`：fmt / clippy / test + Skill 单测
-- **版本号只有一处**：`pc-gpui/Cargo.toml` 的 `[workspace.package] version`（改完 `Cargo.lock` 同步），当前 `3.1.0-pre`。cloud 版本在
+- **版本号只有一处**：`pc-gpui/Cargo.toml` 的 `[workspace.package] version`（改完 `Cargo.lock` 同步），当前 `3.1.1-pre`。cloud 版本在
   `cloud/Cargo.toml`，与 tag 无关。发布步骤与安装器契约见 `.trellis/spec/pc-gpui/release.md`
+- 改版本号时同步改应用内更新日志 `pc-gpui/crates/app/assets/changelog.md`：把 `## 未发布` 改成 `## <版本号>（日期）`（或补写该版本的段落）；
+  忘了写时单测 `current_version_has_a_changelog_section` 让 `cargo test` / CI 失败
 
 ## 注意事项
 

@@ -323,6 +323,33 @@ pub fn set_show_calendar(db: &Database, show: bool) -> Result<(), String> {
 }
 
 // ============================================================================
+// 本机上次运行的版本（更新日志弹窗，设备本地）
+// ============================================================================
+
+/// 本机上次运行的程序版本（app 的更新日志弹窗据此判断"升级后第一次运行"）。
+///
+/// **设备本地**（同 v29 的 `fence_onedrive_notice_shown`）：不进 `AppSettings`、不进 `SYNCED_SETTING_KEYS`、不导出不同步——
+/// 每台电脑各自升级、各自弹一次。没有迁移：键不存在 = 还没记录过（新装，或从没有这个键的旧版本升上来）。
+pub const LAST_RUN_VERSION_KEY: &str = "last_run_version";
+
+/// 本机上次运行的版本（[`LAST_RUN_VERSION_KEY`]）；键不存在或是空串时 `None`
+pub fn last_run_version(db: &Database) -> Result<Option<String>, String> {
+    db.with_connection(|conn| settings_kv::get_setting(conn, LAST_RUN_VERSION_KEY))
+        .map(|value| {
+            value
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        })
+        .map_err(|e| e.to_string())
+}
+
+/// 记下本机这次运行的版本（值没变时不写）
+pub fn set_last_run_version(db: &Database, version: &str) -> Result<(), String> {
+    db.with_connection(|conn| kv_set_setting(conn, LAST_RUN_VERSION_KEY, version).map(|_| ()))
+        .map_err(|e| e.to_string())
+}
+
+// ============================================================================
 // 屏幕组合 ID 与屏幕配置（screen_configs）
 // ============================================================================
 
@@ -697,6 +724,43 @@ mod tests {
 
         assert_eq!(view_mode(&db), "list");
         assert!(set_view_mode(&db, "grid").is_err());
+    }
+
+    #[test]
+    fn last_run_version_round_trips_and_stays_device_local() {
+        let db = Database::new_in_memory().unwrap();
+        // 没有迁移写默认值：键不存在 = 没记录过
+        assert_eq!(last_run_version(&db).unwrap(), None);
+        let version = |db: &Database| db.with_connection(crate::data::settings_version).unwrap();
+        let seq = crate::todo::change_seq(&db).unwrap();
+        let block_version = version(&db);
+
+        set_last_run_version(&db, "3.1.0-pre").unwrap();
+        assert_eq!(last_run_version(&db).unwrap().as_deref(), Some("3.1.0-pre"));
+        set_last_run_version(&db, "3.1.0").unwrap();
+        assert_eq!(last_run_version(&db).unwrap().as_deref(), Some("3.1.0"));
+        // 空串按没记录
+        set_last_run_version(&db, " ").unwrap();
+        assert_eq!(last_run_version(&db).unwrap(), None);
+        set_last_run_version(&db, "3.1.0").unwrap();
+
+        // 不参与同步：不在同步键里、不改设置版本与变更计数，导出 / 同步的 AppSettings 与导出文件里都没有它
+        assert!(!settings_kv::is_synced_setting(LAST_RUN_VERSION_KEY));
+        assert_eq!(version(&db), block_version);
+        assert_eq!(crate::todo::change_seq(&db).unwrap(), seq);
+        let settings = db
+            .with_connection(|conn| Ok(crate::data::read_app_settings(conn)))
+            .unwrap();
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(
+            !json.contains("lastRun") && !json.contains("last_run"),
+            "{json}"
+        );
+        let export = crate::data::export_json(&db).unwrap();
+        assert!(
+            !export.contains("lastRun") && !export.contains("last_run"),
+            "{export}"
+        );
     }
 
     #[test]

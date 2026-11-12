@@ -27,6 +27,7 @@
 
 use std::rc::Rc;
 
+use gpui_kit::base::GlobalState;
 use gpui_kit::component::StyledExt as _;
 use gpui_kit::{
     AnyElement, App, ClickEvent, Div, ElementId, InteractiveElement as _, IntoElement,
@@ -39,8 +40,19 @@ use crate::theme::{self, light};
 use crate::ui::button::EpButton;
 
 /// 铺满父元素的拖动背景层（父元素要 `relative()`；放在第一个子元素，内容画在它上面）
+///
+/// 按下时不开始窗口级的文字选择（同 gpui-component 的按钮）：拖动是系统的拖动循环，它吞掉松手（Windows 的
+/// `WM_NCLBUTTONUP`、mac `performWindowDragWithEvent:` 之后的 mouseUp），GPUI 收不到 MouseUp，选择会一直"按着"，
+/// 松手后鼠标移进可选中的只读 Markdown（更新日志、待办详情……）就开始选中文字
 pub fn drag_region() -> Div {
-    let region = div().absolute().inset_0();
+    let region =
+        div()
+            .absolute()
+            .inset_0()
+            .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| {
+                GlobalState::init(cx);
+                GlobalState::suppress_text_selection(cx);
+            });
     #[cfg(windows)]
     let region = region.window_control_area(gpui_kit::WindowControlArea::Drag);
     #[cfg(not(windows))]

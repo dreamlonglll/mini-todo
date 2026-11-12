@@ -14,9 +14,13 @@
 //! 描述总是发送、新建时第二次 update 写重复设置、新建后续步骤失败时原地切成编辑该待办……）见 [`save`]。
 //! 快捷键：Esc 关闭（有未保存修改时确认）、Ctrl/Cmd+Enter 保存（只读时无效），子任务窗口打开期间全部失效。
 //!
-//! 「清单」下拉（PRD R8，表单里在「四象限」下面）：新建预选打开方的清单（清单窗口的 FAB = 本清单，托盘 / 日历 = 默认清单），
+//! 「清单」下拉（PRD R8，表单里在「四象限」下面）：新建预选打开方的清单（清单窗口的 FAB / Ctrl+N / 双击空白 = 本清单，
+//! 日历双击某天 = 筛选恰好选了一个清单时是它、否则默认清单，托盘 = 默认清单），
 //! 建到选中的清单；编辑已有待办预选它的有效清单，只有用户改了选择才提交 `list_id`（契约 §12-6）；清单增删改名时选项跟着刷新。
 //! 只读详情显示「所属清单」。
+//!
+//! 新建的预设（[`NewTodoPreset`]，[`open_new`]）：清单、象限（四象限里双击某个象限；颜色同在表单里点了它）、开始时间（日历双击
+//! 某天 = 那天 00:00）。预设在拍"干净快照"之前填进表单，是初始基线：没改过就按 Esc 直接关，不弹确认。
 
 mod desc_dialog;
 mod form;
@@ -196,6 +200,58 @@ pub const WEEKDAYS: [(u8, &str); 7] = [
     (7, "周日"),
 ];
 
+/// 新建待办的预设（打开方带来的初始值：清单窗口的 FAB / Ctrl+N / 双击空白、四象限的象限、日历双击的日期）。
+/// 预设是表单的初始基线：什么都没改就按 Esc 不算"有未保存的修改"
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewTodoPreset {
+    /// 「清单」下拉预选的清单（已经不在了时建到默认清单）
+    pub list_id: i64,
+    /// 预选的象限（1~4，其它值忽略）；颜色按「在表单里点了这个象限」的规则跟着变（[`preset_quadrant_color`]）
+    pub quadrant: Option<i32>,
+    /// 开始时间（规范存储格式 `YYYY-MM-DD HH:MM:SS`，无法识别时忽略）
+    pub start_time: Option<String>,
+}
+
+impl Default for NewTodoPreset {
+    fn default() -> Self {
+        Self::in_list(DEFAULT_LIST_ID)
+    }
+}
+
+impl NewTodoPreset {
+    /// 只预选清单
+    pub fn in_list(list_id: i64) -> Self {
+        Self {
+            list_id,
+            quadrant: None,
+            start_time: None,
+        }
+    }
+
+    /// 预选象限
+    pub fn with_quadrant(mut self, quadrant: i32) -> Self {
+        self.quadrant = Some(quadrant);
+        self
+    }
+
+    /// 预填开始时间
+    pub fn with_start_time(mut self, start_time: impl Into<String>) -> Self {
+        self.start_time = Some(start_time.into());
+        self
+    }
+}
+
+/// 新建表单的（象限, 颜色）：从空表单（象限 4、默认色）出发，有预选象限时等同在表单里点了它
+/// （颜色还是默认色，跟着变成该象限的颜色，同 [`resolve_quadrant_color`]）
+pub fn preset_quadrant_color(quadrant: Option<i32>) -> (i32, Option<String>) {
+    const BLANK_QUADRANT: i32 = 4;
+    let blank_color = Some(DEFAULT_TODO_COLOR);
+    match quadrant.filter(|q| (1..=4).contains(q)) {
+        Some(q) => (q, resolve_quadrant_color(blank_color, BLANK_QUADRANT, q)),
+        None => (BLANK_QUADRANT, blank_color.map(str::to_string)),
+    }
+}
+
 /// 清单（id、名称），按 `AppState::lists` 的顺序（`sortOrder`、id）
 fn list_entries(lists: &[TodoList]) -> Vec<(i64, String)> {
     lists.iter().map(|l| (l.id, l.name.clone())).collect()
@@ -310,11 +366,12 @@ pub struct EditorWindow {
 impl EditorWindow {
     pub fn new(
         todo_id: Option<i64>,
-        new_list_id: i64,
+        preset: NewTodoPreset,
         mode: EditorMode,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let new_list_id = preset.list_id;
         let images_dir = Arc::new(mini_todo_core::db::paths::images_dir());
         let title = cx.new(|cx| {
             InputState::new(window, cx)
@@ -497,6 +554,9 @@ impl EditorWindow {
 
         let focus = cx.focus_handle();
         let is_view_mode = mode == EditorMode::View && todo_id.is_some();
+        // 新建：预选的象限与它的颜色；已有待办加载完成前先按空表单
+        let (quadrant, color) =
+            preset_quadrant_color(preset.quadrant.filter(|_| todo_id.is_none()));
         let mut this = Self {
             todo_id,
             is_view_mode,
@@ -505,9 +565,9 @@ impl EditorWindow {
             focus,
             title,
             description,
-            color: Some(DEFAULT_TODO_COLOR.to_string()),
+            color,
             color_picker,
-            quadrant: 4,
+            quadrant,
             list_select,
             list_id,
             original_list_id: list_id,
@@ -551,9 +611,12 @@ impl EditorWindow {
             panel_scroll: ScrollHandle::new(),
             _subscriptions: subscriptions,
         };
+        if todo_id.is_none() {
+            this.apply_start_preset(preset.start_time.as_deref(), window, cx);
+        }
         this.sync_controls(window, cx);
         this.install_image_click(cx);
-        // 组件创建时先按空表单拍一次（加载完成前按 Esc 不会误报）
+        // 组件创建时先按空表单（新建：含预设）拍一次：加载完成前、新建没改过预设时按 Esc 不会误报
         this.clean_snapshot = this.form_snapshot(cx);
 
         if todo_id.is_some() {
@@ -738,6 +801,25 @@ impl EditorWindow {
         self.list_select
             .update(cx, |select, cx| select.set_value(Some(list_id), cx));
         let _ = window;
+    }
+
+    /// 新建的开始时间预设（日历双击某天）：拆成日期 / 时间选择器的值，与加载已有待办（[`Self::fill_form`]）同一套规则；
+    /// 无法识别时什么都不填
+    fn apply_start_preset(
+        &mut self,
+        start_time: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(parts) = datetime::split_date_time(start_time, DateTimeKind::Start) else {
+            return;
+        };
+        self.start_date
+            .update(cx, |p, cx| p.set_value(Some(&parts.date), window, cx));
+        self.start_time.update(cx, |p, cx| {
+            p.set_value(Some(&parts.time), window, cx);
+            p.set_disabled(false, cx);
+        });
     }
 
     fn on_notify_before_change(
@@ -1163,7 +1245,7 @@ impl Render for EditorWindow {
 }
 
 /// 打开编辑窗口。`parent`：打开方（清单 / 日历窗口 `ChildOf::window(window, cx)`；托盘 `ChildOf::handle(默认清单窗口, cx).unowned()`；
-/// 截图调试 `None`）。`todo_id = None` 为新建（「清单」下拉预选默认清单；从清单窗口的 FAB 新建用 [`open_new`]）。
+/// 截图调试 `None`）。`todo_id = None` 为新建（「清单」下拉预选默认清单，没有别的预设；清单 / 日历窗口新建用 [`open_new`]）。
 /// 打开方已有模态子窗口时只把它带到前台、返回 `None`。
 pub fn open(
     cx: &mut App,
@@ -1171,19 +1253,24 @@ pub fn open(
     todo_id: Option<i64>,
     mode: EditorMode,
 ) -> Option<AnyWindowHandle> {
-    open_with(cx, parent, todo_id, DEFAULT_LIST_ID, mode)
+    open_with(cx, parent, todo_id, NewTodoPreset::default(), mode)
 }
 
-/// 新建待办，「清单」下拉预选 `list_id`（清单窗口的 FAB：本清单）
-pub fn open_new(cx: &mut App, parent: Option<ChildOf>, list_id: i64) -> Option<AnyWindowHandle> {
-    open_with(cx, parent, None, list_id, EditorMode::Edit)
+/// 新建待办，表单按 `preset` 预填（清单窗口的 FAB / Ctrl+N / 双击空白：本清单，四象限另带象限；日历双击某天：开始时间 +
+/// 按筛选定的清单）。预设算作初始基线，不算未保存的修改
+pub fn open_new(
+    cx: &mut App,
+    parent: Option<ChildOf>,
+    preset: NewTodoPreset,
+) -> Option<AnyWindowHandle> {
+    open_with(cx, parent, None, preset, EditorMode::Edit)
 }
 
 fn open_with(
     cx: &mut App,
     parent: Option<ChildOf>,
     todo_id: Option<i64>,
-    new_list_id: i64,
+    preset: NewTodoPreset,
     mode: EditorMode,
 ) -> Option<AnyWindowHandle> {
     editor_shortcuts::init(cx);
@@ -1202,7 +1289,7 @@ fn open_with(
         WindowKind::Editor,
         None,
         spec,
-        |window, cx| cx.new(|cx| EditorWindow::new(todo_id, new_list_id, mode, window, cx)),
+        |window, cx| cx.new(|cx| EditorWindow::new(todo_id, preset, mode, window, cx)),
     )
 }
 
@@ -1228,6 +1315,61 @@ mod tests {
             Some("#6366F1")
         );
         assert_eq!(resolve_quadrant_color(None, 2, 1), None);
+    }
+
+    #[test]
+    fn preset_quadrant_picks_the_same_color_as_clicking_it() {
+        // 没有预设：空表单（象限 4、默认色）
+        assert_eq!(
+            preset_quadrant_color(None),
+            (4, Some(DEFAULT_TODO_COLOR.to_string()))
+        );
+        // 预选象限 = 在空表单里点了它：默认色跟着变成该象限色
+        for (q, _, color) in QUADRANTS {
+            let expected = resolve_quadrant_color(Some(DEFAULT_TODO_COLOR), 4, q);
+            assert_eq!(preset_quadrant_color(Some(q)), (q, expected.clone()));
+            assert!(theme::is_same_color(
+                expected.as_deref().unwrap(),
+                &format!("#{color:06X}")
+            ));
+        }
+        // 非法象限忽略
+        assert_eq!(preset_quadrant_color(Some(0)), preset_quadrant_color(None));
+        assert_eq!(preset_quadrant_color(Some(5)), preset_quadrant_color(None));
+    }
+
+    #[test]
+    fn new_todo_preset_defaults_to_the_default_list() {
+        assert_eq!(
+            NewTodoPreset::default(),
+            NewTodoPreset {
+                list_id: DEFAULT_LIST_ID,
+                quadrant: None,
+                start_time: None,
+            }
+        );
+        let preset = NewTodoPreset::in_list(7)
+            .with_quadrant(2)
+            .with_start_time("2026-11-12 00:00:00");
+        assert_eq!(preset.list_id, 7);
+        assert_eq!(preset.quadrant, Some(2));
+        assert_eq!(preset.start_time.as_deref(), Some("2026-11-12 00:00:00"));
+    }
+
+    #[test]
+    fn start_preset_round_trips_through_the_pickers() {
+        // 日历双击某天的预设：拆成选择器的值，再合回来是同一个规范时间（保存出来的就是它）
+        let parts =
+            datetime::split_date_time(Some("2026-11-12 00:00:00"), DateTimeKind::Start).unwrap();
+        assert_eq!(
+            (parts.date.as_str(), parts.time.as_str()),
+            ("2026-11-12", "00:00")
+        );
+        assert_eq!(
+            datetime::compose_date_time(Some(&parts.date), Some(&parts.time), DateTimeKind::Start)
+                .as_deref(),
+            Some("2026-11-12 00:00:00")
+        );
     }
 
     #[test]
