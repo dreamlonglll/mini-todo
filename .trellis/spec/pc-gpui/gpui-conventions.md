@@ -84,6 +84,9 @@
 - Windows 上 `window.start_window_move()` 是**空操作**。
 - 普通标题栏（编辑 / 子任务 / 已完成 / 设置等窗口）：`ui::title_bar::drag_region()` 作为标题栏（`relative()`）的**第一个子元素**；
   Windows 上走 `WindowControlArea::Drag` → `HTCAPTION`（系统拖动：贴边分屏、可缩放窗口双击最大化），其它平台 `start_window_move()`。
+  它按下时调 `gpui_kit::base::GlobalState::suppress_text_selection`（同 gpui-component 的按钮）：GPUI 把 `WM_NCLBUTTONDOWN` 也派发成
+  MouseDown，窗口级文字选择会从这里开始，而系统拖动循环吞掉松手（收不到 MouseUp），选择一直"按着"，松手后鼠标移进可选中的只读 Markdown
+  就开始选中文字。自己写的系统拖动区同样要这样做。
   **清单 / 日历窗口不用它**：与收纳箱一样自绘移动 + 窗口内 8 个缩放手柄（`windows::block::BlockDrag`，建窗 `resizable: false`），
   代价是没有 Aero Snap、没有标题栏双击最大化。
 - 拖动区之上的**可交互元素必须 `.occlude()`**（`EpButton` 已是），否则 Windows 上点它变成拖窗口；纯文字不用。
