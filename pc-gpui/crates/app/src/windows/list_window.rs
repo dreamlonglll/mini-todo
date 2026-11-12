@@ -11,8 +11,12 @@
 //! | [`quadrant`] | 四象限视图与跨象限拖拽 |
 //! | [`logic`] | 纯逻辑（重复文案、象限颜色、拖拽排序、版本比较……，带单测） |
 //!
-//! - 只显示**有效清单**等于本清单的待办（`AppState::pending_todos_in`：归属未知 / 清单不存在的待办按默认清单）；FAB 新建到本清单；
+//! - 只显示**有效清单**等于本清单的待办（`AppState::pending_todos_in`：归属未知 / 清单不存在的待办按默认清单）；
 //!   右键待办行「移动到」别的清单（[`row_menu`]）
+//! - 新建待办（都建到本清单，`editor::open_new`）：右下角 FAB（**锁定时不显示**）、Ctrl+N / ⌘N（[`NewTodo`]，窗口有焦点时，
+//!   锁定与否都行；改名中不响应）、双击空白处（列表：行以外的空白与空状态；四象限：双击某个象限里行以外的地方，预选该象限；
+//!   四象限网格外的空白按列表处理）。双击判定在按下时（`click_count >= 2`）：待办行对第二下按下 `stop_propagation`，所以双击行
+//!   只打开详情；拖拽排序会话还在（含松手后的落库中）时不新建
 //! - 日 / 夜、列表 / 四象限、展开全部按窗口（`AppState::window_prefs`）；锁定按窗口（`services::window_mode`）
 //! - 生命周期（启动开窗、关闭 = 隐藏、同步来的清单开 / 关窗、托盘唤起）在 `services::block_windows`；窗口模式（锁定 / 嵌入桌面）、
 //!   几何保存 / 恢复、贴边隐藏、唤起见 `services::window_mode`；日历是另一个窗口（`windows::calendar_window`）
@@ -31,10 +35,11 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui_kit::{
-    AnyElement, Bounds, Context, Entity, Font, Hsla, InteractiveElement as _, IntoElement,
-    MouseMoveEvent, ParentElement as _, Pixels, Point, Render, ScrollHandle, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, deferred, div,
-    prelude::FluentBuilder as _, px, relative,
+    AnyElement, App, Bounds, Context, Entity, FocusHandle, Font, Global, Hsla,
+    InteractiveElement as _, IntoElement, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent,
+    ParentElement as _, Pixels, Point, Render, ScrollHandle, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, actions, deferred,
+    div, prelude::FluentBuilder as _, px, relative,
 };
 use mini_todo_core::db::Todo;
 
@@ -61,6 +66,32 @@ const FAB_DIM_ENTER_DELAY: Duration = Duration::from_millis(750);
 const FAB_DIM_LEAVE_DELAY: Duration = Duration::from_millis(1500);
 /// 子任务展开 / 收起动画
 const SUBTASK_ANIMATION: Duration = Duration::from_millis(200);
+
+actions!(mini_todo_list, [NewTodo]);
+
+/// 清单窗口根元素的 key context
+const LIST_CONTEXT: &str = "MiniTodoList";
+
+/// 新建待办快捷键的显示文案（绑定是 GPUI 的 `secondary-n`：macOS ⌘N，其它平台 Ctrl+N）
+pub(crate) const NEW_TODO_SHORTCUT: &str = if cfg!(target_os = "macos") {
+    "⌘N"
+} else {
+    "Ctrl+N"
+};
+
+/// 已注册过清单窗口快捷键的标记（`App::bind_keys` 不去重）
+struct ListShortcutsBound;
+
+impl Global for ListShortcutsBound {}
+
+/// 注册清单窗口的快捷键（建第一个清单窗口时；之后的调用什么都不做）
+fn init_shortcuts(cx: &mut App) {
+    if cx.has_global::<ListShortcutsBound>() {
+        return;
+    }
+    cx.set_global(ListShortcutsBound);
+    cx.bind_keys([KeyBinding::new("secondary-n", NewTodo, Some(LIST_CONTEXT))]);
+}
 
 /// 一行子任务
 #[derive(Clone, Debug)]
@@ -170,6 +201,8 @@ pub struct ListWindow {
     pub(crate) block: BlockKey,
     /// 标题栏自绘移动与 8 个缩放手柄（与收纳箱同一套做法，吸附到吸附组里的其它窗口）
     window_drag: BlockDrag,
+    /// 根元素的焦点（[`NewTodo`] 快捷键要焦点在本窗口的元素树里才派发得到）：建窗、窗口激活时焦点不在树里、改名结束时拿回来
+    focus: FocusHandle,
     pub(crate) state: Entity<AppState>,
     pub(crate) scroll: ScrollHandle,
     pub(crate) scrollbar: ScrollbarState,
@@ -200,8 +233,11 @@ pub struct ListWindow {
 
 impl ListWindow {
     pub fn new(list_id: i64, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        init_shortcuts(cx);
         let block = BlockKey::List(list_id);
         let state = AppState::global(cx);
+        let focus = cx.focus_handle();
+        window.focus(&focus, cx);
         let snapshot = state.read(cx);
         let last_expand_all = snapshot.expand_all(block);
         let last_view_mode = snapshot.view_mode(block);
@@ -220,6 +256,7 @@ impl ListWindow {
                 let block = this.block;
                 cx.defer(move |cx| window_mode::on_activated(cx, block));
                 if !WindowManager::forward_activation(window, cx) {
+                    this.ensure_focus(window, cx);
                     AppState::global(cx).update(cx, |state, cx| state.reload_todos(cx));
                 }
             }),
@@ -242,6 +279,7 @@ impl ListWindow {
         Self {
             block,
             window_drag: BlockDrag::new(block, f64::from(MIN_WIDTH), f64::from(MIN_HEIGHT)),
+            focus,
             state,
             scroll: ScrollHandle::new(),
             scrollbar: ScrollbarState::new(),
@@ -381,6 +419,11 @@ impl ListWindow {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.fab_visible(cx) {
+            // 锁定时没有 FAB：不进"操作模式"（操作条也不用压到 FAB 之上）
+            self.reset_fab_dim();
+            return;
+        }
         let inside = self
             .actions_bounds
             .get()
@@ -421,6 +464,19 @@ impl ListWindow {
         }
     }
 
+    /// FAB 只在没锁定时显示（锁定 = 固定模式，含经典固定与嵌入桌面：用 Ctrl+N / 双击空白新建）
+    fn fab_visible(&self, cx: &App) -> bool {
+        !window_mode::is_fixed(cx, self.block)
+    }
+
+    /// 退出"操作模式"（FAB 不显示时）：恢复不变暗、取消计时
+    fn reset_fab_dim(&mut self) {
+        self.fab_dimmed = false;
+        self.pointer_in_actions = false;
+        self.fab_enter = None;
+        self.fab_leave = None;
+    }
+
     /// `border`：根容器描边宽度（CSS 的 `position: fixed` 相对窗口而不是描边内侧）。新建的待办建到本清单
     fn render_fab(&self, palette: &Palette, border: f32) -> impl IntoElement {
         let dimmed = self.fab_dimmed;
@@ -429,7 +485,7 @@ impl ListWindow {
         // transform: scale(1.05) / scale(0.95) 按中心缩放：改尺寸并挪位置
         let grow = size * 0.05 / 2.;
         let primary_dark = palette.primary_dark;
-        let list_id = self.list_id();
+        let preset = editor::NewTodoPreset::in_list(self.list_id());
         let actions = self.actions_bounds.clone();
         div()
             .id("fab-add")
@@ -462,7 +518,14 @@ impl ListWindow {
                     .right(px(inset + grow))
                     .bottom(px(inset + grow))
             })
-            .tooltip(tooltip::native("新建待办"))
+            .tooltip(tooltip::native(format!("新建待办（{NEW_TODO_SHORTCUT}）")))
+            // 双击 FAB：两下都是点 FAB（第二下打开方已有模态子窗口，只把它带到前台），不能落到下面内容区的"双击空白新建"
+            // （变暗时 FAB 不 occlude，内容区也收得到这次按下）
+            .on_mouse_down(MouseButton::Left, |event: &MouseDownEvent, _, cx| {
+                if event.click_count >= 2 {
+                    cx.stop_propagation();
+                }
+            })
             .on_click(move |_, window, cx| {
                 if dimmed
                     && actions
@@ -472,7 +535,7 @@ impl ListWindow {
                     return;
                 }
                 let parent = ChildOf::window(window, cx);
-                editor::open_new(cx, Some(parent), list_id);
+                editor::open_new(cx, Some(parent), preset.clone());
             })
             .child(
                 icon(EpIcon::Plus, 24., theme::hex(0xFFFFFF))
@@ -483,6 +546,52 @@ impl ListWindow {
     // ------------------------------------------------------------------
     // 打开子窗口 / 行操作
     // ------------------------------------------------------------------
+
+    /// 新建待办（建到本清单；`quadrant`：四象限里双击的象限）。打开方已有模态子窗口时 `open_child` 只把它带到前台
+    fn open_new_todo(&self, quadrant: Option<i32>, window: &mut Window, cx: &mut Context<Self>) {
+        let mut preset = editor::NewTodoPreset::in_list(self.list_id());
+        if let Some(quadrant) = quadrant {
+            preset = preset.with_quadrant(quadrant);
+        }
+        let parent = ChildOf::window(window, cx);
+        editor::open_new(cx, Some(parent), preset);
+    }
+
+    /// Ctrl+N / ⌘N：新建待办（锁定与否都行）；清单名改名中不响应（输入框里按下不该把改名提交掉）
+    fn on_new_todo_action(&mut self, _: &NewTodo, window: &mut Window, cx: &mut Context<Self>) {
+        if self.name.is_renaming() {
+            return;
+        }
+        self.open_new_todo(None, window, cx);
+    }
+
+    /// 双击空白处（列表的空白 / 空状态、四象限网格外：`quadrant = None`；某个象限里：该象限）新建待办。
+    /// 在按下时判断（`click_count >= 2`）；待办行对双击的第二下 `stop_propagation`，到不了这里。处理了就 `stop_propagation`
+    /// （外层的空白处理与下面的缩放手柄不再收到）
+    pub(crate) fn on_blank_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        quadrant: Option<i32>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.click_count < 2 {
+            return;
+        }
+        // 拖拽排序中 / 刚松手还在落库：不新建（松手后的下一次按下 click_count 本来就从 1 算起，这里兜底）
+        if self.drag.is_some() || cx.has_active_drag() {
+            return;
+        }
+        cx.stop_propagation();
+        self.open_new_todo(quadrant, window, cx);
+    }
+
+    /// 焦点不在本窗口的元素树里（改名输入框已卸载、别处拿走过焦点……）时交给根元素：[`NewTodo`] 才派发得到
+    fn ensure_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus.contains_focused(window, cx) {
+            window.focus(&self.focus, cx);
+        }
+    }
 
     /// 点击待办：打开只读详情（拖拽刚结束时的点击忽略）
     pub(crate) fn open_todo(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
@@ -550,6 +659,13 @@ impl ListWindow {
                     .h_full()
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)
+                    // 双击空白处新建（列表：行以外 / 空状态；四象限：网格外。象限里的双击由象限自己先处理）
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                            this.on_blank_mouse_down(event, None, window, cx)
+                        }),
+                    )
                     .child(div().px(px(16.)).pb(px(76.)).child(content)),
             )
             .child(scrollbar::vertical(
@@ -579,6 +695,11 @@ impl Render for ListWindow {
 
         let fixed = window_mode::is_fixed(cx, self.block);
         let classic_fixed = window_mode::is_classic_fixed(cx, self.block);
+        // 锁定时不显示 FAB：也不留"操作模式"（变暗、操作条压到 FAB 之上）的状态
+        let show_fab = !fixed;
+        if !show_fab {
+            self.reset_fab_dim();
+        }
         // 吸附组里别的窗口（收纳箱、其它清单 / 日历窗口）拖动 / 缩放时吸附到本窗口的边
         let snap_edges = crate::services::snap::edges(cx, SnapKey::Block(self.block));
         // 锁定（任一种固定）时不能缩放：不放手柄
@@ -597,7 +718,7 @@ impl Render for ListWindow {
         let title_bar = self.render_title_bar(&rc, window, cx).into_any_element();
         let body = self.render_main_body(&rc, window, cx).into_any_element();
         let border = if classic_fixed { 0. } else { 1. };
-        let fab = self.render_fab(&palette, border).into_any_element();
+        let fab = show_fab.then(|| self.render_fab(&palette, border).into_any_element());
         // 清单名 / 待办行的右键菜单（画在本帧最后的浮层；跟随本窗口的日 / 夜）
         let name_menu = self.render_name_menu(palette.is_dark, window, cx);
         let row_menu = self.render_row_menu(palette.is_dark, window, cx);
@@ -615,6 +736,9 @@ impl Render for ListWindow {
 
         let root = div()
             .id("main-root")
+            .key_context(LIST_CONTEXT)
+            .track_focus(&self.focus)
+            .on_action(cx.listener(Self::on_new_todo_action))
             .size_full()
             .relative()
             .flex()
@@ -639,7 +763,7 @@ impl Render for ListWindow {
             // 留白与滚动条轨道处缩放）。见 `windows::block` 模块文档
             .children(resize_handles)
             .child(body)
-            .child(fab)
+            .children(fab)
             .children(name_menu)
             .children(row_menu)
             .children(overlay)

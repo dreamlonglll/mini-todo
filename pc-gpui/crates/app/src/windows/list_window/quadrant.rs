@@ -1,5 +1,5 @@
 //! 四象限视图（旧 `QuadrantView.vue`，规格 §8）：2×2 网格，每格 头部（色点 + 名称 + 计数胶囊）+ 待办列表；
-//! 待办可在象限内排序、拖到别的象限（颜色仍是旧象限默认色时跟随新象限）。
+//! 待办可在象限内排序、拖到别的象限（颜色仍是旧象限默认色时跟随新象限）。双击象限里行以外的地方新建待办、预选该象限。
 //!
 //! "观察到的实际效果"按旧版真实渲染还原（以参考截图为准）：
 //! - 网格高度由内容决定（两行等高 = 最高的格子），不撑满窗口；整个主内容区滚动（以前开着日历分栏时撑满左栏、各格内部滚动，
@@ -7,8 +7,9 @@
 //! - 空象限看不到"暂无待办"（原版被 `min-height: 100%` 的列表挤出可视区），只占位 60px
 
 use gpui_kit::{
-    Context, DragMoveEvent, InteractiveElement as _, IntoElement, ParentElement as _, Styled as _,
-    Window, canvas, div, prelude::FluentBuilder as _, px, relative,
+    Context, DragMoveEvent, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent,
+    ParentElement as _, Styled as _, Window, canvas, div, prelude::FluentBuilder as _, px,
+    relative,
 };
 
 use super::todo_item::{RowPlace, rows_of};
@@ -55,6 +56,7 @@ impl ListWindow {
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
         let info = logic::QUADRANTS[index];
+        let quadrant_id = info.id;
         let palette = rc.palette;
         let colors = rc.colors;
         let (r, g, b) = info.rgb;
@@ -142,6 +144,13 @@ impl ListWindow {
             .border_color(colors.quadrant_border)
             .bg(bg)
             .hover(move |s| s.border_color(hover_border))
+            // 双击象限里行以外的地方（头部、空白）：新建到本清单并预选这个象限（行对双击的第二下 stop_propagation）
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.on_blank_mouse_down(event, Some(quadrant_id), window, cx)
+                }),
+            )
             .on_drag_move::<DraggedTodo>(cx.listener(
                 move |this, event: &DragMoveEvent<DraggedTodo>, window, cx| {
                     if event.bounds.contains(&event.event.position) {
