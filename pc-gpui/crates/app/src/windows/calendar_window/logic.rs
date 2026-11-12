@@ -1,11 +1,13 @@
 //! 日历窗口的纯逻辑（无 GPUI）：日历网格与跨天条（逐字移植自旧前端 `CalendarView.vue`）、日历窗口第一次显示时的位置。
 //! 都带单测。
 
-use chrono::{Datelike, Duration, NaiveDate};
+use chrono::{Datelike, Duration, NaiveDate, NaiveTime};
 use mini_todo_core::db::Todo;
 use mini_todo_core::db::time::{DefaultTime, parse_local_datetime_with};
 
 use crate::platform::PhysRect;
+use crate::util::datetime::format_storage_date_time;
+use crate::windows::block::DEFAULT_LIST_ID;
 use crate::windows::drag::js_round;
 
 // ----------------------------------------------------------------------
@@ -179,6 +181,25 @@ fn assign_lanes(bars: &mut [TodoBar]) {
 }
 
 // ----------------------------------------------------------------------
+// 双击某天新建待办
+// ----------------------------------------------------------------------
+
+/// 在日历上双击某天新建的待办建到哪个清单：清单筛选（`None` = 全部）**恰好只选了一个**、且它还在 → 它；
+/// 其余（全部、选了多个、选的清单已不在）→ 默认清单
+pub fn new_todo_list_id(filter: Option<&[i64]>, exists: impl Fn(i64) -> bool) -> i64 {
+    match filter {
+        Some([only]) if exists(*only) => *only,
+        _ => DEFAULT_LIST_ID,
+    }
+}
+
+/// 在日历上双击某天新建的待办的开始时间：那天 00:00（规范存储格式）。日历按开始时间把待办放进格子
+/// （[`todo_start_date`]），保存后就出现在那天
+pub fn new_todo_start_time(date: NaiveDate) -> String {
+    format_storage_date_time(&date.and_time(NaiveTime::default()))
+}
+
+// ----------------------------------------------------------------------
 // 日历窗口的位置
 // ----------------------------------------------------------------------
 
@@ -248,6 +269,43 @@ mod tests {
             list_updated_at: None,
             subtasks: vec![],
         }
+    }
+
+    #[test]
+    fn new_todo_goes_to_the_only_selected_list() {
+        let exists = |ids: &'static [i64]| move |id| ids.contains(&id);
+        // 全部清单：默认清单
+        assert_eq!(new_todo_list_id(None, exists(&[1, 7, 8])), DEFAULT_LIST_ID);
+        // 恰好选了一个：它
+        assert_eq!(new_todo_list_id(Some(&[7]), exists(&[1, 7, 8])), 7);
+        assert_eq!(new_todo_list_id(Some(&[1]), exists(&[1, 7])), 1);
+        // 选了多个：默认清单（哪怕默认清单不在里面）
+        assert_eq!(
+            new_todo_list_id(Some(&[7, 8]), exists(&[1, 7, 8])),
+            DEFAULT_LIST_ID
+        );
+        // 选的那个清单已不在（刚被删除、内存副本晚一步）：默认清单
+        assert_eq!(
+            new_todo_list_id(Some(&[9]), exists(&[1, 7])),
+            DEFAULT_LIST_ID
+        );
+        // 空数组（存储里不会出现，按"没有唯一的清单"处理）：默认清单
+        assert_eq!(new_todo_list_id(Some(&[]), exists(&[1])), DEFAULT_LIST_ID);
+    }
+
+    #[test]
+    fn new_todo_starts_at_midnight_of_the_clicked_day() {
+        let day = NaiveDate::from_ymd_opt(2026, 11, 12).unwrap();
+        assert_eq!(new_todo_start_time(day), "2026-11-12 00:00:00");
+        // 灰色的上 / 下月格子按那天算；保存后日历把它放回这一天
+        let prev = NaiveDate::from_ymd_opt(2026, 10, 26).unwrap();
+        let mut t = todo(1);
+        t.start_time = Some(new_todo_start_time(prev));
+        assert_eq!(todo_start_date(&t), Some(prev));
+        let cells = month_cells(2026, 11, day);
+        let bars = calendar_bars(&cells, &[&t]);
+        assert_eq!(bars.len(), 1);
+        assert_eq!(cells[bars[0].row * 7 + bars[0].start_col].date, prev);
     }
 
     #[test]

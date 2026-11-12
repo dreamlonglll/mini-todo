@@ -55,9 +55,11 @@ src/
 │   ├── list_window.rs + list_window/   清单窗口（原主窗口，每个清单一个）：title_bar（清单名 / 版本红点（只在默认清单窗口）/
 │   │                 同步 / 展开全部 / 已完成 / 视图 / 日夜 / 锁 / 设置）、name（双击改名、右键「重命名 / 删除清单」、删除确认）、
 │   │                 list、todo_item（行 / 子任务 / 拖拽手柄 / 删除确认）、quadrant、row_menu（待办行右键「移动到 ▸」）、
-│   │                 logic（纯逻辑：提醒文案、拖拽排序、版本比较）；FAB（建到本清单）与操作模式、遮罩
+│   │                 logic（纯逻辑：提醒文案、拖拽排序、版本比较）；新建到本清单：FAB（锁定时不显示）与操作模式、
+│   │                 Ctrl+N / ⌘N（动作 NewTodo，key context MiniTodoList，根元素 track_focus）、双击空白 / 象限（on_blank_mouse_down）；遮罩
 │   ├── calendar_window.rs + calendar_window/   日历窗口（单例）：title_bar（月份导航 / 今天 / 清单筛选 / 日夜 / 锁 / 设置）、
-│   │                 grid（农历 / 节假日 / 跨天条）、filter（清单筛选下拉）、logic（网格、跨天条、first_rect / default_width）
+│   │                 grid（农历 / 节假日 / 跨天条、双击日格新建）、filter（清单筛选下拉）、
+│   │                 logic（网格、跨天条、双击新建的清单与开始时间、first_rect / default_width）
 │   ├── editor/       待办详情 / 编辑：mod（窗口、加载、Esc / Ctrl+Enter、弹层关闭）、view（标题栏与只读排版）、
 │   │                 form（表单与底部栏）、save（防重入保存、暂存子任务落库）、subtasks（子任务面板、拖拽排序、
 │   │                 从文件导入）、desc_dialog（描述放大编辑：源码 / 预览分栏）
@@ -124,7 +126,8 @@ src/
    唤起所有清单窗口（`window_mode::bring_all_to_front`）；只有托盘「退出」/ ⌘Q / 应用菜单「退出」退出。Linux 没有托盘、不能程序化隐藏，
    关窗是真的关，最后一个窗口关闭时退出（`lib.rs`）。
 10. **键盘**：键绑定的 action 先于 `on_key_down` 派发；编辑类窗口的 Esc / Ctrl+Enter 是 action，弹层打开时由窗口自己先收起弹层
-    （`any_popup_open` / `close_popups`），控件自身的 Esc 处理只在没有绑定的窗口里生效。
+    （`any_popup_open` / `close_popups`），控件自身的 Esc 处理只在没有绑定的窗口里生效。带 key context 的绑定要焦点在元素树里才派发：
+    清单窗口的 Ctrl+N / ⌘N（`list_window::NewTodo`）靠根元素 `track_focus`，建窗、激活、改名结束时把焦点交回根元素（spec gpui-conventions §2.10）。
 
 ## 4. 接口
 
@@ -210,7 +213,7 @@ editor::open(cx, parent, None, EditorMode::Edit);
 |---|---|---|
 | `services::block_windows`（`start` / `show_list(cx, id)` / `create_list(cx)` / `reconcile(cx)` / `request_close`） | 清单窗口（`WindowKind::List`，key `list:<id>`） | 每个清单一个；380×600，最小 320×400，透明，自绘移动与缩放（建窗不可缩放）；系统标题：默认清单窗口固定 `Mini Todo`，其它 = 清单名；关闭 = 隐藏 |
 | `block_windows::set_calendar_visible(cx, bool)` | 日历窗口（`WindowKind::Calendar`，key `calendar`） | 单例；最小 420×480，没有布局时贴默认清单窗口右侧、等高（`calendar_window::logic::first_rect`）；系统标题 `日历`；关闭 = 关掉「显示日历」 |
-| `editor::open(cx, parent, todo_id: Option<i64>, EditorMode::{View, Edit}) -> Option<AnyWindowHandle>`、`editor::open_new(cx, parent, list_id)` | 待办详情 / 新建 | 1080×600，可缩放；`todo_id = None` 为新建（总是编辑，「清单」下拉预选默认清单；清单窗口 FAB 用 `open_new` 预选本清单）；表单「四象限」下有「清单」下拉，保存时只有选择 ≠ 预选才带 `list_id`；只读详情有「所属清单」徽章；系统标题 `待办详情` / `新建待办` |
+| `editor::open(cx, parent, todo_id: Option<i64>, EditorMode::{View, Edit}) -> Option<AnyWindowHandle>`、`editor::open_new(cx, parent, NewTodoPreset)` | 待办详情 / 新建 | 1080×600，可缩放；`todo_id = None` 为新建（总是编辑，「清单」下拉预选默认清单）；清单 / 日历窗口新建用 `open_new` 带预设：`NewTodoPreset::in_list(id)`（FAB / Ctrl+N / 双击空白）`.with_quadrant(q)`（双击象限，颜色同表单里点了它）`.with_start_time(..)`（日历双击某天 = 那天 00:00），预设在拍干净快照前填入，没改过按 Esc 不弹确认；表单「四象限」下有「清单」下拉，保存时只有选择 ≠ 预选才带 `list_id`；只读详情有「所属清单」徽章；系统标题 `待办详情` / `新建待办` |
 | `subtask::open(cx, parent, subtask_id, SubtaskMode::{View, Edit})`、`subtask::open_draft(cx, parent, drafts, pending_id, mode)` | 子任务 | 800×750；标题 `查看子任务` / `编辑子任务`；`open_draft` 直接读写新建待办窗口的 `DraftSubtasks` |
 | `completed::open(cx, parent, list_id)` | 已完成 | 460×550；只列该清单（有效清单）的已完成，恢复后回原清单 |
 | `settings::open(cx, parent, SettingsTab::{General, Appearance, Data, Screen, About})` | 设置 | 680×560，不可缩放；`SettingsTab::label()` = 菜单文案。「深色主题」切的是打开它的清单 / 日历窗口；常规「展示日历」= `set_calendar_visible`（与托盘勾选同一个设备本地状态）；屏幕配置页每个组合一行，汇总保存了几个清单窗口、日历、几个收纳箱的位置与锁定数（`screen::load_layout_summaries`），删除确认写明连带删除这些布局，当前组合不能删 |

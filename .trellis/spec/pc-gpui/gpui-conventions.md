@@ -252,6 +252,18 @@
   `MiniTodoEditor`）：弹层打开时由窗口自己的处理函数先收起弹层（`any_popup_open` / `close_popups`）。
 - 多行编辑器的 Enter 插入换行且不冒泡：`MiniTodoEditor > Input` 上下文额外绑定了 Ctrl+Enter 抢在换行之前。
 - `App::bind_keys` **不去重**：全局按键绑定只注册一次（`util::editor_shortcuts::init` 用 Global 标记守卫），不要在每次开窗时注册。
+- 带 key context 的绑定只在**焦点在该元素树里**时派发：窗口里没有焦点（或焦点所在的元素这一帧没渲染，比如改名结束、输入框卸载了）时
+  派发路径只有窗口的根节点，绑定不生效。清单窗口的 Ctrl+N / ⌘N（`NewTodo`，key context `MiniTodoList`，绑定 `secondary-n`）因此在根元素
+  `track_focus`：建窗时聚焦根元素，窗口激活时焦点不在树里（`FocusHandle::contains_focused` 为假）就交回根元素，改名结束也交回。
+  `track_focus` 的元素在任意左键按下冒泡到它时都会拿走焦点（子元素先聚焦了就 `prevent_default` 不抢），改名输入框因此在点窗口别处时失焦提交。
+
+### 2.10.1 双击空白处
+
+- 双击在**按下**时判定（`MouseDownEvent.click_count >= 2`），不用 `on_click`（不给容器记下按下，不触发 §2.5.2 的悬停问题）。
+  容器（清单窗口的内容区 / 象限、日历日格）挂 `on_mouse_down(Left)` 判断双击，处理了就 `stop_propagation`（外层容器与下面的缩放手柄不再收到）；
+  "不算空白"的子元素（待办行、日历待办条、FAB）对 `click_count >= 2` 的按下 `stop_propagation`——冒泡阶段子元素 / 后绘制的兄弟元素先执行，
+  同一元素里 `on_click` 的按下记录比 `on_mouse_down` 后注册、先执行，所以它们自己的单击照常。日历的待办条与日格是兄弟元素（绝对定位叠在网格上、
+  不 `occlude`），两者的 hitbox 都算悬停，靠条后绘制先收到事件拦下。
 
 ### 2.11 debug 专用开关只在 debug 构建生效
 
@@ -411,7 +423,7 @@ gpui-pre-macos 能建窗（位置 / 显示器 / 置顶层级 / 可缩放都只�
    改写 `GWL_STYLE`（`open_window` 建窗后去掉 `WS_SYSMENU` 依赖它）；文件拖放是否仍不改输入模态、`on_drop` 是否仍要求
    `is_hovered`（`ui::external_drop` 依赖它）；自绘拖动（§2.3，收纳箱移动 / 缩放）依赖的：Windows 鼠标按下时 `SetCapture`、`on_drag_move`
    是捕获阶段且不看悬停、`on_drag` 的 2px 阈值与开始后抑制 click、拖动期间 `on_hover` 报 `false`、`active_drag` 只在 MouseUp 后清掉、
-   `MouseDownEvent.click_count`（收纳箱双击改名）；Markdown 图片手柄依赖的：`active_drag` 在 MouseUp 派发完才清掉（编辑器根元素
+   `MouseDownEvent.click_count`（收纳箱双击改名、清单 / 日历窗口双击空白新建，§2.10.1）、没有焦点时按键只派发到根节点（§2.10）；Markdown 图片手柄依赖的：`active_drag` 在 MouseUp 派发完才清掉（编辑器根元素
    用 `has_active_drag` 区分拖动结束的松手）、`DragMoveEvent.bounds` 是注册监听的元素的 hitbox（图片框的实际大小）、`on_click` 里
    `stop_propagation` 能拦下父元素的 `on_mouse_up`；gpui-pre-windows 的 `read_from_clipboard` 是否仍只取第一个图片格式、不认 MIME 名
    格式（`platform::clipboard` 存在的理由；修好了可以删掉它改回 GPUI 的结果）；`on_hover` 是否仍在元素记着按下时报 `false`、鼠标监听是否仍在 Bubble 阶段倒序派发

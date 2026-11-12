@@ -139,6 +139,8 @@ impl ListWindow {
             return;
         }
         self.name.renaming = false;
+        // 输入框随之卸载：焦点还给根元素，否则 Ctrl+N（`NewTodo`）派发不到本窗口
+        window.focus(&self.focus, cx);
         cx.notify();
         if !commit {
             return;
