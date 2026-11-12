@@ -111,7 +111,11 @@ mini-todo/
 ## 核心功能
 
 ### 待办管理
-- 创建、编辑、删除待办事项
+- 创建、编辑、删除待办事项。新建入口：清单窗口右下角「+」FAB（锁定时不显示）、清单窗口有焦点时 Ctrl+N（macOS ⌘N，GPUI `secondary-n`，
+  锁定与否都行，清单名改名中不响应）、双击清单窗口的空白处（列表：行以外的空白 / 空状态；四象限：双击某个象限里行以外的地方并预选该象限，
+  颜色同在表单里点了它；网格外的空白不预选象限）——都建到本清单；双击日历的某天（见「视图模式」）；托盘「添加待办项」（默认清单）。
+  双击在按下时判定（`click_count >= 2`）：待办行 / 日历的待办条 / FAB 拦下第二下，双击它们只是打开；拖拽排序中不触发。
+  这些入口都走 `editor::open_new(cx, parent, NewTodoPreset { list_id, quadrant, start_time })`，预设算作表单的初始基线（没改过按 Esc 不弹确认）
 - 描述字段支持 Markdown（存于 `description`）：编辑为"源码 + 预览"——平时显示渲染结果，单击切到源码编辑，失焦回到渲染；
   粘贴普通文字 / Markdown 源码原样插入；渲染支持 GFM 表格 / 任务清单 / 删除线 / 自动链接。编辑模式另有源码 / 预览分栏的放大编辑弹窗
   （`windows/editor/desc_dialog.rs`，「最大化」联动窗口最大化）
@@ -147,11 +151,12 @@ mini-todo/
   空名 / 重名提示并恢复原名）；右键清单名「重命名 / 删除清单」（默认清单的删除置灰）。实现 `windows/list_window/name.rs`
 - 删除：确认框 `确定删除清单「X」吗？N 项待办将移到「待办清单」。` → core `lists::delete`（单事务：其下待办移到默认清单并刷新 `updated_at` /
   `list_updated_at`、删清单、写清单墓碑、删它的窗口记录、从日历筛选移出）→ 关掉它的窗口
-- 待办在清单间移动：编辑表单「四象限」下的「清单」下拉（新建预选打开方的清单：FAB = 本清单，托盘「添加待办项」= 默认清单；编辑已有待办时
+- 待办在清单间移动：编辑表单「四象限」下的「清单」下拉（新建预选打开方的清单：FAB / Ctrl+N / 双击空白 = 本清单，日历双击某天 = 筛选恰好
+  只选了一个清单时是它、否则默认清单，托盘「添加待办项」= 默认清单；编辑已有待办时
   **只有用户真的改了选择**才在 `UpdateTodoRequest` 带 `list_id`，否则归属未知的待办会被写成 1）；列表 / 四象限的待办行右键「移动到 ▸」
   （子菜单列出其它清单，只有默认清单时置灰并提示"没有其它清单"；`windows/list_window/row_menu.rs`，`AppState::move_todo_to_list` 先改本地副本、
   失败回滚）。不做跨窗口拖动
-- 清单窗口的 FAB 建到本清单；「已完成」只看本清单（恢复后回原清单）；日历显示所有清单的待办（可按清单筛选，见「视图模式」）
+- 清单窗口里新建（FAB / Ctrl+N / 双击空白）建到本清单；「已完成」只看本清单（恢复后回原清单）；日历显示所有清单的待办（可按清单筛选，见「视图模式」）
 - 清单定义与删除随 WebDAV 同步（顶层 `todoLists` / `listTombstones`）；同步来的新清单（本机没有窗口记录）自动开窗，同步删除的清单自动关窗
 
 ### 子任务
@@ -180,7 +185,9 @@ mini-todo/
 - **列表视图**：按排序/优先级展示
 - **四象限视图**：拖拽分类
 - **日历窗口**（单例，设置 → 常规「展示日历」/ 托盘「显示日历」勾选，两者同一个设备本地状态 = 日历窗口的 `hidden`）：按日期展示所有清单的待办
-  （含农历、节气、传统节日、法定节假日与调休；跨天条用待办自己的颜色，点击打开只读详情；不能新建待办）。标题栏：月份导航、今天、清单筛选、日 / 夜、锁、设置。
+  （含农历、节气、传统节日、法定节假日与调休；跨天条用待办自己的颜色，点击打开只读详情）。**双击某天**（待办条以外的地方，含灰色的上 / 下月格子；
+  锁定与否都行）新建待办：只预填开始时间 = 那天 00:00（截止、提醒留空；日历按开始时间放格子，保存后就在那天），清单 = 筛选恰好只选了一个且它还在时
+  建到它、否则默认清单（`calendar_window::logic::new_todo_list_id`）。标题栏：月份导航、今天、清单筛选、日 / 夜、锁、设置。
   **清单筛选**（漏斗按钮下拉多选，`windows/calendar_window/filter.rs`，存 `window_prefs.calendar_filter`：`NULL` = 全部，否则清单 id 数组）：
   「全部清单」包含以后新建的清单；从全部取消一个 = 其余清单；勾满或一个不剩回到全部；选了具体清单时新清单不勾；被删除的清单自动移出；
   兜底到默认清单的待办按默认清单参与筛选；不是全部时按钮显示主色。第一次显示且当前屏幕组合没有布局时贴默认清单窗口右侧、与它等高
@@ -220,6 +227,7 @@ mini-todo/
   「背景透明度」（透出桌面）
 - **固定模式**（每个窗口标题栏的锁按钮，`window_mode::toggle_fixed(cx, key)`；托盘不再有「固定模式」）：
   - 固定在用户指定位置：不可拖动、不可缩放（自绘拖动与手柄不挂；`platform::subclass` 的 `FLAG_LOCK_GEOMETRY` 拦截命中测试）
+  - 清单窗口不显示右下角「+」FAB（含嵌入桌面），新建用 Ctrl+N / ⌘N 或双击空白处（见「待办管理」）；空状态文案随之只提示后两者
   - 不在任务栏、不参与 Alt+Tab（`WS_EX_TOOLWINDOW`）；被 Win+D / Win+M 最小化后由 200ms 轮询立即还原
   - 可选贴边自动隐藏、唤起时置顶（设置 → 常规）；经典固定时没有圆角与描边
 - **固定模式时嵌入桌面**（设置 → 常规「固定模式时，嵌入桌面中」，仅 Windows 显示，Win11 24H2+ 保证 Win+D 免疫）：
@@ -587,7 +595,7 @@ macOS（与 2.5.0 mac 版 `mini-todo_2.5.0_universal.dmg` 的实物 Info.plist �
 |---|---|---|
 | 清单窗口 | `services::block_windows`（`show_list` / `create_list` / `reconcile`；`windows/list_window/`） | 每个清单一个，`WindowKind::List`、key `list:<清单 id>`（= `window_prefs` 的 key）；380×600，最小 320×400，透明，自绘移动与缩放（不可系统缩放、没有 Aero Snap / 双击最大化）；系统标题：默认清单窗口固定 `Mini Todo`（e2e 按它找窗口），其它 = 清单名；关闭 = 隐藏 |
 | 日历窗口 | `block_windows::set_calendar_visible`（`windows/calendar_window/`） | 单例，`WindowKind::Calendar`、key `calendar`；最小 420×480，第一次显示贴默认清单窗口右侧、等高；系统标题 `日历`；关闭 = 隐藏（关掉「显示日历」） |
-| 待办详情 / 编辑 | `editor::open(cx, parent, todo_id, EditorMode::{View, Edit})`；清单窗口 FAB 用 `editor::open_new(cx, parent, list_id)` | 1080×600；`todo_id = None` 为新建（「清单」下拉预选默认清单 / `open_new` 的清单） |
+| 待办详情 / 编辑 | `editor::open(cx, parent, todo_id, EditorMode::{View, Edit})`；清单 / 日历窗口新建用 `editor::open_new(cx, parent, NewTodoPreset)`（FAB / Ctrl+N / 双击空白 / 双击象限 / 双击日历某天） | 1080×600；`todo_id = None` 为新建（「清单」下拉预选默认清单 / 预设的清单；预设还可带象限、开始时间，算作初始基线） |
 | 子任务 | `subtask::open` / `subtask::open_draft` | 800×750，查看 / 编辑 |
 | 已完成 | `completed::open(cx, parent, list_id)` | 460×550，只列本清单（有效清单）的已完成；搜索、恢复、删除 |
 | 设置 | `settings::open(cx, parent, SettingsTab::{General, Appearance, Data, Screen, About})` | 680×560；常规 / 外观 / 数据与同步 / 屏幕配置 / 关于 |
@@ -618,7 +626,8 @@ services::scheduler（后台线程）
 
 ```
 列表 / 四象限 / 日历 / 已完成
-  └── 点击待办 → editor::open(.., Some(id), EditorMode::View)（新建：FAB → editor::open_new(.., 本清单)；托盘「添加待办项」→ None = 默认清单，直接编辑）
+  └── 点击待办 → editor::open(.., Some(id), EditorMode::View)（新建：FAB / Ctrl+N / 双击空白 → editor::open_new(.., 本清单 [+ 象限])；
+       日历双击某天 → open_new(.., 筛选定的清单 + 开始时间)；托盘「添加待办项」→ None = 默认清单，直接编辑）
        └── 编辑窗口：只读详情（标题 + MD 渲染 + 通知状态 + 优先级 + 所属清单）⇄ [编辑] 原地切换表单（含「清单」下拉）
             ├── 写操作经 AppState（create_todo / update_todo / …，后台执行、更新本地副本）
             └── 描述字段使用 ui::markdown_editor（源码 + 预览，值为存储形式 minitodo-image://）
@@ -696,7 +705,8 @@ WebDAV 服务端差异（实测，见 `.trellis/spec/backend/sync-protocol.md`�
    - 系统通知拿不到投递结果（授权被拒也视为已投递），`cargo run` 的裸二进制收不到通知；runner 上测不了通知横幅与授权
    - 清单 / 日历窗口没有嵌入桌面，固定模式没有"不进 Dock / ⌘Tab"；固定模式在 Spaces / 全屏下的行为（`collectionBehavior`）没有处理
    - 多清单 / 日历窗口（3.1）没有新增 mac 专属代码，共用路径没在 Mac 上跑过：⌘W 隐藏（`orderOut:`）、全部隐藏后点 Dock 带出隐藏的清单窗口、
-     新清单窗口进入改名时能否拿到 key、隐藏状态下 `setFrame:` 后再显示（「重置位置」）、清单 / 日历窗口的自绘拖动、缩放与吸附；
+     新清单窗口进入改名时能否拿到 key、隐藏状态下 `setFrame:` 后再显示（「重置位置」）、清单 / 日历窗口的自绘拖动、缩放与吸附、
+     ⌘N 与双击空白 / 日历某天新建（应用菜单里没有「新建待办」项，⌘N 只靠清单窗口的 key context）；
      有清单 / 日历窗口显示着时点 Dock 只激活应用、不带出隐藏的清单窗口（GPUI 只在没有可见窗口时回调 `on_reopen`），只能用菜单栏图标左键
    - 收纳箱（3.0.3-pre 起）只在 runner 上跑过 e2e（MF 组：桌面层层级、监听、真实拖入、移回、删除、⌘H、Dock 唤起、改名、拖动落库、菜单栏三项、
      重启恢复），全部在临时目录里、没碰过真实 `~/Desktop`。改名（MF08）在 runner 上用粘贴 + 回车验证（系统输入流的 ⌘V / 回车；runner 上逐字注入的
