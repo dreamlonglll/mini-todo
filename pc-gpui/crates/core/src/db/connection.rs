@@ -6,6 +6,8 @@ use super::{backup, migrations, paths};
 
 pub struct Database {
     conn: Mutex<Connection>,
+    /// 本次打开时、执行迁移之前的库结构版本（0 = 全新的库），见 [`Database::schema_version_at_open`]
+    schema_version_at_open: i32,
 }
 
 impl Database {
@@ -27,11 +29,19 @@ impl Database {
             std::fs::create_dir_all(parent).map_err(|e| format!("创建数据目录失败: {}", e))?;
         }
         let conn = Connection::open(db_path).map_err(|e| format!("打开数据库失败: {}", e))?;
-        backup_before_migrations(&conn, db_path)?;
+        let schema_version_at_open = backup_before_migrations(&conn, db_path)?;
         migrations::migrate(&conn).map_err(|e| format!("数据库升级失败: {}", e))?;
         Ok(Self {
             conn: Mutex::new(conn),
+            schema_version_at_open,
         })
+    }
+
+    /// 本次打开时、执行迁移**之前**的库结构版本（`migrations` 表的最大版本）：`0` = 全新的库（文件刚建好 / 空库），
+    /// 其它值是上次运行的程序留下的版本（3.0.x 及更早 `< 31`，3.1.0-pre 是 `31`）。启动时判断"是不是刚装好""上次大概是哪个
+    /// 版本"用（app 的更新日志弹窗）；迁移之后的当前版本用 [`migrations::current_version`]。
+    pub fn schema_version_at_open(&self) -> i32 {
+        self.schema_version_at_open
     }
 
     pub fn with_connection<F, R>(&self, f: F) -> Result<R>
@@ -75,12 +85,14 @@ impl Database {
         migrations::migrate(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
+            schema_version_at_open: 0,
         })
     }
 }
 
 /// 有待执行的迁移时先给当前库拍快照（C5）。全新库（版本 0）没有可备份的数据，直接跳过。
-fn backup_before_migrations(conn: &Connection, db_path: &Path) -> std::result::Result<(), String> {
+/// 返回迁移前的库版本（[`Database::schema_version_at_open`]）。
+fn backup_before_migrations(conn: &Connection, db_path: &Path) -> std::result::Result<i32, String> {
     let current =
         migrations::current_version(conn).map_err(|e| format!("读取数据库版本失败: {}", e))?;
     if current > migrations::LATEST_VERSION {
@@ -89,10 +101,10 @@ fn backup_before_migrations(conn: &Connection, db_path: &Path) -> std::result::R
             current,
             migrations::LATEST_VERSION
         );
-        return Ok(());
+        return Ok(current);
     }
     if current == 0 || current == migrations::LATEST_VERSION {
-        return Ok(());
+        return Ok(current);
     }
     let dir = db_path
         .parent()
@@ -106,7 +118,7 @@ fn backup_before_migrations(conn: &Connection, db_path: &Path) -> std::result::R
         migrations::LATEST_VERSION,
         file.display()
     );
-    Ok(())
+    Ok(current)
 }
 
 #[cfg(test)]
@@ -159,12 +171,42 @@ mod tests {
             db.with_connection(migrations::current_version).unwrap(),
             migrations::LATEST_VERSION
         );
+        assert_eq!(db.schema_version_at_open(), 0, "全新的库：迁移前是 v0");
         drop(db);
 
         // 已是最新版本：再次打开不备份
         let db = Database::open(&dir.join("data.db")).unwrap();
         assert!(backups(&dir).is_empty());
+        assert_eq!(db.schema_version_at_open(), migrations::LATEST_VERSION);
         drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn schema_version_at_open_is_the_version_before_migrations() {
+        let dir = temp_dir("at-open");
+        let path = dir.join("data.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            migrations::run_migrations_to(&conn, 30).unwrap();
+        }
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.schema_version_at_open(), 30);
+        assert_eq!(
+            db.with_connection(migrations::current_version).unwrap(),
+            migrations::LATEST_VERSION
+        );
+        drop(db);
+
+        // 空文件（0 字节）也是全新的库
+        let empty = dir.join("empty.db");
+        std::fs::write(&empty, b"").unwrap();
+        assert_eq!(Database::open(&empty).unwrap().schema_version_at_open(), 0);
+        // 内存库（测试用）同样按全新的库
+        assert_eq!(
+            Database::new_in_memory().unwrap().schema_version_at_open(),
+            0
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
