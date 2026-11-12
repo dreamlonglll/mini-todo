@@ -411,6 +411,8 @@ impl CalendarWindow {
             .py(px(3.))
             .when(col < 6, |this| this.border_r_1().border_color(line))
             .when(row < 5, |this| this.border_b_1().border_color(line))
+            // 手形指针提示格子可以操作（双击新建）；待办条在格子之上，指针按条自己的
+            .cursor_pointer()
             // 双击格子（含灰色的上 / 下月格子；待办条对双击的第二下 stop_propagation，到不了这里）：新建待办
             .on_mouse_down(
                 MouseButton::Left,
