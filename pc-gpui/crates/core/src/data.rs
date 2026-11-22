@@ -452,30 +452,58 @@ pub fn export_to_file(db: &Database, file_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// 手动导入文件（ZIP 解压后或原始 JSON）的大小上限（128 MiB），防止恶意 / 损坏压缩包撑爆内存
+pub const MAX_IMPORT_BYTES: u64 = 128 * 1024 * 1024;
+
+/// 限长读取文本（最多 `max_bytes` 字节），超出时返回面向用户的中文错误
+fn read_limited_string<R: std::io::Read>(reader: R, max_bytes: u64) -> Result<String, String> {
+    let mut buf = Vec::new();
+    reader
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("读取导入数据失败: {}", e))?;
+    if buf.len() as u64 > max_bytes {
+        return Err(format!(
+            "导入文件过大（超过 {} MB），已拒绝导入",
+            max_bytes / (1024 * 1024)
+        ));
+    }
+    String::from_utf8(buf).map_err(|e| format!("文件编码错误: {}", e))
+}
+
 /// 从文件导入：按 `PK` 魔数区分 ZIP（取 `data.json`）与 JSON，再走 [`import_json`]（`import_data_from_file`）
 pub fn import_from_file(db: &Database, file_path: &Path) -> Result<(), String> {
-    let file_bytes = std::fs::read(file_path).map_err(|e| format!("读取文件失败: {}", e))?;
+    let meta = std::fs::metadata(file_path).map_err(|e| format!("读取文件失败: {}", e))?;
+    if meta.len() > MAX_IMPORT_BYTES {
+        return Err(format!(
+            "导入文件过大（超过 {} MB），已拒绝导入",
+            MAX_IMPORT_BYTES / (1024 * 1024)
+        ));
+    }
 
-    // ZIP magic bytes: PK (0x50, 0x4B)
-    let is_zip = file_bytes.len() >= 2 && file_bytes[0] == 0x50 && file_bytes[1] == 0x4B;
+    let mut file = std::fs::File::open(file_path).map_err(|e| format!("读取文件失败: {}", e))?;
+    let mut magic = [0u8; 2];
+    let n = file
+        .read(&mut magic)
+        .map_err(|e| format!("读取文件失败: {}", e))?;
+    let is_zip = n == 2 && magic == [0x50, 0x4B];
+
+    use std::io::Seek as _;
+    file.seek(std::io::SeekFrom::Start(0))
+        .map_err(|e| format!("读取文件失败: {}", e))?;
 
     if is_zip {
-        let cursor = std::io::Cursor::new(&file_bytes);
         let mut archive =
-            zip::ZipArchive::new(cursor).map_err(|e| format!("解析 ZIP 失败: {}", e))?;
+            zip::ZipArchive::new(file).map_err(|e| format!("解析 ZIP 失败: {}", e))?;
 
-        let mut json_data = String::new();
-        let mut data_file = archive
+        let data_file = archive
             .by_name("data.json")
             .map_err(|e| format!("ZIP 中未找到 data.json: {}", e))?;
-        data_file
-            .read_to_string(&mut json_data)
-            .map_err(|e| format!("读取 data.json 失败: {}", e))?;
+        let json_data = read_limited_string(data_file, MAX_IMPORT_BYTES)?;
 
         import_json(db, &json_data)
     } else {
-        let json_data =
-            String::from_utf8(file_bytes).map_err(|e| format!("文件编码错误: {}", e))?;
+        let json_data = read_limited_string(file, MAX_IMPORT_BYTES)?;
         import_json(db, &json_data)
     }
 }
@@ -1271,5 +1299,13 @@ mod tests {
         seed_existing(&db);
         let old: ExportDataV40 = serde_json::from_str(&export_json(&db).unwrap()).unwrap();
         assert_eq!(old.todos.len(), 1);
+    }
+
+    #[test]
+    fn read_limited_string_rejects_oversized_input() {
+        let ok = read_limited_string(std::io::Cursor::new(b"hello"), 5).unwrap();
+        assert_eq!(ok, "hello");
+        let err = read_limited_string(std::io::Cursor::new(b"hello!"), 5).unwrap_err();
+        assert!(err.contains("过大"), "{err}");
     }
 }

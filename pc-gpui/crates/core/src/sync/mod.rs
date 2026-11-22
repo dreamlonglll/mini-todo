@@ -88,6 +88,7 @@ const MAX_SYNC_DOC_BYTES: u64 = 256 * 1024 * 1024;
 const KEY_URL: &str = "webdav_url";
 const KEY_USERNAME: &str = "webdav_username";
 const KEY_PASSWORD: &str = "webdav_password";
+const KEY_SYNC_PASSPHRASE: &str = "webdav_sync_passphrase";
 const KEY_AUTO_SYNC: &str = "webdav_auto_sync";
 const KEY_SYNC_INTERVAL: &str = "webdav_sync_interval";
 const KEY_LAST_SYNC_AT: &str = "webdav_last_sync_at";
@@ -130,6 +131,13 @@ pub struct SyncSettings {
     pub device_id: String,
     #[serde(default, skip_serializing)]
     pub clear_password: bool,
+    /// 可选：端到端加密口令（读取时恒为空串；保存时非空则更新，空则保留原口令）
+    #[serde(default)]
+    pub sync_passphrase: String,
+    #[serde(default)]
+    pub has_sync_passphrase: bool,
+    #[serde(default, skip_serializing)]
+    pub clear_sync_passphrase: bool,
 }
 
 fn generate_device_id() -> String {
@@ -169,37 +177,62 @@ fn read_sync_settings(db: &Database) -> Result<SyncSettings, String> {
             last_sync_at: get_setting(conn, KEY_LAST_SYNC_AT)?.filter(|s| !s.is_empty()),
             device_id: ensure_device_id(conn)?,
             clear_password: false,
+            sync_passphrase: String::new(),
+            has_sync_passphrase: !get_setting_or(conn, KEY_SYNC_PASSPHRASE, "").is_empty(),
+            clear_sync_passphrase: false,
         })
     })
     .map_err(|e| e.to_string())
 }
 
-/// 保存同步设置（`save_sync_settings`）。密码：`clear_password` > 新密码（Windows 上 DPAPI 加密）> 保留
-/// （旧版明文顺手加密）；换了服务器 / 账号时清掉同步基准与 `synced_seq`，下次同步完整合并一次
+/// 保存同步设置（`save_sync_settings`）。密码与加密口令：`clear_*` > 新值（Windows 上 DPAPI 加密）> 保留
+/// （旧版明文顺手加密）；换了服务器 / 账号 / 加密口令时清掉同步基准，下次同步完整合并一次
 pub fn save_settings(db: &Database, settings: &SyncSettings) -> Result<(), String> {
     save_sync_settings_inner(db, settings)
+}
+
+fn resolve_secret_update(
+    stored: &str,
+    incoming: &str,
+    clear: bool,
+) -> Result<Option<String>, String> {
+    if clear {
+        Ok(Some(String::new()))
+    } else if !incoming.is_empty() {
+        Ok(Some(secret::protect(incoming)?))
+    } else if !stored.is_empty() && !secret::is_protected(stored) {
+        match secret::protect(stored) {
+            Ok(p) if p != stored => Ok(Some(p)),
+            _ => Ok(None),
+        }
+    } else {
+        Ok(None)
+    }
 }
 
 fn save_sync_settings_inner(db: &Database, settings: &SyncSettings) -> Result<(), String> {
     let url = settings.webdav_url.trim().to_string();
     let username = settings.webdav_username.clone();
 
-    // 密码：显式清空 > 新密码（加密）> 保留；保留时把旧版明文顺手加密
-    let stored = db
-        .with_connection(|conn| Ok(get_setting_or(conn, KEY_PASSWORD, "")))
+    let (stored_password, stored_passphrase) = db
+        .with_connection(|conn| {
+            Ok((
+                get_setting_or(conn, KEY_PASSWORD, ""),
+                get_setting_or(conn, KEY_SYNC_PASSPHRASE, ""),
+            ))
+        })
         .map_err(|e: rusqlite::Error| e.to_string())?;
-    let new_password = if settings.clear_password {
-        Some(String::new())
-    } else if !settings.webdav_password.is_empty() {
-        Some(secret::protect(&settings.webdav_password)?)
-    } else if !stored.is_empty() && !secret::is_protected(&stored) {
-        match secret::protect(&stored) {
-            Ok(p) if p != stored => Some(p),
-            _ => None,
-        }
-    } else {
-        None
-    };
+    let new_password = resolve_secret_update(
+        &stored_password,
+        &settings.webdav_password,
+        settings.clear_password,
+    )?;
+    let new_passphrase = resolve_secret_update(
+        &stored_passphrase,
+        &settings.sync_passphrase,
+        settings.clear_sync_passphrase,
+    )?;
+    let passphrase_changed = settings.clear_sync_passphrase || !settings.sync_passphrase.is_empty();
     let interval = settings.sync_interval.max(1);
 
     db.with_transaction(|tx| -> rusqlite::Result<()> {
@@ -210,6 +243,9 @@ fn save_sync_settings_inner(db: &Database, settings: &SyncSettings) -> Result<()
         set_setting(tx, KEY_USERNAME, &username)?;
         if let Some(password) = &new_password {
             set_setting(tx, KEY_PASSWORD, password)?;
+        }
+        if let Some(passphrase) = &new_passphrase {
+            set_setting(tx, KEY_SYNC_PASSPHRASE, passphrase)?;
         }
         set_bool_setting(tx, KEY_AUTO_SYNC, settings.auto_sync)?;
         set_setting(tx, KEY_SYNC_INTERVAL, &interval.to_string())?;
@@ -226,6 +262,9 @@ fn save_sync_settings_inner(db: &Database, settings: &SyncSettings) -> Result<()
                 set_setting(tx, key, "")?;
             }
             sync_store::set_synced_seq(tx, 0)?;
+        } else if passphrase_changed {
+            // 改了加密口令：清除 ETag 让下一次同步做无条件 GET，及时按新口令重写远端格式
+            set_setting(tx, KEY_REMOTE_ETAG, "")?;
         }
         Ok(())
     })
@@ -419,12 +458,23 @@ fn gzip_decompress(data: &[u8]) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-/// 解码远端 `sync-data.json.gz`（也接受未压缩的 JSON）。任何结构性问题都返回错误。
-pub(crate) fn decode_sync_doc(bytes: &[u8]) -> Result<SyncData, String> {
-    let json = if bytes.starts_with(&[0x1f, 0x8b]) {
-        gzip_decompress(bytes)?
+/// 解码远端 `sync-data.json.gz`（支持可选 E2EE 封包、明文 gzip 与未压缩 JSON）。任何结构性问题都返回错误。
+pub(crate) fn decode_sync_doc_with_passphrase(
+    bytes: &[u8],
+    passphrase: Option<&str>,
+) -> Result<SyncData, String> {
+    let decrypted;
+    let payload = if mini_todo_protocol::crypto::is_encrypted(bytes) {
+        let pass = passphrase.unwrap_or("");
+        decrypted = mini_todo_protocol::crypto::decrypt(bytes, pass)?;
+        decrypted.as_slice()
     } else {
-        bytes.to_vec()
+        bytes
+    };
+    let json = if payload.starts_with(&[0x1f, 0x8b]) {
+        gzip_decompress(payload)?
+    } else {
+        payload.to_vec()
     };
     let value: Value =
         serde_json::from_slice(&json).map_err(|e| format!("解析远程数据失败: {}", e))?;
@@ -432,6 +482,11 @@ pub(crate) fn decode_sync_doc(bytes: &[u8]) -> Result<SyncData, String> {
         return Err("解析远程数据失败: 顶层不是 JSON 对象".to_string());
     }
     serde_json::from_value(value).map_err(|e| format!("解析远程数据失败: {}", e))
+}
+
+#[cfg(test)]
+pub(crate) fn decode_sync_doc(bytes: &[u8]) -> Result<SyncData, String> {
+    decode_sync_doc_with_passphrase(bytes, None)
 }
 
 fn iso_now() -> String {
@@ -596,16 +651,18 @@ struct ConnectionConfig {
     url: String,
     username: String,
     password: String,
+    sync_passphrase: Option<String>,
     device_id: String,
 }
 
 fn load_connection(db: &Database) -> Result<ConnectionConfig, String> {
-    let (url, username, stored, device_id) = db
+    let (url, username, stored_password, stored_passphrase, device_id) = db
         .with_connection(|conn| {
             Ok((
                 get_setting_or(conn, KEY_URL, ""),
                 get_setting_or(conn, KEY_USERNAME, ""),
                 get_setting_or(conn, KEY_PASSWORD, ""),
+                get_setting_or(conn, KEY_SYNC_PASSPHRASE, ""),
                 ensure_device_id(conn)?,
             ))
         })
@@ -613,10 +670,12 @@ fn load_connection(db: &Database) -> Result<ConnectionConfig, String> {
     if url.trim().is_empty() {
         return Err("未配置 WebDAV 服务器".to_string());
     }
+    let sync_passphrase = secret::reveal(&stored_passphrase)?;
     Ok(ConnectionConfig {
         url,
         username,
-        password: secret::reveal(&stored)?,
+        password: secret::reveal(&stored_password)?,
+        sync_passphrase: (!sync_passphrase.is_empty()).then_some(sync_passphrase),
         device_id,
     })
 }
@@ -630,6 +689,7 @@ fn run_sync_blocking(db: &Database, mode: SyncMode) -> Result<SyncReport, String
         images_dir: paths::images_dir(),
         device_id: config.device_id,
         retry_delay: CONFLICT_RETRY_DELAY,
+        sync_passphrase: config.sync_passphrase,
     };
     let report = match mode {
         SyncMode::Smart { full } => {
@@ -699,6 +759,8 @@ struct SyncEngine<'a> {
     device_id: String,
     /// 412 之后的等待时间（生产环境为 [`CONFLICT_RETRY_DELAY`]）
     retry_delay: std::time::Duration,
+    /// 可选：端到端加密口令
+    sync_passphrase: Option<String>,
 }
 
 impl SyncEngine<'_> {
@@ -793,23 +855,27 @@ impl SyncEngine<'_> {
         Ok(at)
     }
 
-    /// gzip + 条件 PUT；父目录不存在时建目录重试一次；响应没带 ETag 时 HEAD / PROPFIND 补齐
+    /// gzip（若配置口令则再端到端加密）+ 条件 PUT；父目录不存在时建目录重试一次；响应没带 ETag 时 HEAD / PROPFIND 补齐
     fn put_doc(&self, doc: &SyncData, precondition: &Precondition) -> Result<PushResult, String> {
         let json = serde_json::to_vec(doc).map_err(|e| format!("序列化同步数据失败: {}", e))?;
-        let body = gzip_compress(&json)?;
+        let gzipped = gzip_compress(&json)?;
+        let (body, content_type) = match self.sync_passphrase.as_deref().filter(|p| !p.is_empty()) {
+            Some(pass) => (
+                bytes::Bytes::from(mini_todo_protocol::crypto::encrypt(&gzipped, pass)?),
+                "application/octet-stream",
+            ),
+            None => (bytes::Bytes::from(gzipped), "application/gzip"),
+        };
         let len = body.len() as u64;
 
-        let mut outcome = self.client.put(
-            SYNC_DATA_FILE,
-            body.clone(),
-            "application/gzip",
-            precondition,
-        )?;
+        let mut outcome =
+            self.client
+                .put(SYNC_DATA_FILE, body.clone(), content_type, precondition)?;
         if outcome == PutOutcome::ParentMissing {
             self.client.ensure_dir(REMOTE_DIR)?;
             outcome = self
                 .client
-                .put(SYNC_DATA_FILE, body, "application/gzip", precondition)?;
+                .put(SYNC_DATA_FILE, body, content_type, precondition)?;
         }
         match outcome {
             PutOutcome::Ok(version) if version.etag.is_some() => Ok(PushResult::Done(version)),
@@ -881,15 +947,23 @@ impl SyncEngine<'_> {
             // 本地有变更时反正要拿到远端全文来合并，直接无条件 GET；手动同步 / 兜底轮也无条件
             let conditional =
                 (!full && !dirty && attempt == 0 && pre.base.etag.is_some()).then_some(&pre.base);
-            let (remote, version) = match self.client.get(SYNC_DATA_FILE, conditional)? {
+            let (remote, version, remote_encrypted) = match self
+                .client
+                .get(SYNC_DATA_FILE, conditional)?
+            {
                 GetOutcome::NotModified => {
                     let at =
                         self.finish(&pre.base, pre.local_seq, &pre.synced_settings_at, &cutoff)?;
                     report.finalize(false, at, &images);
                     return Ok(report);
                 }
-                GetOutcome::NotFound => (None, RemoteVersion::default()),
-                GetOutcome::Found { body, version } => (Some(decode_sync_doc(&body)?), version),
+                GetOutcome::NotFound => (None, RemoteVersion::default(), false),
+                GetOutcome::Found { body, version } => {
+                    let enc = mini_todo_protocol::crypto::is_encrypted(&body);
+                    let doc =
+                        decode_sync_doc_with_passphrase(&body, self.sync_passphrase.as_deref())?;
+                    (Some(doc), version, enc)
+                }
             };
 
             if let Some(remote) = &remote {
@@ -906,9 +980,14 @@ impl SyncEngine<'_> {
                 &self.device_id,
                 &cutoff,
             );
+            let want_encrypted = self
+                .sync_passphrase
+                .as_deref()
+                .is_some_and(|p| !p.is_empty());
+            let format_changed = want_encrypted != remote_encrypted;
             let need_upload = match &remote {
                 None => true,
-                Some(r) => dirty || doc_differs(&doc, r, &cutoff),
+                Some(r) => dirty || format_changed || doc_differs(&doc, r, &cutoff),
             };
 
             if !need_upload {
@@ -961,7 +1040,10 @@ impl SyncEngine<'_> {
         let mut report = SyncReport::default();
         let cutoff = sync_store::retention_cutoff();
         let (remote, version) = match self.client.get(SYNC_DATA_FILE, None)? {
-            GetOutcome::Found { body, version } => (decode_sync_doc(&body)?, version),
+            GetOutcome::Found { body, version } => (
+                decode_sync_doc_with_passphrase(&body, self.sync_passphrase.as_deref())?,
+                version,
+            ),
             GetOutcome::NotFound => {
                 return Err("远端还没有同步数据，无法用云端覆盖本地".to_string())
             }
@@ -1015,14 +1097,19 @@ impl SyncEngine<'_> {
         for attempt in 0..MAX_ATTEMPTS {
             let cutoff = sync_store::retention_cutoff();
             let (remote, version) = match self.client.get(SYNC_DATA_FILE, None)? {
-                GetOutcome::Found { body, version } => match decode_sync_doc(&body) {
-                    Ok(doc) => (Some(doc), version),
-                    Err(e) => {
-                        // 用户明确要求用本地覆盖：看不懂的远端也直接覆盖
-                        log::warn!("[sync] 强制推送：远端数据无法识别，将被本地数据覆盖: {}", e);
-                        (None, version)
+                GetOutcome::Found { body, version } => {
+                    match decode_sync_doc_with_passphrase(&body, self.sync_passphrase.as_deref()) {
+                        Ok(doc) => (Some(doc), version),
+                        Err(e) => {
+                            // 用户明确要求用本地覆盖：看不懂的远端也直接覆盖
+                            log::warn!(
+                                "[sync] 强制推送：远端数据无法识别，将被本地数据覆盖: {}",
+                                e
+                            );
+                            (None, version)
+                        }
                     }
-                },
+                }
                 GetOutcome::NotFound => (None, RemoteVersion::default()),
                 GetOutcome::NotModified => return Err("远端返回了意外的 304".to_string()),
             };
@@ -1563,6 +1650,9 @@ fn remote_image_path(name: &str) -> String {
     format!("{}/{}", REMOTE_IMAGES_DIR, name)
 }
 
+/// 单次同步里图片并发下载 / 上传的最大线程数
+const IMAGE_TRANSFER_CONCURRENCY: usize = 4;
+
 /// 一次同步里的图片传输状态
 struct ImageTransfer<'a> {
     client: &'a WebDavClient,
@@ -1609,8 +1699,9 @@ impl<'a> ImageTransfer<'a> {
         names
     }
 
-    /// 下载远端列出、本地缺失的图片；失败只记日志
+    /// 下载远端列出、本地缺失的图片（最多 4 路有限并发）；失败只记日志
     fn download_missing(&mut self, names: &[String]) {
+        let mut todo: Vec<String> = Vec::new();
         for name in names {
             if !is_safe_image_name(name) {
                 log::warn!("[sync] 跳过文件名不安全的远端图片: {:?}", name);
@@ -1619,19 +1710,39 @@ impl<'a> ImageTransfer<'a> {
             if !self.tried_download.insert(name.clone()) {
                 continue;
             }
-            let local = self.dir.join(name);
-            if local.exists() {
+            if self.dir.join(name).exists() {
                 continue;
             }
-            match self.client.download_file(&remote_image_path(name), &local) {
-                Ok(true) => self.downloaded += 1,
-                Ok(false) => log::warn!("[sync] 远端缺少图片 {}", name),
-                Err(e) => log::warn!("[sync] 下载图片 {} 失败: {}", name, e),
-            }
+            todo.push(name.clone());
         }
+        if todo.is_empty() {
+            return;
+        }
+        let workers = todo.len().min(IMAGE_TRANSFER_CONCURRENCY);
+        let queue = std::sync::Mutex::new(todo.into_iter());
+        let ok_count = AtomicU32::new(0);
+        let client = self.client;
+        let dir = self.dir;
+        std::thread::scope(|s| {
+            for _ in 0..workers {
+                s.spawn(|| loop {
+                    let next = queue.lock().unwrap_or_else(|e| e.into_inner()).next();
+                    let Some(name) = next else { break };
+                    let local = dir.join(&name);
+                    match client.download_file(&remote_image_path(&name), &local) {
+                        Ok(true) => {
+                            ok_count.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Ok(false) => log::warn!("[sync] 远端缺少图片 {}", name),
+                        Err(e) => log::warn!("[sync] 下载图片 {} 失败: {}", name, e),
+                    }
+                });
+            }
+        });
+        self.downloaded += ok_count.load(Ordering::Relaxed);
     }
 
-    /// 上传远端缺失的本地图片（每次同步只做一次）。远端清单用一次 PROPFIND Depth 1，
+    /// 上传远端缺失的本地图片（每次同步只做一次，最多 4 路有限并发）。远端清单用一次 PROPFIND Depth 1，
     /// 失败时退化为逐个 HEAD；单张失败只记日志，不阻断同步。
     fn upload_missing(&mut self) {
         if self.upload_done {
@@ -1655,6 +1766,7 @@ impl<'a> ImageTransfer<'a> {
                 .extend(list.iter().filter(|n| is_safe_image_name(n)).cloned());
         }
 
+        let mut to_upload: Vec<String> = Vec::new();
         for name in names {
             let present = match &listing {
                 Some(list) => list.contains(&name),
@@ -1666,19 +1778,50 @@ impl<'a> ImageTransfer<'a> {
                     }
                 },
             };
-            if !present {
-                if let Err(e) = self.client.upload_file(
-                    &remote_image_path(&name),
-                    &self.dir.join(&name),
-                    REMOTE_IMAGES_DIR,
-                ) {
-                    log::warn!("[sync] 上传图片 {} 失败: {}", name, e);
-                    continue;
-                }
-                self.uploaded += 1;
+            if present {
+                self.remote_known.insert(name);
+            } else {
+                to_upload.push(name);
             }
-            self.remote_known.insert(name);
         }
+        if to_upload.is_empty() {
+            return;
+        }
+        // 多图并发上传前先确保远端目录已存在，避免多个线程同时触发 404 → MKCOL 竞争
+        if to_upload.len() > 1 {
+            let _ = self.client.ensure_dir(REMOTE_IMAGES_DIR);
+        }
+        let workers = to_upload.len().min(IMAGE_TRANSFER_CONCURRENCY);
+        let queue = std::sync::Mutex::new(to_upload.into_iter());
+        let uploaded_names = std::sync::Mutex::new(Vec::<String>::new());
+        let client = self.client;
+        let dir = self.dir;
+        std::thread::scope(|s| {
+            for _ in 0..workers {
+                s.spawn(|| loop {
+                    let next = queue.lock().unwrap_or_else(|e| e.into_inner()).next();
+                    let Some(name) = next else { break };
+                    match client.upload_file(
+                        &remote_image_path(&name),
+                        &dir.join(&name),
+                        REMOTE_IMAGES_DIR,
+                    ) {
+                        Ok(()) => {
+                            uploaded_names
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .push(name);
+                        }
+                        Err(e) => log::warn!("[sync] 上传图片 {} 失败: {}", name, e),
+                    }
+                });
+            }
+        });
+        let done = uploaded_names
+            .into_inner()
+            .unwrap_or_else(|e| e.into_inner());
+        self.uploaded += done.len() as u32;
+        self.remote_known.extend(done);
     }
 
     /// 上传文档里的图片清单：远端原清单 ∪ 已知存在于远端的图片（只保留安全文件名）

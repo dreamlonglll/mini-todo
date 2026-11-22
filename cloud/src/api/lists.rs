@@ -297,7 +297,11 @@ pub(crate) fn delete_list_tx(
 
 /// `GET /lists`：全部清单，按 `(sortOrder, id)`。
 pub async fn list_lists(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let lists = state.db.with_conn(|conn| load_lists(conn))?;
+    let lists = state
+        .db
+        .run_read(load_lists)
+        .await
+        .map_err(|e| ApiError::internal("list_lists task failed", e))??;
     Ok(Json(Value::Array(
         lists.into_iter().map(|l| Value::Object(l.obj)).collect(),
     )))
@@ -308,7 +312,11 @@ pub async fn get_list(
     State(state): State<AppState>,
     Path(raw): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let entry = state.db.with_conn(|conn| resolve_list_ref(conn, &raw))?;
+    let entry = state
+        .db
+        .run_read(move |conn| resolve_list_ref(conn, &raw))
+        .await
+        .map_err(|e| ApiError::internal("get_list task failed", e))??;
     Ok(Json(Value::Object(entry.obj)))
 }
 
@@ -322,12 +330,15 @@ pub async fn create_list(
     let now = now_local_string(state.config.timezone);
     let record = state
         .db
-        .with_conn(|conn| -> Result<Map<String, Value>, ApiError> {
+        .run_write(move |conn| -> Result<Map<String, Value>, ApiError> {
             let tx = conn.transaction()?;
             let record = create_list_tx(&tx, &patch, &now)?;
             tx.commit()?;
             Ok(record)
-        })?;
+        })
+        .await
+        .map_err(|e| ApiError::internal("create_list task failed", e))??;
+    state.sync.request_push();
     Ok((StatusCode::CREATED, Json(Value::Object(record))))
 }
 
@@ -343,13 +354,16 @@ pub async fn patch_list(
     let now = now_local_string(tz);
     let record = state
         .db
-        .with_conn(|conn| -> Result<Map<String, Value>, ApiError> {
+        .run_write(move |conn| -> Result<Map<String, Value>, ApiError> {
             let tx = conn.transaction()?;
             let entry = resolve_list_ref(&tx, &raw)?;
             let record = update_list_tx(&tx, &entry, &patch, &now, tz)?;
             tx.commit()?;
             Ok(record)
-        })?;
+        })
+        .await
+        .map_err(|e| ApiError::internal("patch_list task failed", e))??;
+    state.sync.request_push();
     Ok(Json(Value::Object(record)))
 }
 
@@ -360,16 +374,18 @@ pub async fn delete_list(
 ) -> Result<Json<Value>, ApiError> {
     let tz = state.config.timezone;
     let now = now_local_string(tz);
-    let (entry, deleted) =
-        state
-            .db
-            .with_conn(|conn| -> Result<(ListEntry, DeletedList), ApiError> {
-                let tx = conn.transaction()?;
-                let entry = resolve_list_ref(&tx, &raw)?;
-                let deleted = delete_list_tx(&tx, &entry, &now, tz)?;
-                tx.commit()?;
-                Ok((entry, deleted))
-            })?;
+    let (entry, deleted) = state
+        .db
+        .run_write(move |conn| -> Result<(ListEntry, DeletedList), ApiError> {
+            let tx = conn.transaction()?;
+            let entry = resolve_list_ref(&tx, &raw)?;
+            let deleted = delete_list_tx(&tx, &entry, &now, tz)?;
+            tx.commit()?;
+            Ok((entry, deleted))
+        })
+        .await
+        .map_err(|e| ApiError::internal("delete_list task failed", e))??;
+    state.sync.request_push();
     Ok(Json(json!({
         "deleted": deleted.id,
         "name": entry.name(),

@@ -29,8 +29,16 @@ impl Database {
             std::fs::create_dir_all(parent).map_err(|e| format!("创建数据目录失败: {}", e))?;
         }
         let conn = Connection::open(db_path).map_err(|e| format!("打开数据库失败: {}", e))?;
+        // 避免杀毒软件 / 短时外部读取立即触发 SQLITE_BUSY；临时排序与索引留在内存
+        let _ = conn.execute_batch("PRAGMA busy_timeout = 5000; PRAGMA temp_store = MEMORY;");
         let schema_version_at_open = backup_before_migrations(&conn, db_path)?;
         migrations::migrate(&conn).map_err(|e| format!("数据库升级失败: {}", e))?;
+        // 启用 WAL + synchronous=NORMAL：大幅降低桌面高频小事务的 fsync 成本并改善并发读写
+        if let Err(e) =
+            conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")
+        {
+            log::warn!("[db] 配置 WAL 模式失败（继续按默认日志模式运行）: {}", e);
+        }
         Ok(Self {
             conn: Mutex::new(conn),
             schema_version_at_open,
@@ -253,6 +261,29 @@ mod tests {
         std::fs::write(&path, b"this is not a sqlite database at all, just text").unwrap();
         let err = Database::open(&path).err().expect("损坏的库应报错");
         assert!(!err.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_enables_wal_busy_timeout_and_pending_notify_index() {
+        let dir = temp_dir("pragmas");
+        let db = Database::open(&dir.join("data.db")).unwrap();
+        let (journal_mode, busy_timeout, has_idx): (String, i64, i64) = db
+            .with_connection(|c| {
+                let jm: String = c.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
+                let bt: i64 = c.query_row("PRAGMA busy_timeout", [], |r| r.get(0))?;
+                let idx: i64 = c.query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_todos_pending_notify'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                Ok((jm, bt, idx))
+            })
+            .unwrap();
+        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+        assert_eq!(busy_timeout, 5000);
+        assert_eq!(has_idx, 1);
+        drop(db);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

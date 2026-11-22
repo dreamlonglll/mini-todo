@@ -1,0 +1,13 @@
+# 统一文本文件换行与大体积二进制资源标记
+* text=auto
+
+# 跨平台脚本保持 LF
+*.sh text eol=lf
+*.py text eol=lf
+
+# 大体积二进制媒体文件标记为 binary（不产生文本 diff；后续新录制的介绍视频建议改由 GitHub Releases / Git LFS 托管以控制仓库体积）
+*.mp4 binary
+*.png binary
+*.ico binary
+*.icns binary
+*.zip binary

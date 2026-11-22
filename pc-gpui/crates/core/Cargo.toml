@@ -22,9 +22,12 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "5"
 base64 = "0.22"
+bytes = "1"
 reqwest = { version = "0.12", features = ["json", "blocking"] }
 # webdav.rs 解码 PROPFIND 里的 href
 urlencoding = "2"
+# PC 与 Cloud 共用的跨端协议工具（ID、安全图片名与 MIME、WebDAV XML、可选 E2EE）
+mini-todo-protocol = { path = "../../../shared/mini-todo-protocol" }
 flate2 = "1.1.9"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 # 桌面收纳箱（services/fence_fs）：监听收纳目录变化；图标位图编码为 PNG
@@ -34,11 +37,12 @@ png = "0.17"
 tyme4rs = "1.5"
 
 [target.'cfg(windows)'.dependencies]
-# features（沿用旧 Tauri 版）：IFileOperation 移动、IShellItemImageFactory 图标、ShellExecuteExW、
+# 与 app / gpui-pre-windows 统一使用 windows 0.62，减少重复编译；
+# features：IFileOperation 移动、IShellItemImageFactory 图标、ShellExecuteExW、
 # 资源管理器定位、IShellLinkW、DPAPI、DirectWrite 字体枚举
-windows = { version = "0.58", features = ["implement", "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Dwm", "Win32_Graphics_DirectWrite", "Win32_Graphics_Gdi", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Registry", "Win32_UI_Shell", "Win32_UI_Shell_Common"] }
-# windows 0.58 的 #[implement] 宏展开后引用 ::windows_core，版本须与 windows 一致
-windows-core = "0.58"
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Dwm", "Win32_Graphics_DirectWrite", "Win32_Graphics_Gdi", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Registry", "Win32_UI_Shell", "Win32_UI_Shell_Common"] }
+# windows 0.62 的 #[implement] 宏展开后引用 ::windows_core，版本须与 windows 一致
+windows-core = "0.62"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # 桌面收纳箱的 macOS 文件层（services/fence_fs/mac.rs）：renamex_np(RENAME_EXCL) 移动、NSFileManager 跨卷移动、

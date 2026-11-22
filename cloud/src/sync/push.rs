@@ -153,18 +153,26 @@ fn push_sync_data(ctx: &SyncCtx, g0: i64, report: &mut PushReport) -> anyhow::Re
                 Ok((base, doc))
             })
             .context("构造 sync-data 失败")?;
-        let payload = gzip(&serde_json::to_vec(&doc)?)?;
+        let gzipped = gzip(&serde_json::to_vec(&doc)?)?;
+        let (payload, content_type) = match ctx.cfg.sync_passphrase.as_deref() {
+            Some(pass) if !pass.is_empty() => (
+                mini_todo_protocol::crypto::encrypt(&gzipped, pass)
+                    .map_err(|e| anyhow::anyhow!("{}", e))?,
+                "application/octet-stream",
+            ),
+            _ => (gzipped, "application/gzip"),
+        };
 
         // 3) 条件 PUT
         let pre = select_precondition(fetched.remote_exists, &base);
-        let mut outcome = dav.put(SYNC_DATA_FILE, &payload, "application/gzip", pre)?;
+        let mut outcome = dav.put(SYNC_DATA_FILE, &payload, content_type, pre)?;
         if let PutOutcome::ParentMissing(status) = outcome {
             info!(
                 target: "minitodo_cloud::push",
                 "PUT sync-data 返回 {}，创建远端目录后重试", status
             );
             dav.ensure_dir(REMOTE_DIR)?;
-            outcome = dav.put(SYNC_DATA_FILE, &payload, "application/gzip", pre)?;
+            outcome = dav.put(SYNC_DATA_FILE, &payload, content_type, pre)?;
         }
 
         match outcome {

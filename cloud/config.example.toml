@@ -21,6 +21,10 @@ webdav_password = "your-webdav-pass"
 # 相对路径按本配置文件所在目录解析；文件不存在或证书无效时启动直接报错。
 # webdav_ca_file = "/etc/minitodo/webdav-ca.pem"
 
+# 可选：WebDAV sync-data.json.gz 端到端加密口令（客户端 PBKDF2-HMAC-SHA256 + ChaCha20-Poly1305）。
+# 留空或注释掉表示保持传统明文 gzip；开启后，所有同步同一 WebDAV 的 PC 客户端也必须配置相同口令。
+# sync_passphrase = ""
+
 # ============================================================
 # HTTP API 鉴权与监听
 # ============================================================

@@ -8,6 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 /// 节假日信息
@@ -69,13 +70,23 @@ fn write_cache(dir: &Path, year: i32, holidays: &[HolidayInfo]) {
     }
 }
 
+fn shared_http_client() -> Result<&'static reqwest::blocking::Client, String> {
+    static CLIENT: OnceLock<Result<reqwest::blocking::Client, String>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::blocking::Client::builder()
+                .timeout(REQUEST_TIMEOUT)
+                .connect_timeout(CONNECT_TIMEOUT)
+                .build()
+                .map_err(|e| format!("Failed to create HTTP client: {}", e))
+        })
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
 /// 从网络获取节假日数据（带超时）
 fn fetch_from_network(url: &str) -> Result<Vec<HolidayInfo>, String> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(REQUEST_TIMEOUT)
-        .connect_timeout(CONNECT_TIMEOUT)
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+    let client = shared_http_client()?;
 
     let response = client
         .get(url)

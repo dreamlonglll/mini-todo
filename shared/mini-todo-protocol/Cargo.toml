@@ -1,0 +1,10 @@
+[package]
+name = "mini-todo-protocol"
+version = "0.1.0"
+edition = "2021"
+description = "PC 与 Cloud 共用的跨端协议工具：同步 ID、安全图片名与 MIME、WebDAV XML/ETag、可选端到端加密"
+publish = false
+
+[dependencies]
+ring = "0.17"
+urlencoding = "2"

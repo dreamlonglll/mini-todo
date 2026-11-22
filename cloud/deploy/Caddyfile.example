@@ -5,6 +5,22 @@
 minitodo.example.com {
     encode zstd gzip
 
+    # 基础安全响应头
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        Referrer-Policy no-referrer
+    }
+
+    # 如暴露在公网，建议配合 caddy-ratelimit 插件对鉴权端点限流（防 API Key 暴力探测）：
+    # rate_limit {
+    #     zone minitodo_ip {
+    #         key {remote_host}
+    #         events 120
+    #         window 1m
+    #     }
+    # }
+
     # 反代到 cloud HTTP server（默认 127.0.0.1:8787）
     # Caddy 会自动设置 X-Forwarded-For / X-Forwarded-Proto / X-Forwarded-Host 并透传 Host，
     # 不要手写 `header_up X-Forwarded-For {remote}`：{remote} 带端口，还会覆盖掉 Caddy

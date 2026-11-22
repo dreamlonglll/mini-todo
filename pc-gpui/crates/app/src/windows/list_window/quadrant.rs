@@ -12,7 +12,7 @@ use gpui_kit::{
     relative,
 };
 
-use super::todo_item::{RowPlace, rows_of};
+use super::todo_item::RowPlace;
 use super::{DragKind, DraggedTodo, ListWindow, RenderCtx, RowData, logic};
 use crate::theme;
 
@@ -23,16 +23,15 @@ impl ListWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let lists: [Vec<RowData>; 4] = match self.drag.as_ref().map(|d| &d.kind) {
+        let cache = self.list_cache(cx);
+        let drag_lists: Option<[Vec<RowData>; 4]> = match self.drag.as_ref().map(|d| &d.kind) {
             Some(DragKind::Quadrant { lists, .. }) => {
                 let lists = lists.clone();
-                std::array::from_fn(|i| self.rows_for(&lists[i], cx))
+                Some(std::array::from_fn(|i| self.rows_for(&lists[i], cx)))
             }
-            _ => {
-                let groups = self.state.read(cx).todos_by_quadrant_in(self.list_id());
-                std::array::from_fn(|i| rows_of(&groups[i]))
-            }
+            _ => None,
         };
+        let lists = drag_lists.as_ref().unwrap_or(&cache.quadrants);
         let mut cells = Vec::with_capacity(4);
         for (index, rows) in lists.iter().enumerate() {
             cells.push(self.render_quadrant_cell(index, rows, rc, window, cx));

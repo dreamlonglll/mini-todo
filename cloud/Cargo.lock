@@ -751,6 +751,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
+name = "mini-todo-protocol"
+version = "0.1.0"
+dependencies = [
+ "ring",
+ "urlencoding",
+]
+
+[[package]]
 name = "minitodo-cloud"
 version = "0.4.0"
 dependencies = [
@@ -760,6 +768,7 @@ dependencies = [
  "chrono-tz",
  "flate2",
  "http-body-util",
+ "mini-todo-protocol",
  "rand 0.8.6",
  "reqwest",
  "rusqlite",

@@ -18,12 +18,16 @@
 //!
 //! **所有方法都会阻塞**：只能在阻塞上下文（`spawn_blocking` / 普通线程）里调用。
 
-use std::borrow::Cow;
-use std::collections::HashSet;
 use std::fs;
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::path::Path;
 use std::time::Duration;
+
+#[cfg(test)]
+use mini_todo_protocol::webdav_xml::decode_entities;
+pub use mini_todo_protocol::webdav_xml::{
+    etag_for_if_match, file_names_in_listing, parse_multistatus, DavEntry,
+};
 
 use reqwest::blocking::{Client, RequestBuilder};
 use reqwest::header::{
@@ -41,6 +45,10 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 pub const SYNC_DATA_GET_TIMEOUT: Duration = transfer_timeout(8 * 1024 * 1024);
 /// 下载单张图片的总超时：按 API 允许的最大上传尺寸 32 MiB 估算。
 pub const IMAGE_GET_TIMEOUT: Duration = transfer_timeout(32 * 1024 * 1024);
+/// GET sync-data 压缩响应体上限（128 MiB），防止异常响应 OOM。
+const MAX_SYNC_RESPONSE_BYTES: u64 = 128 * 1024 * 1024;
+/// 远端单张图片下载上限（64 MiB，略大于 API 32 MiB 上传上限以兼容存量大图）。
+const MAX_IMAGE_DOWNLOAD_BYTES: u64 = 64 * 1024 * 1024;
 
 /// 按传输字节数放宽的总超时：基础 60s + 按 64 KiB/s 慢速链路折算，上限 30 分钟。
 pub const fn transfer_timeout(bytes: u64) -> Duration {
@@ -71,21 +79,6 @@ fn header_string(headers: &HeaderMap, name: &HeaderName) -> Option<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
-}
-
-/// `If-Match` 用的 ETag 值：去掉弱标记 `W/`，只留带引号的不透明部分；空值返回 `None`。
-///
-/// `If-Match` 是强比较，原样带 `W/"…"` 永远 412。Apache 写入后约 1 秒内给弱 ETag，
-/// 其不透明部分与之后（以及 PROPFIND getetag）给出的强 ETag 相同：去掉 `W/` 之后，
-/// 这一秒内仍会 412（调用方等 1.1 秒再试），过了这一秒就能匹配。
-pub fn etag_for_if_match(etag: &str) -> Option<&str> {
-    let e = etag.trim();
-    let opaque = e
-        .strip_prefix("W/")
-        .or_else(|| e.strip_prefix("w/"))
-        .unwrap_or(e)
-        .trim();
-    (!opaque.is_empty()).then_some(opaque)
 }
 
 /// 条件 GET 的结果。
@@ -126,16 +119,6 @@ pub enum PutOutcome {
     PreconditionFailed,
     /// 404 / 409：父目录不存在。
     ParentMissing(u16),
-}
-
-/// multistatus 里的一条 `<response>`。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct DavEntry {
-    pub href: String,
-    pub is_collection: bool,
-    pub etag: Option<String>,
-    pub last_modified: Option<String>,
-    pub content_length: Option<u64>,
 }
 
 const PROPFIND_META_BODY: &str = r#"<?xml version="1.0" encoding="utf-8"?><D:propfind xmlns:D="DAV:"><D:prop><D:getetag/><D:getlastmodified/><D:getcontentlength/><D:resourcetype/></D:prop></D:propfind>"#;
@@ -209,11 +192,19 @@ impl WebDavClient {
             ))),
             StatusCode::NOT_FOUND => Ok(GetOutcome::NotFound),
             StatusCode::OK => {
+                if let Some(len) = resp.content_length() {
+                    if len > MAX_SYNC_RESPONSE_BYTES {
+                        anyhow::bail!("WebDAV GET {} 响应体过大（{} 字节）", path, len);
+                    }
+                }
                 let validators = Validators::from_headers(resp.headers());
-                let body = resp
-                    .bytes()
-                    .map_err(|e| anyhow::anyhow!("读取 WebDAV GET {} 响应体失败: {}", path, e))?
-                    .to_vec();
+                let mut body = Vec::new();
+                resp.take(MAX_SYNC_RESPONSE_BYTES.saturating_add(1))
+                    .read_to_end(&mut body)
+                    .map_err(|e| anyhow::anyhow!("读取 WebDAV GET {} 响应体失败: {}", path, e))?;
+                if body.len() as u64 > MAX_SYNC_RESPONSE_BYTES {
+                    anyhow::bail!("WebDAV GET {} 响应体过大", path);
+                }
                 Ok(GetOutcome::Fetched { body, validators })
             }
             other => anyhow::bail!("WebDAV GET {} 返回状态 {}", path, other.as_u16()),
@@ -333,7 +324,7 @@ impl WebDavClient {
     /// 下载单个文件到 `local`：先写同目录临时文件再原子 rename，半截文件永远不会
     /// 以正式文件名出现。远端 404 返回 `Ok(None)`。
     pub fn download_to(&self, path: &str, local: &Path) -> anyhow::Result<Option<u64>> {
-        let mut resp = self
+        let resp = self
             .request(Method::GET, path)
             .timeout(IMAGE_GET_TIMEOUT)
             .send()
@@ -342,6 +333,11 @@ impl WebDavClient {
             StatusCode::NOT_FOUND => return Ok(None),
             StatusCode::OK => {}
             other => anyhow::bail!("WebDAV GET {} 返回状态 {}", path, other.as_u16()),
+        }
+        if let Some(len) = resp.content_length() {
+            if len > MAX_IMAGE_DOWNLOAD_BYTES {
+                anyhow::bail!("WebDAV 图片 {} 过大（{} 字节）", path, len);
+            }
         }
         let dir = local
             .parent()
@@ -355,7 +351,15 @@ impl WebDavClient {
         let tmp = dir.join(format!(".{}.part", file_name));
         let written = (|| -> anyhow::Result<u64> {
             let mut f = fs::File::create(&tmp)?;
-            let n = resp.copy_to(&mut f)?;
+            let mut limited = resp.take(MAX_IMAGE_DOWNLOAD_BYTES.saturating_add(1));
+            let n = std::io::copy(&mut limited, &mut f)?;
+            if n > MAX_IMAGE_DOWNLOAD_BYTES {
+                anyhow::bail!(
+                    "WebDAV 图片 {} 过大（超过 {} 字节）",
+                    path,
+                    MAX_IMAGE_DOWNLOAD_BYTES
+                );
+            }
             f.flush()?;
             f.sync_all()?;
             Ok(n)
@@ -374,248 +378,6 @@ impl WebDavClient {
             }
         }
     }
-}
-
-// =============================================================================
-// multistatus 解析
-// =============================================================================
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Field {
-    Href,
-    ETag,
-    LastModified,
-    ContentLength,
-}
-
-fn field_of(local_name: &str) -> Option<Field> {
-    match local_name {
-        "href" => Some(Field::Href),
-        "getetag" => Some(Field::ETag),
-        "getlastmodified" => Some(Field::LastModified),
-        "getcontentlength" => Some(Field::ContentLength),
-        _ => None,
-    }
-}
-
-/// 解析 WebDAV multistatus 响应，返回每个 `<response>` 的 href / 是否集合 /
-/// getetag / getlastmodified / getcontentlength。
-///
-/// 只认元素的本地名（去掉任意命名空间前缀、大小写不敏感），不依赖换行：
-/// `<D:href>`、`<d:href>`、`<href xmlns="DAV:">`、`<lp1:getetag>` 都能识别；
-/// 文本中的 XML 实体（含 x/net/webdav 输出的 `&#34;`）会被解码，CDATA 原样保留。
-pub fn parse_multistatus(xml: &str) -> Vec<DavEntry> {
-    let mut entries = Vec::new();
-    let mut current: Option<DavEntry> = None;
-    let mut capture: Option<(Field, String)> = None;
-    let mut rest = xml;
-
-    while let Some(lt) = rest.find('<') {
-        if let Some((_, buf)) = capture.as_mut() {
-            buf.push_str(&decode_entities(&rest[..lt]));
-        }
-        let tail = &rest[lt..];
-        if let Some(body) = tail.strip_prefix("<!--") {
-            match body.find("-->") {
-                Some(end) => {
-                    rest = &body[end + 3..];
-                    continue;
-                }
-                None => break,
-            }
-        }
-        if let Some(body) = tail.strip_prefix("<![CDATA[") {
-            match body.find("]]>") {
-                Some(end) => {
-                    if let Some((_, buf)) = capture.as_mut() {
-                        buf.push_str(&body[..end]);
-                    }
-                    rest = &body[end + 3..];
-                    continue;
-                }
-                None => break,
-            }
-        }
-        let Some(end) = tag_end(tail) else { break };
-        let inner = &tail[1..end];
-        rest = &tail[end + 1..];
-        if inner.starts_with('?') || inner.starts_with('!') {
-            continue;
-        }
-        let (closing, inner) = match inner.strip_prefix('/') {
-            Some(i) => (true, i),
-            None => (false, inner),
-        };
-        let self_closing = !closing && inner.trim_end().ends_with('/');
-        let name = inner
-            .trim_end_matches('/')
-            .split(|c: char| c.is_whitespace())
-            .next()
-            .unwrap_or("");
-        let local = name.rsplit(':').next().unwrap_or(name).to_ascii_lowercase();
-
-        if closing {
-            if local == "response" {
-                if let Some(entry) = current.take() {
-                    entries.push(entry);
-                }
-                capture = None;
-            } else if let Some(field) = field_of(&local) {
-                let matches = capture.as_ref().is_some_and(|(f, _)| *f == field);
-                if let (true, Some((_, buf)), Some(entry)) =
-                    (matches, capture.take(), current.as_mut())
-                {
-                    assign_field(entry, field, buf.trim());
-                }
-            }
-            continue;
-        }
-
-        match local.as_str() {
-            "response" if !self_closing => {
-                current = Some(DavEntry::default());
-                capture = None;
-            }
-            "collection" => {
-                if let Some(entry) = current.as_mut() {
-                    entry.is_collection = true;
-                }
-            }
-            other => {
-                if let (Some(field), false, true) =
-                    (field_of(other), self_closing, current.is_some())
-                {
-                    capture = Some((field, String::new()));
-                }
-            }
-        }
-    }
-    entries
-}
-
-fn assign_field(entry: &mut DavEntry, field: Field, value: &str) {
-    if value.is_empty() {
-        return;
-    }
-    match field {
-        Field::Href if entry.href.is_empty() => entry.href = value.to_string(),
-        Field::ETag if entry.etag.is_none() => entry.etag = Some(value.to_string()),
-        Field::LastModified if entry.last_modified.is_none() => {
-            entry.last_modified = Some(value.to_string())
-        }
-        Field::ContentLength if entry.content_length.is_none() => {
-            entry.content_length = value.parse().ok()
-        }
-        _ => {}
-    }
-}
-
-/// 找到结束当前标签的 `>`（跳过属性值里的引号内容）。
-fn tag_end(s: &str) -> Option<usize> {
-    let mut quote: Option<u8> = None;
-    for (i, b) in s.bytes().enumerate().skip(1) {
-        match quote {
-            Some(q) if b == q => quote = None,
-            Some(_) => {}
-            None => match b {
-                b'"' | b'\'' => quote = Some(b),
-                b'>' => return Some(i),
-                _ => {}
-            },
-        }
-    }
-    None
-}
-
-/// 解码 XML 预定义实体与数字字符引用；不认识的实体原样保留。
-fn decode_entities(s: &str) -> Cow<'_, str> {
-    if !s.contains('&') {
-        return Cow::Borrowed(s);
-    }
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(amp) = rest.find('&') {
-        out.push_str(&rest[..amp]);
-        let after = &rest[amp + 1..];
-        let decoded = after.find(';').filter(|&semi| semi <= 10).and_then(|semi| {
-            let ent = &after[..semi];
-            let ch = match ent {
-                "amp" => Some('&'),
-                "lt" => Some('<'),
-                "gt" => Some('>'),
-                "quot" => Some('"'),
-                "apos" => Some('\''),
-                _ => {
-                    if let Some(hex) = ent.strip_prefix("#x").or_else(|| ent.strip_prefix("#X")) {
-                        u32::from_str_radix(hex, 16).ok().and_then(char::from_u32)
-                    } else if let Some(dec) = ent.strip_prefix('#') {
-                        dec.parse::<u32>().ok().and_then(char::from_u32)
-                    } else {
-                        None
-                    }
-                }
-            };
-            ch.map(|c| (c, semi))
-        });
-        match decoded {
-            Some((c, semi)) => {
-                out.push(c);
-                rest = &after[semi + 1..];
-            }
-            None => {
-                out.push('&');
-                rest = after;
-            }
-        }
-    }
-    out.push_str(rest);
-    Cow::Owned(out)
-}
-
-/// href 可能是绝对路径（`/dav/mini-todo/images/a.png`）或绝对 URL
-/// （`https://host/remote.php/dav/files/u/mini-todo/images/a.png`），只取路径部分。
-fn href_path(href: &str) -> &str {
-    let path = match href.find("://") {
-        Some(i) => {
-            let after = &href[i + 3..];
-            match after.find('/') {
-                Some(j) => &after[j..],
-                None => "/",
-            }
-        }
-        None => href,
-    };
-    path.split(['?', '#']).next().unwrap_or(path)
-}
-
-/// 从 `PROPFIND Depth: 1` 的响应里取出 `dir` 下的文件名（URL 解码后的最后一段），
-/// 跳过目录本身与子目录，去重并保持出现顺序。
-pub fn file_names_in_listing(xml: &str, dir: &str) -> Vec<String> {
-    let dir_tail = dir.trim_matches('/');
-    let dir_suffix = format!("/{}", dir_tail);
-    let mut seen = HashSet::new();
-    let mut names = Vec::new();
-    for entry in parse_multistatus(xml) {
-        if entry.is_collection {
-            continue;
-        }
-        let Ok(decoded) = urlencoding::decode(href_path(&entry.href)) else {
-            continue;
-        };
-        if decoded.ends_with('/') {
-            continue;
-        }
-        let rel = decoded.trim_start_matches('/');
-        if rel.is_empty() || rel == dir_tail || decoded.ends_with(&dir_suffix) {
-            continue;
-        }
-        if let Some(name) = decoded.rsplit('/').next().filter(|n| !n.is_empty()) {
-            if seen.insert(name.to_string()) {
-                names.push(name.to_string());
-            }
-        }
-    }
-    names
 }
 
 #[cfg(test)]

@@ -313,20 +313,40 @@ pub fn deliver_refresh(cx: &mut App, refresh: FenceRefresh) {
     }
 }
 
-/// 200ms 守护：Explorer 重启后重挂 owner / 样式被改掉时自愈（仅 Windows。macOS 的层级是全局排序、GPUI 建窗后不再改层级，
-/// Finder 重启后桌面图标窗口仍在原层级，所以不重挂——未在真机验证）；每 ~2 秒检测屏幕组合变化（三个平台都做）
+/// 守护循环：
+/// - Windows：200ms 守护 Explorer 重启重挂 / 样式自愈，每 ~2 秒检测屏幕组合变化；
+/// - 非 Windows（macOS / Linux）：无需 200ms 重挂，直接按 ~2 秒检测屏幕组合变化；
+/// - 当所有收纳箱都关闭/删除时主动结束循环（下次建窗再启动），零后台空转。
 fn ensure_guard(cx: &mut App) {
     if runtime(cx).guard_started {
         return;
     }
     runtime(cx).guard_started = true;
     cx.spawn(async move |cx| {
+        #[cfg(windows)]
         let mut tick: u32 = 0;
+        let sleep_interval = if cfg!(windows) {
+            GUARD_TICK
+        } else {
+            GUARD_TICK * SCREEN_CHECK_TICKS
+        };
         loop {
-            cx.background_executor().timer(GUARD_TICK).await;
-            tick = tick.wrapping_add(1);
+            cx.background_executor().timer(sleep_interval).await;
+            let empty = cx.update(|cx| {
+                let rt = runtime(cx);
+                if rt.windows.is_empty() {
+                    rt.guard_started = false;
+                    true
+                } else {
+                    false
+                }
+            });
+            if empty {
+                break;
+            }
             #[cfg(windows)]
             {
+                tick = tick.wrapping_add(1);
                 let hwnds: Vec<Hwnd> = cx.update(|cx| {
                     runtime(cx)
                         .windows
@@ -349,8 +369,12 @@ fn ensure_guard(cx: &mut App) {
                         platform::embed::set_always_on_bottom(h, true);
                     }
                 }
+                if tick.is_multiple_of(SCREEN_CHECK_TICKS) {
+                    cx.update(check_screen_layout);
+                }
             }
-            if tick.is_multiple_of(SCREEN_CHECK_TICKS) {
+            #[cfg(not(windows))]
+            {
                 cx.update(check_screen_layout);
             }
         }

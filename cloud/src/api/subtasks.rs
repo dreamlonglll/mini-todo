@@ -40,7 +40,7 @@ pub async fn create_subtask(
     // 同一事务内解析父 todo ref（支持 C 短码）+ 校验 + 写 subtask + 标脏。
     let record = state
         .db
-        .with_conn(|conn| -> Result<Map<String, Value>, ApiError> {
+        .run_write(move |conn| -> Result<Map<String, Value>, ApiError> {
             let tx = conn.transaction()?;
             let parent_id = ensure_todo_exists(&tx, &raw_todo_ref)?;
             let parent_num = todo_id_num(&parent_id)?;
@@ -61,7 +61,10 @@ pub async fn create_subtask(
             repo::mark_dirty(&tx)?;
             tx.commit()?;
             Ok(record)
-        })?;
+        })
+        .await
+        .map_err(|e| ApiError::internal("create_subtask task failed", e))??;
+    state.sync.request_push();
 
     Ok((StatusCode::CREATED, Json(Value::Object(record))))
 }
@@ -77,12 +80,13 @@ pub async fn patch_subtask(
 ) -> Result<Json<Value>, ApiError> {
     let tz = state.config.timezone;
     let now = now_local_string(tz);
+    let target_id = id.clone();
 
     let updated = state
         .db
-        .with_conn(|conn| -> Result<Option<Value>, ApiError> {
+        .run_write(move |conn| -> Result<Option<Value>, ApiError> {
             let tx = conn.transaction()?;
-            let Some(row) = repo::get_subtask(&tx, &id)? else {
+            let Some(row) = repo::get_subtask(&tx, &target_id)? else {
                 return Ok(None);
             };
             let parent_num = todo_id_num(&row.todo_id)?;
@@ -130,10 +134,15 @@ pub async fn patch_subtask(
             }
             tx.commit()?;
             Ok(Some(Value::Object(next)))
-        })?;
+        })
+        .await
+        .map_err(|e| ApiError::internal("patch_subtask task failed", e))??;
 
     match updated {
-        Some(v) => Ok(Json(v)),
+        Some(v) => {
+            state.sync.request_push();
+            Ok(Json(v))
+        }
         None => Err(ApiError::not_found(format!("subtask {} not found", id))),
     }
 }
@@ -148,26 +157,34 @@ pub async fn delete_subtask(
 ) -> Result<impl IntoResponse, ApiError> {
     let tz = state.config.timezone;
     let now = now_local_string(tz);
-    let removed = state.db.with_conn(|conn| -> rusqlite::Result<bool> {
-        let tx = conn.transaction()?;
-        let Some(row) = repo::get_subtask(&tx, &id)? else {
-            return Ok(false);
-        };
-        let existed = repo::delete_subtask(&tx, &row.id)?;
-        if existed {
-            // 墓碑时间 = max(now, 记录的 updatedAt)（与 PC 一致，见 time::deletion_time）
-            let json_ts = model::data_json_updated_at(&row.data_json);
-            let deleted_at = deletion_time(
-                &now,
-                &[&row.updated_at, json_ts.as_deref().unwrap_or("")],
-                tz,
-            );
-            repo::add_tombstone(&tx, TOMBSTONE_SUBTASK, &row.id, &deleted_at)?;
-            repo::mark_dirty(&tx)?;
-        }
-        tx.commit()?;
-        Ok(existed)
-    })?;
+    let target_id = id.clone();
+    let removed = state
+        .db
+        .run_write(move |conn| -> rusqlite::Result<bool> {
+            let tx = conn.transaction()?;
+            let Some(row) = repo::get_subtask(&tx, &target_id)? else {
+                return Ok(false);
+            };
+            let existed = repo::delete_subtask(&tx, &row.id)?;
+            if existed {
+                // 墓碑时间 = max(now, 记录的 updatedAt)（与 PC 一致，见 time::deletion_time）
+                let json_ts = model::data_json_updated_at(&row.data_json);
+                let deleted_at = deletion_time(
+                    &now,
+                    &[&row.updated_at, json_ts.as_deref().unwrap_or("")],
+                    tz,
+                );
+                repo::add_tombstone(&tx, TOMBSTONE_SUBTASK, &row.id, &deleted_at)?;
+                repo::mark_dirty(&tx)?;
+            }
+            tx.commit()?;
+            Ok(existed)
+        })
+        .await
+        .map_err(|e| ApiError::internal("delete_subtask task failed", e))??;
+    if removed {
+        state.sync.request_push();
+    }
     if removed {
         Ok(StatusCode::NO_CONTENT)
     } else {

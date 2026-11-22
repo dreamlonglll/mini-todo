@@ -5,6 +5,7 @@
 //! 节假日后台加载（每年最多 3 次重试，结果为空时 5s / 10s / 15s 后重载，切月作废旧加载）。
 
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::Duration;
 
 use chrono::{Datelike, Local, NaiveDate, Timelike};
@@ -34,6 +35,24 @@ struct CellView {
     kind: LunarTextKind,
 }
 
+/// 跨天待办条缓存键（只在日期网格 / 待办 / 清单 / 日历筛选 / 深浅色主题变化时重算）
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct BarsCacheKey {
+    year: i32,
+    month: u32,
+    today: NaiveDate,
+    todos_rev: u64,
+    lists_rev: u64,
+    cal_prefs_rev: u64,
+    is_dark: bool,
+}
+
+struct CachedCalendarBars {
+    key: BarsCacheKey,
+    bars: Vec<TodoBar>,
+    todo_info: HashMap<i64, (SharedString, gpui_kit::Hsla, bool)>,
+}
+
 pub(crate) struct CalendarState {
     pub year: i32,
     /// 1~12
@@ -48,6 +67,7 @@ pub(crate) struct CalendarState {
     retry: Option<Task<()>>,
     pub hovered_todo: Option<i64>,
     cells: Option<((i32, u32, NaiveDate), Vec<CellView>)>,
+    bars_cache: Option<Rc<CachedCalendarBars>>,
 }
 
 fn local_today() -> NaiveDate {
@@ -68,6 +88,7 @@ impl CalendarState {
             retry: None,
             hovered_todo: None,
             cells: None,
+            bars_cache: None,
         }
     }
 
@@ -169,10 +190,12 @@ impl CalendarWindow {
                     None => {
                         let mut map = HashMap::new();
                         for attempt in 1..=HOLIDAY_ATTEMPTS {
-                            let result = cx
-                                .background_executor()
-                                .spawn(async move { mini_todo_core::holiday::fetch(year) })
-                                .await;
+                            let task = cx.update(|cx| {
+                                crate::db::spawn_io(cx, "holiday-fetch", move || {
+                                    mini_todo_core::holiday::fetch(year)
+                                })
+                            });
+                            let result = task.await;
                             match result {
                                 Ok(list) => {
                                     map = list
@@ -249,27 +272,46 @@ impl CalendarWindow {
         let palette = rc.palette;
         let line = rc.colors.calendar_line;
         let cells = self.calendar.cells();
-        let bars = {
+        let bars_cache = {
             let state = self.state.read(cx);
-            let plain: Vec<CalendarCell> = cells.iter().map(|c| c.cell).collect();
-            logic::calendar_bars(&plain, &state.calendar_todos())
-        };
-        let todo_info: HashMap<i64, (SharedString, gpui_kit::Hsla, bool)> = {
-            let state = self.state.read(cx);
-            state
-                .calendar_todos()
-                .into_iter()
-                .map(|t| {
-                    (
-                        t.id,
+            let key = BarsCacheKey {
+                year: self.calendar.year,
+                month: self.calendar.month,
+                today: self.calendar.today,
+                todos_rev: state.todos_revision(),
+                lists_rev: state.lists_revision,
+                cal_prefs_rev: state.window_prefs_revision(self.block),
+                is_dark: palette.is_dark,
+            };
+            if let Some(cached) = &self.calendar.bars_cache
+                && cached.key == key
+            {
+                cached.clone()
+            } else {
+                let todos = state.calendar_todos();
+                let plain: Vec<CalendarCell> = cells.iter().map(|c| c.cell).collect();
+                let bars = logic::calendar_bars(&plain, &todos);
+                let todo_info: HashMap<i64, (SharedString, gpui_kit::Hsla, bool)> = todos
+                    .into_iter()
+                    .map(|t| {
                         (
-                            SharedString::from(t.title.clone()),
-                            theme::todo_color(&t.color, palette.primary),
-                            t.completed,
-                        ),
-                    )
-                })
-                .collect()
+                            t.id,
+                            (
+                                SharedString::from(t.title.clone()),
+                                theme::todo_color(&t.color, palette.primary),
+                                t.completed,
+                            ),
+                        )
+                    })
+                    .collect();
+                let cached = Rc::new(CachedCalendarBars {
+                    key,
+                    bars,
+                    todo_info,
+                });
+                self.calendar.bars_cache = Some(cached.clone());
+                cached
+            }
         };
 
         let weekdays = div().flex().flex_none().children(
@@ -304,9 +346,14 @@ impl CalendarWindow {
             })
             .collect();
 
-        let mut bar_elements = Vec::with_capacity(bars.len());
-        for bar in bars.iter().filter(|bar| bar.end_col >= bar.start_col) {
-            if let Some((title, color, completed)) = todo_info.get(&bar.todo_id).cloned() {
+        let mut bar_elements = Vec::with_capacity(bars_cache.bars.len());
+        for bar in bars_cache
+            .bars
+            .iter()
+            .filter(|bar| bar.end_col >= bar.start_col)
+        {
+            if let Some((title, color, completed)) = bars_cache.todo_info.get(&bar.todo_id).cloned()
+            {
                 bar_elements.push(self.render_bar(bar, title, color, completed, cx));
             }
         }

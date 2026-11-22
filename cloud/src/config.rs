@@ -27,6 +27,8 @@ pub struct Config {
     pub webdav_ca_file: Option<PathBuf>,
     /// `webdav_ca_file` 解析出的证书（启动时已校验可用）。
     pub webdav_ca_certs: Vec<Certificate>,
+    /// 可选：WebDAV `sync-data.json.gz` 端到端加密口令（为空表示不加密；需与所有 PC 设备保持一致）。
+    pub sync_passphrase: Option<String>,
     pub api_key: String,
     pub bind: String,
     /// IANA 时区，例如 `Asia/Shanghai`。用于生成与 PC SQLite
@@ -48,6 +50,8 @@ struct RawConfig {
     webdav_password: String,
     #[serde(default)]
     webdav_ca_file: Option<PathBuf>,
+    #[serde(default)]
+    sync_passphrase: Option<String>,
     api_key: String,
     #[serde(default = "default_bind")]
     bind: String,
@@ -139,12 +143,15 @@ impl Config {
             None => Vec::new(),
         };
 
+        let sync_passphrase = raw.sync_passphrase.filter(|s| !s.is_empty());
+
         Ok(Config {
             webdav_url,
             webdav_username: raw.webdav_username,
             webdav_password: raw.webdav_password,
             webdav_ca_file,
             webdav_ca_certs,
+            sync_passphrase,
             api_key: raw.api_key,
             bind: raw.bind,
             timezone: tz,
@@ -187,6 +194,7 @@ impl Config {
             webdav_password: "p".to_string(),
             webdav_ca_file: None,
             webdav_ca_certs: Vec::new(),
+            sync_passphrase: None,
             api_key: api_key.to_string(),
             bind: "127.0.0.1:0".to_string(),
             timezone: tz,

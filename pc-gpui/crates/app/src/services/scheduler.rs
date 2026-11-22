@@ -129,11 +129,15 @@ pub fn start(cx: &mut App) {
     .detach();
 
     let db = Db::get(cx);
-    let executor = cx.background_executor().clone();
-    cx.background_executor()
-        .spawn(async move {
+    // 在独立 OS 线程运行提醒循环，避免 `recv_blocking()` / 阻塞 Toast 长期占用 GPUI 后台线程池
+    if let Err(e) = std::thread::Builder::new()
+        .name("reminder-scheduler".to_string())
+        .spawn(move || {
             // 等待应用初始化完成
-            executor.timer(reminder::STARTUP_DELAY).await;
+            std::thread::sleep(reminder::STARTUP_DELAY);
+            if requests.is_closed() {
+                return;
+            }
             let kind = reminder::notification_kind(&db);
             if let Err(e) =
                 reminder::catch_up_missed_repeats(&db, &mut |r| deliver(&requests, kind, r))
@@ -141,9 +145,10 @@ pub fn start(cx: &mut App) {
                 log::error!("[notify] 补发错过的重复提醒失败: {e}");
             }
             loop {
-                executor
-                    .timer(reminder::duration_until_next_minute(SystemTime::now()))
-                    .await;
+                std::thread::sleep(reminder::duration_until_next_minute(SystemTime::now()));
+                if requests.is_closed() {
+                    break;
+                }
                 // 每轮重新读取通知方式（设置里改了立即生效）
                 let kind = reminder::notification_kind(&db);
                 if let Err(e) = reminder::run_due(&db, &mut |r| deliver(&requests, kind, r)) {
@@ -151,5 +156,7 @@ pub fn start(cx: &mut App) {
                 }
             }
         })
-        .detach();
+    {
+        log::error!("[notify] 启动提醒调度线程失败: {e}");
+    }
 }

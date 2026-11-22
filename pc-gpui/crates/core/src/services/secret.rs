@@ -63,7 +63,7 @@ mod platform {
             return Vec::new();
         }
         let bytes = std::slice::from_raw_parts(out.pbData, out.cbData as usize).to_vec();
-        let _ = LocalFree(HLOCAL(out.pbData as *mut core::ffi::c_void));
+        let _ = LocalFree(Some(HLOCAL(out.pbData as *mut core::ffi::c_void)));
         out.pbData = std::ptr::null_mut();
         out.cbData = 0;
         bytes

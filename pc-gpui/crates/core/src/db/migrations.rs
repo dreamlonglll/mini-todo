@@ -79,6 +79,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     let restored = conn.execute_batch("PRAGMA foreign_keys = ON");
     migrated?;
     restored?;
+    ensure_runtime_indexes(conn)?;
     if let Some(remaining) = remaining {
         let remaining: Vec<FkViolation> = remaining?.into_iter().collect();
         if !remaining.is_empty() {
@@ -89,6 +90,18 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// 运行时性能索引（幂等，不改变迁移版本号，兼容已升级到 v31 的存量库）。
+///
+/// 提醒调度每分钟扫描 `completed = 0 AND notified = 0 AND notify_at IS NOT NULL`：
+/// 部分索引仅收录极少数待提醒记录，避免对历史已完成待办做全量扫描。
+fn ensure_runtime_indexes(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_todos_pending_notify
+         ON todos(notify_at)
+         WHERE completed = 0 AND notified = 0 AND notify_at IS NOT NULL;",
+    )
 }
 
 type MigrationFn = fn(&Connection) -> Result<()>;

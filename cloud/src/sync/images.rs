@@ -22,19 +22,7 @@ use crate::sync::webdav::{Precondition, PutOutcome, WebDavClient};
 use crate::sync::{SyncCtx, REMOTE_IMAGES_DIR};
 use crate::util::image_content_type;
 
-/// 图片文件名最大长度（K5）。
-pub const MAX_IMAGE_NAME_LEN: usize = 128;
-
-/// K5 安全文件名判定。
-pub fn is_safe_image_name(name: &str) -> bool {
-    let b = name.as_bytes();
-    !b.is_empty()
-        && b.len() <= MAX_IMAGE_NAME_LEN
-        && b[0].is_ascii_alphanumeric()
-        && b.iter()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'))
-        && !name.contains("..")
-}
+pub use mini_todo_protocol::image_name::is_safe_image_name;
 
 /// 本地 images 目录里的合法图片文件名（跳过子目录、下载中的临时文件、非法名）。
 pub fn list_local_images(dir: &Path) -> Vec<String> {

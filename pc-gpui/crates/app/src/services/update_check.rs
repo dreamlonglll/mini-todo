@@ -5,6 +5,7 @@
 //! debug 构建可用 `MINI_TODO_DEBUG_LATEST_VERSION=v2.6.0` 跳过网络、直接当作最新版本（截图 / 冒烟用；release 忽略）。
 
 use std::cmp::Ordering;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use gpui_kit::{App, Task};
@@ -53,6 +54,21 @@ fn debug_override() -> Option<String> {
     }
 }
 
+fn shared_http_client() -> Result<&'static reqwest::blocking::Client, String> {
+    static CLIENT: OnceLock<Result<reqwest::blocking::Client, String>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::blocking::Client::builder()
+                .timeout(REQUEST_TIMEOUT)
+                .connect_timeout(CONNECT_TIMEOUT)
+                .user_agent(format!("mini-todo/{APP_VERSION}"))
+                .build()
+                .map_err(|e| e.to_string())
+        })
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
 fn fetch_latest() -> Result<Release, String> {
     if let Some(tag) = debug_override() {
         return Ok(Release {
@@ -60,12 +76,7 @@ fn fetch_latest() -> Result<Release, String> {
             html_url: None,
         });
     }
-    let client = reqwest::blocking::Client::builder()
-        .timeout(REQUEST_TIMEOUT)
-        .connect_timeout(CONNECT_TIMEOUT)
-        .user_agent(format!("mini-todo/{APP_VERSION}"))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = shared_http_client()?;
     let response = client
         .get(latest_release_url())
         .header("Accept", "application/vnd.github.v3+json")
@@ -79,9 +90,7 @@ fn fetch_latest() -> Result<Release, String> {
 
 /// 后台检查一次；有新版本时写进 `AppState`（返回值同时给设置页「检查更新」用）
 pub fn check(cx: &mut App) -> Task<Result<UpdateInfo, String>> {
-    let task = cx
-        .background_executor()
-        .spawn(async move { fetch_latest() });
+    let task = crate::db::spawn_io(cx, "update-check", fetch_latest);
     cx.spawn(async move |cx| {
         let release = task.await?;
         if compare_versions(&release.tag_name, APP_VERSION) != Ordering::Greater {
@@ -90,10 +99,7 @@ pub fn check(cx: &mut App) -> Task<Result<UpdateInfo, String>> {
         let info = (release.tag_name.clone(), release.html_url.clone());
         cx.update(|cx| {
             AppState::global(cx).update(cx, |state, cx| {
-                state.has_update = true;
-                state.latest_version = Some(release.tag_name);
-                state.release_url = release.html_url;
-                cx.notify();
+                state.set_update_info(release.tag_name, release.html_url, cx);
             })
         });
         Ok(Some(info))

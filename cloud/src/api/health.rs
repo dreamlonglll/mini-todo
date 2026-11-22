@@ -32,7 +32,7 @@ pub struct HealthResp {
 }
 
 pub async fn get_health(State(state): State<AppState>) -> (StatusCode, Json<HealthResp>) {
-    let s = compute_sync_status(&state);
+    let s = compute_sync_status(&state).await;
     let degraded = s.overall != Level::Healthy;
     let code = if degraded {
         StatusCode::SERVICE_UNAVAILABLE

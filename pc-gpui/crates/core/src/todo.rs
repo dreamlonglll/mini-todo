@@ -26,6 +26,20 @@ pub fn list(db: &Database) -> Result<Vec<Todo>, String> {
         .map_err(|e| e.to_string())
 }
 
+/// 仅查询已完成待办（不加载未完成待办与子任务正文），供「已完成」窗口按需拉取
+pub fn list_completed(db: &Database) -> Result<Vec<Todo>, String> {
+    db.with_connection(|conn| {
+        let sql = format!(
+            "SELECT {} FROM todos WHERE completed = 1 ORDER BY updated_at DESC, id DESC",
+            TODO_COLUMNS
+        );
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map([], todo_from_row)?;
+        rows.collect::<rusqlite::Result<Vec<Todo>>>()
+    })
+    .map_err(|e| e.to_string())
+}
+
 /// 读取单条待办（含子任务）。编辑窗口只需要这一条，不必每次子任务操作后拉全库（`get_todo`）。
 pub fn get(db: &Database, id: i64) -> Result<Todo, String> {
     db.with_connection(|conn| load_todo(conn, id))
@@ -424,9 +438,6 @@ pub fn delete_subtask(db: &Database, id: i64) -> Result<(), String> {
 /// 单张图片上限（K5）
 const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 
-/// 编辑器可上传的图片扩展名（K5，存小写）
-const IMAGE_EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
-
 /// 图片目录（不存在则创建）的绝对路径（`get_images_dir`）
 pub fn images_dir() -> Result<PathBuf, String> {
     let dir = paths::images_dir();
@@ -452,17 +463,12 @@ fn save_image_in(dir: &Path, bytes: &[u8], ext: &str, max_bytes: usize) -> Resul
 /// 校验并规范化 `x-image-ext`：大小写不敏感、允许带前导点，返回小写扩展名
 fn image_extension(header: Option<&str>) -> Result<&'static str, String> {
     let raw = header.map(str::trim).unwrap_or("");
-    let lower = raw.trim_start_matches('.').to_ascii_lowercase();
-    IMAGE_EXTENSIONS
-        .iter()
-        .find(|ext| **ext == lower)
-        .copied()
-        .ok_or_else(|| {
-            format!(
-                "不支持的图片格式：{:?}（支持 png / jpg / jpeg / webp / gif / bmp）",
-                raw
-            )
-        })
+    mini_todo_protocol::image_name::normalize_image_ext(raw).ok_or_else(|| {
+        format!(
+            "不支持的图片格式：{:?}（支持 png / jpg / jpeg / webp / gif / bmp）",
+            raw
+        )
+    })
 }
 
 fn check_image_size(len: usize, max_bytes: usize) -> Result<(), String> {
@@ -522,6 +528,166 @@ fn store_image(dir: &Path, ext: &str, bytes: &[u8]) -> Result<PathBuf, String> {
         return Ok(target);
     }
     Err("生成图片文件名失败，请重试".to_string())
+}
+
+/// 清理未引用本地图片的结果统计
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ImageCleanupReport {
+    /// 删除的孤儿图片数量
+    pub removed_count: usize,
+    /// 释放的磁盘字节数
+    pub freed_bytes: u64,
+    /// 扫描的合法图片总数
+    pub scanned_count: usize,
+    /// 未被引用但因在安全宽限期内而跳过的文件数
+    pub skipped_recent: usize,
+}
+
+/// 从 Markdown 文本中抽取所有本地图片引用文件名（兼容 `minitodo-image://<name>` 与旧版
+/// `http(s)://asset.localhost/.../images/<name>` / `asset://localhost/.../images/<name>`）
+pub fn collect_referenced_image_names(markdown: &str, out: &mut std::collections::HashSet<String>) {
+    let bytes = markdown.as_bytes();
+    let is_name_char = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-');
+    let mut i = 0;
+    while i < bytes.len() {
+        let rest = &bytes[i..];
+        if rest.starts_with(b"minitodo-image://") {
+            let start = i + "minitodo-image://".len();
+            let mut end = start;
+            while end < bytes.len() && end - start < 128 && is_name_char(bytes[end]) {
+                end += 1;
+            }
+            if end > start {
+                let name = &markdown[start..end];
+                if is_safe_image_name(name) {
+                    out.insert(name.to_string());
+                }
+            }
+            i = end.max(start);
+            continue;
+        }
+        // 兼容旧版 asset URL（.../images/<name> 或 ...%5Cimages%5C<name> / ...%2Fimages%2F<name>）
+        let asset_len = if rest.starts_with(b"http://asset.localhost/") {
+            Some("http://asset.localhost/".len())
+        } else if rest.starts_with(b"https://asset.localhost/") {
+            Some("https://asset.localhost/".len())
+        } else if rest.starts_with(b"asset://localhost/") {
+            Some("asset://localhost/".len())
+        } else {
+            None
+        };
+        if let Some(prefix_len) = asset_len {
+            let url_start = i + prefix_len;
+            let mut url_end = url_start;
+            while url_end < bytes.len()
+                && !bytes[url_end].is_ascii_whitespace()
+                && !matches!(bytes[url_end], b')' | b'"' | b'\'' | b'>' | b'<')
+            {
+                url_end += 1;
+            }
+            let raw = &markdown[url_start..url_end];
+            let decoded = urlencoding::decode(raw).unwrap_or(std::borrow::Cow::Borrowed(raw));
+            let normalized = decoded.replace('\\', "/");
+            if let Some((_, tail)) = normalized.rsplit_once("/images/") {
+                let name = tail.split(['?', '#']).next().unwrap_or("");
+                if is_safe_image_name(name) {
+                    out.insert(name.to_string());
+                }
+            }
+            i = url_end.max(i + 1);
+            continue;
+        }
+        i += 1;
+    }
+}
+
+/// 清理本地 `images/` 目录中不再被任何待办或子任务引用的孤儿图片。
+///
+/// `min_age_secs` 为安全宽限期（例如 3600 秒 = 1 小时；传 0 表示立即清理）：刚粘贴尚未保存草稿
+/// 的图片会被跳过，避免误删正在编辑中的图片。
+pub fn cleanup_unused_images(
+    db: &Database,
+    min_age_secs: u64,
+) -> Result<ImageCleanupReport, String> {
+    cleanup_unused_images_in(db, &paths::images_dir(), min_age_secs)
+}
+
+pub fn cleanup_unused_images_in(
+    db: &Database,
+    dir: &Path,
+    min_age_secs: u64,
+) -> Result<ImageCleanupReport, String> {
+    let referenced = db
+        .with_connection(
+            |conn| -> rusqlite::Result<std::collections::HashSet<String>> {
+                let mut set = std::collections::HashSet::new();
+                let mut t_stmt =
+                    conn.prepare("SELECT description FROM todos WHERE description IS NOT NULL")?;
+                let t_rows = t_stmt.query_map([], |r| r.get::<_, String>(0))?;
+                for text in t_rows.flatten() {
+                    collect_referenced_image_names(&text, &mut set);
+                }
+                let mut s_stmt =
+                    conn.prepare("SELECT content FROM subtasks WHERE content IS NOT NULL")?;
+                let s_rows = s_stmt.query_map([], |r| r.get::<_, String>(0))?;
+                for text in s_rows.flatten() {
+                    collect_referenced_image_names(&text, &mut set);
+                }
+                Ok(set)
+            },
+        )
+        .map_err(|e| format!("扫描图片引用失败: {}", e))?;
+
+    let mut report = ImageCleanupReport::default();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(report),
+        Err(e) => return Err(format!("读取图片目录失败: {}", e)),
+    };
+    let now = std::time::SystemTime::now();
+    let min_age = std::time::Duration::from_secs(min_age_secs);
+
+    for entry in entries.flatten() {
+        let Ok(ft) = entry.file_type() else { continue };
+        if !ft.is_file() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if !is_safe_image_name(&name) {
+            continue;
+        }
+        let ext = Path::new(&name).extension().and_then(|e| e.to_str());
+        if image_extension(ext).is_err() {
+            continue;
+        }
+        report.scanned_count += 1;
+        if referenced.contains(&name) {
+            continue;
+        }
+        let meta = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if min_age_secs > 0 {
+            let age = meta
+                .modified()
+                .ok()
+                .and_then(|m| now.duration_since(m).ok())
+                .unwrap_or_default();
+            if age < min_age {
+                report.skipped_recent += 1;
+                continue;
+            }
+        }
+        let len = meta.len();
+        if std::fs::remove_file(entry.path()).is_ok() {
+            report.removed_count += 1;
+            report.freed_bytes += len;
+        }
+    }
+    Ok(report)
 }
 
 // ============================================================================
@@ -1374,6 +1540,72 @@ mod tests {
 
         let files = collect_import_files(&[dir.to_string_lossy().into_owned()]).unwrap();
         assert_eq!(files, vec![dir.join("a.md")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_completed_returns_only_completed_todos() {
+        let db = db();
+        let pending = create(&db, &create_request("未完成")).unwrap();
+        let done = create(&db, &create_request("已完成")).unwrap();
+        let mut upd = update_request();
+        upd.completed = Some(true);
+        update(&db, done.id, &upd).unwrap();
+
+        let completed = list_completed(&db).unwrap();
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].id, done.id);
+        assert_ne!(completed[0].id, pending.id);
+        assert!(completed[0].completed);
+    }
+
+    #[test]
+    fn cleanup_unused_images_removes_only_unreferenced_old_files() {
+        let db = db();
+        let mut req = create_request("含图待办");
+        req.description = Some(
+            "![a](minitodo-image://keep_desc.png) ![b](http://asset.localhost/C%3A%2Fdata%2Fimages%2Fkeep_legacy.jpg?v=1)"
+                .to_string(),
+        );
+        let parent = create(&db, &req).unwrap();
+        create_subtask(
+            &db,
+            &CreateSubTaskRequest {
+                parent_id: parent.id,
+                title: "子任务".to_string(),
+                content: Some("![c](asset://localhost/x/images/keep_sub.webp)".to_string()),
+            },
+        )
+        .unwrap();
+
+        let dir = temp_dir("cleanup-images");
+        std::fs::write(dir.join("keep_desc.png"), b"1234").unwrap();
+        std::fs::write(dir.join("keep_legacy.jpg"), b"12345").unwrap();
+        std::fs::write(dir.join("keep_sub.webp"), b"123456").unwrap();
+        std::fs::write(dir.join("orphan_pic.png"), b"abcdef").unwrap();
+        std::fs::write(dir.join(".tmp.part"), b"tmp").unwrap();
+        std::fs::write(dir.join("notes.txt"), b"keep non-image").unwrap();
+
+        // 宽限期内：孤儿图片被跳过，不删除
+        let skipped = cleanup_unused_images_in(&db, &dir, 3600).unwrap();
+        assert_eq!(skipped.scanned_count, 4);
+        assert_eq!(skipped.removed_count, 0);
+        assert_eq!(skipped.skipped_recent, 1);
+        assert!(dir.join("orphan_pic.png").exists());
+
+        // 立即清理：只删未引用图片，保留被引用图片、临时文件和非图片文件
+        let cleaned = cleanup_unused_images_in(&db, &dir, 0).unwrap();
+        assert_eq!(cleaned.scanned_count, 4);
+        assert_eq!(cleaned.removed_count, 1);
+        assert_eq!(cleaned.freed_bytes, 6);
+        assert_eq!(cleaned.skipped_recent, 0);
+        assert!(dir.join("keep_desc.png").exists());
+        assert!(dir.join("keep_legacy.jpg").exists());
+        assert!(dir.join("keep_sub.webp").exists());
+        assert!(!dir.join("orphan_pic.png").exists());
+        assert!(dir.join(".tmp.part").exists());
+        assert!(dir.join("notes.txt").exists());
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

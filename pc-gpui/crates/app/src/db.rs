@@ -53,3 +53,38 @@ where
     let db = Db::get(cx);
     cx.background_executor().spawn(async move { f(db) })
 }
+
+/// 在独立命名的 OS 线程执行长耗时阻塞 I/O（网络请求、WebDAV 同步、大目录清理等），
+/// 避免占满 GPUI `background_executor` 的共享工作线程池。
+pub fn spawn_io<T, F>(cx: &App, name: &'static str, f: F) -> Task<Result<T, String>>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    let (tx, rx) = async_channel::bounded(1);
+    let spawned = std::thread::Builder::new()
+        .name(name.to_string())
+        .spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+                .unwrap_or_else(|_| Err(format!("后台任务 {name} 异常中止")));
+            let _ = tx.send_blocking(result);
+        });
+    cx.background_executor().spawn(async move {
+        if let Err(e) = spawned {
+            return Err(format!("启动后台线程 {name} 失败: {e}"));
+        }
+        rx.recv()
+            .await
+            .unwrap_or_else(|_| Err(format!("后台线程 {name} 未返回结果")))
+    })
+}
+
+/// 同 [`spawn_io`]，并把全局数据库句柄传给闭包。
+pub fn spawn_io_db<T, F>(cx: &App, name: &'static str, f: F) -> Task<Result<T, String>>
+where
+    T: Send + 'static,
+    F: FnOnce(&Database) -> Result<T, String> + Send + 'static,
+{
+    let db = Db::get(cx);
+    spawn_io(cx, name, move || f(&db))
+}

@@ -16,7 +16,7 @@ use super::{
     section_divider, settings_row,
 };
 use crate::assets::EpIcon;
-use crate::db::spawn_db;
+use crate::db::{spawn_db, spawn_io_db};
 use crate::platform::file_dialog::{self, FileFilter};
 use crate::services;
 use crate::state::AppState;
@@ -59,6 +59,18 @@ pub(crate) fn is_plain_http(url: &str) -> bool {
     url.len() >= 7 && url[..7].eq_ignore_ascii_case("http://")
 }
 
+pub(crate) fn format_bytes(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = 1024.0 * 1024.0;
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if (bytes as f64) < MB {
+        format!("{:.1} KB", bytes as f64 / KB)
+    } else {
+        format!("{:.2} MB", bytes as f64 / MB)
+    }
+}
+
 impl SettingsWindow {
     pub(super) fn load_sync_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let task = spawn_db(cx, sync::get_settings);
@@ -96,6 +108,16 @@ impl SettingsWindow {
             s.set_value("", window, cx);
             s.set_placeholder(placeholder, window, cx);
         });
+        self.has_sync_passphrase = settings.has_sync_passphrase;
+        let pass_placeholder = if settings.has_sync_passphrase {
+            "已设置加密口令（留空则不修改）"
+        } else {
+            "留空表示不加密"
+        };
+        self.passphrase_input.update(cx, |s, cx| {
+            s.set_value("", window, cx);
+            s.set_placeholder(pass_placeholder, window, cx);
+        });
         self.auto_sync = settings.auto_sync;
         self.sync_interval = settings.sync_interval;
         self.last_sync_at = settings.last_sync_at.clone();
@@ -106,7 +128,12 @@ impl SettingsWindow {
         cx.notify();
     }
 
-    fn form_settings(&self, cx: &Context<Self>, clear_password: bool) -> SyncSettings {
+    fn form_settings(
+        &self,
+        cx: &Context<Self>,
+        clear_password: bool,
+        clear_sync_passphrase: bool,
+    ) -> SyncSettings {
         SyncSettings {
             webdav_url: self.url_input.read(cx).value().to_string(),
             webdav_username: self.user_input.read(cx).value().to_string(),
@@ -121,6 +148,13 @@ impl SettingsWindow {
             last_sync_at: self.last_sync_at.clone(),
             device_id: self.device_id.clone(),
             clear_password,
+            sync_passphrase: if clear_sync_passphrase {
+                String::new()
+            } else {
+                self.passphrase_input.read(cx).value().to_string()
+            },
+            has_sync_passphrase: self.has_sync_passphrase,
+            clear_sync_passphrase,
         }
     }
 
@@ -128,11 +162,12 @@ impl SettingsWindow {
     fn persist_sync_settings(
         &mut self,
         clear_password: bool,
+        clear_sync_passphrase: bool,
         success_text: &'static str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let settings = self.form_settings(cx, clear_password);
+        let settings = self.form_settings(cx, clear_password, clear_sync_passphrase);
         let task = spawn_db(cx, move |db| {
             sync::save_settings(db, &settings)?;
             sync::get_settings(db)
@@ -141,6 +176,7 @@ impl SettingsWindow {
             let result = task.await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.clearing_password = false;
+                this.clearing_passphrase = false;
                 match result {
                     Ok(fresh) => {
                         services::auto_sync::start(cx);
@@ -156,7 +192,7 @@ impl SettingsWindow {
     }
 
     pub(super) fn save_sync_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.persist_sync_settings(false, "同步设置已保存", window, cx);
+        self.persist_sync_settings(false, false, "同步设置已保存", window, cx);
     }
 
     fn clear_password(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -180,7 +216,34 @@ impl SettingsWindow {
                 }
                 let _ = this.update(cx, |this, cx| {
                     this.clearing_password = true;
-                    this.persist_sync_settings(true, "已清除保存的密码", window, cx);
+                    this.persist_sync_settings(true, false, "已清除保存的密码", window, cx);
+                });
+            },
+        );
+    }
+
+    fn clear_passphrase(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.clearing_passphrase {
+            return;
+        }
+        let this = cx.entity().downgrade();
+        message_box::confirm(
+            window,
+            cx,
+            ConfirmOptions::new(
+                "清除加密口令",
+                "确定清除已保存的端到端同步加密口令吗？如果云端数据目前处于加密状态，清除后将无法解密，除非先用此设备推送明文或重新输入原口令。",
+            )
+            .confirm_text("清除")
+            .cancel_text("取消")
+            .kind(BoxKind::Warning),
+            move |confirmed, window, cx| {
+                if !confirmed {
+                    return;
+                }
+                let _ = this.update(cx, |this, cx| {
+                    this.clearing_passphrase = true;
+                    this.persist_sync_settings(false, true, "已清除加密口令", window, cx);
                 });
             },
         );
@@ -199,7 +262,7 @@ impl SettingsWindow {
         let password = self.password_input.read(cx).value().to_string();
         self.testing = true;
         cx.notify();
-        let task = spawn_db(cx, move |db| {
+        let task = spawn_io_db(cx, "webdav-test", move |db| {
             let password = (!password.is_empty()).then_some(password);
             sync::test_connection(db, &url, &username, password.as_deref())
         });
@@ -302,15 +365,16 @@ impl SettingsWindow {
         cx.notify();
         let name = export_file_name(Local::now().date_naive());
         let dialog = file_dialog::save_file(window, cx, "导出待办数据", &name, ZIP_FILTER);
-        let db = crate::db::Db::get(cx);
         cx.spawn_in(window, async move |this, cx| {
             let result = match dialog.await {
-                Some(path) => {
-                    let task = cx
-                        .background_executor()
-                        .spawn(async move { mini_todo_core::data::export_to_file(&db, &path) });
-                    Some(task.await)
-                }
+                Some(path) => match cx.update(|_, cx| {
+                    spawn_io_db(cx, "data-export", move |db| {
+                        mini_todo_core::data::export_to_file(db, &path)
+                    })
+                }) {
+                    Ok(task) => Some(task.await),
+                    Err(_) => None,
+                },
                 None => None,
             };
             let _ = this.update_in(cx, |this, window, cx| {
@@ -367,7 +431,7 @@ impl SettingsWindow {
         self.importing = true;
         cx.notify();
         // ZIP / JSON 都交给 core 按文件头判断（大写 .ZIP 也按 ZIP 处理）
-        let task = spawn_db(cx, move |db| {
+        let task = spawn_io_db(cx, "data-import", move |db| {
             mini_todo_core::data::import_from_file(db, &path)
         });
         cx.spawn_in(window, async move |this, cx| {
@@ -393,6 +457,75 @@ impl SettingsWindow {
                     Err(e) => {
                         log::error!("[settings] 导入失败: {e}");
                         message::error(window, cx, format!("导入失败: {e}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn confirm_cleanup_images(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.cleaning_images {
+            return;
+        }
+        let this = cx.entity().downgrade();
+        message_box::confirm(
+            window,
+            cx,
+            ConfirmOptions::new(
+                "清理未引用图片",
+                "将扫描本地图片目录并删除不再被任何待办或子任务引用的历史图片（最近 1 小时内创建的文件会保留，避免误删编辑中的草稿）。确定继续吗？",
+            )
+            .confirm_text("开始清理")
+            .cancel_text("取消")
+            .kind(BoxKind::Warning),
+            move |confirmed, window, cx| {
+                if confirmed {
+                    let _ = this.update(cx, |this, cx| this.run_cleanup_images(window, cx));
+                }
+            },
+        );
+    }
+
+    fn run_cleanup_images(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cleaning_images = true;
+        cx.notify();
+        let task = spawn_io_db(cx, "cleanup-images", |db| {
+            mini_todo_core::todo::cleanup_unused_images(db, 3600)
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.cleaning_images = false;
+                match result {
+                    Ok(report) if report.removed_count == 0 && report.skipped_recent == 0 => {
+                        message::info(window, cx, "没有需要清理的未引用图片");
+                    }
+                    Ok(report) if report.removed_count == 0 => {
+                        message::info(
+                            window,
+                            cx,
+                            format!(
+                                "未删除文件（有 {} 张未引用图片在 1 小时保护期内）",
+                                report.skipped_recent
+                            ),
+                        );
+                    }
+                    Ok(report) => {
+                        message::success(
+                            window,
+                            cx,
+                            format!(
+                                "已清理 {} 张未引用图片，释放 {}",
+                                report.removed_count,
+                                format_bytes(report.freed_bytes)
+                            ),
+                        );
+                    }
+                    Err(e) => {
+                        log::error!("[settings] 清理未引用图片失败: {e}");
+                        message::error_with(window, cx, "清理未引用图片失败", &e);
                     }
                 }
                 cx.notify();
@@ -441,6 +574,19 @@ impl SettingsWindow {
                 self.importing,
                 false,
                 cx.listener(|this, _, window, cx| this.import_data(window, cx)),
+            ))
+            .child(data_btn(
+                "cleanup-images-btn",
+                EpIcon::Delete,
+                if self.cleaning_images {
+                    "清理中..."
+                } else {
+                    "清理未引用图片"
+                },
+                DataBtnKind::Normal,
+                self.cleaning_images,
+                self.cleaning_images,
+                cx.listener(|this, _, window, cx| this.confirm_cleanup_images(window, cx)),
             ));
 
         let webdav_title = panel_title("云同步 (WebDAV)").when_some(
@@ -655,6 +801,47 @@ impl SettingsWindow {
             }
         };
 
+        let passphrase_label = form_label().child("端到端同步加密口令（可选）").when(
+            self.has_sync_passphrase,
+            |this| {
+                let clearing = self.clearing_passphrase;
+                this.child(
+                    div()
+                        .id("clear-passphrase")
+                        .text_size(px(12.))
+                        .font_weight(gpui_kit::FontWeight::NORMAL)
+                        .text_color(t.primary)
+                        .when(clearing, |this| this.opacity(0.6))
+                        .when(!clearing, |this| {
+                            this.cursor_pointer()
+                                .hover(move |s| s.text_color(t.primary_dark).underline())
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.clear_passphrase(window, cx)
+                                }))
+                        })
+                        .child("清除已保存的口令"),
+                )
+            },
+        );
+        let passphrase_toggle_icon = if self.passphrase_visible {
+            EpIcon::View
+        } else {
+            EpIcon::Hide
+        };
+        let passphrase_toggle = div()
+            .id("passphrase-toggle")
+            .flex()
+            .items_center()
+            .cursor_pointer()
+            .child(icon(passphrase_toggle_icon, 14., t.tertiary))
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.passphrase_visible = !this.passphrase_visible;
+                let masked = !this.passphrase_visible;
+                this.passphrase_input
+                    .update(cx, |s, cx| s.set_masked(masked, window, cx));
+                cx.notify();
+            }));
+
         div()
             .flex()
             .flex_col()
@@ -662,7 +849,7 @@ impl SettingsWindow {
             .child(data_actions)
             .child(card_hint(
                 EpIcon::InfoFilled,
-                "导出为 ZIP 压缩包，可用于备份或迁移到其他设备",
+                "导出为 ZIP 压缩包，可用于备份或迁移到其他设备；清理图片只删除超过 1 小时未被引用的本地图片",
                 false,
             ))
             .child(section_divider())
@@ -713,6 +900,46 @@ impl SettingsWindow {
                         .border_color(t.advanced_border)
                         .rounded(theme::radius::MD)
                         .bg(t.advanced_bg)
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(6.))
+                                .mb(px(12.))
+                                .pb(px(12.))
+                                .border_b_1()
+                                .border_color(t.border)
+                                .child(passphrase_label)
+                                .child(
+                                    div()
+                                        .flex()
+                                        .gap(px(8.))
+                                        .child(
+                                            div().flex_1().min_w_0().child(
+                                                EpInput::new(&self.passphrase_input)
+                                                    .small()
+                                                    .suffix(passphrase_toggle)
+                                                    .w_full(),
+                                            ),
+                                        )
+                                        .child(div().w(px(108.)).flex_none().child(data_btn(
+                                            "save-passphrase",
+                                            EpIcon::Check,
+                                            "保存口令",
+                                            DataBtnKind::Normal,
+                                            false,
+                                            false,
+                                            cx.listener(|this, _, window, cx| {
+                                                this.save_sync_settings(window, cx)
+                                            }),
+                                        ))),
+                                )
+                                .child(card_hint(
+                                    EpIcon::InfoFilled,
+                                    "开启后同步文档在本地加密再上传（ChaCha20-Poly1305）；所有 PC 与云端服务必须使用相同口令，遗忘口令将无法解密云端数据",
+                                    false,
+                                )),
+                        )
                         .child(card_hint(
                             EpIcon::WarningFilled,
                             "仅在两端数据出现异常时使用：会以一端为准整体覆盖另一端，被覆盖一端独有的数据将被删除",
@@ -782,5 +1009,12 @@ mod tests {
         assert_eq!(format_last_sync(utc), expected);
         assert_eq!(format_last_sync("2026-10-15 09:42:13"), "2026-10-15 09:42");
         assert_eq!(format_last_sync("garbage"), "garbage");
+    }
+
+    #[test]
+    fn format_bytes_human_readable() {
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(2048), "2.0 KB");
+        assert_eq!(format_bytes(3 * 1024 * 1024), "3.00 MB");
     }
 }

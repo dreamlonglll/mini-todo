@@ -49,6 +49,8 @@ pub struct CalendarWindow {
     window_drag: BlockDrag,
     pub(crate) state: Entity<AppState>,
     pub(crate) calendar: grid::CalendarState,
+    /// 本窗口关心的全局版本号 `(todos, lists, settings, calendar_prefs)`：其它清单窗口属性变化不触发重绘
+    last_revs: (u64, u64, u64, u64),
     /// 清单筛选的下拉开着
     filter_open: bool,
     /// 筛选按钮的位置（下拉挂在它下面）
@@ -57,11 +59,27 @@ pub struct CalendarWindow {
 }
 
 impl CalendarWindow {
+    fn revisions(s: &AppState) -> (u64, u64, u64, u64) {
+        (
+            s.todos_revision(),
+            s.lists_revision,
+            s.settings_revision(),
+            s.window_prefs_revision(BlockKey::Calendar),
+        )
+    }
+
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let block = BlockKey::Calendar;
         let state = AppState::global(cx);
+        let last_revs = Self::revisions(state.read(cx));
         let subscriptions = vec![
-            cx.observe(&state, |_, _, cx| cx.notify()),
+            cx.observe(&state, |this, state, cx| {
+                let revs = Self::revisions(state.read(cx));
+                if revs != this.last_revs {
+                    this.last_revs = revs;
+                    cx.notify();
+                }
+            }),
             cx.observe_global::<WindowManager>(|_, cx| cx.notify()),
             cx.observe_window_activation(window, |this, window, cx| {
                 if !window.is_window_active() {
@@ -74,7 +92,8 @@ impl CalendarWindow {
                 cx.defer(move |cx| window_mode::on_activated(cx, block));
                 this.calendar.refresh_today(cx);
                 if !WindowManager::forward_activation(window, cx) {
-                    AppState::global(cx).update(cx, |state, cx| state.reload_todos(cx));
+                    // 仅在数据库 change_seq 真的变化时才全量拉取，避免每次切换焦点扫库
+                    AppState::global(cx).update(cx, |state, cx| state.refresh_if_changed(cx));
                 }
             }),
             // 系统 / 程序挪动、改尺寸后防抖保存；用户自绘拖动 / 缩放中不算，松手后由 BlockDrag 直接保存一次
@@ -99,6 +118,7 @@ impl CalendarWindow {
             ),
             state,
             calendar,
+            last_revs,
             filter_open: false,
             filter_anchor: Anchor::new(),
             _subscriptions: subscriptions,

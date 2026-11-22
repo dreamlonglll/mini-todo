@@ -46,7 +46,21 @@ fn sync_failed(op: &str, e: anyhow::Error) -> ApiError {
     )
 }
 
-pub async fn post_sync(State(state): State<AppState>) -> (StatusCode, Json<SyncResp>) {
+fn too_many_syncs() -> ApiError {
+    ApiError::new(
+        StatusCode::TOO_MANY_REQUESTS,
+        "too_many_requests",
+        "too many concurrent sync requests; please retry shortly",
+    )
+}
+
+pub async fn post_sync(
+    State(state): State<AppState>,
+) -> Result<(StatusCode, Json<SyncResp>), ApiError> {
+    let _permit = state
+        .sync
+        .try_acquire_manual_sync()
+        .ok_or_else(too_many_syncs)?;
     let (pull_res, push_res) = match state
         .sync
         .run_locked(|ctx| {
@@ -71,7 +85,7 @@ pub async fn post_sync(State(state): State<AppState>) -> (StatusCode, Json<SyncR
         StatusCode::MULTI_STATUS
     };
 
-    (
+    Ok((
         status,
         Json(SyncResp {
             pull: if pull_ok { "ok" } else { "error" },
@@ -79,12 +93,16 @@ pub async fn post_sync(State(state): State<AppState>) -> (StatusCode, Json<SyncR
             pull_error: pull_res.err().map(|e| public("pull", &e)),
             push_error: push_res.err().map(|e| public("push", &e)),
         }),
-    )
+    ))
 }
 
 pub async fn post_sync_pull(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let _permit = state
+        .sync
+        .try_acquire_manual_sync()
+        .ok_or_else(too_many_syncs)?;
     let r = state
         .sync
         .run_locked(|ctx| pull::pull_once_with(ctx, true))
@@ -110,6 +128,10 @@ pub async fn post_sync_pull(
 pub async fn post_sync_push(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let _permit = state
+        .sync
+        .try_acquire_manual_sync()
+        .ok_or_else(too_many_syncs)?;
     let r = state
         .sync
         .run_locked(push::push_once)

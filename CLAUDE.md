@@ -26,7 +26,7 @@ git 历史取（删除前的最后一个提交是 `749405a`，例如 `git show 7
 | 控件 | 自绘 Element Plus 风格控件（`crates/app/src/ui/`） | 外观数值照抄 UI 规格；复杂输入基于 gpui-component（`InputState` 等），主题调成 EP（`#409EFF`） |
 | 图标 | Element Plus Icons SVG | 从 `@element-plus/icons-vue` 抽取，`crates/app/assets/icons/{ep,app}/`，经 `assets.rs` 嵌入 |
 | Markdown | gpui-base `TextView` + 自写块级排版（`markdown` crate，GFM：表格 / 任务清单 / 删除线 / 自动链接） | 编辑为"源码 + 预览"（已知偏差，见下文） |
-| 业务核心 | `mini-todo-core`（`crates/core`） | rusqlite 0.32 bundled（SQLite）、reqwest 0.12 blocking（WebDAV / 节假日）、windows 0.58；macOS 收纳箱文件层用 libc / objc2 / objc2-foundation / objc2-app-kit（与 app 同版本）；不依赖 GPUI / Tauri / tokio，函数全部阻塞 |
+| 业务核心 | `mini-todo-core`（`crates/core`）+ 共享协议 `mini-todo-protocol`（`shared/mini-todo-protocol`） | rusqlite 0.32 bundled（SQLite WAL）、reqwest 0.12 blocking（进程级 Client 复用）、windows 0.62（与 app/gpui 统一版本）、ring 0.17（可选 WebDAV E2EE）；macOS 收纳箱文件层用 libc / objc2；不依赖 GPUI / Tauri / tokio，函数全部阻塞 |
 | 农历 | tyme4rs | lunar-javascript 同一作者的 Rust 库，结果与旧前端逐日比对（`tests/fixtures/lunar_fixture.json`） |
 | 平台集成 | windows 0.62（与 gpui 同版本）、tray-icon、notify-rust、auto-launch、rfd、embed-resource；macOS：objc2 0.6 / objc2-app-kit 0.3（与 gpui-pre-macos 同版本） | 托盘 / 菜单栏图标、Toast、开机自启、带过滤器的文件对话框（rfd 仅 Windows）、exe 图标与版本信息；macOS 的 NSWindow / NSScreen 调用（含收纳箱桌面层、取色面板 `NSColorPanel`）、系统通知走 GPUI `show_system_notification`（notify-rust 不在 mac 上编译） |
 | 安装包 | NSIS（`pc-gpui/scripts/windows-installer.nsi`）+ 便携 zip；macOS universal dmg（`pc-gpui/scripts/macos/`） | 由 `release.yml` 构建：Windows x64 + macOS universal（整包 ad-hoc 签名，不公证） |
@@ -104,6 +104,8 @@ mini-todo/
 │       ├── e2e-linux/                      # Linux 端到端（真实应用 + Apache / nginx WebDAV + cloud + Skill）
 │       ├── e2e-windows/                    # Windows 端到端（真实窗口 + 真实输入 + Win32 断言；CI pc-gpui-e2e-windows.yml）
 │       └── e2e-macos/                      # macOS 端到端（CGWindowList / 截图 / Vision OCR / AX / CGEvent；CI pc-gpui-e2e-macos.yml）
+├── shared/
+│   └── mini-todo-protocol/                 # PC 与 Cloud 共用协议 crate（ID 生成、K5 图片名/MIME、WebDAV XML/ETag、可选 E2EE）
 ├── cloud/                                  # 云端 HTTP API（独立 Rust crate，见下文）
 ├── .github/workflows/                      # release / cache-warm / pc-gpui-ci / pc-gpui-e2e-windows / pc-gpui-e2e-macos / cloud-ci
 ├── CLAUDE.md                               # 项目指南（本文档）
@@ -217,9 +219,9 @@ mini-todo/
   其中 `is_fixed` / `text_theme` / `view_mode` / `show_calendar` 3.1 起只作迁移 v31 的初始值，不再驱动界面、也不再写入）/ 图片。
   清单 / 日历窗口的属性与布局是设备本地的，不同步
 - 自动同步可选（按间隔轮询，失败段只提示一次）；同步在后台线程执行，不阻塞界面；同一时刻只允许一个同步（`"同步正在进行中"`）
-- gzip 压缩传输；**数据本身不加密**（传输安全取决于 https，WebDAV 服务商可读取内容）；
-  WebDAV 密码在 Windows 上用 DPAPI 加密保存，macOS / Linux 上明文存在本机数据库里（与 2.5.0 一致；mac 设置页有提示，钥匙串要开发者签名，暂不做），
-  界面只拿到 `has_password`，http:// 地址会提示明文风险
+- gzip 压缩传输，支持可选客户端端到端加密（PBKDF2-HMAC-SHA256 + ChaCha20-Poly1305）：未配置加密口令时保持传统明文 gzip（100% 向后兼容）；在设置 → 数据与同步 → 高级（PC）及 `config.toml` 的 `sync_passphrase`（Cloud）配置相同口令后，同步文档在上传前先本地加密；
+  WebDAV 密码与加密口令在 Windows 上均用 DPAPI 加密保存，macOS / Linux 上明文存在本机数据库里（与 2.5.0 一致；mac 设置页有提示，钥匙串要开发者签名，暂不做），
+  界面只拿到 `has_password` / `has_sync_passphrase`，http:// 地址会提示明文风险
 
 ### 窗口特殊功能
 - 下面的模式**按窗口**作用于每个清单窗口与日历窗口（`services/window_mode/`：每个窗口一份 `ModeState` 状态机，`BlockKey::{List(id), Calendar}`）；

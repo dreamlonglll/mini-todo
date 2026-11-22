@@ -24,6 +24,20 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Callable
 
+_SCRIPTS_ROOT = str(Path(__file__).resolve().parents[1])
+if _SCRIPTS_ROOT not in sys.path:
+    sys.path.insert(0, _SCRIPTS_ROOT)
+
+from e2e_common import (  # noqa: E402
+    CURRENT_REPORT,
+    Checks,
+    Skip,
+    Tee as _Tee,
+    db_query,
+    seed_database,
+    write_report_summary,
+)
+
 from PIL import Image, ImageChops
 
 try:
@@ -1164,11 +1178,7 @@ class App:
 
     # --- 数据库
     def q(self, sql: str, params: tuple = ()) -> list[tuple]:
-        con = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True, timeout=10)
-        try:
-            return con.execute(sql, params).fetchall()
-        finally:
-            con.close()
+        return db_query(self.db_path, sql, params)
 
     # --- 系统视角
     def running_app_info(self) -> str:
@@ -1228,62 +1238,17 @@ class App:
 
 
 def seed(seed_exe: Path, data_dir: Path, sample: Path) -> None:
-    if data_dir.exists():
-        import shutil
-        shutil.rmtree(data_dir, ignore_errors=True)
-    r = run([str(seed_exe), str(data_dir), str(sample)], timeout=120)
+    r = seed_database(seed_exe, data_dir, sample)
     if r.returncode != 0:
         raise AssertionError(f"seed 失败（rc={r.returncode}）：{r.stdout}\n{r.stderr}")
     print(f"    seed: {r.stdout.strip()}")
 
 
-# ----------------------------------------------------------------------------- 用例与汇总
-
-class Skip(Exception):
-    pass
+# ----------------------------------------------------------------------------- 用例与汇总（Skip / Checks / _Tee / CURRENT_REPORT 复用 e2e_common）
 
 
 class CaseTimeout(AssertionError):
     pass
-
-
-class Checks:
-    """一个用例里的多项软断言：全部检查完再统一判定"""
-
-    def __init__(self):
-        self.items: list[tuple[bool, str]] = []
-
-    def ok(self, cond, what: str) -> bool:
-        self.items.append((bool(cond), what))
-        print(f"    {'ok ' if cond else 'BAD'} {what}", flush=True)
-        return bool(cond)
-
-    def near(self, actual: float, expected: float, tol: float, what: str) -> bool:
-        return self.ok(abs(actual - expected) <= tol, f"{what}: {actual:g} ≈ {expected:g} (±{tol:g})")
-
-    def done(self, summary: str = "") -> str:
-        bad = [w for c, w in self.items if not c]
-        if bad:
-            if CURRENT_REPORT[0]:
-                CURRENT_REPORT[0].snapshot()
-            raise AssertionError("; ".join(bad))
-        return summary or f"{len(self.items)} 项检查通过"
-
-
-CURRENT_REPORT: list = [None]
-
-
-class _Tee:
-    def __init__(self, stream):
-        self.stream = stream
-        self.buf: list[str] = []
-
-    def write(self, data):
-        self.buf.append(data)
-        return self.stream.write(data)
-
-    def flush(self):
-        self.stream.flush()
 
 
 def _on_alarm(signum, frame):  # noqa: ARG001
@@ -1365,30 +1330,4 @@ class Report:
         return status == "PASS"
 
     def finish(self) -> int:
-        (self.out_dir / "results.json").write_text(json.dumps(self.results, ensure_ascii=False, indent=2),
-                                                   encoding="utf-8")
-        counts = {s: sum(1 for r in self.results if r["status"] == s) for s in ("PASS", "FAIL", "SKIP")}
-        lines = [f"## {self.title}", "",
-                 f"PASS {counts['PASS']} / FAIL {counts['FAIL']} / SKIP {counts['SKIP']}", "",
-                 "| 用例 | 结果 | 说明 |", "|---|---|---|"]
-        for r in self.results:
-            detail = r["detail"].replace("|", "\\|").replace("\n", " ")
-            if len(detail) > 300:
-                detail = detail[:300] + "…"
-            lines.append(f"| {r['id']} {r['title']} | {r['status']} | {detail} |")
-        md = "\n".join(lines) + "\n"
-        (self.out_dir / "summary.md").write_text(md, encoding="utf-8")
-        step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
-        if step_summary:
-            with open(step_summary, "a", encoding="utf-8") as f:
-                f.write(md + "\n")
-        print("\n========== E2E SUMMARY ==========")
-        w = max((len(r["id"]) for r in self.results), default=4)
-        for r in self.results:
-            detail = r["detail"].replace("\n", " ")
-            if len(detail) > 220:
-                detail = detail[:220] + "…"
-            print(f"{r['status']:<4} {r['id']:<{w}} {r['title']} — {detail}")
-        print(f"TOTAL: PASS {counts['PASS']}  FAIL {counts['FAIL']}  SKIP {counts['SKIP']}")
-        print("=================================", flush=True)
-        return 1 if counts["FAIL"] else 0
+        return write_report_summary(self.out_dir, self.title, self.results)

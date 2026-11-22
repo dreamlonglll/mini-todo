@@ -74,12 +74,20 @@ pub fn init(conn: &Connection) -> anyhow::Result<()> {
 
         -- 清单删除墓碑（同步文档顶层 `listTombstones`）。与 tombstones 分开存放、分开传播：
         -- 旧版本（≤ 3.0.x）的 parse_tombstone 丢弃未知 entityType，上传时又按本地表重建
-        -- `tombstones`，清单墓碑放进去会被旧设备抹掉。规则与 todo 墓碑相同（同键取较大
-        -- deleted_at、保留 30 天）；默认清单（entity_id = '1'）的墓碑一律不存。
+        -- `tombstones`，清单墓碑放进去会被旧设备抹掉。同键取较大 deleted_at，永不过期；
+        -- 默认清单（entity_id = '1'）的墓碑一律不存。
         CREATE TABLE IF NOT EXISTS list_tombstones (
             entity_id   TEXT PRIMARY KEY,
             deleted_at  TEXT NOT NULL
         );
+
+        -- 表达式索引：加速高频过滤字段查询（用 json_valid 防止损坏行破坏索引构建）
+        CREATE INDEX IF NOT EXISTS idx_todos_completed
+            ON todos(CASE WHEN json_valid(data_json) THEN json_extract(data_json, '$.completed') END);
+        CREATE INDEX IF NOT EXISTS idx_todos_end_time
+            ON todos(CASE WHEN json_valid(data_json) THEN json_extract(data_json, '$.endTime') END);
+        CREATE INDEX IF NOT EXISTS idx_todos_list_id
+            ON todos(CASE WHEN json_valid(data_json) THEN json_extract(data_json, '$.listId') END);
         "#,
     )
     .map_err(|e| anyhow::anyhow!("初始化 schema 失败: {}", e))?;

@@ -196,6 +196,14 @@ pub(crate) struct ExpandAnim {
     pub generation: u64,
 }
 
+/// 清单窗口的派生列表/象限缓存（按 `(todos_revision, lists_revision)` 失效，悬停/滚动/菜单重绘零分配）
+pub(crate) struct CachedListData {
+    pub key: (u64, u64),
+    pub total: usize,
+    pub pending: Vec<RowData>,
+    pub quadrants: [Vec<RowData>; 4],
+}
+
 pub struct ListWindow {
     /// 这个窗口在 `window_mode` 状态表 / 几何持久化 / 吸附组里的 key（`BlockKey::List(清单 id)`）
     pub(crate) block: BlockKey,
@@ -226,6 +234,10 @@ pub struct ListWindow {
     fab_leave: Option<Task<()>>,
     last_expand_all: bool,
     last_view_mode: ViewMode,
+    /// 本窗口关心的全局版本号 `(todos, lists, settings, sync, own_prefs)`：其它窗口的属性变化不触发本窗口重绘
+    last_revs: (u64, u64, u64, u64, u64),
+    /// 派生视图缓存（列表行 & 四象限行）
+    cached_list: Option<Rc<CachedListData>>,
     /// 系统窗口标题跟着清单名（默认清单窗口固定是 "Mini Todo"）
     last_name: String,
     /// 清单名的就地改名与右键菜单
@@ -245,6 +257,7 @@ impl ListWindow {
         let snapshot = state.read(cx);
         let last_expand_all = snapshot.expand_all(block);
         let last_view_mode = snapshot.view_mode(block);
+        let last_revs = Self::revisions(snapshot, block);
         let last_name = snapshot.list_name(list_id);
         let mut subscriptions = vec![
             cx.observe_in(&state, window, Self::on_state_changed),
@@ -261,7 +274,8 @@ impl ListWindow {
                 cx.defer(move |cx| window_mode::on_activated(cx, block));
                 if !WindowManager::forward_activation(window, cx) {
                     this.ensure_focus(window, cx);
-                    AppState::global(cx).update(cx, |state, cx| state.reload_todos(cx));
+                    // 仅在数据库 change_seq 真的变化时才全量拉取，避免每次切换焦点扫库
+                    AppState::global(cx).update(cx, |state, cx| state.refresh_if_changed(cx));
                 }
             }),
             // 系统 / 程序挪动、改尺寸（DPI 变化、显示器变化…）后防抖保存；用户自绘拖动 / 缩放中不算，
@@ -303,6 +317,8 @@ impl ListWindow {
             fab_leave: None,
             last_expand_all,
             last_view_mode,
+            last_revs,
+            cached_list: None,
             last_name,
             name,
             row_menu: None,
@@ -315,6 +331,49 @@ impl ListWindow {
         self.block.list_id().unwrap_or(DEFAULT_LIST_ID)
     }
 
+    fn revisions(s: &AppState, block: BlockKey) -> (u64, u64, u64, u64, u64) {
+        (
+            s.todos_revision(),
+            s.lists_revision,
+            s.settings_revision(),
+            s.sync_revision(),
+            s.window_prefs_revision(block),
+        )
+    }
+
+    /// 读取或重建本清单的派生视图缓存（仅当 `todos_revision` 或 `lists_revision` 变化时重建一次）
+    pub(crate) fn list_cache(&mut self, cx: &App) -> Rc<CachedListData> {
+        let state = self.state.read(cx);
+        let key = (state.todos_revision(), state.lists_revision);
+        if let Some(cached) = &self.cached_list
+            && cached.key == key
+        {
+            return cached.clone();
+        }
+        let list_id = self.list_id();
+        let total = state.todo_count_in(list_id).total;
+        let pending_todos = state.pending_todos_in(list_id);
+        let mut pending = Vec::with_capacity(pending_todos.len());
+        let mut quadrants: [Vec<RowData>; 4] = Default::default();
+        for todo in pending_todos {
+            let row = RowData::from_todo(todo);
+            let q_idx = match todo.quadrant {
+                q @ 1..=4 => (q - 1) as usize,
+                _ => 0,
+            };
+            quadrants[q_idx].push(row.clone());
+            pending.push(row);
+        }
+        let cached = Rc::new(CachedListData {
+            key,
+            total,
+            pending,
+            quadrants,
+        });
+        self.cached_list = Some(cached.clone());
+        cached
+    }
+
     /// 观察全局状态：展开全部 / 视图切换 / 清单改名的变化各自收尾（嵌入偏好与运行时偏好由 `window_mode` 集中观察，
     /// 对所有窗口收尾）
     fn on_state_changed(
@@ -324,6 +383,11 @@ impl ListWindow {
         cx: &mut Context<Self>,
     ) {
         let s = state.read(cx);
+        let revs = Self::revisions(s, self.block);
+        if revs == self.last_revs {
+            return;
+        }
+        self.last_revs = revs;
         let list_id = self.list_id();
         let (expand_all, view_mode) = (s.expand_all(self.block), s.view_mode(self.block));
         let animate_ids: Vec<i64> = if expand_all != self.last_expand_all {

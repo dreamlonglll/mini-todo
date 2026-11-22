@@ -11,6 +11,8 @@
 //!
 //! 这个中间件挂在鉴权中间件**内层**：401 直接由鉴权层返回，不注入同步头、不查库。
 
+use std::collections::HashMap;
+
 use axum::extract::{Request, State};
 use axum::http::header::HeaderValue;
 use axum::http::HeaderName;
@@ -22,7 +24,7 @@ use rusqlite::Connection;
 use tracing::warn;
 
 use super::AppState;
-use crate::db::repo::{self, meta_keys as mk};
+use crate::db::repo::meta_keys as mk;
 use crate::time::{epoch_to_local_string, local_string_to_utc};
 
 const X_SYNC_STATUS: HeaderName = HeaderName::from_static("x-sync-status");
@@ -81,31 +83,59 @@ fn non_empty(v: Option<String>) -> Option<String> {
     v.filter(|s| !s.trim().is_empty())
 }
 
-fn meta_epoch(conn: &Connection, key: &str) -> rusqlite::Result<Option<i64>> {
-    Ok(repo::get_meta(conn, key)?.and_then(|s| s.trim().parse::<i64>().ok()))
-}
-
-/// 一次连接调用读出全部同步状态。
+/// 一次 SQL 查询批量读出全部同步状态（替代原先 6~8 次逐键 SELECT）。
 pub fn read_snapshot(conn: &Connection) -> rusqlite::Result<SyncSnapshot> {
-    let dirty = repo::is_dirty(conn)?;
-    let image_queue_length = repo::dirty_image_queue(conn)?.len();
+    let mut stmt = conn.prepare_cached(
+        "SELECT key, value FROM meta WHERE key IN (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+    )?;
+    let mut map: HashMap<String, String> = HashMap::with_capacity(8);
+    let rows = stmt.query_map(
+        [
+            mk::DIRTY,
+            mk::DIRTY_IMAGES,
+            mk::LAST_PULL_AT,
+            mk::LAST_PULL_ERROR,
+            mk::LAST_PUSH_OK_AT,
+            mk::LAST_PUSH_ERROR,
+            mk::DIRTY_SINCE,
+            mk::IMAGE_QUEUE_SINCE,
+        ],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+    )?;
+    for row in rows {
+        let (k, v) = row?;
+        map.insert(k, v);
+    }
+
+    let dirty = map.get(mk::DIRTY).map(String::as_str) == Some("true");
+    let image_queue_length = map
+        .get(mk::DIRTY_IMAGES)
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok())
+        .map_or(0, |q| q.len());
+    let take_non_empty = |map: &mut HashMap<String, String>, key: &str| non_empty(map.remove(key));
+    let parse_epoch = |map: &HashMap<String, String>, key: &str| {
+        map.get(key).and_then(|s| s.trim().parse::<i64>().ok())
+    };
+    let dirty_since = if dirty {
+        parse_epoch(&map, mk::DIRTY_SINCE)
+    } else {
+        None
+    };
+    let image_queue_since = if image_queue_length > 0 {
+        parse_epoch(&map, mk::IMAGE_QUEUE_SINCE)
+    } else {
+        None
+    };
+
     Ok(SyncSnapshot {
-        last_pull_at: non_empty(repo::get_meta(conn, mk::LAST_PULL_AT)?),
-        last_pull_error: non_empty(repo::get_meta(conn, mk::LAST_PULL_ERROR)?),
-        last_push_ok_at: non_empty(repo::get_meta(conn, mk::LAST_PUSH_OK_AT)?),
-        last_push_error: non_empty(repo::get_meta(conn, mk::LAST_PUSH_ERROR)?),
+        last_pull_at: take_non_empty(&mut map, mk::LAST_PULL_AT),
+        last_pull_error: take_non_empty(&mut map, mk::LAST_PULL_ERROR),
+        last_push_ok_at: take_non_empty(&mut map, mk::LAST_PUSH_OK_AT),
+        last_push_error: take_non_empty(&mut map, mk::LAST_PUSH_ERROR),
         dirty,
-        dirty_since: if dirty {
-            meta_epoch(conn, mk::DIRTY_SINCE)?
-        } else {
-            None
-        },
+        dirty_since,
         image_queue_length,
-        image_queue_since: if image_queue_length > 0 {
-            meta_epoch(conn, mk::IMAGE_QUEUE_SINCE)?
-        } else {
-            None
-        },
+        image_queue_since,
     })
 }
 
@@ -171,13 +201,17 @@ pub fn classify(
     }
 }
 
-pub fn compute_sync_status(state: &AppState) -> SyncStatus {
-    // 读失败按"什么都不知道"处理（pull 判 offline），但要留日志——header 注入
-    // 不该因为一次 DB 错误静默降级成"看起来只是还没同步过"。
-    let snapshot = match state.db.with_conn(|conn| read_snapshot(conn)) {
-        Ok(s) => s,
-        Err(e) => {
+pub async fn compute_sync_status(state: &AppState) -> SyncStatus {
+    // 在只读连接 + spawn_blocking 中读取，不阻塞 Tokio async 线程、不被后台同步写锁挡住。
+    // 读失败按"什么都不知道"处理（pull 判 offline），并记日志。
+    let snapshot = match state.db.run_read(read_snapshot).await {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
             warn!(target: "minitodo_cloud::api", "读同步状态失败: {}", e);
+            SyncSnapshot::default()
+        }
+        Err(e) => {
+            warn!(target: "minitodo_cloud::api", "读同步状态任务异常: {}", e);
             SyncSnapshot::default()
         }
     };
@@ -195,7 +229,7 @@ pub async fn inject_sync_headers(
     next: Next,
 ) -> Response {
     let mut resp = next.run(req).await;
-    let status = compute_sync_status(&state);
+    let status = compute_sync_status(&state).await;
 
     resp.headers_mut().insert(
         X_SYNC_STATUS,
@@ -216,6 +250,7 @@ pub async fn inject_sync_headers(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::repo;
     use chrono::TimeZone;
 
     fn tz() -> Tz {

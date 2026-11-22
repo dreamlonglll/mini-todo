@@ -11,31 +11,11 @@
 //! - PC AUTOINCREMENT 从 1 起步；合并进 PC 的云端 id 会把 PC 的序列推到 ~1.8e15，之后
 //!   PC 新建的 id 每条 +1，而云端的 id 每毫秒前进 1000，两者实际不会相撞
 
-use chrono::Utc;
-use rand::Rng;
-
 use crate::db::repo::is_primary_key_conflict;
 
-/// JavaScript 安全整数上限（`Number.MAX_SAFE_INTEGER`）。
-pub const MAX_SAFE_ID: i64 = (1 << 53) - 1;
-/// 新建记录时 id 冲突的最大重试次数。
-pub const MAX_ID_ATTEMPTS: usize = 8;
-/// 越界兜底时随机 id 的下限（保持与时间型 id 同一量级，远离 PC 的小 id）。
-const FALLBACK_MIN_ID: i64 = 1_000_000_000_000_000;
-
-/// 毫秒 × 1000 + 后缀；超出 JS 安全整数范围时返回 `None`。
-pub fn compose_id(unix_millis: i64, suffix: i64) -> Option<i64> {
-    unix_millis
-        .checked_mul(1000)
-        .and_then(|v| v.checked_add(suffix))
-        .filter(|id| (1..=MAX_SAFE_ID).contains(id))
-}
-
-pub fn new_id() -> i64 {
-    let mut rng = rand::thread_rng();
-    compose_id(Utc::now().timestamp_millis(), rng.gen_range(0..1000))
-        .unwrap_or_else(|| rng.gen_range(FALLBACK_MIN_ID..=MAX_SAFE_ID))
-}
+#[cfg(test)]
+use mini_todo_protocol::ids::{compose_id, FALLBACK_MIN_ID, MAX_SAFE_ID};
+pub use mini_todo_protocol::ids::{new_id, MAX_ID_ATTEMPTS};
 
 /// 用 `next_id` 生成 id 并调用 `insert`（普通 INSERT）；主键冲突时换一个 id 重试，
 /// 最多 `MAX_ID_ATTEMPTS` 次。其它错误立即返回。成功返回最终使用的 id。
@@ -62,7 +42,7 @@ pub fn insert_with_fresh_id(
 mod tests {
     use super::*;
     use crate::db::repo;
-    use chrono::TimeZone;
+    use chrono::{TimeZone, Utc};
     use rusqlite::Connection;
 
     fn millis(y: i32, m: u32, d: u32) -> i64 {

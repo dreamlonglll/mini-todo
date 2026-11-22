@@ -153,7 +153,14 @@ pub(crate) fn fetch_and_merge(ctx: &SyncCtx, force_full: bool) -> anyhow::Result
             })
         }
         GetOutcome::Fetched { body, validators } => {
-            let json = gunzip(&body)?;
+            let raw = if mini_todo_protocol::crypto::is_encrypted(&body) {
+                let pass = ctx.cfg.sync_passphrase.as_deref().unwrap_or("");
+                mini_todo_protocol::crypto::decrypt(&body, pass)
+                    .map_err(|e| anyhow::anyhow!("{}", e))?
+            } else {
+                body
+            };
+            let json = gunzip(&raw)?;
             let doc = RemoteDoc::parse(&json)?;
             let cutoff = days_ago_local_string(tz, TOMBSTONE_RETENTION_DAYS);
             let recheck_cutoff =
@@ -269,6 +276,7 @@ pub fn pull_once_with(ctx: &SyncCtx, force_full: bool) -> anyhow::Result<PullRep
                     "remote sync-data is missing local records / tombstones; scheduling a re-push"
                 );
             }
+            ctx.request_push();
             repush_scheduled = true;
         }
         Ok(PullReport {

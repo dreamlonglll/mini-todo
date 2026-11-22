@@ -5,11 +5,13 @@ on:
     branches: [main]
     paths:
       - 'cloud/**'
+      - 'shared/**'
       - '.github/workflows/cloud-ci.yml'
   pull_request:
     branches: [main]
     paths:
       - 'cloud/**'
+      - 'shared/**'
       - '.github/workflows/cloud-ci.yml'
   workflow_dispatch:
 

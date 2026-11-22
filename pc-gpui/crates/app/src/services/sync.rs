@@ -18,10 +18,10 @@
 use gpui_kit::{App, Task};
 use mini_todo_core::sync::{self, SyncMode, SyncReport, SyncStatus};
 
-use crate::db::spawn_db;
+use crate::db::spawn_io_db;
 use crate::state::AppState;
 
-/// 执行一次同步（后台线程）：期间 `AppState.syncing = true`（标题栏图标旋转）；成功后
+/// 执行一次同步（独立 I/O 线程）：期间 `AppState.syncing = true`（标题栏图标旋转）；成功后
 /// [`AppState::apply_sync_report`]（同一份报告只处理一次：本地数据有变化且主窗口没有模态子窗口 →
 /// 重新拉待办；`settings_applied` → 重新读设置与运行时偏好）。
 ///
@@ -29,7 +29,7 @@ use crate::state::AppState;
 pub fn run_sync(cx: &mut App, mode: SyncMode) -> Task<Result<SyncReport, String>> {
     let state = AppState::global(cx);
     state.update(cx, |state, cx| state.begin_sync(cx));
-    let task = spawn_db(cx, move |db| sync::run(db, mode));
+    let task = spawn_io_db(cx, "webdav-sync", move |db| sync::run(db, mode));
     cx.spawn(async move |cx| {
         let result = task.await;
         match &result {

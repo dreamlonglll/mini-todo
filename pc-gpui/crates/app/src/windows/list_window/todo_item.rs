@@ -858,8 +858,3 @@ impl Render for DragGhost {
             )
     }
 }
-
-/// 状态里的待办 → 行数据（按给定顺序）
-pub(crate) fn rows_of(todos: &[&mini_todo_core::db::Todo]) -> Vec<RowData> {
-    todos.iter().map(|t| RowData::from_todo(t)).collect()
-}

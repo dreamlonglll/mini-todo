@@ -8,11 +8,11 @@ use super::location::same_path_ci;
 use super::ops::{BatchOutcome, MoveJob, MoveOutcome};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use windows::core::{implement, Interface, HRESULT, HSTRING, PCWSTR};
-use windows::Win32::Foundation::{HANDLE, HWND, SIZE};
+use windows::core::{implement, Interface, Ref, HRESULT, HSTRING, PCWSTR};
+use windows::Win32::Foundation::{HWND, SIZE};
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, GetObjectW, BITMAP, BITMAPINFO,
-    BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, HDC,
+    BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoTaskMemFree, IBindCtx, IPersistFile, CLSCTX_ALL, CLSCTX_INPROC_SERVER,
@@ -31,8 +31,7 @@ use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 /// 公共桌面路径（`SHGetKnownFolderPath(FOLDERID_PublicDesktop)`，不需要 COM）
 pub(crate) fn known_folder_public_desktop() -> Option<PathBuf> {
     unsafe {
-        let raw = SHGetKnownFolderPath(&FOLDERID_PublicDesktop, KF_FLAG_DEFAULT, HANDLE::default())
-            .ok()?;
+        let raw = SHGetKnownFolderPath(&FOLDERID_PublicDesktop, KF_FLAG_DEFAULT, None).ok()?;
         let path = raw.to_string().ok().map(PathBuf::from);
         CoTaskMemFree(Some(raw.0 as *const _));
         path
@@ -95,7 +94,7 @@ impl IFileOperationProgressSink_Impl for MoveSink_Impl {
     fn PreRenameItem(
         &self,
         _dwflags: u32,
-        _psiitem: Option<&IShellItem>,
+        _psiitem: Ref<'_, IShellItem>,
         _psznewname: &PCWSTR,
     ) -> windows::core::Result<()> {
         Ok(())
@@ -103,18 +102,18 @@ impl IFileOperationProgressSink_Impl for MoveSink_Impl {
     fn PostRenameItem(
         &self,
         _dwflags: u32,
-        _psiitem: Option<&IShellItem>,
+        _psiitem: Ref<'_, IShellItem>,
         _psznewname: &PCWSTR,
         _hrrename: HRESULT,
-        _psinewlycreated: Option<&IShellItem>,
+        _psinewlycreated: Ref<'_, IShellItem>,
     ) -> windows::core::Result<()> {
         Ok(())
     }
     fn PreMoveItem(
         &self,
         _dwflags: u32,
-        _psiitem: Option<&IShellItem>,
-        _psidestinationfolder: Option<&IShellItem>,
+        _psiitem: Ref<'_, IShellItem>,
+        _psidestinationfolder: Ref<'_, IShellItem>,
         _psznewname: &PCWSTR,
     ) -> windows::core::Result<()> {
         Ok(())
@@ -122,13 +121,13 @@ impl IFileOperationProgressSink_Impl for MoveSink_Impl {
     fn PostMoveItem(
         &self,
         _dwflags: u32,
-        psiitem: Option<&IShellItem>,
-        _psidestinationfolder: Option<&IShellItem>,
+        psiitem: Ref<'_, IShellItem>,
+        _psidestinationfolder: Ref<'_, IShellItem>,
         _psznewname: &PCWSTR,
         hrmove: HRESULT,
-        psinewlycreated: Option<&IShellItem>,
+        psinewlycreated: Ref<'_, IShellItem>,
     ) -> windows::core::Result<()> {
-        let item_path = psiitem.and_then(shell_item_path);
+        let item_path = psiitem.as_ref().and_then(shell_item_path);
         let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
         let is_top_level = match &item_path {
             Some(path) => same_path_ci(path, &self.source),
@@ -136,15 +135,15 @@ impl IFileOperationProgressSink_Impl for MoveSink_Impl {
             None => slot.is_none(),
         };
         if is_top_level {
-            *slot = Some((hrmove.0, psinewlycreated.and_then(shell_item_path)));
+            *slot = Some((hrmove.0, psinewlycreated.as_ref().and_then(shell_item_path)));
         }
         Ok(())
     }
     fn PreCopyItem(
         &self,
         _dwflags: u32,
-        _psiitem: Option<&IShellItem>,
-        _psidestinationfolder: Option<&IShellItem>,
+        _psiitem: Ref<'_, IShellItem>,
+        _psidestinationfolder: Ref<'_, IShellItem>,
         _psznewname: &PCWSTR,
     ) -> windows::core::Result<()> {
         Ok(())
@@ -152,34 +151,34 @@ impl IFileOperationProgressSink_Impl for MoveSink_Impl {
     fn PostCopyItem(
         &self,
         _dwflags: u32,
-        _psiitem: Option<&IShellItem>,
-        _psidestinationfolder: Option<&IShellItem>,
+        _psiitem: Ref<'_, IShellItem>,
+        _psidestinationfolder: Ref<'_, IShellItem>,
         _psznewname: &PCWSTR,
         _hrcopy: HRESULT,
-        _psinewlycreated: Option<&IShellItem>,
+        _psinewlycreated: Ref<'_, IShellItem>,
     ) -> windows::core::Result<()> {
         Ok(())
     }
     fn PreDeleteItem(
         &self,
         _dwflags: u32,
-        _psiitem: Option<&IShellItem>,
+        _psiitem: Ref<'_, IShellItem>,
     ) -> windows::core::Result<()> {
         Ok(())
     }
     fn PostDeleteItem(
         &self,
         _dwflags: u32,
-        _psiitem: Option<&IShellItem>,
+        _psiitem: Ref<'_, IShellItem>,
         _hrdelete: HRESULT,
-        _psinewlycreated: Option<&IShellItem>,
+        _psinewlycreated: Ref<'_, IShellItem>,
     ) -> windows::core::Result<()> {
         Ok(())
     }
     fn PreNewItem(
         &self,
         _dwflags: u32,
-        _psidestinationfolder: Option<&IShellItem>,
+        _psidestinationfolder: Ref<'_, IShellItem>,
         _psznewname: &PCWSTR,
     ) -> windows::core::Result<()> {
         Ok(())
@@ -187,12 +186,12 @@ impl IFileOperationProgressSink_Impl for MoveSink_Impl {
     fn PostNewItem(
         &self,
         _dwflags: u32,
-        _psidestinationfolder: Option<&IShellItem>,
+        _psidestinationfolder: Ref<'_, IShellItem>,
         _psznewname: &PCWSTR,
         _psztemplatename: &PCWSTR,
         _dwfileattributes: u32,
         _hrnew: HRESULT,
-        _psinewitem: Option<&IShellItem>,
+        _psinewitem: Ref<'_, IShellItem>,
     ) -> windows::core::Result<()> {
         Ok(())
     }
@@ -392,7 +391,7 @@ pub(crate) fn extract_image(path: &Path, size_px: u32, flags: SIIGBF) -> Result<
             .GetImage(size, flags)
             .map_err(|e| format!("提取图标失败: {}", describe_hresult(e.code().0)))?;
         let result = bitmap_to_bgra(hbitmap);
-        let _ = DeleteObject(hbitmap);
+        let _ = DeleteObject(hbitmap.into());
         result
     }
 }
@@ -401,7 +400,7 @@ pub(crate) fn extract_image(path: &Path, size_px: u32, flags: SIIGBF) -> Result<
 unsafe fn bitmap_to_bgra(hbitmap: HBITMAP) -> Result<RawImage, String> {
     let mut bitmap = BITMAP::default();
     let got = GetObjectW(
-        hbitmap,
+        hbitmap.into(),
         std::mem::size_of::<BITMAP>() as i32,
         Some(&mut bitmap as *mut BITMAP as *mut _),
     );
@@ -423,7 +422,7 @@ unsafe fn bitmap_to_bgra(hbitmap: HBITMAP) -> Result<RawImage, String> {
         ..Default::default()
     };
     let mut bgra = vec![0u8; width as usize * height as usize * 4];
-    let hdc = CreateCompatibleDC(HDC::default());
+    let hdc = CreateCompatibleDC(None);
     let lines = GetDIBits(
         hdc,
         hbitmap,

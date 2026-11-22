@@ -349,6 +349,7 @@ impl Fixture {
             images_dir: self.dir.clone(),
             device_id: "test-pc".to_string(),
             retry_delay: self.retry_delay,
+            sync_passphrase: None,
         }
     }
 
@@ -1525,7 +1526,37 @@ fn sync_settings(url: &str, password: &str) -> SyncSettings {
         last_sync_at: None,
         device_id: String::new(),
         clear_password: false,
+        sync_passphrase: String::new(),
+        has_sync_passphrase: false,
+        clear_sync_passphrase: false,
     }
+}
+
+#[test]
+fn e2ee_passphrase_round_trips_in_settings_and_doc_codec() {
+    let db = Database::new_in_memory().unwrap();
+    let mut cfg = sync_settings("https://dav.example.com", "pw");
+    cfg.sync_passphrase = "my-e2ee-pass-中文".to_string();
+    save_sync_settings_inner(&db, &cfg).unwrap();
+
+    let read = read_sync_settings(&db).unwrap();
+    assert_eq!(read.sync_passphrase, "", "明文口令不离开 core");
+    assert!(read.has_sync_passphrase);
+
+    // 加密同步文档编解码往返
+    let raw_json = br#"{"version":"4.1","todos":[],"tombstones":[]}"#;
+    let gz = gzip_compress(raw_json).unwrap();
+    let enc = mini_todo_protocol::crypto::encrypt(&gz, "my-e2ee-pass-中文").unwrap();
+    assert!(decode_sync_doc_with_passphrase(&enc, None).is_err());
+    assert!(decode_sync_doc_with_passphrase(&enc, Some("wrong")).is_err());
+    let decoded = decode_sync_doc_with_passphrase(&enc, Some("my-e2ee-pass-中文")).unwrap();
+    assert_eq!(decoded.version, "4.1");
+
+    // 显式清空口令
+    let mut clear_cfg = sync_settings("https://dav.example.com", "");
+    clear_cfg.clear_sync_passphrase = true;
+    save_sync_settings_inner(&db, &clear_cfg).unwrap();
+    assert!(!read_sync_settings(&db).unwrap().has_sync_passphrase);
 }
 
 #[test]
@@ -1880,6 +1911,7 @@ fn upgraded_old_device_learns_list_ids_without_uploading() {
         images_dir: fx.dir.clone(),
         device_id: "new-pc".to_string(),
         retry_delay: fx.retry_delay,
+        sync_passphrase: None,
     };
     let life = lists::create(&new_db, "生活").unwrap();
     for id in 1..=3 {
@@ -1965,6 +1997,7 @@ fn a_stale_copy_cannot_undo_a_move_in_either_order() {
             images_dir: fx.dir.clone(),
             device_id: "pc-b".to_string(),
             retry_delay: fx.retry_delay,
+            sync_passphrase: None,
         };
         let a = fx.engine();
         let work = lists::create(&fx.db, "工作").unwrap();
@@ -2160,6 +2193,7 @@ fn two_devices_creating_lists_offline_keep_both() {
         images_dir: fx.dir.clone(),
         device_id: "test-pc-2".to_string(),
         retry_delay: fx.retry_delay,
+        sync_passphrase: None,
     };
     let a = lists::create(&fx.db, "工作").unwrap();
     // 不同毫秒：毫秒分量不同，id 一定不同（同一毫秒靠随机后缀，测试里不赌概率）

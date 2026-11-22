@@ -145,6 +145,7 @@ pub struct SettingsWindow {
     // ---- 数据与同步 ----
     exporting: bool,
     importing: bool,
+    cleaning_images: bool,
     url_input: Entity<InputState>,
     /// 地址输入框悬停（`clearable` 只在悬停 / 聚焦且非空时显示清空图标）
     url_hovered: bool,
@@ -152,6 +153,10 @@ pub struct SettingsWindow {
     password_input: Entity<InputState>,
     password_visible: bool,
     has_password: bool,
+    passphrase_input: Entity<InputState>,
+    passphrase_visible: bool,
+    has_sync_passphrase: bool,
+    clearing_passphrase: bool,
     auto_sync: bool,
     sync_interval: i32,
     last_sync_at: Option<String>,
@@ -191,6 +196,11 @@ impl SettingsWindow {
         let user_input = cx.new(|cx| InputState::new(window, cx).placeholder("用户名"));
         let password_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("密码").masked(true));
+        let passphrase_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("留空表示不加密")
+                .masked(true)
+        });
         let bg_picker = cx.new(|cx| EpColorPicker::new("bg-color-picker", window, cx));
         let font_select = cx.new(|cx| {
             EpSelect::new("font-select", window, cx)
@@ -275,12 +285,17 @@ impl SettingsWindow {
             font_size_preview: None,
             exporting: false,
             importing: false,
+            cleaning_images: false,
             url_input,
             url_hovered: false,
             user_input,
             password_input,
             password_visible: false,
             has_password: false,
+            passphrase_input,
+            passphrase_visible: false,
+            has_sync_passphrase: false,
+            clearing_passphrase: false,
             auto_sync: false,
             sync_interval: 15,
             last_sync_at: None,

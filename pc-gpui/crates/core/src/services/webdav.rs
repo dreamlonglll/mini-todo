@@ -17,12 +17,14 @@
 //! - PROPFIND：Depth 0 取 getetag / getlastmodified / getcontentlength；Depth 1 列目录，
 //!   XML 解析不依赖命名空间前缀、大小写与换行
 
+use bytes::Bytes;
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE, ETAG, LAST_MODIFIED};
 use reqwest::{Method, StatusCode};
 use std::collections::BTreeSet;
+use std::io::{Read as _, Write as _};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -30,6 +32,10 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 /// 图片上传按 50KB/s 估算的最长耗时上限
 const MAX_TRANSFER_TIMEOUT: Duration = Duration::from_secs(600);
 const MIN_TRANSFER_BYTES_PER_SEC: u64 = 50 * 1024;
+/// 远端同步文档下载字节上限（压缩态，128 MiB），防止异常/恶意响应 OOM
+const MAX_SYNC_RESPONSE_BYTES: u64 = 128 * 1024 * 1024;
+/// 远端单张图片下载上限（64 MiB，略大于 API 32 MiB 上传上限以兼容存量大图）
+const MAX_IMAGE_DOWNLOAD_BYTES: u64 = 64 * 1024 * 1024;
 
 const PROPFIND_BODY: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <D:propfind xmlns:D="DAV:"><D:prop><D:resourcetype/><D:getetag/><D:getlastmodified/><D:getcontentlength/></D:prop></D:propfind>"#;
@@ -80,18 +86,7 @@ pub enum Precondition {
     IfMatch(String),
 }
 
-pub fn is_weak_etag(etag: &str) -> bool {
-    etag.starts_with("W/") || etag.starts_with("w/")
-}
-
-/// ETag 的 opaque-tag 部分：去掉弱标记 `W/` 与首尾空白（`W/"abc"` → `"abc"`）
-pub fn opaque_etag(etag: &str) -> &str {
-    let etag = etag.trim();
-    match etag.get(..2) {
-        Some("W/") | Some("w/") => etag[2..].trim_start(),
-        _ => etag,
-    }
-}
+pub use mini_todo_protocol::webdav_xml::{is_weak_etag, opaque_etag};
 
 /// K4：按基准选择 PUT 前置条件。知道 ETag（强弱都行）→ `If-Match: "<opaque>"`；
 /// 不知道 → 不带条件。Last-Modified 不参与。
@@ -103,6 +98,41 @@ pub fn choose_put_precondition(base: &RemoteVersion) -> Precondition {
         Some(tag) if !tag.is_empty() => Precondition::IfMatch(tag.to_string()),
         _ => Precondition::None,
     }
+}
+
+/// 进程级复用的 HTTP 客户端：避免每次同步 / 测试连接反复创建和销毁 reqwest 内部 tokio runtime 线程，
+/// 同时复用 HTTP Keep-Alive 与 TLS 会话。
+fn shared_webdav_client() -> Result<&'static Client, String> {
+    static CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            Client::builder()
+                .connect_timeout(CONNECT_TIMEOUT)
+                .timeout(REQUEST_TIMEOUT)
+                .redirect(reqwest::redirect::Policy::none())
+                .user_agent(concat!("mini-todo/", env!("CARGO_PKG_VERSION")))
+                .build()
+                .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))
+        })
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
+/// 限长读取响应体，防止异常响应撑爆内存
+fn read_limited_bytes(resp: Response, max_bytes: u64) -> Result<Vec<u8>, String> {
+    if let Some(len) = resp.content_length() {
+        if len > max_bytes {
+            return Err(format!("远端响应过大（{} 字节）", len));
+        }
+    }
+    let mut out = Vec::new();
+    resp.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut out)
+        .map_err(|e| format!("读取响应失败: {}", e))?;
+    if out.len() as u64 > max_bytes {
+        return Err("远端响应过大".to_string());
+    }
+    Ok(out)
 }
 
 pub struct WebDavClient {
@@ -126,13 +156,8 @@ impl WebDavClient {
             log::warn!("[webdav] 警告：使用明文 http:// 连接 WebDAV，密码与数据可能被窃听");
         }
 
-        let client = Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(REQUEST_TIMEOUT)
-            .redirect(reqwest::redirect::Policy::none())
-            .user_agent(concat!("mini-todo/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
+        // Client 内部为 Arc，clone 零开销且共享底层连接池与 runtime
+        let client = shared_webdav_client()?.clone();
 
         Ok(Self {
             client,
@@ -237,13 +262,8 @@ impl WebDavClient {
             404 => Ok(GetOutcome::NotFound),
             200 => {
                 let version = version_from_headers(&resp);
-                let body = resp
-                    .bytes()
-                    .map_err(|e| format!("读取响应失败: {}", describe_error(e)))?;
-                Ok(GetOutcome::Found {
-                    body: body.to_vec(),
-                    version,
-                })
+                let body = read_limited_bytes(resp, MAX_SYNC_RESPONSE_BYTES)?;
+                Ok(GetOutcome::Found { body, version })
             }
             401 => Err("认证失败，请检查用户名和密码".to_string()),
             status => Err(format!("下载失败，状态码: {}", status)),
@@ -272,14 +292,15 @@ impl WebDavClient {
         }
     }
 
-    /// PUT bytes，按 `precondition` 附条件头
+    /// PUT bytes，按 `precondition` 附条件头。使用 [`Bytes`] 支持 404/409 重试时零拷贝。
     pub fn put(
         &self,
         remote_path: &str,
-        data: Vec<u8>,
+        data: impl Into<Bytes>,
         content_type: &str,
         precondition: &Precondition,
     ) -> Result<PutOutcome, String> {
+        let data: Bytes = data.into();
         let timeout = transfer_timeout(data.len() as u64);
         let mut req = self
             .request(Method::PUT, &self.full_url(remote_path))
@@ -306,7 +327,8 @@ impl WebDavClient {
         local_path: &Path,
         remote_dir: &str,
     ) -> Result<(), String> {
-        let data = std::fs::read(local_path).map_err(|e| format!("读取文件失败: {}", e))?;
+        let data =
+            Bytes::from(std::fs::read(local_path).map_err(|e| format!("读取文件失败: {}", e))?);
         let content_type = content_type_for(local_path);
         match self.put(remote_path, data.clone(), content_type, &Precondition::None)? {
             PutOutcome::Ok(_) => Ok(()),
@@ -321,8 +343,8 @@ impl WebDavClient {
         }
     }
 
-    /// 下载远端文件到本地：先写同目录下的隐藏临时文件再改名，避免半截文件被当成已下载。
-    /// 返回 `Ok(false)` 表示远端不存在。
+    /// 下载远端文件到本地：流式写入同目录下的隐藏临时文件再改名，避免半截文件被当成已下载，
+    /// 并限制单文件大小防止 OOM / 写爆磁盘。返回 `Ok(false)` 表示远端不存在。
     pub fn download_file(&self, remote_path: &str, local_path: &Path) -> Result<bool, String> {
         let resp = Self::send(
             self.request(Method::GET, &self.full_url(remote_path))
@@ -334,9 +356,11 @@ impl WebDavClient {
             200 => {}
             status => return Err(format!("下载失败，状态码: {}", status)),
         }
-        let bytes = resp
-            .bytes()
-            .map_err(|e| format!("读取响应失败: {}", describe_error(e)))?;
+        if let Some(len) = resp.content_length() {
+            if len > MAX_IMAGE_DOWNLOAD_BYTES {
+                return Err(format!("远端图片过大（{} 字节），已跳过下载", len));
+            }
+        }
 
         let parent = local_path
             .parent()
@@ -348,7 +372,22 @@ impl WebDavClient {
             .ok_or_else(|| "无效的本地路径".to_string())?;
         // 以 '.' 开头的临时名不满足安全图片名规则，崩溃残留也不会被当成图片上传
         let temp = parent.join(format!(".{}.part", file_name));
-        std::fs::write(&temp, &bytes).map_err(|e| format!("写入文件失败: {}", e))?;
+        let written = (|| -> Result<u64, String> {
+            let mut file =
+                std::fs::File::create(&temp).map_err(|e| format!("写入文件失败: {}", e))?;
+            let mut limited = resp.take(MAX_IMAGE_DOWNLOAD_BYTES.saturating_add(1));
+            let n = std::io::copy(&mut limited, &mut file)
+                .map_err(|e| format!("读取响应失败: {}", e))?;
+            if n > MAX_IMAGE_DOWNLOAD_BYTES {
+                return Err("远端图片过大，已中止下载".to_string());
+            }
+            file.flush().map_err(|e| format!("写入文件失败: {}", e))?;
+            Ok(n)
+        })();
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&temp);
+            return Err(e);
+        }
         std::fs::rename(&temp, local_path).map_err(|e| {
             let _ = std::fs::remove_file(&temp);
             format!("写入文件失败: {}", e)
@@ -455,216 +494,36 @@ fn transfer_timeout(bytes: u64) -> Duration {
 }
 
 fn content_type_for(path: &Path) -> &'static str {
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(str::to_ascii_lowercase)
-        .unwrap_or_default();
-    match ext.as_str() {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "bmp" => "image/bmp",
-        _ => "application/octet-stream",
-    }
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    mini_todo_protocol::image_name::image_content_type(name)
 }
 
 // ============================================================================
-// PROPFIND XML 解析（容忍任意命名空间前缀、大小写、单行 / 多行）
+// PROPFIND XML 解析（委托给共享协议 crate `mini-todo-protocol`）
 // ============================================================================
 
-/// 标签名去掉命名空间前缀后的本地名
-fn local_name(tag: &str) -> &str {
-    tag.rsplit(':').next().unwrap_or(tag)
-}
-
-/// 返回所有本地名为 `name`（ASCII 大小写不敏感）的元素的内部文本（原始 XML 片段）。
-/// 自闭合元素返回空串。
-fn find_elements<'a>(xml: &'a str, name: &str) -> Vec<&'a str> {
-    let mut out = Vec::new();
-    let mut pos = 0;
-    while let Some(offset) = xml[pos..].find('<') {
-        let start = pos + offset;
-        let rest = &xml[start + 1..];
-        if rest.starts_with(['/', '?', '!']) {
-            pos = start + 1;
-            continue;
-        }
-        let Some(gt) = rest.find('>') else { break };
-        let open_end = start + 1 + gt + 1;
-        let inside = &rest[..gt];
-        let name_end = inside
-            .find(|c: char| c.is_whitespace() || c == '/')
-            .unwrap_or(inside.len());
-        if !local_name(&inside[..name_end]).eq_ignore_ascii_case(name) {
-            pos = start + 1;
-            continue;
-        }
-        if inside.ends_with('/') {
-            out.push("");
-            pos = open_end;
-            continue;
-        }
-        match find_closing(xml, open_end, name) {
-            Some((content_end, after)) => {
-                out.push(&xml[open_end..content_end]);
-                pos = after;
-            }
-            None => pos = open_end,
-        }
-    }
-    out
-}
-
-/// 从 `from` 起找 `</[prefix:]name>`，返回 (内容结束位置, 闭合标签之后的位置)
-fn find_closing(xml: &str, from: usize, name: &str) -> Option<(usize, usize)> {
-    let mut pos = from;
-    while let Some(offset) = xml[pos..].find("</") {
-        let start = pos + offset;
-        let rest = &xml[start + 2..];
-        let gt = rest.find('>')?;
-        if local_name(rest[..gt].trim()).eq_ignore_ascii_case(name) {
-            return Some((start, start + 2 + gt + 1));
-        }
-        pos = start + 2;
-    }
-    None
-}
-
-/// 解码 XML 实体（`&amp;` `&lt;` `&gt;` `&quot;` `&apos;` `&#NN;` `&#xHH;`）
+#[cfg(test)]
 fn xml_unescape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(amp) = rest.find('&') {
-        out.push_str(&rest[..amp]);
-        let after = &rest[amp..];
-        let Some(semi) = after.find(';') else {
-            out.push_str(after);
-            return out;
-        };
-        let entity = &after[1..semi];
-        let decoded = match entity {
-            "amp" => Some('&'),
-            "lt" => Some('<'),
-            "gt" => Some('>'),
-            "quot" => Some('"'),
-            "apos" => Some('\''),
-            _ => entity
-                .strip_prefix("#x")
-                .or_else(|| entity.strip_prefix("#X"))
-                .and_then(|hex| u32::from_str_radix(hex, 16).ok())
-                .or_else(|| entity.strip_prefix('#').and_then(|d| d.parse().ok()))
-                .and_then(char::from_u32),
-        };
-        match decoded {
-            Some(c) => {
-                out.push(c);
-                rest = &after[semi + 1..];
-            }
-            None => {
-                out.push('&');
-                rest = &after[1..];
-            }
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
-fn first_text(xml: &str, name: &str) -> Option<String> {
-    find_elements(xml, name)
-        .into_iter()
-        .map(|raw| xml_unescape(raw).trim().to_string())
-        .find(|s| !s.is_empty())
-}
-
-/// PROPFIND 返回的 getetag 有的不带引号，统一成 HTTP 头里的带引号形式
-fn normalize_etag(raw: &str) -> String {
-    let raw = raw.trim();
-    if raw.starts_with('"') || is_weak_etag(raw) {
-        raw.to_string()
-    } else {
-        format!("\"{}\"", raw)
-    }
+    mini_todo_protocol::webdav_xml::decode_entities(s).into_owned()
 }
 
 /// 解析 PROPFIND Depth 0 响应
 pub fn parse_propfind_meta(xml: &str) -> PropMeta {
+    let entry = mini_todo_protocol::webdav_xml::parse_prop_meta(xml);
     PropMeta {
         version: RemoteVersion {
-            etag: first_text(xml, "getetag").map(|e| normalize_etag(&e)),
-            last_modified: first_text(xml, "getlastmodified"),
+            etag: entry
+                .etag
+                .map(|e| mini_todo_protocol::webdav_xml::normalize_etag(&e)),
+            last_modified: entry.last_modified,
         },
-        content_length: first_text(xml, "getcontentlength").and_then(|s| s.parse().ok()),
+        content_length: entry.content_length,
     }
-}
-
-/// href → URL 解码后的路径（绝对 URL 只取路径部分）
-fn href_path(href: &str) -> String {
-    let href = xml_unescape(href);
-    let href = href.trim();
-    let path = match href.find("://") {
-        Some(scheme_end) => {
-            let after = &href[scheme_end + 3..];
-            match after.find('/') {
-                Some(slash) => &after[slash..],
-                None => "/",
-            }
-        }
-        None => href,
-    };
-    let path = path.split(['?', '#']).next().unwrap_or(path);
-    urlencoding::decode(path)
-        .map(|c| c.into_owned())
-        .unwrap_or_else(|_| path.to_string())
 }
 
 /// 解析 PROPFIND Depth 1 列表，返回目录下的文件名（跳过目录自身与子目录）
 pub fn parse_listing(xml: &str, collection_path: &str) -> Vec<String> {
-    let collection = collection_path.trim_matches('/').to_string();
-    let entries: Vec<(String, bool)> = {
-        let responses = find_elements(xml, "response");
-        if responses.is_empty() {
-            // 非常规服务端：没有 response 包裹，只能逐个看 href
-            find_elements(xml, "href")
-                .into_iter()
-                .map(|h| (h.to_string(), false))
-                .collect()
-        } else {
-            responses
-                .into_iter()
-                .filter_map(|resp| {
-                    let href = find_elements(resp, "href").into_iter().next()?;
-                    let is_collection = !find_elements(resp, "collection").is_empty();
-                    Some((href.to_string(), is_collection))
-                })
-                .collect()
-        }
-    };
-
-    let mut names = Vec::new();
-    for (href, is_collection) in entries {
-        if is_collection {
-            continue;
-        }
-        let path = href_path(&href);
-        if path.ends_with('/') {
-            continue;
-        }
-        let trimmed = path.trim_matches('/');
-        let is_self = !collection.is_empty()
-            && (trimmed == collection || trimmed.ends_with(&format!("/{}", collection)));
-        if trimmed.is_empty() || is_self {
-            continue;
-        }
-        if let Some(name) = trimmed.rsplit('/').next() {
-            if !name.is_empty() && !names.iter().any(|n| n == name) {
-                names.push(name.to_string());
-            }
-        }
-    }
-    names
+    mini_todo_protocol::webdav_xml::file_names_in_listing_lenient(xml, collection_path)
 }
 
 #[cfg(test)]

@@ -4,7 +4,7 @@
 //!   平时用 `If-None-Match` 条件拉取，每 `FULL_PULL_EVERY` 轮做一次无条件全量拉取兜底：
 //!   nginx 的 ETag 只有秒级精度（`mtime秒-长度`），同一秒内写入且长度相同的修改会被
 //!   304 掩盖，全量拉取保证这种修改最多晚一个周期被合并
-//! - push 循环：每 500ms 看一眼 `meta.dirty` / 图片队列（只读本地 SQLite，不触网）；
+//! - push 循环：事件驱动（`SyncCtx::push_wakeup` 唤醒，空闲时零轮询）；
 //!   连续写入去抖 1.5s（最长攒 10s），失败指数退避 + 抖动（1s 起，上限 5 分钟）
 //! - 图片镜像循环：pull 拿到新文档后被唤醒，补下缺失图片；有下载失败时退避重试
 //! - 日志只在状态变化时打 warn（正常 → 失败），持续失败降为 debug，恢复时 info
@@ -24,8 +24,8 @@ use crate::sync::{images, pull, push, SyncCtx};
 
 /// 退避上限。
 pub const MAX_BACKOFF: Duration = Duration::from_secs(300);
-/// push 循环检查本地状态的间隔。
-const PUSH_TICK: Duration = Duration::from_millis(500);
+/// push 读取本地待推送状态出错后的重试间隔。
+const PUSH_DB_ERROR_RETRY: Duration = Duration::from_secs(2);
 /// 最后一次写入之后静默这么久才推送（连续写入合并成一次 PUT）。
 const PUSH_DEBOUNCE: Duration = Duration::from_millis(1500);
 /// 持续写入时最多攒这么久就推一次。
@@ -79,6 +79,10 @@ impl Backoff {
         self.next_at.is_none_or(|t| now >= t)
     }
 
+    pub(crate) fn next_deadline(&self) -> Option<Instant> {
+        self.next_at
+    }
+
     /// 记一次失败，返回 (连续失败次数, 本次退避时长)。
     pub(crate) fn on_failure(&mut self, now: Instant) -> (u32, Duration) {
         self.failures = self.failures.saturating_add(1);
@@ -119,15 +123,27 @@ impl Debounce {
     }
 
     /// 观察一次当前 generation，返回是否可以推送。
+    #[cfg(test)]
     pub(crate) fn observe(&mut self, generation: i64, now: Instant) -> bool {
+        self.deadline_after_observe(generation, now).is_none()
+    }
+
+    /// 观察一次当前 generation：已经可以推送返回 `None`，否则返回最早可推送的时刻。
+    pub(crate) fn deadline_after_observe(
+        &mut self,
+        generation: i64,
+        now: Instant,
+    ) -> Option<Instant> {
         if self.observed_gen != Some(generation) {
             self.observed_gen = Some(generation);
             self.changed_at = Some(now);
         }
         let pending_since = *self.pending_since.get_or_insert(now);
         let changed_at = self.changed_at.unwrap_or(now);
-        now.duration_since(changed_at) >= self.quiet
-            || now.duration_since(pending_since) >= self.max_delay
+        let quiet_at = changed_at + self.quiet;
+        let max_at = pending_since + self.max_delay;
+        let deadline = quiet_at.min(max_at);
+        (now < deadline).then_some(deadline)
     }
 
     /// 没有待推送内容 / 推送成功后重置。
@@ -166,6 +182,8 @@ pub fn spawn_workers(
     ctx: Arc<SyncCtx>,
     shutdown: watch::Receiver<bool>,
 ) -> Vec<tokio::task::JoinHandle<()>> {
+    // 启动时唤醒一次 push 检查（覆盖上次停机前留下的 dirty / 图片队列）
+    ctx.request_push();
     vec![
         tokio::spawn(pull_loop(ctx.clone(), shutdown.clone())),
         tokio::spawn(push_loop(ctx.clone(), shutdown.clone())),
@@ -221,15 +239,42 @@ async fn pull_loop(ctx: Arc<SyncCtx>, mut shutdown: watch::Receiver<bool>) {
     debug!(target: "minitodo_cloud::pull", "pull loop stopped");
 }
 
+/// 等待 `deadline`（有待推定时）、`push_wakeup` 信号或停机信号；返回 `true` 表示应当退出。
+async fn wait_push_trigger(
+    ctx: &SyncCtx,
+    deadline: Option<Instant>,
+    shutdown: &mut watch::Receiver<bool>,
+) -> bool {
+    if *shutdown.borrow() {
+        return true;
+    }
+    let timer = async move {
+        match deadline {
+            Some(at) => tokio::time::sleep_until(at).await,
+            None => std::future::pending::<()>().await,
+        }
+    };
+    tokio::select! {
+        _ = ctx.push_requested() => *shutdown.borrow(),
+        _ = timer => *shutdown.borrow(),
+        res = shutdown.changed() => res.is_err() || *shutdown.borrow(),
+    }
+}
+
 async fn push_loop(ctx: Arc<SyncCtx>, mut shutdown: watch::Receiver<bool>) {
     let mut backoff = Backoff::new(PUSH_BACKOFF_BASE, MAX_BACKOFF);
     let mut debounce = Debounce::new(PUSH_DEBOUNCE, PUSH_MAX_DELAY);
     let mut db_error_logged = false;
     loop {
-        if sleep_or_shutdown(PUSH_TICK, &mut shutdown).await {
+        if *shutdown.borrow() {
             break;
         }
-        let pending = match read_pending(&ctx.db) {
+        let db = ctx.db.clone();
+        let pending_res = tokio::task::spawn_blocking(move || read_pending(&db))
+            .await
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+            .and_then(|r| r);
+        let pending = match pending_res {
             Ok(p) => {
                 db_error_logged = false;
                 p
@@ -238,6 +283,9 @@ async fn push_loop(ctx: Arc<SyncCtx>, mut shutdown: watch::Receiver<bool>) {
                 if !db_error_logged {
                     warn!(target: "minitodo_cloud::push", "读本地待推送状态失败: {}", e);
                     db_error_logged = true;
+                }
+                if sleep_or_shutdown(PUSH_DB_ERROR_RETRY, &mut shutdown).await {
+                    break;
                 }
                 continue;
             }
@@ -248,13 +296,28 @@ async fn push_loop(ctx: Arc<SyncCtx>, mut shutdown: watch::Receiver<bool>) {
             if prev > 0 {
                 info!(target: "minitodo_cloud::push", "nothing left to push after {} failure(s)", prev);
             }
+            if wait_push_trigger(&ctx, None, &mut shutdown).await {
+                break;
+            }
             continue;
         }
         let now = Instant::now();
-        if pending.dirty && !debounce.observe(pending.generation, now) {
-            continue;
-        }
-        if !backoff.ready(now) {
+        let debounce_wait = if pending.dirty {
+            debounce.deadline_after_observe(pending.generation, now)
+        } else {
+            None
+        };
+        let backoff_wait = (!backoff.ready(now))
+            .then(|| backoff.next_deadline())
+            .flatten();
+        let wait_until = match (debounce_wait, backoff_wait) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
+        if let Some(deadline) = wait_until {
+            if wait_push_trigger(&ctx, Some(deadline), &mut shutdown).await {
+                break;
+            }
             continue;
         }
         match ctx.run_locked(push::push_once).await {

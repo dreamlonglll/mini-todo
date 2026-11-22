@@ -143,11 +143,7 @@ pub fn register(
     block.handle = Some(handle);
     block.hwnd = hwnd;
     block.view = Some(view);
-    let start_tick = hwnd.is_some() && !mode.tick_running;
-    if start_tick {
-        mode.tick_running = true;
-        start_tick_loop(cx);
-    }
+    ensure_tick_loop(cx);
     snap::register(
         cx,
         SnapKey::Block(key),
@@ -292,6 +288,7 @@ pub fn apply_mode(cx: &mut App, key: BlockKey, target: TargetMode) -> Task<Resul
         if let Some(hwnd) = hwnd {
             run_ops(hwnd, ops);
         }
+        cx.update(ensure_tick_loop);
         Ok(())
     })
 }
@@ -396,6 +393,28 @@ fn ensure_prefs_observer(cx: &mut App) {
 // 200ms 轮询（Windows / macOS）：嵌入重挂（仅 Windows）/ 经典固定守护 / 贴边隐藏，遍历所有登记的窗口
 // ----------------------------------------------------------------------
 
+/// 至少存在一个处于嵌入桌面或经典固定模式的存活原生窗口时才需要 200ms 轮询；
+/// 所有窗口都在普通模式时零后台定时唤醒。
+fn needs_tick(cx: &App) -> bool {
+    cx.try_global::<WindowMode>().is_some_and(|m| {
+        m.blocks.values().any(|b| {
+            b.hwnd.is_some_and(Hwnd::is_alive) && (b.state.desktop || b.state.classic_fixed)
+        })
+    })
+}
+
+/// 按需启动 200ms 轮询（已在跑或当前无需轮询时什么都不做）
+fn ensure_tick_loop(cx: &mut App) {
+    if !needs_tick(cx) {
+        return;
+    }
+    let m = mode(cx);
+    if !m.tick_running {
+        m.tick_running = true;
+        start_tick_loop(cx);
+    }
+}
+
 fn start_tick_loop(cx: &mut App) {
     cx.spawn(async move |cx| {
         loop {
@@ -419,22 +438,35 @@ struct TickJob {
     plan: TickPlan,
 }
 
-/// 读状态、算出这一 tick 每个窗口要做的事（在 `cx.update` 里；只用只读的 `Hwnd` 查询）。没有存活的窗口时返回 `None`（结束轮询）
+/// 读状态、算出这一 tick 每个窗口要做的事（在 `cx.update` 里；只用只读的 `Hwnd` 查询）。
+/// 没有处于固定 / 嵌入模式的存活窗口时返回 `None`（结束轮询，普通模式零空转）。
 fn plan_tick(cx: &mut App) -> Option<Vec<TickJob>> {
-    let alive: Vec<(BlockKey, Hwnd)> = mode(cx)
+    let active: Vec<(BlockKey, Hwnd, bool)> = mode(cx)
         .blocks
         .iter()
-        .filter_map(|(key, b)| Some((*key, b.hwnd?)))
-        .filter(|(_, hwnd)| hwnd.is_alive())
+        .filter_map(|(key, b)| {
+            let hwnd = b.hwnd?;
+            if !(b.state.desktop || b.state.classic_fixed) {
+                return None;
+            }
+            let needs_monitors = b.state.classic_fixed && b.state.auto_hide.enabled;
+            Some((*key, hwnd, needs_monitors))
+        })
+        .filter(|(_, hwnd, _)| hwnd.is_alive())
         .collect();
-    if alive.is_empty() {
+    if active.is_empty() {
         return None;
     }
-    let monitors = platform::monitors(cx);
+    // 只有存在「经典固定 + 贴边隐藏」窗口时才枚举系统显示器，避免每 200ms 调系统显示器 API
+    let monitors = if active.iter().any(|(_, _, needs)| *needs) {
+        platform::monitors(cx)
+    } else {
+        Vec::new()
+    };
     let mut cursor = None;
     let now = Instant::now();
-    let mut jobs = Vec::with_capacity(alive.len());
-    for (key, hwnd) in alive {
+    let mut jobs = Vec::with_capacity(active.len());
+    for (key, hwnd, _) in active {
         let Some(block) = block_mut(cx, key) else {
             continue;
         };

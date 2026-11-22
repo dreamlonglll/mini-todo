@@ -22,6 +22,7 @@ pub(crate) mod mock_dav;
 mod scenario_tests;
 
 use std::io::{Read as _, Write as _};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use flate2::read::GzDecoder;
@@ -39,6 +40,22 @@ pub const REMOTE_DIR: &str = "/mini-todo";
 pub const REMOTE_IMAGES_DIR: &str = "/mini-todo/images";
 /// 远端 sync-data 文件（gzip 压缩的 JSON）。
 pub const SYNC_DATA_FILE: &str = "/mini-todo/sync-data.json.gz";
+/// 远端同步文档解压后的大小上限（256 MiB，与 PC 端一致），防止异常 / 恶意压缩包撑爆内存。
+pub const MAX_SYNC_DOC_BYTES: u64 = 256 * 1024 * 1024;
+
+/// 允许同时排队等待手动 `/sync*` 的最大请求数（含正在执行的 1 个），超出返回 429 防队列打爆。
+pub const MAX_MANUAL_SYNC_INFLIGHT: usize = 4;
+
+/// 手动同步并发名额守卫：离开作用域自动归还。
+pub struct ManualSyncPermit {
+    counter: Arc<AtomicUsize>,
+}
+
+impl Drop for ManualSyncPermit {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 /// 全进程共享的同步上下文：配置、数据库、同步互斥锁、复用的 WebDAV 客户端。
 ///
@@ -58,6 +75,10 @@ pub struct SyncCtx {
     /// 图片镜像 worker 的唤醒信号（pull 拿到新文档后触发）。`Notify` 会保留一个
     /// 许可，worker 还没开始等待时发出的通知也不会丢。
     mirror_wakeup: Notify,
+    /// push worker 的唤醒信号（API 写路径 / pull 发现远端落后时触发），消除空闲 500ms 轮询。
+    push_wakeup: Notify,
+    /// 当前在途（含排队中）的手动 `/sync*` 请求计数。
+    manual_sync_inflight: Arc<AtomicUsize>,
 }
 
 impl SyncCtx {
@@ -68,7 +89,32 @@ impl SyncCtx {
             lock: Arc::new(Mutex::new(())),
             dav: OnceLock::new(),
             mirror_wakeup: Notify::new(),
+            push_wakeup: Notify::new(),
+            manual_sync_inflight: Arc::new(AtomicUsize::new(0)),
         })
+    }
+
+    /// 申请一个手动 `/sync*` 并发名额；超出 [`MAX_MANUAL_SYNC_INFLIGHT`] 返回 `None`。
+    pub fn try_acquire_manual_sync(&self) -> Option<ManualSyncPermit> {
+        let mut current = self.manual_sync_inflight.load(Ordering::Acquire);
+        loop {
+            if current >= MAX_MANUAL_SYNC_INFLIGHT {
+                return None;
+            }
+            match self.manual_sync_inflight.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Some(ManualSyncPermit {
+                        counter: self.manual_sync_inflight.clone(),
+                    });
+                }
+                Err(actual) => current = actual,
+            }
+        }
     }
 
     /// 取（必要时创建）全局复用的 WebDAV 客户端。**只能在阻塞上下文里调用。**
@@ -115,6 +161,15 @@ impl SyncCtx {
     pub(crate) async fn mirror_requested(&self) {
         self.mirror_wakeup.notified().await;
     }
+
+    /// 通知后台 push worker 检查本地待推送变更（非阻塞，可在任意上下文调用）。
+    pub fn request_push(&self) {
+        self.push_wakeup.notify_one();
+    }
+
+    pub(crate) async fn push_requested(&self) {
+        self.push_wakeup.notified().await;
+    }
 }
 
 pub(crate) fn gzip(data: &[u8]) -> anyhow::Result<Vec<u8>> {
@@ -126,11 +181,19 @@ pub(crate) fn gzip(data: &[u8]) -> anyhow::Result<Vec<u8>> {
 }
 
 pub(crate) fn gunzip(data: &[u8]) -> anyhow::Result<String> {
-    let mut dec = GzDecoder::new(data);
-    let mut out = String::new();
-    dec.read_to_string(&mut out)
+    gunzip_limited(data, MAX_SYNC_DOC_BYTES)
+}
+
+fn gunzip_limited(data: &[u8], max_bytes: u64) -> anyhow::Result<String> {
+    let mut out = Vec::new();
+    GzDecoder::new(data)
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut out)
         .map_err(|e| anyhow::anyhow!("gunzip 失败: {}", e))?;
-    Ok(out)
+    if out.len() as u64 > max_bytes {
+        anyhow::bail!("远端同步数据过大（超过 {} 字节）", max_bytes);
+    }
+    String::from_utf8(out).map_err(|e| anyhow::anyhow!("gunzip UTF-8 解码失败: {}", e))
 }
 
 #[cfg(test)]
@@ -148,5 +211,12 @@ mod tests {
     #[test]
     fn gunzip_rejects_garbage() {
         assert!(gunzip(b"definitely not gzip").is_err());
+    }
+
+    #[test]
+    fn gunzip_rejects_oversized_payload() {
+        let compressed = gzip(&vec![b'a'; 1024]).unwrap();
+        assert!(gunzip_limited(&compressed, 512).is_err());
+        assert_eq!(gunzip_limited(&compressed, 1024).unwrap().len(), 1024);
     }
 }

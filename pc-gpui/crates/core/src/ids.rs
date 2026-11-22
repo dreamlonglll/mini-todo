@@ -12,53 +12,15 @@
 //! 随机数只求"不撞号"、不用于安全场景：用标准库 `RandomState`（每个实例的种子不同）混入计数与纳秒，
 //! 不为此引入新的依赖。
 
-use std::collections::hash_map::RandomState;
-use std::hash::{BuildHasher, Hasher};
-use std::sync::atomic::{AtomicU64, Ordering};
-
-/// JavaScript 安全整数上限（`Number.MAX_SAFE_INTEGER`）
-pub const MAX_SAFE_ID: i64 = (1 << 53) - 1;
-/// 新建记录时 id 冲突的最大重试次数
-pub const MAX_ID_ATTEMPTS: usize = 8;
-/// 越界兜底时随机 id 的下限（保持与时间型 id 同一量级，远离 PC 待办 `AUTOINCREMENT` 的小 id）
-pub const FALLBACK_MIN_ID: i64 = 1_000_000_000_000_000;
-
-/// 毫秒 × 1000 + 后缀；超出 `1..=MAX_SAFE_ID` 时返回 `None`
-pub fn compose_id(unix_millis: i64, suffix: i64) -> Option<i64> {
-    unix_millis
-        .checked_mul(1000)
-        .and_then(|v| v.checked_add(suffix))
-        .filter(|id| (1..=MAX_SAFE_ID).contains(id))
-}
-
-/// 一个新 id（见模块说明）
-pub fn new_id() -> i64 {
-    let millis = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
-        .unwrap_or(0);
-    compose_id(millis, (random_u64() % 1000) as i64).unwrap_or_else(|| fallback_id(random_u64()))
-}
-
-/// 越界兜底：`[FALLBACK_MIN_ID, MAX_SAFE_ID]` 内的随机值
-fn fallback_id(random: u64) -> i64 {
-    let span = (MAX_SAFE_ID - FALLBACK_MIN_ID + 1) as u64;
-    FALLBACK_MIN_ID + (random % span) as i64
-}
+#[cfg(test)]
+use mini_todo_protocol::ids::fallback_id;
+pub use mini_todo_protocol::ids::{
+    compose_id, new_id, FALLBACK_MIN_ID, MAX_ID_ATTEMPTS, MAX_SAFE_ID,
+};
 
 /// 非加密的随机 u64（只求不撞号）
 pub(crate) fn random_u64() -> u64 {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    // RandomState 每个实例的种子都不同（进程级随机 + 递增），再混入计数与纳秒
-    let mut hasher = RandomState::new().build_hasher();
-    hasher.write_u64(COUNTER.fetch_add(1, Ordering::Relaxed));
-    hasher.write_u128(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or_default(),
-    );
-    hasher.finish()
+    mini_todo_protocol::ids::random_u64()
 }
 
 /// 主键（或唯一键）冲突：换一个 id 重试的条件（与 cloud `repo::is_primary_key_conflict` 相同）

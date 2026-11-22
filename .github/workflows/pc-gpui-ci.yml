@@ -5,11 +5,13 @@ on:
     branches: [main]
     paths:
       - 'pc-gpui/**'
+      - 'shared/**'
       - '.github/workflows/pc-gpui-ci.yml'
   pull_request:
     branches: [main]
     paths:
       - 'pc-gpui/**'
+      - 'shared/**'
       - '.github/workflows/pc-gpui-ci.yml'
   workflow_dispatch:
 

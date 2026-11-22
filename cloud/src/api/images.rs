@@ -132,13 +132,19 @@ pub async fn upload_image(
             )
         })?;
 
-    // 入 dirty_images 上传队列 + 标脏，同一事务（队列格式与并发约束见 repo::enqueue_dirty_image）
-    state.db.with_conn(|conn| -> rusqlite::Result<()> {
-        let tx = conn.transaction()?;
-        repo::enqueue_dirty_image(&tx, &name)?;
-        repo::mark_dirty(&tx)?;
-        tx.commit()
-    })?;
+    // 入 dirty_images 上传队列 + 标脏，同一事务（放到 spawn_blocking 避免阻塞 async worker）
+    let img_name = name.clone();
+    state
+        .db
+        .run_write(move |conn| -> rusqlite::Result<()> {
+            let tx = conn.transaction()?;
+            repo::enqueue_dirty_image(&tx, &img_name)?;
+            repo::mark_dirty(&tx)?;
+            tx.commit()
+        })
+        .await
+        .map_err(|e| ApiError::internal("image queue task failed", e))??;
+    state.sync.request_push();
 
     Ok(Json(UploadResp { name }))
 }

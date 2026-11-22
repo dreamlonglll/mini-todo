@@ -115,6 +115,14 @@ pub struct AppState {
     /// 清单列表 / 窗口属性记录每被外部替换一次（加载、同步、本机新建 / 改名 / 删除）加一：`services::block_windows`
     /// 观察它，给同步来的新清单开窗、关掉已删除清单的窗口
     pub lists_revision: u64,
+    /// 待办与子任务内容版本号（供清单 / 日历窗口按需刷新缓存与跳过无关重绘）
+    todos_revision: u64,
+    /// 全局设置（底色、字体、通知、屏幕配置、运行时偏好、initialized）版本号
+    settings_revision: u64,
+    /// 同步 / 更新状态版本号（syncing、last_sync_report、has_update 等）
+    sync_revision: u64,
+    /// 各窗口属性（深色、视图模式、展开全部、隐藏、日历筛选）的独立版本号
+    window_prefs_revisions: BTreeMap<BlockKey, u64>,
     /// 清单 / 日历窗口的设备本地属性（core `window_prefs` 的内存副本；没有记录的窗口按 `WindowPrefs::new` 的默认值）
     window_prefs: BTreeMap<BlockKey, WindowPrefs>,
 
@@ -248,6 +256,10 @@ impl AppState {
             change_seq_warned: false,
             lists: Vec::new(),
             lists_revision: 0,
+            todos_revision: 0,
+            settings_revision: 0,
+            sync_revision: 0,
+            window_prefs_revisions: BTreeMap::new(),
             window_prefs: BTreeMap::new(),
             current_screen_config_id: String::new(),
             screen_configs: Vec::new(),
@@ -284,6 +296,44 @@ impl AppState {
     /// 全局状态句柄
     pub fn global(cx: &App) -> Entity<AppState> {
         cx.global::<AppStateGlobal>().0.clone()
+    }
+
+    /// 待办集合版本号
+    pub fn todos_revision(&self) -> u64 {
+        self.todos_revision
+    }
+
+    /// 全局外观 / 行为设置版本号
+    pub fn settings_revision(&self) -> u64 {
+        self.settings_revision
+    }
+
+    /// 同步 / 更新检查状态版本号
+    pub fn sync_revision(&self) -> u64 {
+        self.sync_revision
+    }
+
+    /// 单个窗口属性（深色、视图模式、展开全部、隐藏、日历筛选）的独立版本号
+    pub fn window_prefs_revision(&self, key: BlockKey) -> u64 {
+        self.window_prefs_revisions.get(&key).copied().unwrap_or(0)
+    }
+
+    fn bump_window_prefs_revision(&mut self, key: BlockKey) {
+        *self.window_prefs_revisions.entry(key).or_insert(0) += 1;
+    }
+
+    /// 记录版本检查发现的新版本并通知观察者
+    pub(crate) fn set_update_info(
+        &mut self,
+        latest_version: String,
+        release_url: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.has_update = true;
+        self.latest_version = Some(latest_version);
+        self.release_url = release_url;
+        self.sync_revision += 1;
+        cx.notify();
     }
 
     // ------------------------------------------------------------------
@@ -418,6 +468,10 @@ impl AppState {
     pub fn set_startup_snapshot(&mut self, lists: Vec<TodoList>, prefs: Vec<WindowPrefs>) {
         self.lists = lists;
         self.window_prefs = prefs_map(prefs);
+        for &key in self.window_prefs.keys() {
+            *self.window_prefs_revisions.entry(key).or_insert(0) += 1;
+        }
+        self.settings_revision += 1;
     }
 
     /// 启动加载：设置（不含窗口定位，窗口定位在 `services::window_mode`）→ 待办。完成后 `initialized = true`。
@@ -431,6 +485,7 @@ impl AppState {
             }
             let _ = this.update(cx, |this, cx| {
                 this.initialized = true;
+                this.settings_revision += 1;
                 cx.notify();
             });
         })
@@ -454,6 +509,7 @@ impl AppState {
                 this.notification_type = loaded.notification_type;
                 this.screen_configs = loaded.screen_configs;
                 this.runtime_prefs = loaded.runtime_prefs;
+                this.settings_revision += 1;
                 cx.notify();
             });
         })
@@ -497,6 +553,7 @@ impl AppState {
                             }
                             Ok(loaded) => {
                                 this.todos = loaded.todos;
+                                this.todos_revision += 1;
                                 match loaded.seq {
                                     Ok(seq) => this.loaded_change_seq = Some(seq),
                                     Err(e) => {
@@ -561,7 +618,21 @@ impl AppState {
         if let Some(prefs) = prefs {
             let prefs = prefs_map(prefs);
             if prefs != self.window_prefs {
+                let mut touched: Vec<BlockKey> = Vec::new();
+                for (&k, old_val) in &self.window_prefs {
+                    if prefs.get(&k) != Some(old_val) {
+                        touched.push(k);
+                    }
+                }
+                for &k in prefs.keys() {
+                    if !self.window_prefs.contains_key(&k) {
+                        touched.push(k);
+                    }
+                }
                 self.window_prefs = prefs;
+                for k in touched {
+                    self.bump_window_prefs_revision(k);
+                }
                 changed = true;
             }
         }
@@ -749,6 +820,7 @@ impl AppState {
     /// 本地副本里把待办 `id` 的清单归属改成 `list_id`，返回原来的归属（没有这条待办时 `None`）
     fn set_local_list_id(&mut self, id: i64, list_id: Option<i64>) -> Option<Option<i64>> {
         let todo = self.todos.iter_mut().find(|t| t.id == id)?;
+        self.todos_revision += 1;
         Some(std::mem::replace(&mut todo.list_id, list_id))
     }
 
@@ -760,6 +832,7 @@ impl AppState {
             task.await?;
             let _ = this.update(cx, |this, cx| {
                 this.todos.retain(|t| t.id != id);
+                this.todos_revision += 1;
                 cx.notify();
             });
             Ok(())
@@ -779,6 +852,7 @@ impl AppState {
                 todo.sort_order = index as i32;
             }
         }
+        self.todos_revision += 1;
         cx.notify();
         let task = spawn_db(cx, move |db| todo::reorder(db, &ids));
         cx.spawn(async move |_, _| task.await)
@@ -832,6 +906,7 @@ impl AppState {
                 for todo in &mut this.todos {
                     todo.subtasks.retain(|s| s.id != id);
                 }
+                this.todos_revision += 1;
                 cx.notify();
             });
             Ok(())
@@ -857,6 +932,7 @@ impl AppState {
                 todo.subtasks.sort_by_key(|s| (s.sort_order, s.id));
             }
         }
+        self.todos_revision += 1;
         cx.notify();
         let task = spawn_db(cx, move |db| todo::reorder_subtasks(db, &ids));
         cx.spawn(async move |_, _| task.await)
@@ -880,6 +956,7 @@ impl AppState {
             Some(existing) => *existing = todo,
             None => self.todos.push(todo),
         }
+        self.todos_revision += 1;
     }
 
     fn upsert_local_subtask(&mut self, subtask: SubTask) {
@@ -891,6 +968,7 @@ impl AppState {
             None => parent.subtasks.push(subtask),
         }
         parent.subtasks.sort_by_key(|s| (s.sort_order, s.id));
+        self.todos_revision += 1;
     }
 
     // ------------------------------------------------------------------
@@ -927,8 +1005,9 @@ impl AppState {
             let _ = this.update(cx, |this, cx| {
                 this.upsert_local_list(created.clone());
                 if let Some(prefs) = prefs {
-                    this.window_prefs
-                        .insert(BlockKey::from_window_key(prefs.key), prefs);
+                    let key = BlockKey::from_window_key(prefs.key);
+                    this.window_prefs.insert(key, prefs);
+                    this.bump_window_prefs_revision(key);
                 }
                 this.lists_revision += 1;
                 cx.notify();
@@ -967,12 +1046,14 @@ impl AppState {
             let _ = this.update(cx, |this, cx| {
                 this.lists.retain(|l| l.id != id);
                 this.window_prefs.remove(&BlockKey::List(id));
+                this.bump_window_prefs_revision(BlockKey::List(id));
                 // 同 core `lists::delete`：从日历筛选里移出，空了回到"全部"
                 let lists = &this.lists;
                 if let Some(prefs) = this.window_prefs.get_mut(&BlockKey::Calendar) {
                     prefs.calendar_filter =
                         effective_calendar_filter(prefs.calendar_filter.as_deref(), lists);
                 }
+                this.bump_window_prefs_revision(BlockKey::Calendar);
                 this.lists_revision += 1;
                 this.reload_todos(cx);
                 cx.notify();
@@ -1073,6 +1154,7 @@ impl AppState {
         let mut next = self.window_prefs(key);
         next.calendar_filter = filter.clone();
         self.window_prefs.insert(key, next);
+        self.bump_window_prefs_revision(key);
         cx.notify();
         let task = spawn_db(cx, move |db| {
             window_prefs::set_calendar_filter(db, filter.as_deref())
@@ -1084,6 +1166,7 @@ impl AppState {
                         && let Some(prefs) = this.window_prefs.get_mut(&key)
                     {
                         prefs.calendar_filter = saved;
+                        this.bump_window_prefs_revision(key);
                         cx.notify();
                     }
                 });
@@ -1094,6 +1177,7 @@ impl AppState {
                 let _ = this.update(cx, |this, cx| {
                     if this.calendar_filter_seq == seq {
                         restore_prefs(&mut this.window_prefs, key, previous);
+                        this.bump_window_prefs_revision(key);
                         cx.notify();
                     }
                 });
@@ -1114,6 +1198,7 @@ impl AppState {
         let mut next = self.window_prefs(key);
         apply_prefs_update(&mut next, &update);
         self.window_prefs.insert(key, next);
+        self.bump_window_prefs_revision(key);
         cx.notify();
         let window_key = key.window_key();
         let task = spawn_db(cx, move |db| {
@@ -1122,7 +1207,10 @@ impl AppState {
         self.rollback_on_error(
             task,
             prefix,
-            move |this| restore_prefs(&mut this.window_prefs, key, previous),
+            move |this| {
+                restore_prefs(&mut this.window_prefs, key, previous);
+                this.bump_window_prefs_revision(key);
+            },
             cx,
         )
     }
@@ -1141,6 +1229,7 @@ impl AppState {
         let previous = self.auto_hide_enabled;
         self.auto_hide_enabled = enabled;
         self.runtime_prefs.auto_hide_enabled = enabled;
+        self.settings_revision += 1;
         cx.notify();
         let task = spawn_db(cx, move |db| settings::set_auto_hide_enabled(db, enabled));
         self.rollback_on_error(
@@ -1149,6 +1238,7 @@ impl AppState {
             move |this| {
                 this.auto_hide_enabled = previous;
                 this.runtime_prefs.auto_hide_enabled = previous;
+                this.settings_revision += 1;
             },
             cx,
         )
@@ -1163,6 +1253,7 @@ impl AppState {
         let previous = self.top_on_wake;
         self.top_on_wake = enabled;
         self.runtime_prefs.top_on_wake = enabled;
+        self.settings_revision += 1;
         cx.notify();
         let task = spawn_db(cx, move |db| settings::set_top_on_wake(db, enabled));
         self.rollback_on_error(
@@ -1171,6 +1262,7 @@ impl AppState {
             move |this| {
                 this.top_on_wake = previous;
                 this.runtime_prefs.top_on_wake = previous;
+                this.settings_revision += 1;
             },
             cx,
         )
@@ -1185,12 +1277,16 @@ impl AppState {
     ) -> Task<Result<(), String>> {
         let previous = self.fixed_embed_desktop;
         self.fixed_embed_desktop = enabled;
+        self.settings_revision += 1;
         cx.notify();
         let task = spawn_db(cx, move |db| settings::set_fixed_embed_desktop(db, enabled));
         self.rollback_on_error(
             task,
             "设置嵌入桌面失败",
-            move |this| this.fixed_embed_desktop = previous,
+            move |this| {
+                this.fixed_embed_desktop = previous;
+                this.settings_revision += 1;
+            },
             cx,
         )
     }
@@ -1208,6 +1304,7 @@ impl AppState {
             color: color.clone(),
             alpha,
         };
+        self.settings_revision += 1;
         cx.notify();
         let task = spawn_db(cx, move |db| {
             settings::set_window_background(db, &color, alpha)
@@ -1215,7 +1312,10 @@ impl AppState {
         self.rollback_on_error(
             task,
             "设置界面底色失败",
-            move |this| this.window_bg = previous,
+            move |this| {
+                this.window_bg = previous;
+                this.settings_revision += 1;
+            },
             cx,
         )
     }
@@ -1230,6 +1330,7 @@ impl AppState {
         let size = size.clamp(12, 20);
         self.todo_font_family = family.clone();
         self.todo_font_size = size;
+        self.settings_revision += 1;
         cx.notify();
         spawn_db(cx, move |db| {
             settings::set_font_family(db, &family)?;
@@ -1244,6 +1345,7 @@ impl AppState {
         cx: &mut Context<Self>,
     ) -> Task<Result<(), String>> {
         self.notification_type = value;
+        self.settings_revision += 1;
         cx.notify();
         spawn_db(cx, move |db| {
             settings::set_notification_type(db, value.as_str())
@@ -1257,6 +1359,7 @@ impl AppState {
             let configs = task.await?;
             let _ = this.update(cx, |this, cx| {
                 this.screen_configs = configs;
+                this.settings_revision += 1;
                 cx.notify();
             });
             Ok(())
@@ -1290,12 +1393,14 @@ impl AppState {
     pub(crate) fn begin_sync(&mut self, cx: &mut Context<Self>) {
         self.syncing_count += 1;
         self.syncing = true;
+        self.sync_revision += 1;
         cx.notify();
     }
 
     pub(crate) fn end_sync(&mut self, cx: &mut Context<Self>) {
         self.syncing_count = self.syncing_count.saturating_sub(1);
         self.syncing = self.syncing_count > 0;
+        self.sync_revision += 1;
         cx.notify();
     }
 
@@ -1319,6 +1424,7 @@ impl AppState {
         if report.settings_applied {
             self.reload_app_settings(cx).detach();
         }
+        self.sync_revision += 1;
         cx.notify();
         true
     }

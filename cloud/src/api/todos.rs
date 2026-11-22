@@ -128,33 +128,38 @@ pub async fn list_todos(
 ) -> Result<Json<Value>, ApiError> {
     let mut filter = parse_list_filter(&q, state.config.timezone)?;
     let with_subtasks = parse_bool_flag(&q.with_subtasks);
+    let list_name = q.list.clone();
 
-    let todos = state.db.with_conn(|conn| -> Result<Value, ApiError> {
-        filter.list_id = resolve_list_filter(conn, filter.list_id, q.list.as_deref())?;
-        let rows = repo::list_todos_filtered(conn, &filter)?;
-        let ids: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
-        // 每类附加信息一次查询（不随条数增长），避免 N+1
-        let seqs = repo::seq_map_for_todos(conn, &ids)?;
-        let (mut subs, counts) = if with_subtasks {
-            (repo::subtasks_for_todos(conn, &ids)?, HashMap::new())
-        } else {
-            (HashMap::new(), repo::subtask_counts_for_todos(conn, &ids)?)
-        };
-        let out = rows
-            .into_iter()
-            .map(|row| {
-                let nested = with_subtasks.then(|| subs.remove(&row.id).unwrap_or_default());
-                let count = counts.get(&row.id).copied().unwrap_or(0);
-                todo_response(
-                    row_value(&row.data_json, &row.id),
-                    seqs.get(&row.id).copied(),
-                    nested,
-                    count,
-                )
-            })
-            .collect();
-        Ok(Value::Array(out))
-    })?;
+    let todos = state
+        .db
+        .run_read(move |conn| -> Result<Value, ApiError> {
+            filter.list_id = resolve_list_filter(conn, filter.list_id, list_name.as_deref())?;
+            let rows = repo::list_todos_filtered(conn, &filter)?;
+            let ids: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
+            // 每类附加信息一次查询（不随条数增长），避免 N+1
+            let seqs = repo::seq_map_for_todos(conn, &ids)?;
+            let (mut subs, counts) = if with_subtasks {
+                (repo::subtasks_for_todos(conn, &ids)?, HashMap::new())
+            } else {
+                (HashMap::new(), repo::subtask_counts_for_todos(conn, &ids)?)
+            };
+            let out = rows
+                .into_iter()
+                .map(|row| {
+                    let nested = with_subtasks.then(|| subs.remove(&row.id).unwrap_or_default());
+                    let count = counts.get(&row.id).copied().unwrap_or(0);
+                    todo_response(
+                        row_value(&row.data_json, &row.id),
+                        seqs.get(&row.id).copied(),
+                        nested,
+                        count,
+                    )
+                })
+                .collect();
+            Ok(Value::Array(out))
+        })
+        .await
+        .map_err(|e| ApiError::internal("list_todos task failed", e))??;
 
     Ok(Json(todos))
 }
@@ -174,11 +179,12 @@ pub async fn get_todo(
         .as_deref()
         .map(|s| !matches!(s.to_ascii_lowercase().as_str(), "false" | "0" | "no"))
         .unwrap_or(true);
+    let target_ref = raw_id.clone();
 
     let res = state
         .db
-        .with_conn(|conn| -> rusqlite::Result<Option<Value>> {
-            let Some(id) = resolve_todo_ref(conn, &raw_id)? else {
+        .run_read(move |conn| -> rusqlite::Result<Option<Value>> {
+            let Some(id) = resolve_todo_ref(conn, &target_ref)? else {
                 return Ok(None);
             };
             let Some(row) = repo::get_todo(conn, &id)? else {
@@ -196,7 +202,9 @@ pub async fn get_todo(
                 nested,
                 count,
             )))
-        })?;
+        })
+        .await
+        .map_err(|e| ApiError::internal("get_todo task failed", e))??;
 
     match res {
         Some(v) => Ok(Json(v)),
@@ -220,27 +228,29 @@ pub async fn create_todo(
     // 插入 + 分配 seq + 标脏在同一事务里。id 冲突换号重试，绝不覆盖已有记录。
     // seq 是 cloud-only 字段，存独立的 `todo_seq` 表，不进 data_json
     // （PC 往返会把它丢掉，见 schema.rs）。
-    let (record, seq) =
-        state
-            .db
-            .with_conn(|conn| -> Result<(Map<String, Value>, i64), ApiError> {
-                let tx = conn.transaction()?;
-                ensure_list_exists(&tx, &patch, None)?;
-                let mut record = Map::new();
-                let id = insert_with_fresh_id(new_id, |id| {
-                    record = model::new_todo_record(id, &patch, &now);
-                    repo::insert_todo(
-                        &tx,
-                        &id.to_string(),
-                        &Value::Object(record.clone()).to_string(),
-                        &now,
-                    )
-                })?;
-                let seq = repo::assign_seq(&tx, &id.to_string())?;
-                repo::mark_dirty(&tx)?;
-                tx.commit()?;
-                Ok((record, seq))
+    let (record, seq) = state
+        .db
+        .run_write(move |conn| -> Result<(Map<String, Value>, i64), ApiError> {
+            let tx = conn.transaction()?;
+            ensure_list_exists(&tx, &patch, None)?;
+            let mut record = Map::new();
+            let id = insert_with_fresh_id(new_id, |id| {
+                record = model::new_todo_record(id, &patch, &now);
+                repo::insert_todo(
+                    &tx,
+                    &id.to_string(),
+                    &Value::Object(record.clone()).to_string(),
+                    &now,
+                )
             })?;
+            let seq = repo::assign_seq(&tx, &id.to_string())?;
+            repo::mark_dirty(&tx)?;
+            tx.commit()?;
+            Ok((record, seq))
+        })
+        .await
+        .map_err(|e| ApiError::internal("create_todo task failed", e))??;
+    state.sync.request_push();
 
     Ok((
         StatusCode::CREATED,
@@ -261,12 +271,13 @@ pub async fn patch_todo(
     let patch =
         model::validate_todo_input(&body, WriteMode::Update, tz).map_err(ApiError::validation)?;
     let now = now_local_string(tz);
+    let target_ref = raw_id.clone();
 
     let updated = state
         .db
-        .with_conn(|conn| -> Result<Option<Value>, ApiError> {
+        .run_write(move |conn| -> Result<Option<Value>, ApiError> {
             let tx = conn.transaction()?;
-            let Some(id) = resolve_todo_ref(&tx, &raw_id)? else {
+            let Some(id) = resolve_todo_ref(&tx, &target_ref)? else {
                 return Ok(None);
             };
             let Some(row) = repo::get_todo(&tx, &id)? else {
@@ -325,10 +336,15 @@ pub async fn patch_todo(
             let seq = repo::get_seq(&tx, &id)?;
             tx.commit()?;
             Ok(Some(model::todo_view(Value::Object(next), seq)))
-        })?;
+        })
+        .await
+        .map_err(|e| ApiError::internal("patch_todo task failed", e))??;
 
     match updated {
-        Some(v) => Ok(Json(v)),
+        Some(v) => {
+            state.sync.request_push();
+            Ok(Json(v))
+        }
         None => Err(ApiError::not_found(format!("todo {} not found", raw_id))),
     }
 }
@@ -343,44 +359,52 @@ pub async fn delete_todo(
 ) -> Result<impl IntoResponse, ApiError> {
     let tz = state.config.timezone;
     let now = now_local_string(tz);
-    let removed = state.db.with_conn(|conn| -> rusqlite::Result<bool> {
-        let tx = conn.transaction()?;
-        let Some(id) = resolve_todo_ref(&tx, &raw_id)? else {
-            return Ok(false);
-        };
-        let Some(row) = repo::get_todo(&tx, &id)? else {
-            return Ok(false);
-        };
-        // 先收集子任务：`delete_todo_cascade` 会把 subtasks 一起删掉，
-        // 若放在 cascade 之后再 query 就拿不到任何 id，导致 subtask tombstones 漏写。
-        let subs = repo::list_subtasks_for_todo(&tx, &id)?;
+    let target_ref = raw_id.clone();
+    let removed = state
+        .db
+        .run_write(move |conn| -> rusqlite::Result<bool> {
+            let tx = conn.transaction()?;
+            let Some(id) = resolve_todo_ref(&tx, &target_ref)? else {
+                return Ok(false);
+            };
+            let Some(row) = repo::get_todo(&tx, &id)? else {
+                return Ok(false);
+            };
+            // 先收集子任务：`delete_todo_cascade` 会把 subtasks 一起删掉，
+            // 若放在 cascade 之后再 query 就拿不到任何 id，导致 subtask tombstones 漏写。
+            let subs = repo::list_subtasks_for_todo(&tx, &id)?;
 
-        let existed = repo::delete_todo_cascade(&tx, &id)?;
-        if existed {
-            // 墓碑时间 = max(now, 记录的 updatedAt)（与 PC 一致）：记录比本端"现在"还新时，
-            // 只写 now 压不住它，推送前合并远端就会把它插回来
-            let json_ts = model::data_json_updated_at(&row.data_json);
-            let deleted_at = deletion_time(
-                &now,
-                &[&row.updated_at, json_ts.as_deref().unwrap_or("")],
-                tz,
-            );
-            repo::add_tombstone(&tx, TOMBSTONE_TODO, &id, &deleted_at)?;
-            for sub in subs {
-                let json_ts = model::data_json_updated_at(&sub.data_json);
+            let existed = repo::delete_todo_cascade(&tx, &id)?;
+            if existed {
+                // 墓碑时间 = max(now, 记录的 updatedAt)（与 PC 一致）：记录比本端"现在"还新时，
+                // 只写 now 压不住它，推送前合并远端就会把它插回来
+                let json_ts = model::data_json_updated_at(&row.data_json);
                 let deleted_at = deletion_time(
                     &now,
-                    &[&sub.updated_at, json_ts.as_deref().unwrap_or("")],
+                    &[&row.updated_at, json_ts.as_deref().unwrap_or("")],
                     tz,
                 );
-                repo::add_tombstone(&tx, "subtask", &sub.id, &deleted_at)?;
+                repo::add_tombstone(&tx, TOMBSTONE_TODO, &id, &deleted_at)?;
+                for sub in subs {
+                    let json_ts = model::data_json_updated_at(&sub.data_json);
+                    let deleted_at = deletion_time(
+                        &now,
+                        &[&sub.updated_at, json_ts.as_deref().unwrap_or("")],
+                        tz,
+                    );
+                    repo::add_tombstone(&tx, "subtask", &sub.id, &deleted_at)?;
+                }
+                repo::delete_seq(&tx, &id)?;
+                repo::mark_dirty(&tx)?;
             }
-            repo::delete_seq(&tx, &id)?;
-            repo::mark_dirty(&tx)?;
-        }
-        tx.commit()?;
-        Ok(existed)
-    })?;
+            tx.commit()?;
+            Ok(existed)
+        })
+        .await
+        .map_err(|e| ApiError::internal("delete_todo task failed", e))??;
+    if removed {
+        state.sync.request_push();
+    }
     if removed {
         Ok(StatusCode::NO_CONTENT)
     } else {

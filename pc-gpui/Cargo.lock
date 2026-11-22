@@ -4203,12 +4203,14 @@ version = "3.1.1-pre"
 dependencies = [
  "base64",
  "block2 0.6.2",
+ "bytes",
  "chrono",
  "dirs 5.0.1",
  "encoding_rs",
  "flate2",
  "libc",
  "log",
+ "mini-todo-protocol",
  "notify 7.0.0",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
@@ -4221,9 +4223,17 @@ dependencies = [
  "tiny_http",
  "tyme4rs",
  "urlencoding",
- "windows 0.58.0",
- "windows-core 0.58.0",
+ "windows 0.62.2",
+ "windows-core 0.62.2",
  "zip",
+]
+
+[[package]]
+name = "mini-todo-protocol"
+version = "0.1.0"
+dependencies = [
+ "ring",
+ "urlencoding",
 ]
 
 [[package]]

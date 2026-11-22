@@ -69,11 +69,39 @@ pub fn matches_query(todo: &Todo, query: &str) -> bool {
             .is_some_and(|d| d.to_lowercase().contains(&q))
 }
 
+/// 已完成待办缓存项（加载时预计算小写搜索键，避免每帧悬停/搜索重复分配）
+struct CompletedEntry {
+    todo: Todo,
+    title_lower: String,
+    desc_lower: Option<String>,
+}
+
+impl CompletedEntry {
+    fn from_todo(todo: Todo) -> Self {
+        let title_lower = todo.title.to_lowercase();
+        let desc_lower = todo.description.as_deref().map(str::to_lowercase);
+        Self {
+            todo,
+            title_lower,
+            desc_lower,
+        }
+    }
+
+    fn matches(&self, query_lower: &str) -> bool {
+        query_lower.is_empty()
+            || self.title_lower.contains(query_lower)
+            || self
+                .desc_lower
+                .as_deref()
+                .is_some_and(|d| d.contains(query_lower))
+    }
+}
+
 /// 已完成窗口视图
 pub struct CompletedWindow {
     /// 只看这个清单的已完成（打开方清单窗口的清单）
     list_id: i64,
-    todos: Vec<Todo>,
+    entries: Vec<CompletedEntry>,
     search: Entity<InputState>,
     hovered: Option<i64>,
     _subscriptions: Vec<Subscription>,
@@ -96,7 +124,7 @@ impl CompletedWindow {
         ];
         let mut this = Self {
             list_id,
-            todos: Vec::new(),
+            entries: Vec::new(),
             search,
             hovered: None,
             _subscriptions: subscriptions,
@@ -106,14 +134,17 @@ impl CompletedWindow {
     }
 
     fn load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let task = spawn_db(cx, mini_todo_core::todo::list);
+        let task = spawn_db(cx, mini_todo_core::todo::list_completed);
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let result = task.await;
             let _ = this.update_in(cx, |this, window, cx| match result {
                 Ok(todos) => {
                     // 清单列表取 AppState 的内存副本（与清单窗口按同一份列表判断有效清单）
                     let lists = AppState::global(cx).read(cx).lists.clone();
-                    this.todos = completed_in_list(todos, &lists, this.list_id);
+                    this.entries = completed_in_list(todos, &lists, this.list_id)
+                        .into_iter()
+                        .map(CompletedEntry::from_todo)
+                        .collect();
                     cx.notify();
                 }
                 Err(e) => message::error_with(window, cx, "加载已完成待办失败", &e),
@@ -122,11 +153,12 @@ impl CompletedWindow {
         .detach();
     }
 
-    fn filtered(&self, cx: &App) -> Vec<&Todo> {
-        let query = self.search.read(cx).value().to_string();
-        self.todos
+    fn filtered_indices(&self, cx: &App) -> Vec<usize> {
+        let query_lower = self.search.read(cx).value().trim().to_lowercase();
+        self.entries
             .iter()
-            .filter(|t| matches_query(t, &query))
+            .enumerate()
+            .filter_map(|(idx, entry)| entry.matches(&query_lower).then_some(idx))
             .collect()
     }
 
@@ -475,7 +507,7 @@ impl CompletedWindow {
 impl Render for CompletedWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = light();
-        let filtered: Vec<Todo> = self.filtered(cx).into_iter().cloned().collect();
+        let filtered = self.filtered_indices(cx);
         let count = filtered.len();
         let searching = !self.search.read(cx).value().trim().is_empty();
         let empty_state = |source: EpIcon, text: &'static str| {
@@ -494,10 +526,10 @@ impl Render for CompletedWindow {
                 .child(div().text_size(px(14.)).child(text))
         };
         let items: Vec<gpui_kit::AnyElement> = filtered
-            .iter()
+            .into_iter()
             .enumerate()
-            .map(|(index, todo)| {
-                self.render_item(todo, index + 1 == count, cx)
+            .map(|(index, entry_idx)| {
+                self.render_item(&self.entries[entry_idx].todo, index + 1 == count, cx)
                     .into_any_element()
             })
             .collect();

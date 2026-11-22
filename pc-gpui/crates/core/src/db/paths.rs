@@ -67,30 +67,9 @@ pub fn images_dir() -> PathBuf {
     app_data_dir().join("images")
 }
 
-/// 图片文件名最大长度（K5）
-const MAX_IMAGE_NAME_LEN: usize = 128;
-
 /// K5 安全图片文件名：单个普通路径段，匹配 `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$` 且不含 `..`。
-///
-/// 保存、上传、下载、列举图片时一律先过这一关：名字来自远端 JSON / PROPFIND / 前端，
-/// 不校验就 `images_dir.join(name)` 会被 `../` 或绝对路径带出图片目录（B2）。
-/// 不满足规则的名字由调用方跳过并记日志。
-pub fn is_safe_image_name(name: &str) -> bool {
-    let bytes = name.as_bytes();
-    if bytes.is_empty() || bytes.len() > MAX_IMAGE_NAME_LEN {
-        return false;
-    }
-    if !bytes[0].is_ascii_alphanumeric() {
-        return false;
-    }
-    if !bytes
-        .iter()
-        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
-    {
-        return false;
-    }
-    !name.contains("..")
-}
+/// 实现由共享协议 crate `mini-todo-protocol` 统一维护。
+pub use mini_todo_protocol::image_name::is_safe_image_name;
 
 #[cfg(test)]
 mod tests {

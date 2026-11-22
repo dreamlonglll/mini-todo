@@ -56,60 +56,9 @@ pub fn public_error_message(err: &anyhow::Error) -> String {
     parts.join(": ")
 }
 
-/// 允许的图片扩展名与对应的 Content-Type（K5 白名单：png / jpg / jpeg / webp / gif / bmp）。
-/// svg 故意不在表内：可内嵌脚本，内联渲染是存储型 XSS 向量。
-const IMAGE_TYPES: &[(&str, &str)] = &[
-    ("png", "image/png"),
-    ("jpg", "image/jpeg"),
-    ("jpeg", "image/jpeg"),
-    ("webp", "image/webp"),
-    ("gif", "image/gif"),
-    ("bmp", "image/bmp"),
-];
-
-/// 文件名的小写扩展名。
-pub fn extension_of(name: &str) -> Option<String> {
-    std::path::Path::new(name)
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_ascii_lowercase())
-}
-
-/// 按扩展名得到图片 Content-Type；不在白名单内（含 svg）一律 `application/octet-stream`。
-pub fn image_content_type(name: &str) -> &'static str {
-    let ext = extension_of(name);
-    IMAGE_TYPES
-        .iter()
-        .find(|(e, _)| Some(*e) == ext.as_deref())
-        .map(|(_, ct)| *ct)
-        .unwrap_or("application/octet-stream")
-}
-
-/// 白名单扩展名（大小写不敏感）→ 规范小写扩展名；其它返回 `None`。
-pub fn allowed_image_ext(ext: &str) -> Option<&'static str> {
-    let lower = ext.to_ascii_lowercase();
-    IMAGE_TYPES
-        .iter()
-        .find(|(e, _)| *e == lower)
-        .map(|(e, _)| *e)
-}
-
-/// Content-Type → 扩展名（上传时客户端没给文件名用）。`image/jpeg` 映射到 `jpg`。
-pub fn image_ext_for_content_type(ct: &str) -> Option<&'static str> {
-    let essence = ct
-        .split(';')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_ascii_lowercase();
-    if essence == "image/jpg" {
-        return Some("jpg");
-    }
-    IMAGE_TYPES
-        .iter()
-        .find(|(_, t)| *t == essence)
-        .map(|(e, _)| *e)
-}
+pub use mini_todo_protocol::image_name::{
+    allowed_image_ext, extension_of, image_content_type, image_ext_for_content_type,
+};
 
 #[cfg(test)]
 mod tests {

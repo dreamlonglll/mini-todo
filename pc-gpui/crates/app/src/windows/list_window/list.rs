@@ -7,7 +7,7 @@ use gpui_kit::{
     Window, div, prelude::FluentBuilder as _, px,
 };
 
-use super::todo_item::{RowPlace, rows_of};
+use super::todo_item::RowPlace;
 use super::{DragKind, DraggedTodo, ListWindow, RenderCtx, logic};
 use crate::assets::EpIcon;
 use crate::theme::Palette;
@@ -20,19 +20,19 @@ impl ListWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let list_id = self.list_id();
-        let state = self.state.read(cx);
-        let total = state.todo_count_in(list_id).total;
-        let rows = match self.drag.as_ref().map(|d| &d.kind) {
+        let cache = self.list_cache(cx);
+        let total = cache.total;
+        let drag_rows = match self.drag.as_ref().map(|d| &d.kind) {
             Some(DragKind::List { order, .. }) => {
                 let order = order.clone();
-                self.rows_for(&order, cx)
+                Some(self.rows_for(&order, cx))
             }
-            _ => rows_of(&state.pending_todos_in(list_id)),
+            _ => None,
         };
+        let rows = drag_rows.as_deref().unwrap_or(&cache.pending);
         let empty = rows.is_empty() && total == 0;
         let mut children = Vec::with_capacity(rows.len());
-        for row in &rows {
+        for row in rows {
             children.push(self.render_row(row, RowPlace::List, rc, window, cx));
         }
         // 锁定时没有 FAB：空状态只提示双击 / 快捷键
