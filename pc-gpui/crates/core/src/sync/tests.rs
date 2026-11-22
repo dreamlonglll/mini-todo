@@ -36,6 +36,8 @@ mod mock {
         counter: u64,
         /// 下一次 PUT sync-data 之前，模拟另一台设备抢先写入的内容
         pub concurrent_write: Option<Vec<u8>>,
+        /// 每次 PUT sync-data 之前都模拟另一台设备抢先写入的内容（确定性触发连续 412，不依赖测试线程调度）
+        pub persistent_concurrent_write: Option<Vec<u8>>,
         /// PUT 响应不带 ETag / Last-Modified（Apache、nginx 都如此）
         pub omit_put_headers: bool,
         /// Apache：文件写入后这段时间内 GET / HEAD 只给弱 ETag，`If-Match`（强比较）必然 412；
@@ -203,7 +205,11 @@ mod mock {
                 if key.ends_with("sync-data.json.gz") {
                     st.put_preconditions
                         .push((if_match.clone(), if_unmodified_since.clone()));
-                    if let Some(other) = st.concurrent_write.take() {
+                    if let Some(other) = st
+                        .concurrent_write
+                        .take()
+                        .or_else(|| st.persistent_concurrent_write.clone())
+                    {
                         st.write(&key, other);
                     }
                 }
@@ -685,24 +691,11 @@ fn sync_gives_up_after_repeated_conflicts() {
     add_local_todo(&fx.db, 1, "本地", "2026-09-01 10:00:00");
     let blob = gzip_compress(&serde_json::to_vec(&doc(vec![])).unwrap()).unwrap();
 
-    // 每次 PUT 前都有别人抢先写入
-    let state = fx.mock.state.clone();
-    let stop = std::sync::Arc::new(AtomicBool::new(false));
-    let stop2 = stop.clone();
-    let feeder = std::thread::spawn(move || {
-        while !stop2.load(Ordering::SeqCst) {
-            {
-                let mut st = state.lock().unwrap();
-                if st.concurrent_write.is_none() {
-                    st.concurrent_write = Some(blob.clone());
-                }
-            }
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-    });
+    // 每次 PUT 前都有别人抢先写入（由 mock 服务端确定性触发，避免因 Keep-Alive + WAL 加速后
+    // 超过 Windows 15.6ms 睡眠粒度导致后台 feeder 线程来不及补充 concurrent_write）
+    fx.mock.state.lock().unwrap().persistent_concurrent_write = Some(blob);
+
     let err = fx.engine().sync(false).expect_err("连续冲突应报错");
-    stop.store(true, Ordering::SeqCst);
-    feeder.join().unwrap();
     assert!(err.contains("请稍后重试"), "{err}");
     assert_eq!(fx.count(PUT_DOC), MAX_ATTEMPTS);
 }
