@@ -595,6 +595,7 @@ pub fn bring_to_front(cx: &mut App, key: BlockKey) {
         return;
     }
     if is_registered(cx, key) {
+        crate::services::block_windows::mark_shown(cx, key);
         wake(cx, vec![key]);
     }
 }

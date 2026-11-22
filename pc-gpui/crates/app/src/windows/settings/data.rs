@@ -913,6 +913,7 @@ impl SettingsWindow {
                                 .child(
                                     div()
                                         .flex()
+                                        .items_center()
                                         .gap(px(8.))
                                         .child(
                                             div().flex_1().min_w_0().child(

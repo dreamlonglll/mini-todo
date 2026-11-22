@@ -374,7 +374,7 @@ fn calendar_fallback(cx: &mut App, beside: Option<PhysRect>) -> PhysRect {
 // ----------------------------------------------------------------------
 
 /// 窗口 `key` 显示中：属性里的隐藏清掉（已是显示时不写库）
-fn mark_shown(cx: &mut App, key: BlockKey) {
+pub fn mark_shown(cx: &mut App, key: BlockKey) {
     set_hidden(cx, key, false);
 }
 
