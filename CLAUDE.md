@@ -44,7 +44,7 @@ mini-todo/
 │   └── video/                              # 功能介绍视频 mini-todo-intro.mp4（同上；README 内嵌的是它上传到 GitHub 后的附件链接）
 ├── pc-gpui/                                # PC 端（Cargo workspace；详见各 crate README）
 │   ├── Cargo.toml                          # [workspace] members = crates/core、crates/app；[workspace.package] version 是
-│   │                                       # 版本号唯一来源（当前 3.1.1-pre）；release thin LTO + strip
+│   │                                       # 版本号唯一来源（当前 3.1.2）；release thin LTO + strip
 │   ├── Cargo.lock                          # 提交；CI 一律 --locked
 │   ├── crates/
 │   │   ├── core/                           # mini-todo-core：业务核心（不依赖 GPUI / Tauri / tokio，全部阻塞函数）
@@ -682,7 +682,8 @@ services::sync::run_sync(cx, SyncMode)（后台线程；AppState.syncing 期间�
         ├── GET sync-data（有基准 ETag 时 If-None-Match；本地有未上传变更 / 手动同步 / 每第 10 轮时无条件 GET）
         │     ├── 304 → 远端未变
         │     ├── 200 → 解析（失败直接报错）→ 单事务逐条合并（LWW + 墓碑 + 设置 LWW；清单 todoLists / listTombstones 同一事务；
-        │     │         待办归属按 listUpdatedAt 字段级合并）→ 下载缺失图片
+        │     │         待办归属按 listUpdatedAt 字段级合并）→ 下载缺失且仍被待办 / 子任务引用的图片
+        │     │         （`todo::referenced_image_names`，与「清理未引用图片」同一口径；远端 images 清单只增不减）
         │     └── 404 → 首次上传
         ├── 需要上传？（local_seq ≠ synced_seq / 设置更新 / 远端缺本地记录、墓碑、清单或清单墓碑 / 远端那一版的归属比本机旧）
         │     ├── 先上传缺失图片（一次 PROPFIND Depth:1 列清单）
@@ -896,7 +897,7 @@ debug 专用环境变量（**只在 debug 构建读取，release 一律忽略**�
 - `pc-gpui-e2e-macos.yml`：macOS 编译门 + e2e（`checks` clippy / test、`smoke` debug `.app` 的 M 组与收纳箱 MF 组、`release-smoke` release `.app` 不隔离的 P 组）；
   触发条件同 Windows e2e。mac 代码没有别的编译门，改了就推分支看它
 - `cloud-ci.yml`：fmt / clippy / test + Skill 单测
-- **版本号只有一处**：`pc-gpui/Cargo.toml` 的 `[workspace.package] version`（改完 `Cargo.lock` 同步），当前 `3.1.1-pre`。cloud 版本在
+- **版本号只有一处**：`pc-gpui/Cargo.toml` 的 `[workspace.package] version`（改完 `Cargo.lock` 同步），当前 `3.1.2`。cloud 版本在
   `cloud/Cargo.toml`，与 tag 无关。发布步骤与安装器契约见 `.trellis/spec/pc-gpui/release.md`
 - 改版本号时同步改应用内更新日志 `pc-gpui/crates/app/assets/changelog.md`：把 `## 未发布` 改成 `## <版本号>（日期）`（或补写该版本的段落）；
   忘了写时单测 `current_version_has_a_changelog_section` 让 `cargo test` / CI 失败
