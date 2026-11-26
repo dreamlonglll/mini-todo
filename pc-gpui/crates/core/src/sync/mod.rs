@@ -969,7 +969,9 @@ impl SyncEngine<'_> {
             if let Some(remote) = &remote {
                 let (stats, settings_applied) = self.merge(remote, pre.first_sync, &cutoff)?;
                 report.add_merge(&stats, settings_applied);
-                images.download_missing(&remote.images);
+                images.download_missing(&remote.images, || {
+                    crate::todo::referenced_image_names(self.db)
+                });
             }
 
             let local = self.snapshot(&cutoff)?;
@@ -1081,7 +1083,9 @@ impl SyncEngine<'_> {
         report.add_merge(&stats, settings_applied);
 
         let mut images = ImageTransfer::new(self.client, &self.images_dir);
-        images.download_missing(&remote.images);
+        images.download_missing(&remote.images, || {
+            crate::todo::referenced_image_names(self.db)
+        });
 
         let synced_settings_at = remote.settings_updated_at.clone().unwrap_or_default();
         let at = self.finish(&version, seq, &synced_settings_at, &cutoff)?;
@@ -1699,27 +1703,48 @@ impl<'a> ImageTransfer<'a> {
         names
     }
 
-    /// 下载远端列出、本地缺失的图片（最多 4 路有限并发）；失败只记日志
-    fn download_missing(&mut self, names: &[String]) {
-        let mut todo: Vec<String> = Vec::new();
+    /// 下载远端列出、本地缺失、且仍被本地待办 / 子任务引用的图片（最多 4 路有限并发）；失败只记日志。
+    ///
+    /// 没被引用的不下载：远端清单是各端的并集、只增不减，否则「清理未引用图片」删掉的旧图每次同步都会被下载回来。
+    /// 必须在合并之后调用（引用按合并后的本地库算，远端新来的待办引用的图片照常下载）。
+    /// `referenced` 要扫描全部描述，只在确有缺失图片时才调用；扫描失败时退回按远端清单全部下载。
+    fn download_missing(
+        &mut self,
+        names: &[String],
+        referenced: impl FnOnce() -> Result<HashSet<String>, String>,
+    ) {
+        let mut pending: Vec<String> = Vec::new();
         for name in names {
             if !is_safe_image_name(name) {
                 log::warn!("[sync] 跳过文件名不安全的远端图片: {:?}", name);
                 continue;
             }
-            if !self.tried_download.insert(name.clone()) {
+            if self.tried_download.contains(name) || self.dir.join(name).exists() {
                 continue;
             }
-            if self.dir.join(name).exists() {
-                continue;
-            }
-            todo.push(name.clone());
+            pending.push(name.clone());
         }
-        if todo.is_empty() {
+        if pending.is_empty() {
             return;
         }
-        let workers = todo.len().min(IMAGE_TRANSFER_CONCURRENCY);
-        let queue = std::sync::Mutex::new(todo.into_iter());
+        match referenced() {
+            Ok(set) => {
+                let before = pending.len();
+                pending.retain(|name| set.contains(name));
+                let skipped = before - pending.len();
+                if skipped > 0 {
+                    log::info!("[sync] 跳过 {skipped} 张没有被任何待办 / 子任务引用的远端图片");
+                }
+            }
+            Err(e) => log::warn!("[sync] {e}，按远端清单下载全部缺失图片"),
+        }
+        // 只记真正尝试过的：本轮 412 重试时新合并进来的待办引用了先前跳过的图片，仍能下载
+        pending.retain(|name| self.tried_download.insert(name.clone()));
+        if pending.is_empty() {
+            return;
+        }
+        let workers = pending.len().min(IMAGE_TRANSFER_CONCURRENCY);
+        let queue = std::sync::Mutex::new(pending.into_iter());
         let ok_count = AtomicU32::new(0);
         let client = self.client;
         let dir = self.dir;

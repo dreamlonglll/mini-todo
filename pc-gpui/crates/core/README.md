@@ -132,6 +132,8 @@ macOS 专属测试（`fence_fs` 的真实 `renamex_np` 移动往返 / 撞名顺�
 | `delete_subtask(db, id) -> R<()>` | 写墓碑 | `delete_subtask` |
 | `images_dir() -> R<PathBuf>` | 图片目录（创建后返回）；Markdown 里存 `minitodo-image://<文件名>` | `get_images_dir` |
 | `save_image(bytes: &[u8], ext: &str) -> R<PathBuf>` | 粘贴 / 拖入图片：扩展名白名单 png/jpg/jpeg/webp/gif/bmp（大小写不敏感、可带点）、非空、≤20MB；文件名后端生成 `<毫秒>_<6位>.<ext>`；先写临时文件再改名；返回绝对路径 | `save_subtask_image` |
+| `referenced_image_names(db) -> R<HashSet<String>>` | 所有待办描述与子任务内容引用的本机图片名（`minitodo-image://` 与父目录为 images 的旧 asset URL）；清理未引用图片与 WebDAV 同步下载图片共用这一口径 | |
+| `cleanup_unused_images(db, min_age_secs) -> R<ImageCleanupReport>` | 删除 images 目录里没被引用、且早于宽限期的图片（设置 → 数据与同步「清理未引用图片」，宽限 3600 秒）；同步之后不会再下载回来（同步只下载被引用的） | |
 | `import_subtasks_from_paths(db, parent_id, &[String]) -> R<Vec<SubTask>>` | .md/.txt 文件或文件夹（≤5 层、≤1000 个、单个 ≤10MB、不跟随符号链接目录）；UTF-8/BOM/UTF-16/GBK；任一失败整体取消；单事务插入 | `import_subtasks_from_paths` |
 
 ### `lists`（新增，待办清单）

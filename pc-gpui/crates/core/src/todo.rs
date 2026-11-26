@@ -612,31 +612,38 @@ pub fn cleanup_unused_images(
     cleanup_unused_images_in(db, &paths::images_dir(), min_age_secs)
 }
 
+/// 所有待办描述与子任务内容里引用的本机图片文件名（[`collect_referenced_image_names`] 的口径）。
+///
+/// 「清理未引用图片」与 WebDAV 同步下载图片共用这一个判断：清理删掉的，同步不会再下载回来；
+/// 同步不下载的，清理本来也会删掉。两边口径必须一致，改这里两边一起生效。
+pub fn referenced_image_names(db: &Database) -> Result<std::collections::HashSet<String>, String> {
+    db.with_connection(
+        |conn| -> rusqlite::Result<std::collections::HashSet<String>> {
+            let mut set = std::collections::HashSet::new();
+            let mut t_stmt =
+                conn.prepare("SELECT description FROM todos WHERE description IS NOT NULL")?;
+            let t_rows = t_stmt.query_map([], |r| r.get::<_, String>(0))?;
+            for text in t_rows.flatten() {
+                collect_referenced_image_names(&text, &mut set);
+            }
+            let mut s_stmt =
+                conn.prepare("SELECT content FROM subtasks WHERE content IS NOT NULL")?;
+            let s_rows = s_stmt.query_map([], |r| r.get::<_, String>(0))?;
+            for text in s_rows.flatten() {
+                collect_referenced_image_names(&text, &mut set);
+            }
+            Ok(set)
+        },
+    )
+    .map_err(|e| format!("扫描图片引用失败: {}", e))
+}
+
 pub fn cleanup_unused_images_in(
     db: &Database,
     dir: &Path,
     min_age_secs: u64,
 ) -> Result<ImageCleanupReport, String> {
-    let referenced = db
-        .with_connection(
-            |conn| -> rusqlite::Result<std::collections::HashSet<String>> {
-                let mut set = std::collections::HashSet::new();
-                let mut t_stmt =
-                    conn.prepare("SELECT description FROM todos WHERE description IS NOT NULL")?;
-                let t_rows = t_stmt.query_map([], |r| r.get::<_, String>(0))?;
-                for text in t_rows.flatten() {
-                    collect_referenced_image_names(&text, &mut set);
-                }
-                let mut s_stmt =
-                    conn.prepare("SELECT content FROM subtasks WHERE content IS NOT NULL")?;
-                let s_rows = s_stmt.query_map([], |r| r.get::<_, String>(0))?;
-                for text in s_rows.flatten() {
-                    collect_referenced_image_names(&text, &mut set);
-                }
-                Ok(set)
-            },
-        )
-        .map_err(|e| format!("扫描图片引用失败: {}", e))?;
+    let referenced = referenced_image_names(db)?;
 
     let mut report = ImageCleanupReport::default();
     let entries = match std::fs::read_dir(dir) {

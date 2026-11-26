@@ -1170,7 +1170,12 @@ fn images_upload_before_sync_data_and_missing_ones_download() {
         st.dirs.insert(REMOTE_IMAGES_DIR.to_string());
         st.write("/mini-todo/images/b.png", b"remote-image".to_vec());
     }
-    let mut remote = doc(vec![]);
+    let mut remote = doc(vec![todo_with_description(
+        2,
+        "远端带图",
+        "2026-09-02 10:00:00",
+        "![b](minitodo-image://b.png)",
+    )]);
     remote["images"] = json!(["b.png", "../evil.png"]);
     fx.set_remote(&remote);
     add_local_todo(&fx.db, 1, "本地", "2026-09-01 10:00:00");
@@ -1204,6 +1209,140 @@ fn images_upload_before_sync_data_and_missing_ones_download() {
         .iter()
         .any(|l| l.contains("bad name") || l.contains("evil")));
     assert_eq!(fx.remote()["images"], json!(["a.png", "b.png"]));
+}
+
+fn todo_with_description(id: i64, title: &str, updated_at: &str, description: &str) -> Value {
+    let mut todo = todo_json(id, title, updated_at);
+    todo["description"] = json!(description);
+    todo
+}
+
+fn add_local_todo_with_description(db: &Database, id: i64, updated_at: &str, description: &str) {
+    let todo: Todo = serde_json::from_value(todo_with_description(
+        id,
+        "本地带图",
+        updated_at,
+        description,
+    ))
+    .unwrap();
+    db.with_transaction(|tx| insert_todo_row(tx, &todo))
+        .unwrap();
+}
+
+/// 只下载合并后仍被引用的远端图片：远端新来的待办 / 子任务引用的、本机独有的待办引用的都下；
+/// 远端清单里已经没人引用的不下（远端清单只增不减，否则「清理未引用图片」删掉的每次同步都会回来）
+#[test]
+fn only_referenced_remote_images_are_downloaded() {
+    let fx = Fixture::new("images-referenced");
+    {
+        let mut st = fx.mock.state.lock().unwrap();
+        st.dirs.insert(REMOTE_IMAGES_DIR.to_string());
+        for name in [
+            "remote-ref.png",
+            "sub-ref.jpg",
+            "local-ref.png",
+            "orphan.png",
+        ] {
+            st.write(
+                &format!("/mini-todo/images/{name}"),
+                name.as_bytes().to_vec(),
+            );
+        }
+    }
+    let mut with_subtask = todo_json(3, "子任务带图", "2026-09-03 10:00:00");
+    with_subtask["subtasks"] = json!([{
+        "id": 31, "parentId": 3, "title": "子任务", "content": "![s](minitodo-image://sub-ref.jpg)",
+        "completed": false, "sortOrder": 0,
+        "createdAt": "2026-09-03 10:00:00", "updatedAt": "2026-09-03 10:00:00"
+    }]);
+    let mut remote = doc(vec![
+        todo_with_description(
+            2,
+            "远端带图",
+            "2026-09-02 10:00:00",
+            "![r](minitodo-image://remote-ref.png)",
+        ),
+        with_subtask,
+    ]);
+    remote["images"] = json!([
+        "local-ref.png",
+        "orphan.png",
+        "remote-ref.png",
+        "sub-ref.jpg"
+    ]);
+    fx.set_remote(&remote);
+    add_local_todo_with_description(
+        &fx.db,
+        1,
+        "2026-09-01 10:00:00",
+        "![l](minitodo-image://local-ref.png)",
+    );
+
+    let report = fx.engine().sync(false).unwrap();
+    assert_eq!(report.images_downloaded, 3);
+    for name in ["remote-ref.png", "sub-ref.jpg", "local-ref.png"] {
+        assert!(fx.dir.join(name).exists(), "{name} 被引用，应下载");
+    }
+    assert!(!fx.dir.join("orphan.png").exists(), "没人引用的不下载");
+    assert_eq!(fx.count("GET /mini-todo/images/orphan.png"), 0);
+    // 远端清单不删名字（其它设备可能还有它），只是本机不再下载
+    assert_eq!(
+        fx.remote()["images"],
+        json!([
+            "local-ref.png",
+            "orphan.png",
+            "remote-ref.png",
+            "sub-ref.jpg"
+        ])
+    );
+
+    // 之后有待办重新引用它：下一次同步照常下载
+    let mut later = remote.clone();
+    later["todos"]
+        .as_array_mut()
+        .unwrap()
+        .push(todo_with_description(
+            4,
+            "又引用了",
+            "2026-09-04 10:00:00",
+            "![o](minitodo-image://orphan.png)",
+        ));
+    fx.other_device_writes(&later);
+    let report = fx.engine().sync(true).unwrap();
+    assert_eq!(report.images_downloaded, 1);
+    assert!(fx.dir.join("orphan.png").exists());
+}
+
+/// 「清理未引用图片」删掉的本地图片，之后的同步不会按远端清单重新下载回来
+#[test]
+fn cleaned_up_images_are_not_downloaded_again() {
+    let fx = Fixture::new("images-cleanup");
+    add_local_todo_with_description(
+        &fx.db,
+        1,
+        "2026-09-01 10:00:00",
+        "![k](minitodo-image://kept.png)",
+    );
+    std::fs::write(fx.dir.join("kept.png"), b"kept").unwrap();
+    std::fs::write(fx.dir.join("old.png"), b"old-image").unwrap();
+    fx.server().dirs.insert(REMOTE_IMAGES_DIR.to_string());
+
+    // 第一次同步：两张都传上去，远端清单里有 old.png
+    fx.engine().sync(false).unwrap();
+    assert_eq!(fx.remote()["images"], json!(["kept.png", "old.png"]));
+
+    let cleaned = crate::todo::cleanup_unused_images_in(&fx.db, &fx.dir, 0).unwrap();
+    assert_eq!(cleaned.removed_count, 1);
+    assert!(!fx.dir.join("old.png").exists());
+
+    fx.clear_log();
+    let report = fx.engine().sync(true).unwrap();
+    assert_eq!(report.images_downloaded, 0);
+    assert!(
+        !fx.dir.join("old.png").exists(),
+        "清理掉的图片不应被同步下载回来"
+    );
+    assert_eq!(fx.count("GET /mini-todo/images/old.png"), 0);
 }
 
 // ------------------------------------------------------------------
