@@ -238,7 +238,7 @@ impl EpTimePicker {
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_size(px(12.))
+                .text_size(theme::text_px(cx, 12.))
                 .text_color(if active {
                     ep.text_primary
                 } else {
@@ -308,7 +308,7 @@ impl EpTimePicker {
                     .h(px(28.))
                     .flex()
                     .items_center()
-                    .text_size(px(12.))
+                    .text_size(theme::text_px(cx, 12.))
                     .cursor_pointer()
                     .text_color(if confirm { ep.primary } else { ep.text_primary })
                     .when(confirm, |this| this.font_weight(FontWeight::EXTRA_BOLD))
@@ -323,7 +323,7 @@ impl EpTimePicker {
             };
         ep_popper::frame()
             .w(px(PANEL_WIDTH))
-            .font(theme::ui_font())
+            .font(theme::ui_font(cx))
             .flex()
             .flex_col()
             .child(

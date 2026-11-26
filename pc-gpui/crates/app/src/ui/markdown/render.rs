@@ -94,6 +94,19 @@ struct Ctx {
     image_paths: Rc<Vec<PathBuf>>,
     on_image_click: Option<ImageClickHandler>,
     image_resize: Option<ImageResize>,
+    font_size: i32,
+    mono_font: gpui_kit::Font,
+    serif_font: gpui_kit::Font,
+}
+
+impl Ctx {
+    fn sz(&self, base: f32) -> f32 {
+        theme::scale_font_size(base, self.font_size)
+    }
+
+    fn scale(&self) -> f32 {
+        self.font_size as f32 / theme::DEFAULT_FONT_SIZE as f32
+    }
 }
 
 impl MarkdownView {
@@ -150,7 +163,7 @@ impl Styled for MarkdownView {
 }
 
 impl RenderOnce for MarkdownView {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let blocks = parsed(&self.source);
         let ctx = Ctx {
             base_id: self.id.clone(),
@@ -160,6 +173,9 @@ impl RenderOnce for MarkdownView {
             selectable: self.selectable,
             on_image_click: self.on_image_click,
             image_resize: self.image_resize,
+            font_size: theme::user_font_size(cx),
+            mono_font: editor_theme::mono_font(cx),
+            serif_font: editor_theme::serif_font(cx),
         };
         let mut image_counter = 0usize;
         div()
@@ -168,7 +184,7 @@ impl RenderOnce for MarkdownView {
             .w_full()
             .min_w_0()
             .text_color(hex(editor_theme::MD_TEXT))
-            .text_size(px(14.))
+            .text_size(px(ctx.sz(14.)))
             .refine_style(&self.style)
             .children(render_blocks(&blocks, &ctx, "b", false, &mut image_counter))
     }
@@ -251,11 +267,13 @@ fn inline_view(ctx: &Ctx, path: &str, markdown: &str, foreground: Hsla) -> TextV
 
 fn render_block(block: &Block, ctx: &Ctx, path: &str, image_counter: &mut usize) -> AnyElement {
     let text = hex(editor_theme::MD_TEXT);
+    let p_size = ctx.sz(editor_theme::MD_P_SIZE);
+    let p_line = editor_theme::MD_P_LINE * ctx.scale();
     match block {
         Block::Paragraph(markdown) => div()
             .w_full()
-            .text_size(px(editor_theme::MD_P_SIZE))
-            .line_height(px(editor_theme::MD_P_LINE))
+            .text_size(px(p_size))
+            .line_height(px(p_line))
             .child(inline_view(ctx, path, markdown, text))
             .into_any_element(),
         Block::RawText(raw) => {
@@ -263,15 +281,12 @@ fn render_block(block: &Block, ctx: &Ctx, path: &str, image_counter: &mut usize)
             escape_text(raw, &mut escaped);
             div()
                 .w_full()
-                .text_size(px(editor_theme::MD_P_SIZE))
-                .line_height(px(editor_theme::MD_P_LINE))
+                .text_size(px(p_size))
+                .line_height(px(p_line))
                 .child(inline_view(ctx, path, &escaped, text))
                 .into_any_element()
         }
-        Block::EmptyLine => div()
-            .w_full()
-            .h(px(editor_theme::MD_P_LINE))
-            .into_any_element(),
+        Block::EmptyLine => div().w_full().h(px(p_line)).into_any_element(),
         Block::Heading(level, markdown) => {
             let (size, line, _, _) = heading_metrics(*level);
             let weight = match level {
@@ -282,7 +297,7 @@ fn render_block(block: &Block, ctx: &Ctx, path: &str, image_counter: &mut usize)
             };
             div()
                 .w_full()
-                .text_size(px(size))
+                .text_size(px(ctx.sz(size)))
                 .line_height(relative(line))
                 .font_weight(weight)
                 .child(inline_view(ctx, path, markdown, text))
@@ -298,7 +313,7 @@ fn render_block(block: &Block, ctx: &Ctx, path: &str, image_counter: &mut usize)
                 .border_l(px(3.))
                 .border_color(hex(editor_theme::MD_QUOTE_BORDER))
                 .pl(px(12.))
-                .font(editor_theme::serif_font())
+                .font(ctx.serif_font.clone())
                 .text_color(quote_text)
                 .children(render_quote_children(
                     children,
@@ -316,9 +331,9 @@ fn render_block(block: &Block, ctx: &Ctx, path: &str, image_counter: &mut usize)
             .rounded(px(8.))
             .bg(hex(editor_theme::MD_PRE_BG))
             .text_color(hex(editor_theme::MD_PRE_TEXT))
-            .font(editor_theme::mono_font())
-            .text_size(px(editor_theme::MD_PRE_SIZE))
-            .line_height(px(editor_theme::MD_PRE_LINE))
+            .font(ctx.mono_font.clone())
+            .text_size(px(ctx.sz(editor_theme::MD_PRE_SIZE)))
+            .line_height(px(editor_theme::MD_PRE_LINE * ctx.scale()))
             .child(
                 gpui_kit::base::SelectableText::new(
                     SharedString::from(format!("{}/{path}", ctx.base_id)),
@@ -355,8 +370,8 @@ fn render_quote_children(
         let element = match block {
             Block::Paragraph(markdown) => div()
                 .w_full()
-                .text_size(px(editor_theme::MD_P_SIZE))
-                .line_height(px(editor_theme::MD_P_LINE))
+                .text_size(px(ctx.sz(editor_theme::MD_P_SIZE)))
+                .line_height(px(editor_theme::MD_P_LINE * ctx.scale()))
                 .child(inline_view(ctx, &child_path, markdown, quote_text))
                 .into_any_element(),
             Block::Mixed(parts) => render_mixed(parts, ctx, &child_path, quote_text, image_counter),
@@ -376,9 +391,11 @@ fn render_list(list: &MdList, ctx: &Ctx, path: &str, image_counter: &mut usize) 
         let (top, bottom) = item_margins(item);
         let gap = prev_bottom.map_or(0., |prev| prev.max(top));
         let item_path = format!("{path}l{ix}.");
-        let line = item.blocks.first().map_or(editor_theme::MD_P_LINE, |b| {
-            b.first_line_height(&ctx.images_dir)
-        });
+        let line = match item.blocks.first() {
+            Some(Block::Images(_)) => item.blocks[0].first_line_height(&ctx.images_dir),
+            Some(b) => b.first_line_height(&ctx.images_dir) * ctx.scale(),
+            None => editor_theme::MD_P_LINE * ctx.scale(),
+        };
         let marker: AnyElement = match item.checked {
             Some(checked) => task_box(checked).into_any_element(),
             None if list.ordered => div()
@@ -390,7 +407,7 @@ fn render_list(list: &MdList, ctx: &Ctx, path: &str, image_counter: &mut usize) 
                 .flex()
                 .items_center()
                 .justify_end()
-                .text_size(px(editor_theme::MD_MARKER_SIZE))
+                .text_size(px(ctx.sz(editor_theme::MD_MARKER_SIZE)))
                 .text_color(accent)
                 .whitespace_nowrap()
                 .child(format!("{}.", list.start as usize + ix))
@@ -500,8 +517,8 @@ fn render_table(table: &MdTable, ctx: &Ctx, path: &str) -> AnyElement {
                 .when(header && last_col, |this| this.rounded_tr(radius))
                 .when(last_row && c == 0, |this| this.rounded_bl(radius))
                 .when(last_row && last_col, |this| this.rounded_br(radius))
-                .text_size(px(editor_theme::MD_P_SIZE))
-                .line_height(px(editor_theme::MD_P_LINE))
+                .text_size(px(ctx.sz(editor_theme::MD_P_SIZE)))
+                .line_height(px(editor_theme::MD_P_LINE * ctx.scale()))
                 .when(header, |this| this.font_weight(theme::WEIGHT_SEMIBOLD))
                 .map(|this| match align {
                     ColumnAlign::Left => this,
@@ -574,6 +591,7 @@ fn image_frame(image: &BlockImage, ctx: &Ctx, id: &str, image_counter: &mut usiz
         .map(|(w, h)| (w, Some(h)))
         .or_else(|| display_size(image.size, natural));
     let alt = SharedString::from(image.alt.clone());
+    let fallback_size = ctx.sz(14.);
     // 图片铺满图片框、按框的宽高拉伸（`|宽x高` 与原图比例不同时就是要改变比例）。宽高比必须显式给：GPUI 的 img 没设时
     // 用原图的比例，taffy 按它算出的自动最小高度会让图片撑出图片框、压住下一段（比原图更宽更矮的 `|300x100`）
     let picture = img(source)
@@ -586,7 +604,7 @@ fn image_frame(image: &BlockImage, ctx: &Ctx, id: &str, image_counter: &mut usiz
         .rounded(px(6.))
         .with_fallback(move || {
             div()
-                .text_size(px(14.))
+                .text_size(px(fallback_size))
                 .text_color(theme::light().text_tertiary)
                 .child(alt.clone())
                 .into_any_element()
@@ -797,6 +815,7 @@ fn resize_decorations(
         );
     }
     if let Some((w, h)) = live {
+        let badge_font = ctx.sz(12.);
         out.push(
             div()
                 .absolute()
@@ -806,8 +825,8 @@ fn resize_decorations(
                 .rounded(px(4.))
                 .bg(theme::hexa(editor_theme::MD_IMAGE_BADGE_BG))
                 .text_color(hex(0xFFFFFF))
-                .text_size(px(12.))
-                .line_height(px(18.))
+                .text_size(px(badge_font))
+                .line_height(px(badge_font * 1.5))
                 .whitespace_nowrap()
                 .child(format!("{} × {}", w.round(), h.round()))
                 .into_any_element(),
@@ -910,17 +929,17 @@ fn render_mixed(
             }
         }
     }
+    let p_line = editor_theme::MD_P_LINE * ctx.scale();
     div()
         .w_full()
         .flex()
         .flex_col()
-        .text_size(px(editor_theme::MD_P_SIZE))
-        .line_height(px(editor_theme::MD_P_LINE))
+        .text_size(px(ctx.sz(editor_theme::MD_P_SIZE)))
+        .line_height(px(p_line))
         // 空行（连续硬换行）也有一行高
         .children(
-            rows.into_iter().map(|(items, keys)| {
-                inline_row(items, ctx, keys).min_h(px(editor_theme::MD_P_LINE))
-            }),
+            rows.into_iter()
+                .map(|(items, keys)| inline_row(items, ctx, keys).min_h(px(p_line))),
         )
         .into_any_element()
 }

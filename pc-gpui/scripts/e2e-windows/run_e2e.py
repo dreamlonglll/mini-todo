@@ -115,13 +115,15 @@ def has_content(img) -> int:
 
 def title_button(main: Win, index_from_right: int) -> tuple[int, int]:
     """清单 / 日历窗口标题栏右区按钮：28×28、间距 8、右内边距 16、描边 1（380 宽时中心 x = 349 / 313 / 277 / 241 / 205 / 169）。
-    清单窗口从右往左 0=设置 1=同步 2=锁 3=日 / 夜 4=视图 5=已完成（只有本清单有已完成时才有）；
-    日历窗口（596 宽）0=设置 1=锁 2=日 / 夜 3=清单筛选"""
+    默认清单窗口从右往左 0=设置 1=同步 2=锁 3=日 / 夜 4=视图 5=已完成（只有本清单有已完成时才有）；
+    其它清单窗口无设置与同步按钮，从右往左 0=锁 1=日 / 夜 2=视图 3=已完成；
+    日历窗口（596 宽）无设置按钮，从右往左 0=锁 1=日 / 夜 2=清单筛选"""
     w, _ = main.logical_size()
     return main.pt(w - 1 - 16 - 14 - 36 * index_from_right, 27)
 
 
-LIST_LOCK, LIST_THEME, CAL_LOCK, CAL_SETTINGS = 2, 3, 1, 0
+LIST_SETTINGS, LIST_LOCK, LIST_THEME = 0, 2, 3
+EXTRA_LIST_LOCK, CAL_LOCK = 0, 0
 DEFAULT_LIST = "list:1"     # 默认清单窗口的 window_key（window_prefs / window_layouts）
 CALENDAR = "日历"           # 日历窗口的系统标题
 TITLE_BLANK = (60, 47)      # 标题栏下半截的空白处（清单名 / 按钮都在 y 13..41）：拖动、双击、激活都点这里
@@ -1967,7 +1969,7 @@ def group_lists() -> None:
     def l05():
         main, win, key = need("main", "xwin", "key")
         c = Checks()
-        W.click(*title_button(win, LIST_LOCK))
+        W.click(*title_button(win, EXTRA_LIST_LOCK))
         W.park_cursor()
         wait_true(c, lambda: win.flags()["toolWindow"], 6, "点本窗口的锁：TOOLWINDOW（不进任务栏 / Alt+Tab）")
         time.sleep(1.0)
@@ -2092,8 +2094,8 @@ def group_lists() -> None:
         W.park_cursor()
         wait_true(c, lambda: cal.flags()["toolWindow"], 6, "点日历的锁：经典固定（TOOLWINDOW）")
         wait_layout_is(app, "calendar", cal, c, "日历锁定落库", fixed=1)
-        # 设置窗口从日历的设置按钮打开 → 常规「固定模式时，嵌入桌面中」（第 5 个开关）→ 所有锁定的窗口直接切到嵌入
-        W.click(*title_button(cal, CAL_SETTINGS))
+        # 设置按钮只在默认清单窗口右上角 → 从默认清单窗口打开设置 → 常规「固定模式时，嵌入桌面中」（第 5 个开关）→ 所有锁定的窗口直接切到嵌入
+        W.click(*title_button(main, LIST_SETTINGS))
         stw = app.wait_window("设置", 15)
         W.park_cursor()
         time.sleep(1.5)

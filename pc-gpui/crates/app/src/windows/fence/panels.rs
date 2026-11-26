@@ -45,11 +45,16 @@ fn cloud_notice_text() -> (&'static str, &'static str) {
     }
 }
 
-/// 「更多」菜单的估算宽度：最长一项（左右内边距 16 + 图标 14 + 间距 5 + 每字 14）+ 2 边框。
+/// 「更多」菜单的估算宽度（默认字号）：最长一项（左右内边距 16 + 图标 14 + 间距 5 + 每字 14）+ 2 边框。
 /// 各项都是中文，最长的是切换项（7 / 8 个字），其次「删除收纳箱」（5 个字）
+#[cfg(test)]
 fn title_menu_width(labels: &[&str]) -> f32 {
+    title_menu_width_at(labels, 14.)
+}
+
+fn title_menu_width_at(labels: &[&str], font_size: f32) -> f32 {
     let longest = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0);
-    16. + 14. + 5. + 14. * longest as f32 + 16. + 2.
+    16. + 14. + 5. + font_size * longest as f32 + 16. + 2.
 }
 
 impl FenceWindow {
@@ -232,7 +237,11 @@ impl FenceWindow {
         }
         let show_hidden = self.show_hidden();
         let toggle_label = show_hidden_label(show_hidden);
-        let width = title_menu_width(&["重命名", "外观", toggle_label, "删除收纳箱"]);
+        let width = title_menu_width_at(
+            &["重命名", "外观", toggle_label, "删除收纳箱"],
+            theme::scaled_size(cx, 14.),
+        );
+        let menu_height = EpDropdownMenu::estimated_height_for(cx, 4, 1);
         let menu = EpDropdownMenu::new("fence-more-menu")
             .item(EpDropdownItem::new("rename", "重命名").icon(EpIcon::EditPen))
             .item(EpDropdownItem::new("appearance", "外观").icon(EpIcon::Brush))
@@ -248,7 +257,7 @@ impl FenceWindow {
                     .icon(EpIcon::Delete)
                     .divided(),
             )
-            .max_height(px(200.))
+            .max_height(px(200.0_f32.max(menu_height)))
             .on_select(cx.listener(|this, command: &SharedString, window, cx| {
                 this.on_title_command(command, window, cx)
             }));
@@ -263,7 +272,7 @@ impl FenceWindow {
                 gap: ep_popper::OFFSET,
                 arrow: true,
                 width,
-                height: EpDropdownMenu::estimated_height(4, 1),
+                height: menu_height,
                 // 收纳箱有自己的底色，菜单保持浅色
                 dark: false,
             },
@@ -308,7 +317,7 @@ impl FenceWindow {
                             )
                             .child(
                                 div()
-                                    .text_size(px(12.))
+                                    .text_size(theme::text_px(cx, 12.))
                                     .text_color(t.panel_label)
                                     .child(logic::delete_hint(self.delete_count)),
                             ),
@@ -364,7 +373,7 @@ impl FenceWindow {
                             )
                             .child(
                                 div()
-                                    .text_size(px(12.))
+                                    .text_size(theme::text_px(cx, 12.))
                                     .text_color(t.panel_label)
                                     .child(notice_body),
                             ),
@@ -409,9 +418,10 @@ impl FenceWindow {
         let t = fence_tokens();
         let alpha = (self.bg_alpha() * 100.).round() as f32;
         let current = fence.bg_color.clone();
+        let label_size = theme::text_px(cx, 12.);
         let label = |text: &'static str| {
             div()
-                .text_size(px(12.))
+                .text_size(label_size)
                 .text_color(t.panel_label)
                 .child(text)
         };
@@ -459,9 +469,9 @@ impl FenceWindow {
             )
             .child(
                 div()
-                    .w(px(36.))
+                    .min_w(px(36. * theme::font_scale(cx)))
                     .text_right()
-                    .text_size(px(12.))
+                    .text_size(label_size)
                     .text_color(t.panel_value)
                     .child(format!("{}%", alpha as i32)),
             );

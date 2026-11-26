@@ -479,7 +479,7 @@ impl EpColorPicker {
             .id("cp-panel")
             .w(px(PANEL_WIDTH))
             .p(px(12.))
-            .font(theme::ui_font())
+            .font(theme::ui_font(cx))
             .child(
                 div()
                     .w(px(300.))

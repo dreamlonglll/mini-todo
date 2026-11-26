@@ -18,7 +18,7 @@ use gpui_kit::{
 };
 
 use crate::assets::EpIcon;
-use crate::theme::ep;
+use crate::theme::{self, ep};
 use crate::ui::icon::icon;
 
 type ChangeHandler = Rc<dyn Fn(&bool, &mut Window, &mut App)>;
@@ -63,7 +63,7 @@ impl EpCheckbox {
 }
 
 impl RenderOnce for EpCheckbox {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let ep = ep();
         let checked = self.checked;
         let group: SharedString = format!("{}", self.id).into();
@@ -71,7 +71,7 @@ impl RenderOnce for EpCheckbox {
         div()
             .id(self.id)
             .group(group.clone())
-            .h(px(32.))
+            .min_h(px(32.))
             .flex()
             .items_center()
             .flex_none()
@@ -100,7 +100,7 @@ impl RenderOnce for EpCheckbox {
             .child(
                 div()
                     .pl(px(8.))
-                    .text_size(px(14.))
+                    .text_size(theme::text_px(cx, 14.))
                     .text_color(if checked { ep.primary } else { ep.text_regular })
                     .child(self.label),
             )

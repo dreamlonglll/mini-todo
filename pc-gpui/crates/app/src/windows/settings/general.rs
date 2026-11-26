@@ -262,9 +262,9 @@ impl SettingsWindow {
             )
             .child(
                 div()
-                    .min_w(px(34.))
+                    .min_w(px(34. * theme::font_scale(cx)))
                     .text_right()
-                    .text_size(px(12.))
+                    .text_size(theme::text_px(cx, 12.))
                     .text_color(t.secondary)
                     .child(format!("{}%", alpha.round() as i32)),
             );
@@ -280,77 +280,104 @@ impl SettingsWindow {
                 this.set_notification_type(NotificationType::parse(value), window, cx)
             }));
 
+        let auto_start_switch = EpSwitch::new("auto-start")
+            .checked(self.auto_start)
+            .loading(self.auto_start_loading)
+            .on_change(cx.listener(|this, value: &bool, window, cx| {
+                this.set_auto_start(*value, window, cx)
+            }));
+        let show_calendar_switch = EpSwitch::new("show-calendar")
+            .checked(show_calendar)
+            .on_change(cx.listener(|_, value: &bool, _, cx| {
+                crate::services::block_windows::set_calendar_visible(cx, *value)
+            }));
+        let auto_hide_switch = toggle(
+            "auto-hide",
+            auto_hide,
+            false,
+            Rc::new(AppState::set_auto_hide_enabled),
+            cx,
+        );
+        let top_on_wake_switch = toggle(
+            "top-on-wake",
+            top_on_wake,
+            !auto_hide,
+            Rc::new(AppState::set_top_on_wake),
+            cx,
+        );
+        let embed_switch = (cfg!(windows) || show_embed_row_for_screenshots()).then(|| {
+            toggle(
+                "embed-desktop",
+                embed,
+                false,
+                Rc::new(AppState::set_fixed_embed_desktop),
+                cx,
+            )
+        });
+        let dark_switch = toggle(
+            "dark-theme",
+            dark,
+            false,
+            Rc::new(move |state, dark, cx| state.set_window_dark(target, dark, cx)),
+            cx,
+        );
+
         div()
             .flex()
             .flex_col()
-            .child(panel_title("常规"))
+            .child(panel_title("常规", cx))
             .child(settings_row(
                 EpIcon::Monitor,
                 "开机自启",
                 None,
-                EpSwitch::new("auto-start")
-                    .checked(self.auto_start)
-                    .loading(self.auto_start_loading)
-                    .on_change(cx.listener(|this, value: &bool, window, cx| {
-                        this.set_auto_start(*value, window, cx)
-                    })),
+                auto_start_switch,
                 false,
+                cx,
             ))
             .child(settings_row(
                 EpIcon::Calendar,
                 "展示日历",
                 Some("开启后在独立的日历窗口中显示所有清单的待办"),
                 // 与托盘「显示日历」同一个状态（日历窗口的隐藏属性）：显示 / 隐藏日历窗口并回写托盘勾选
-                EpSwitch::new("show-calendar")
-                    .checked(show_calendar)
-                    .on_change(cx.listener(|_, value: &bool, _, cx| {
-                        crate::services::block_windows::set_calendar_visible(cx, *value)
-                    })),
+                show_calendar_switch,
                 false,
+                cx,
             ))
             .child(settings_row(
                 EpIcon::Monitor,
                 "贴边自动隐藏",
                 Some("固定模式下，贴边后自动隐藏并在边缘唤起"),
-                toggle("auto-hide", auto_hide, false, Rc::new(AppState::set_auto_hide_enabled), cx),
+                auto_hide_switch,
                 false,
+                cx,
             ))
             .child(settings_row(
                 EpIcon::Top,
                 "唤起时置顶",
                 Some("贴边唤起时显示在其它窗口之上；关闭后可能被全屏窗口遮挡"),
-                toggle("top-on-wake", top_on_wake, !auto_hide, Rc::new(AppState::set_top_on_wake), cx),
+                top_on_wake_switch,
                 false,
+                cx,
             ))
-            .when(cfg!(windows) || show_embed_row_for_screenshots(), |this| {
+            .when_some(embed_switch, |this, embed_switch| {
                 this.child(settings_row(
                     EpIcon::Monitor,
                     "固定模式时，嵌入桌面中",
                     Some(
                         "固定后窗口嵌在桌面图标之上、其它窗口之下，显示桌面（Win+D）时不会被隐藏；贴边隐藏与唤起置顶不再生效。 需要 Windows 11 24H2 及以上",
                     ),
-                    toggle(
-                        "embed-desktop",
-                        embed,
-                        false,
-                        Rc::new(AppState::set_fixed_embed_desktop),
-                        cx,
-                    ),
+                    embed_switch,
                     false,
+                    cx,
                 ))
             })
             .child(settings_row(
                 EpIcon::Moon,
                 "深色主题",
                 Some("启用半透明深色外观"),
-                toggle(
-                    "dark-theme",
-                    dark,
-                    false,
-                    Rc::new(move |state, dark, cx| state.set_window_dark(target, dark, cx)),
-                    cx,
-                ),
+                dark_switch,
                 false,
+                cx,
             ))
             .child(settings_row(
                 EpIcon::Brush,
@@ -358,6 +385,7 @@ impl SettingsWindow {
                 Some("仅深色主题下生效"),
                 swatches,
                 false,
+                cx,
             ))
             .child(settings_row(
                 EpIcon::Sunny,
@@ -365,6 +393,7 @@ impl SettingsWindow {
                 Some("数值越低越透明，仅深色主题下生效"),
                 slider,
                 false,
+                cx,
             ))
             .child(settings_row(
                 EpIcon::Bell,
@@ -372,6 +401,7 @@ impl SettingsWindow {
                 Some("选择待办提醒的通知展示方式"),
                 radio,
                 true,
+                cx,
             ))
     }
 }

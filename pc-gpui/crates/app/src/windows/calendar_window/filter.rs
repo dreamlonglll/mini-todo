@@ -15,7 +15,7 @@ use mini_todo_core::db::TodoList;
 
 use super::CalendarWindow;
 use crate::assets::EpIcon;
-use crate::theme::Palette;
+use crate::theme::{self, Palette};
 use crate::ui::ep_dropdown::{EpDropdownItem, EpDropdownMenu};
 use crate::ui::ep_popper::{self, Placement, PopperOptions};
 use crate::ui::message::{self, MessageKind};
@@ -183,8 +183,10 @@ impl CalendarWindow {
             .on_select(cx.listener(|this, command: &SharedString, window, cx| {
                 this.apply_filter_command(command, window, cx)
             }));
-        let width = menu.panel_width().clamp(MENU_MIN_WIDTH, MENU_MAX_WIDTH);
-        let height = menu.panel_height();
+        let width = menu
+            .panel_width_for(cx)
+            .clamp(MENU_MIN_WIDTH, MENU_MAX_WIDTH * theme::font_scale(cx));
+        let height = menu.panel_height_for(cx);
         let dismiss = cx.entity().downgrade();
         ep_popper::popper(
             &self.filter_anchor,

@@ -64,7 +64,7 @@ impl ChangelogWindow {
         window.remove_window();
     }
 
-    fn render_section(&self, index: usize, section: &Section) -> impl IntoElement {
+    fn render_section(&self, index: usize, section: &Section, cx: &App) -> impl IntoElement {
         let palette = light();
         div()
             .flex()
@@ -83,7 +83,7 @@ impl ChangelogWindow {
                     .gap(px(dims::HEADER_GAP))
                     .child(
                         div()
-                            .text_size(px(dims::VERSION_SIZE))
+                            .text_size(theme::text_px(cx, dims::VERSION_SIZE))
                             .font_weight(theme::WEIGHT_SEMIBOLD)
                             .text_color(palette.text_primary)
                             .child(SharedString::from(section.version.clone())),
@@ -91,7 +91,7 @@ impl ChangelogWindow {
                     .when_some(section.date.clone(), |this, date| {
                         this.child(
                             div()
-                                .text_size(px(dims::DATE_SIZE))
+                                .text_size(theme::text_px(cx, dims::DATE_SIZE))
                                 .text_color(palette.text_tertiary)
                                 .child(date),
                         )
@@ -117,7 +117,7 @@ impl Render for ChangelogWindow {
         let intro = self.upgraded.then(|| {
             div()
                 .mb(px(dims::SECTION_GAP))
-                .text_size(px(dims::INTRO_SIZE))
+                .text_size(theme::text_px(cx, dims::INTRO_SIZE))
                 .text_color(palette.text_secondary)
                 .child(format!(
                     "Mini Todo 已更新到 {APP_VERSION}，以下是新版本的变化。"
@@ -127,11 +127,11 @@ impl Render for ChangelogWindow {
             .sections
             .iter()
             .enumerate()
-            .map(|(index, section)| self.render_section(index, section).into_any_element())
+            .map(|(index, section)| self.render_section(index, section, cx).into_any_element())
             .collect();
         let empty = self.sections.is_empty().then(|| {
             div()
-                .text_size(px(dims::INTRO_SIZE))
+                .text_size(theme::text_px(cx, dims::INTRO_SIZE))
                 .text_color(palette.text_tertiary)
                 .child("暂无更新日志")
         });
@@ -190,8 +190,8 @@ impl Render for ChangelogWindow {
             .size_full()
             .flex()
             .flex_col()
-            .font(theme::ui_font())
-            .text_size(theme::FONT_SIZE)
+            .font(theme::ui_font(cx))
+            .text_size(theme::text_px(cx, 14.))
             .line_height(relative(theme::LINE_HEIGHT))
             .text_color(palette.text_primary)
             .bg(palette.window_bg)

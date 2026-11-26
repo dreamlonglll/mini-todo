@@ -2,9 +2,9 @@
 //! 更新日志（GPUI 版新增：以设置窗口为打开方的模态子窗口，显示全部版本，见 `windows::changelog`）。
 
 use gpui_kit::{
-    Context, Div, ElementId, InteractiveElement as _, IntoElement, ParentElement as _, Stateful,
-    StatefulInteractiveElement as _, Styled as _, Window, div, linear_color_stop, linear_gradient,
-    prelude::FluentBuilder as _, px,
+    App, Context, Div, ElementId, InteractiveElement as _, IntoElement, ParentElement as _,
+    Stateful, StatefulInteractiveElement as _, Styled as _, Window, div, linear_color_stop,
+    linear_gradient, prelude::FluentBuilder as _, px,
 };
 
 use super::SettingsWindow;
@@ -18,7 +18,7 @@ use crate::ui::message_box::{self, BoxKind, ConfirmOptions};
 use crate::windows::{ChildOf, changelog};
 
 /// 关于页的整行描边按钮（「检查更新」「更新日志」）：居中、gap 8、`padding 12px 16px`、1px 边、圆角 8、14px / 500
-fn outline_button(id: impl Into<ElementId>) -> Stateful<Div> {
+fn outline_button(id: impl Into<ElementId>, cx: &App) -> Stateful<Div> {
     let t = settings_tokens();
     div()
         .id(id)
@@ -33,7 +33,7 @@ fn outline_button(id: impl Into<ElementId>) -> Stateful<Div> {
         .border_color(t.border)
         .rounded(theme::radius::MD)
         .bg(t.surface)
-        .text_size(px(14.))
+        .text_size(theme::text_px(cx, 14.))
         .font_weight(theme::WEIGHT_MEDIUM)
         .text_color(t.label)
 }
@@ -113,13 +113,14 @@ impl SettingsWindow {
             ))
             .child(icon(EpIcon::Promotion, 36., t.surface));
 
+        let badge_size = theme::scaled_size(cx, 11.);
         let info = div()
             .flex()
             .flex_col()
             .child(
                 div()
                     .mb(px(4.))
-                    .text_size(px(18.))
+                    .text_size(theme::text_px(cx, 18.))
                     .font_weight(theme::WEIGHT_SEMIBOLD)
                     .text_color(t.title)
                     .child("Mini Todo"),
@@ -130,7 +131,7 @@ impl SettingsWindow {
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .text_size(px(13.))
+                    .text_size(theme::text_px(cx, 13.))
                     .text_color(t.secondary)
                     .child(format!("版本 {APP_VERSION}"))
                     .when_some(update, |this, latest| {
@@ -140,8 +141,8 @@ impl SettingsWindow {
                                 .py(px(2.))
                                 .rounded(px(10.))
                                 .bg(t.update_badge_bg)
-                                .text_size(px(11.))
-                                .line_height(px(16.5))
+                                .text_size(px(badge_size))
+                                .line_height(px(badge_size * 1.5))
                                 .font_weight(theme::WEIGHT_MEDIUM)
                                 .text_color(t.update_badge_text)
                                 .child(format!("新版本 {latest}")),
@@ -150,7 +151,7 @@ impl SettingsWindow {
             )
             .child(
                 div()
-                    .text_size(px(12.))
+                    .text_size(theme::text_px(cx, 12.))
                     .text_color(t.tertiary)
                     .child("一个简洁高效的桌面待办应用"),
             );
@@ -160,7 +161,7 @@ impl SettingsWindow {
         } else {
             icon(EpIcon::Refresh, 16., t.label).into_any_element()
         };
-        let button = outline_button("check-update")
+        let button = outline_button("check-update", cx)
             .when(checking, |this| {
                 this.opacity(0.6)
                     .cursor(gpui_kit::CursorStyle::OperationNotAllowed)
@@ -176,7 +177,7 @@ impl SettingsWindow {
             } else {
                 "检查更新"
             });
-        let changelog_button = outline_button("open-changelog")
+        let changelog_button = outline_button("open-changelog", cx)
             .mt(px(12.))
             .cursor_pointer()
             .hover(move |s| s.bg(t.window_bg).border_color(t.hover_border))

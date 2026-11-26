@@ -416,7 +416,7 @@ impl Styled for EpButton {
 }
 
 impl RenderOnce for EpButton {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let (normal, hover, active, disabled_colors) = variant_colors(self.kind, self.variant);
         let inactive = self.disabled || self.loading;
         let colors = if self.disabled {
@@ -424,10 +424,12 @@ impl RenderOnce for EpButton {
         } else {
             normal
         };
-        let (height, pad_x, pad_y, font) = match self.size {
+        let (base_height, pad_x, pad_y, base_font): (f32, f32, f32, f32) = match self.size {
             ButtonSize::Default => (32., 15., 8., 14.),
             ButtonSize::Small => (24., 11., 5., 12.),
         };
+        let font = theme::scaled_size(cx, base_font);
+        let height = base_height.max((font + pad_y * 2. + 2.).ceil());
         let icon_size = self.icon_size.unwrap_or(font);
         let is_link = self.variant == Variant::Link;
         let has_label = self.label.is_some();

@@ -314,6 +314,7 @@ impl CalendarWindow {
             }
         };
 
+        let weekday_size = theme::text_px(cx, 12.);
         let weekdays = div().flex().flex_none().children(
             ["一", "二", "三", "四", "五", "六", "日"]
                 .into_iter()
@@ -325,7 +326,7 @@ impl CalendarWindow {
                         .justify_center()
                         .px(px(4.))
                         .py(px(8.))
-                        .text_size(px(12.))
+                        .text_size(weekday_size)
                         .line_height(relative(theme::LINE_HEIGHT))
                         .font_weight(theme::WEIGHT_MEDIUM)
                         .text_color(palette.text_secondary)
@@ -399,9 +400,13 @@ impl CalendarWindow {
                 el.opacity(0.4)
             }
         };
+        let date_font = theme::scaled_size(cx, 13.);
+        let today_circle = 20.0_f32.max((date_font * 1.45).ceil());
+        let badge_font = theme::scaled_size(cx, 9.);
+        let lunar_font = theme::scaled_size(cx, 10.);
         let date = if cell.is_today {
             div()
-                .size(px(20.))
+                .size(px(today_circle))
                 .flex()
                 .flex_none()
                 .items_center()
@@ -409,7 +414,7 @@ impl CalendarWindow {
                 .rounded_full()
                 .bg(palette.primary)
                 .text_color(theme::hex(0xFFFFFF))
-                .text_size(px(13.))
+                .text_size(px(date_font))
                 .line_height(relative(1.4))
                 .font_weight(theme::WEIGHT_MEDIUM)
                 .child(cell.date.day().to_string())
@@ -417,7 +422,7 @@ impl CalendarWindow {
             faded(
                 div()
                     .flex_none()
-                    .text_size(px(13.))
+                    .text_size(px(date_font))
                     .line_height(relative(1.4))
                     .font_weight(theme::WEIGHT_MEDIUM)
                     .text_color(palette.text_primary)
@@ -438,8 +443,8 @@ impl CalendarWindow {
                     .rounded(px(2.))
                     .bg(bg)
                     .text_color(theme::hex(0xFFFFFF))
-                    .text_size(px(9.))
-                    .line_height(px(9.))
+                    .text_size(px(badge_font))
+                    .line_height(px(badge_font))
                     .font_weight(theme::WEIGHT_SEMIBOLD)
                     .child(text),
             )
@@ -488,7 +493,7 @@ impl CalendarWindow {
                             .min_w_0()
                             .flex()
                             .justify_end()
-                            .text_size(px(10.))
+                            .text_size(px(lunar_font))
                             .line_height(relative(1.4))
                             .font_weight(lunar_weight)
                             .text_color(lunar_color)
@@ -513,8 +518,12 @@ impl CalendarWindow {
             (true, false) => 0.5,
             (true, true) => 0.65,
         };
+        let bar_font = theme::scaled_size(cx, 11.);
+        let date_font = theme::scaled_size(cx, 13.);
+        let bar_height = dims::BAR_HEIGHT.max((bar_font * 1.45).ceil() + 4.);
+        let bar_top = dims::BAR_TOP_OFFSET.max((date_font * 1.45).ceil() + 9.);
         let span = (bar.end_col - bar.start_col + 1) as f32;
-        let top = dims::BAR_TOP_OFFSET + bar.lane as f32 * (dims::BAR_HEIGHT + dims::BAR_GAP);
+        let top = bar_top + bar.lane as f32 * (bar_height + dims::BAR_GAP);
         div()
             .absolute()
             .left(relative(bar.start_col as f32 / 7.))
@@ -528,7 +537,7 @@ impl CalendarWindow {
                     )))
                     .mx(px(2.))
                     .mt(px(top))
-                    .h(px(dims::BAR_HEIGHT))
+                    .h(px(bar_height))
                     .px(px(6.))
                     .flex()
                     .items_center()
@@ -560,7 +569,7 @@ impl CalendarWindow {
                         let text = div()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(11.))
+                            .text_size(px(bar_font))
                             .text_color(theme::hex(0xFFFFFF))
                             .child(title);
                         this.child(if completed {

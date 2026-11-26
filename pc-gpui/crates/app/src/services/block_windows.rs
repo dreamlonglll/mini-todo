@@ -96,7 +96,10 @@ fn load_startup_snapshot(cx: &mut App) {
     });
     let runtime_prefs = settings::runtime_prefs(&db);
     let embed = settings::fixed_embed_desktop(&db);
+    let font_family = settings::font_family(&db).unwrap_or_default();
+    let font_size = settings::font_size(&db).unwrap_or(crate::theme::DEFAULT_FONT_SIZE);
     let screen_id = platform::screen_config_id(cx);
+    crate::theme::apply_user_font(cx, &font_family, font_size);
     AppState::global(cx).update(cx, |state, cx| {
         state.set_startup_snapshot(lists, prefs);
         state.current_screen_config_id = screen_id;
@@ -104,6 +107,8 @@ fn load_startup_snapshot(cx: &mut App) {
         state.runtime_prefs = runtime_prefs;
         state.auto_hide_enabled = runtime_prefs.auto_hide_enabled;
         state.top_on_wake = runtime_prefs.top_on_wake;
+        state.todo_font_family = font_family;
+        state.todo_font_size = font_size;
         cx.notify();
     });
 }

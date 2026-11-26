@@ -44,11 +44,12 @@ pub struct NativeTooltip {
 }
 
 impl Render for NativeTooltip {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let font = theme::scaled_size(cx, 12.);
         div()
-            .font(theme::ui_font())
-            .text_size(px(12.))
-            .line_height(px(16.))
+            .font(theme::ui_font(cx))
+            .text_size(px(font))
+            .line_height(px(font * (16. / 12.)))
             .px(px(8.))
             .py(px(5.))
             .bg(hex(0xF9F9F9))
@@ -174,15 +175,16 @@ impl RenderOnce for EpTooltip {
                     .h(px(ARROW_H))
                     .w(px(ARROW_W))
             };
+            let tip_font = theme::scaled_size(cx, 12.);
             let body = div()
-                .font(theme::ui_font())
+                .font(theme::ui_font(cx))
                 .min_w(px(10.))
                 .when_some(self.max_width, |this, w| this.max_w(w))
                 .when(self.max_width.is_none(), |this| this.whitespace_nowrap())
                 .px(px(11.))
                 .py(px(5.))
-                .text_size(px(12.))
-                .line_height(px(20.))
+                .text_size(px(tip_font))
+                .line_height(px(tip_font * (20. / 12.)))
                 .text_color(ep().white)
                 .bg(ep().tooltip_bg)
                 .border_1()

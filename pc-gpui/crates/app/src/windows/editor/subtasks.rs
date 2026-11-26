@@ -60,7 +60,7 @@ struct SubtaskGhost {
 }
 
 impl Render for SubtaskGhost {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let row = &self.drag.row;
         // 拖影视图的根元素由 GPUI 放在"光标 − 按下点相对手柄的偏移"处（即手柄左上角）；根元素上的相对偏移不生效，
         // 所以在内层用相对定位把整行挪回与原行对齐
@@ -71,12 +71,12 @@ impl Render for SubtaskGhost {
                 .top(-self.drag.shift.y)
                 .w(px(self.drag.width))
                 .opacity(0.8)
-                .font(theme::ui_font())
+                .font(theme::ui_font(cx))
                 .child(
                     row_frame(row.completed)
                         .child(handle_icon())
                         .child(checkbox_visual(row.completed))
-                        .child(title_visual(&row.title, row.completed)),
+                        .child(title_visual(&row.title, row.completed, cx)),
                 ),
         )
     }
@@ -133,7 +133,7 @@ fn checkbox_visual(checked: bool) -> gpui_kit::Div {
         })
 }
 
-fn title_visual(title: &str, completed: bool) -> gpui_kit::Div {
+fn title_visual(title: &str, completed: bool, cx: &App) -> gpui_kit::Div {
     let palette = light();
     div()
         .flex_1()
@@ -141,7 +141,7 @@ fn title_visual(title: &str, completed: bool) -> gpui_kit::Div {
         .px(px(4.))
         .py(px(2.))
         .rounded(px(4.))
-        .text_size(px(13.))
+        .text_size(theme::text_px(cx, 13.))
         .line_height(relative(1.4))
         .text_color(if completed {
             palette.text_tertiary
@@ -543,23 +543,46 @@ impl EditorWindow {
             .child(drag_region())
             .child(
                 div()
-                    .text_size(px(16.))
+                    .text_size(theme::text_px(cx, 16.))
                     .font_weight(theme::WEIGHT_SEMIBOLD)
                     .line_height(relative(1.2))
                     .text_color(hex(editor_theme::SLATE_700))
                     .child("子任务"),
             );
 
+        let progress = (total > 0).then(|| progress_card(done, total, cx).into_any_element());
+        let add_box =
+            (!self.is_view_mode).then(|| self.render_add_box(window, cx).into_any_element());
+        let pending_size = theme::text_px(cx, 12.);
+        let empty_size = theme::text_px(cx, 13.);
+        let list_or_empty = if total > 0 {
+            self.render_list(rows, window, cx).into_any_element()
+        } else {
+            div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .px(px(16.))
+                .py(px(24.))
+                .text_color(palette.text_tertiary)
+                .child(div().mb(px(8.)).opacity(0.5).child(icon(
+                    EpIcon::List,
+                    32.,
+                    palette.text_tertiary,
+                )))
+                .child(div().text_size(empty_size).child("暂无子任务"))
+                .into_any_element()
+        };
         let content = div()
             .flex_1()
             .min_h_0()
             .p(px(16.))
             .flex()
             .flex_col()
-            .when(total > 0, |this| this.child(progress_card(done, total)))
-            .when(!self.is_view_mode, |this| {
-                this.child(self.render_add_box(window, cx))
-            })
+            .children(progress)
+            .children(add_box)
             .when(pending > 0, |this| {
                 this.child(
                     div()
@@ -573,31 +596,12 @@ impl EditorWindow {
                         .rounded(px(8.))
                         .bg(hex(editor_theme::AMBER_50))
                         .text_color(hex(editor_theme::AMBER_700))
-                        .text_size(px(12.))
+                        .text_size(pending_size)
                         .child(icon(EpIcon::Warning, 14., hex(editor_theme::AMBER_700)))
                         .child(format!("{pending} 个子任务尚未创建，点击「保存」重试")),
                 )
             })
-            .child(if total > 0 {
-                self.render_list(rows, window, cx).into_any_element()
-            } else {
-                div()
-                    .flex_1()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .px(px(16.))
-                    .py(px(24.))
-                    .text_color(palette.text_tertiary)
-                    .child(div().mb(px(8.)).opacity(0.5).child(icon(
-                        EpIcon::List,
-                        32.,
-                        palette.text_tertiary,
-                    )))
-                    .child(div().text_size(px(13.)).child("暂无子任务"))
-                    .into_any_element()
-            });
+            .child(list_or_empty);
 
         div()
             .w(px(super::PANEL_WIDTH))
@@ -669,6 +673,9 @@ impl EditorWindow {
                     .group_hover("editor-import", |s| s.text_color(palette.primary)),
                 )
         });
+        let add_size = theme::scaled_size(cx, 13.);
+        let add_h = 20.0_f32.max((add_size * 1.5).ceil());
+        let btn_size = theme::scaled_size(cx, 12.);
         div()
             .id("editor-add-box")
             .flex_none()
@@ -705,15 +712,15 @@ impl EditorWindow {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .text_size(px(13.))
+                    .text_size(px(add_size))
                     .text_color(hex(editor_theme::SLATE_700))
                     .child(
                         Input::new(&self.add_input)
                             .appearance(false)
-                            .h(px(20.))
+                            .h(px(add_h))
                             .px(px(0.))
                             .py(px(0.))
-                            .text_size(px(13.)),
+                            .text_size(px(add_size)),
                     ),
             )
             .when(has_text, |this| {
@@ -729,8 +736,8 @@ impl EditorWindow {
                         .rounded(px(6.))
                         .bg(palette.primary)
                         .hover(|s| s.bg(palette.primary_dark))
-                        .text_size(px(12.))
-                        .line_height(px(18.))
+                        .text_size(px(btn_size))
+                        .line_height(px(btn_size * 1.5))
                         .text_color(hex(0xFFFFFF))
                         .cursor_pointer()
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -767,8 +774,8 @@ impl EditorWindow {
                 flip: true,
                 gap: ep_popper::OFFSET,
                 arrow: true,
-                width: 186.,
-                height: EpDropdownMenu::estimated_height(2, 0),
+                width: (186. * theme::font_scale(cx)).round(),
+                height: EpDropdownMenu::estimated_height_for(cx, 2, 0),
                 dark: false,
             },
             menu,
@@ -874,29 +881,33 @@ impl EditorWindow {
             }));
 
         let title: AnyElement = match renaming {
-            Some(input) => div()
-                .flex_1()
-                .min_w_0()
-                .px(px(4.))
-                .py(px(1.))
-                .rounded(px(4.))
-                .border_1()
-                .border_color(palette.primary)
-                .bg(hex(0xFFFFFF))
-                .text_size(px(13.))
-                .text_color(hex(editor_theme::SLATE_700))
-                .child(
-                    Input::new(&input)
-                        .appearance(false)
-                        .h(px(18.))
-                        .px(px(0.))
-                        .py(px(0.))
-                        .text_size(px(13.)),
-                )
-                .into_any_element(),
+            Some(input) => {
+                let rename_size = theme::scaled_size(cx, 13.);
+                let rename_h = 18.0_f32.max(rename_size * (18. / 13.));
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .px(px(4.))
+                    .py(px(1.))
+                    .rounded(px(4.))
+                    .border_1()
+                    .border_color(palette.primary)
+                    .bg(hex(0xFFFFFF))
+                    .text_size(px(rename_size))
+                    .text_color(hex(editor_theme::SLATE_700))
+                    .child(
+                        Input::new(&input)
+                            .appearance(false)
+                            .h(px(rename_h))
+                            .px(px(0.))
+                            .py(px(0.))
+                            .text_size(px(rename_size)),
+                    )
+                    .into_any_element()
+            }
             None => {
                 let title_text = row.title.clone();
-                title_visual(&row.title, row.completed)
+                title_visual(&row.title, row.completed, cx)
                     .id(SharedString::from(format!("subtask-title-{id}")))
                     .hover(|s| s.bg(palette.bg_tertiary))
                     .when(can_rename, |this| {
@@ -1050,7 +1061,7 @@ impl EditorWindow {
 }
 
 /// 进度卡片
-fn progress_card(done: usize, total: usize) -> impl IntoElement {
+fn progress_card(done: usize, total: usize, cx: &App) -> impl IntoElement {
     let percent = if total > 0 {
         (done as f32 / total as f32 * 100.).round()
     } else {
@@ -1077,14 +1088,14 @@ fn progress_card(done: usize, total: usize) -> impl IntoElement {
                 .min_w(px(50.))
                 .child(
                     div()
-                        .text_size(px(16.))
+                        .text_size(theme::text_px(cx, 16.))
                         .font_weight(theme::WEIGHT_SEMIBOLD)
                         .text_color(hex(editor_theme::SKY_700))
                         .child(format!("{done} / {total}")),
                 )
                 .child(
                     div()
-                        .text_size(px(11.))
+                        .text_size(theme::text_px(cx, 11.))
                         .text_color(light().text_secondary)
                         .child("已完成"),
                 ),

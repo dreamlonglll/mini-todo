@@ -91,9 +91,9 @@ impl EpRadioButtons {
 }
 
 impl RenderOnce for EpRadioButtons {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let ep = ep();
-        let font = if self.small { 12. } else { 14. };
+        let font = theme::scaled_size(cx, if self.small { 12. } else { 14. });
         let (pad_y, pad_x) = self
             .padding
             .unwrap_or(if self.small { (5., 11.) } else { (8., 15.) });

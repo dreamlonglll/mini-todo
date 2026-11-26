@@ -775,7 +775,7 @@ impl Render for DragGhost {
     fn render(
         &mut self,
         _window: &mut Window,
-        _cx: &mut gpui_kit::Context<Self>,
+        cx: &mut gpui_kit::Context<Self>,
     ) -> impl IntoElement {
         let rc = &self.rc;
         let palette = rc.palette;
@@ -789,8 +789,8 @@ impl Render for DragGhost {
             .items_start()
             .px(px(12.))
             .py(px(8.))
-            .font(theme::ui_font())
-            .text_size(theme::FONT_SIZE)
+            .font(theme::ui_font(cx))
+            .text_size(theme::text_px(cx, 14.))
             .line_height(relative(theme::LINE_HEIGHT))
             .child(
                 div()

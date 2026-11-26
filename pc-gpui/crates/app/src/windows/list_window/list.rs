@@ -47,7 +47,7 @@ impl ListWindow {
             ))
             .children(children)
             .when(empty, |this| {
-                this.child(render_empty(&rc.palette, rc, fab_visible))
+                this.child(render_empty(&rc.palette, rc, fab_visible, cx))
             })
     }
 
@@ -85,7 +85,12 @@ impl ListWindow {
 }
 
 /// 空状态：`Document` 48px + `暂无待办事项` + 提示（深色下底 `rgba(0,0,0,0.1)`）。提示见 [`empty_hints`]
-fn render_empty(palette: &Palette, rc: &RenderCtx, fab_visible: bool) -> impl IntoElement {
+fn render_empty(
+    palette: &Palette,
+    rc: &RenderCtx,
+    fab_visible: bool,
+    cx: &gpui_kit::App,
+) -> impl IntoElement {
     div()
         .flex()
         .flex_col()
@@ -95,12 +100,18 @@ fn render_empty(palette: &Palette, rc: &RenderCtx, fab_visible: bool) -> impl In
         .text_color(palette.text_tertiary)
         .bg(rc.colors.empty_bg)
         .child(icon(EpIcon::Document, 48., palette.text_tertiary))
-        .child(div().mt(px(8.)).text_size(px(14.)).child("暂无待办事项"))
-        .children(
-            empty_hints(fab_visible)
-                .into_iter()
-                .map(|hint| div().mt(px(4.)).text_size(px(12.)).child(hint)),
+        .child(
+            div()
+                .mt(px(8.))
+                .text_size(crate::theme::text_px(cx, 14.))
+                .child("暂无待办事项"),
         )
+        .children(empty_hints(fab_visible).into_iter().map(|hint| {
+            div()
+                .mt(px(4.))
+                .text_size(crate::theme::text_px(cx, 12.))
+                .child(hint)
+        }))
 }
 
 /// 空状态的提示行：没锁定时先提示 FAB（旧版文案），再提示双击空白 / 快捷键；锁定时没有 FAB，只提示后者

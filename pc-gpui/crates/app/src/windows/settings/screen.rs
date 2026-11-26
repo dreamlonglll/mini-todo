@@ -203,6 +203,9 @@ impl SettingsWindow {
         let configs = self.state.read(cx).screen_configs.clone();
         let current = self.current_screen_id.clone();
 
+        let title_size = theme::text_px(cx, 13.);
+        let badge_size = theme::scaled_size(cx, 10.);
+        let meta_size = theme::text_px(cx, 11.);
         let body = if configs.is_empty() {
             div()
                 .flex()
@@ -216,7 +219,7 @@ impl SettingsWindow {
                         .opacity(0.5)
                         .child(icon(EpIcon::Monitor, 28., t.tertiary)),
                 )
-                .child(div().text_size(px(13.)).child("暂无保存的屏幕配置"))
+                .child(div().text_size(title_size).child("暂无保存的屏幕配置"))
                 .into_any_element()
         } else {
             div()
@@ -263,7 +266,7 @@ impl SettingsWindow {
                                         .flex()
                                         .items_center()
                                         .gap(px(8.))
-                                        .text_size(px(13.))
+                                        .text_size(title_size)
                                         .font_weight(theme::WEIGHT_MEDIUM)
                                         .text_color(t.label)
                                         .child(name)
@@ -278,8 +281,8 @@ impl SettingsWindow {
                                                         linear_color_stop(t.gradient_from, 0.),
                                                         linear_color_stop(t.gradient_to, 1.),
                                                     ))
-                                                    .text_size(px(10.))
-                                                    .line_height(px(15.))
+                                                    .text_size(px(badge_size))
+                                                    .line_height(px(badge_size * 1.5))
                                                     .text_color(t.surface)
                                                     .child("当前"),
                                             )
@@ -288,7 +291,7 @@ impl SettingsWindow {
                                 .child(
                                     div()
                                         .mt(px(4.))
-                                        .text_size(px(11.))
+                                        .text_size(meta_size)
                                         .text_color(t.secondary)
                                         .truncate()
                                         .child(detail),
@@ -296,7 +299,7 @@ impl SettingsWindow {
                                 .child(
                                     div()
                                         .mt(px(2.))
-                                        .text_size(px(11.))
+                                        .text_size(meta_size)
                                         .text_color(t.tertiary)
                                         .child(meta),
                                 ),
@@ -321,12 +324,13 @@ impl SettingsWindow {
         div()
             .flex()
             .flex_col()
-            .child(panel_title("屏幕配置"))
+            .child(panel_title("屏幕配置", cx))
             .child(
                 card_hint(
                     EpIcon::InfoFilled,
                     "应用会根据不同的屏幕组合自动保存和恢复窗口位置",
                     false,
+                    cx,
                 )
                 .mb(px(12.)),
             )

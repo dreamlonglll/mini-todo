@@ -80,20 +80,20 @@ impl SettingsWindow {
         div()
             .flex()
             .flex_col()
-            .child(panel_title("外观"))
+            .child(panel_title("外观", cx))
             .child(
                 div()
                     .mb(px(20.))
-                    .child(form_label().child("待办字体"))
+                    .child(form_label(cx).child("字体"))
                     .child(div().w_full().child(self.font_select.clone())),
             )
             .child(
                 div()
                     .mb(px(20.))
                     .child(
-                        form_label().child("字体大小").child(
+                        form_label(cx).child("字体大小").child(
                             div()
-                                .text_size(px(12.))
+                                .text_size(theme::text_px(cx, 12.))
                                 .font_weight(theme::WEIGHT_SEMIBOLD)
                                 .text_color(t.primary)
                                 .child(format!("{size}px")),
@@ -122,7 +122,7 @@ impl SettingsWindow {
                     .text_color(t.label)
                     .font(theme::todo_font(&family))
                     .text_size(px(size as f32))
-                    .child("待办事项预览 Todo Preview 1234"),
+                    .child("字体效果预览 Todo Preview 1234"),
             )
     }
 }

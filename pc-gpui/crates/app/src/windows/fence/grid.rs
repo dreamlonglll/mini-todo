@@ -12,8 +12,8 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use gpui_kit::{
-    Anchor, AnchoredPositionMode, AnyElement, AppContext as _, Context, DragMoveEvent, ImageSource,
-    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ObjectFit,
+    Anchor, AnchoredPositionMode, AnyElement, App, AppContext as _, Context, DragMoveEvent,
+    ImageSource, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ObjectFit,
     ParentElement as _, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, SharedString,
     StatefulInteractiveElement as _, Styled as _, StyledImage as _, Window, anchored, deferred,
     div, img, prelude::FluentBuilder as _, px,
@@ -95,7 +95,7 @@ struct FenceItemDragView {
 }
 
 impl Render for FenceItemDragView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = fence_tokens();
         render_cell_body(
             &self.entry,
@@ -103,6 +103,7 @@ impl Render for FenceItemDragView {
             self.failed,
             false,
             self.icon_size,
+            cx,
         )
         .relative()
         .w(px(self.icon_size + 40.))
@@ -112,7 +113,8 @@ impl Render for FenceItemDragView {
         .rounded(px(6.))
         .bg(t.item_selected)
         .opacity(0.8)
-        .font(theme::ui_font())
+        .font(theme::ui_font(cx))
+        .text_size(theme::text_px(cx, theme::FENCE_FONT_SIZE_BASE))
         .text_color(t.text)
         .child(
             div()
@@ -147,14 +149,16 @@ pub(crate) fn break_all(text: &str) -> String {
 }
 
 /// 带 1px 下移阴影的文字（CSS `text-shadow` 的近似：GPUI 没有文字阴影）
-fn shadowed_name(text: SharedString) -> gpui_kit::Div {
+fn shadowed_name(text: SharedString, cx: &App) -> gpui_kit::Div {
     let text: SharedString = break_all(&text).into();
     let t = fence_tokens();
+    let font_size = theme::scaled_size(cx, 12.);
+    let line_h = font_size * (16. / 12.);
     let base = || {
         div()
             .w_full()
-            .text_size(px(12.))
-            .line_height(px(16.))
+            .text_size(px(font_size))
+            .line_height(px(line_h))
             .text_center()
             .line_clamp(2)
             .text_ellipsis()
@@ -180,6 +184,7 @@ fn render_cell_body(
     failed: bool,
     launching: bool,
     icon_size: f32,
+    cx: &App,
 ) -> gpui_kit::Div {
     let t = fence_tokens();
     // 半透明加在图标框与名字上，不加在返回的外层元素上：调用方（拖动克隆体）会给外层设自己的不透明度
@@ -237,7 +242,7 @@ fn render_cell_body(
                 }),
         )
         .child(
-            shadowed_name(entry.display_name.clone().into()).when(dimmed, |this| {
+            shadowed_name(entry.display_name.clone().into(), cx).when(dimmed, |this| {
                 this.opacity(theme::FENCE_HIDDEN_ITEM_OPACITY)
             }),
         )
@@ -331,7 +336,7 @@ impl FenceWindow {
     // ------------------------------------------------------------------
 
     /// 可见（含上下 64px 外扩）的项目下标范围：按单元最矮 / 最高的行高估一个超集
-    fn visible_range(&self, count: usize) -> std::ops::Range<usize> {
+    fn visible_range(&self, count: usize, cx: &App) -> std::ops::Range<usize> {
         let size = self.icon_size() as f32;
         let cell_w = size + 40.;
         let viewport = self.grid_scroll.bounds();
@@ -342,8 +347,9 @@ impl FenceWindow {
             return 0..count.min(12);
         }
         let cols = ((width / cell_w).floor() as usize).max(1);
-        let short_row = 6. + size + 4. + 16. + 4. + 2.;
-        let tall_row = short_row + 16.;
+        let line_h = theme::scaled_size(cx, 12.) * (16. / 12.);
+        let short_row = 6. + size + 4. + line_h + 4. + 2.;
+        let tall_row = short_row + line_h;
         let top = (-f32::from(self.grid_scroll.offset().y) - timing::ICON_PRELOAD_MARGIN).max(0.);
         let bottom = -f32::from(self.grid_scroll.offset().y) + height + timing::ICON_PRELOAD_MARGIN;
         let first_row = (top / tall_row).floor() as usize;
@@ -360,7 +366,7 @@ impl FenceWindow {
         let bucket = logic::icon_bucket(logic::icon_request_px(f64::from(self.icon_size()), dpr));
         // 只请求显示中的项目（没开「显示隐藏的图标」时隐藏项不请求）
         let shown = self.display_items();
-        let range = self.visible_range(shown.len());
+        let range = self.visible_range(shown.len(), cx);
         let wanted: Vec<IconRequest> = shown[range]
             .iter()
             .map(|entry| IconRequest {
@@ -859,6 +865,7 @@ impl FenceWindow {
                         failed,
                         launching,
                         size,
+                        cx,
                     ))
                     .into_any_element()
             })
@@ -904,6 +911,9 @@ impl FenceWindow {
     ) -> Option<AnyElement> {
         let menu = self.item_menu.clone()?;
         let t = fence_tokens();
+        let row_size = theme::scaled_size(cx, 12.);
+        let note_size = theme::text_px(cx, 11.);
+        let row_min_h = 28.0_f32.max((row_size + 12.).ceil());
         let row = |id: SharedString| {
             div()
                 .id(id)
@@ -911,9 +921,10 @@ impl FenceWindow {
                 .flex_none()
                 .items_center()
                 .gap(px(8.))
-                .h(px(28.))
+                .min_h(px(row_min_h))
+                .py(px(2.))
                 .px(px(8.))
-                .text_size(px(12.))
+                .text_size(px(row_size))
                 .text_color(t.menu_text)
                 .whitespace_nowrap()
                 .rounded(theme::radius::SM)
@@ -934,7 +945,7 @@ impl FenceWindow {
                         .child(
                             div()
                                 .ml_auto()
-                                .text_size(px(11.))
+                                .text_size(note_size)
                                 .text_color(t.menu_note)
                                 .child(AUTO_HIDDEN_NOTE),
                         )
@@ -1001,7 +1012,7 @@ impl FenceWindow {
                             if has_targets {
                                 this.child(icon(EpIcon::Right, 12., t.menu_text))
                             } else {
-                                this.text_size(px(11.))
+                                this.text_size(note_size)
                                     .text_color(t.menu_note)
                                     .child("没有其他收纳箱")
                             }
@@ -1050,14 +1061,14 @@ impl FenceWindow {
                 .occlude()
                 .flex()
                 .flex_col()
-                .min_w(px(150.))
+                .min_w(px(150. * theme::font_scale(cx)))
                 .p(px(4.))
                 .bg(t.menu_bg)
                 .border_1()
                 .border_color(t.menu_border)
                 .rounded(px(6.))
                 .shadow(vec![theme::shadow(0., 6., 18., 0., t.menu_shadow)])
-                .font(theme::ui_font())
+                .font(theme::ui_font(cx))
                 .line_height(gpui_kit::relative(theme::LINE_HEIGHT))
                 .on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, window, cx| {
                     this.close_item_menu(window, cx)

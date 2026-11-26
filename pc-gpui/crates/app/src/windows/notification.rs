@@ -171,7 +171,7 @@ impl Render for NotificationWindow {
             .child(
                 div()
                     .mb(px(4.))
-                    .text_size(px(14.))
+                    .text_size(theme::text_px(cx, 14.))
                     .font_weight(theme::WEIGHT_SEMIBOLD)
                     .text_color(palette.text_primary)
                     .truncate()
@@ -180,7 +180,7 @@ impl Render for NotificationWindow {
             .when(!description.is_empty(), |this| {
                 this.child(
                     div()
-                        .text_size(px(12.))
+                        .text_size(theme::text_px(cx, 12.))
                         .line_height(relative(1.4))
                         .text_color(palette.text_secondary)
                         .line_clamp(2)
@@ -196,7 +196,7 @@ impl Render for NotificationWindow {
             .pb(px(12.))
             .child(
                 div()
-                    .text_size(px(11.))
+                    .text_size(theme::text_px(cx, 11.))
                     .text_color(palette.text_tertiary)
                     .child("Mini Todo"),
             );
@@ -206,8 +206,8 @@ impl Render for NotificationWindow {
             .flex()
             .items_center()
             .justify_center()
-            .font(theme::ui_font())
-            .text_size(theme::FONT_SIZE)
+            .font(theme::ui_font(cx))
+            .text_size(theme::text_px(cx, 14.))
             .line_height(relative(theme::LINE_HEIGHT))
             .cursor_pointer()
             .on_click(cx.listener(|_, _: &ClickEvent, window, _| window.remove_window()))

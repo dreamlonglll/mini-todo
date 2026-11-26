@@ -291,14 +291,15 @@ impl ListWindow {
                 .into_any_element();
         }
         let default_list = self.list_id() == DEFAULT_LIST_ID;
+        let title_size = theme::scaled_size(cx, 16.);
         div()
             .id("list-name")
             .relative()
             .when(default_list, |this| this.flex_none())
             .when(!default_list, |this| this.min_w_0().truncate())
             .whitespace_nowrap()
-            .text_size(px(16.))
-            .line_height(relative_line(16.))
+            .text_size(px(title_size))
+            .line_height(relative_line(title_size))
             .font_weight(theme::WEIGHT_SEMIBOLD)
             .text_color(palette.text_primary)
             .on_mouse_up(
@@ -340,6 +341,8 @@ impl ListWindow {
             .on_select(cx.listener(|this, command: &SharedString, window, cx| {
                 this.on_name_command(command, window, cx)
             }));
+        let width = MENU_WIDTH.max(menu.panel_width_for(cx));
+        let height = EpDropdownMenu::estimated_height_for(cx, 2, 0);
         let dismiss = cx.entity().downgrade();
         ep_popper::popper(
             &self.name.anchor,
@@ -349,11 +352,11 @@ impl ListWindow {
                 flip: false,
                 gap: ep_popper::OFFSET,
                 arrow: true,
-                width: MENU_WIDTH,
-                height: EpDropdownMenu::estimated_height(2, 0),
+                width,
+                height,
                 dark,
             },
-            div().w(px(MENU_WIDTH)).child(menu),
+            div().w(px(width)).child(menu),
             move |_, cx| {
                 let _ = dismiss.update(cx, |this, cx| this.close_name_menu(cx));
             },

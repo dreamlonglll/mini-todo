@@ -137,7 +137,7 @@ impl Styled for WindowTitleBar {
 }
 
 impl RenderOnce for WindowTitleBar {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let palette = light();
         let on_close = self.on_close.clone();
         let close = self.closable.then(|| {
@@ -166,7 +166,7 @@ impl RenderOnce for WindowTitleBar {
             .when(self.draggable, |this| this.child(drag_region()))
             .child(
                 div()
-                    .text_size(px(self.title_size))
+                    .text_size(theme::text_px(cx, self.title_size))
                     .font_weight(theme::WEIGHT_SEMIBOLD)
                     .line_height(relative(1.2))
                     .text_color(palette.text_primary)

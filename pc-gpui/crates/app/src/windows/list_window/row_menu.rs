@@ -159,7 +159,7 @@ impl ListWindow {
                     this.open_move_submenu(cx);
                 }
             }));
-        let (width, height) = (main.panel_width(), main.panel_height());
+        let (width, height) = (main.panel_width_for(cx), main.panel_height_for(cx));
         let submenu_frame = menu.submenu_frame.clone();
         let dismiss = cx.entity().downgrade();
         layers.extend(ep_popper::popper(
@@ -202,9 +202,9 @@ impl ListWindow {
                     }),
                 );
             let width = sub
-                .panel_width()
+                .panel_width_for(cx)
                 .clamp(SUBMENU_MIN_WIDTH, SUBMENU_MAX_WIDTH);
-            let height = sub.panel_height();
+            let height = sub.panel_height_for(cx);
             let dismiss = cx.entity().downgrade();
             // 锚点是主菜单的外框：点在主菜单上不收起（popper 不把锚点算作外面）
             layers.extend(ep_popper::popper(

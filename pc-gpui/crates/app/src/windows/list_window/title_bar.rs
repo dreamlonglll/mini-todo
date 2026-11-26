@@ -1,6 +1,6 @@
 //! 清单窗口标题栏（旧 `TitleBar.vue`，规格 §4）：padding 12 16、高 52；左区清单名 + 版本号（更新红点；只在默认清单窗口）+
-//! 展开全部；右区 已完成（只看本清单）/ 视图 / 日夜 / 锁 / 同步 / 设置（PRD R6）。日历窗口的标题栏复用这里的按钮
-//! （[`title_button`]、[`theme_button`]、[`lock_button`]、[`settings_button`]）。
+//! 展开全部；右区 已完成（只看本清单）/ 视图 / 日夜 / 锁 / 同步 / 设置（同步与设置按钮只在默认清单窗口显示）。日历窗口的标题栏复用这里的按钮
+//! （[`title_button`]、[`theme_button`]、[`lock_button`]）。
 //!
 //! 移动是自绘的（`windows::block::BlockDrag::title_bar`：按下记光标、超过 3px 才跟手、吸附对齐、松手保存一次），不进系统拖动循环
 //! （没有 `drag_region()`，也就没有 Aero Snap 与双击最大化）。固定模式（含嵌入桌面）不挂拖动。按钮、版本号等可点击元素
@@ -125,8 +125,41 @@ pub(crate) fn lock_button(
     )
 }
 
-/// 设置按钮：以本窗口为打开方（模态、遮罩；「深色主题」切的是本窗口）
-pub(crate) fn settings_button(palette: &Palette) -> gpui_kit::Stateful<gpui_kit::Div> {
+/// 同步按钮（只在默认清单窗口右上角显示）
+fn sync_button(palette: &Palette, syncing: bool) -> gpui_kit::Stateful<gpui_kit::Div> {
+    let palette = *palette;
+    let sync_icon = icon(EpIcon::Refresh, dims::TITLE_ICON, palette.text_secondary)
+        .group_hover("title-sync", move |s| s.text_color(palette.text_primary));
+    let hover_bg = palette.bg_tertiary;
+    div()
+        .id("title-sync")
+        .group("title-sync")
+        .occlude()
+        .size(px(dims::TITLE_BUTTON))
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .rounded(theme::radius::BASE)
+        .cursor_pointer()
+        .hover(move |s| s.bg(hover_bg))
+        .tooltip(tooltip::native(if syncing {
+            "同步中..."
+        } else {
+            "同步数据"
+        }))
+        .when(!syncing, |this| {
+            this.on_click(|_, window, cx| manual_sync(window, cx))
+        })
+        .child(if syncing {
+            spinning("title-sync-spin", sync_icon).into_any_element()
+        } else {
+            sync_icon.into_any_element()
+        })
+}
+
+/// 设置按钮（只在默认清单窗口右上角显示）：以本窗口为打开方（模态、遮罩；「深色主题」切的是本窗口）
+fn settings_button(palette: &Palette) -> gpui_kit::Stateful<gpui_kit::Div> {
     title_button(
         "title-settings",
         EpIcon::Setting,
@@ -179,6 +212,7 @@ impl ListWindow {
 
         // 标题栏左区放不下时（macOS 的系统字体比 Segoe UI 宽）先收缩版本号：容器可以缩到 0，版本文字按剩余宽度截断加省略号，
         // 更新红点不截。放得下时排版与以前一样（截断只在文字超出时才发生）
+        let version_size = theme::scaled_size(cx, 11.);
         let version = show_version.then(|| {
             div()
                 .id("version-tag")
@@ -189,8 +223,8 @@ impl ListWindow {
                 .ml(px(4.))
                 // align-items: baseline 的近似：11px 版本号的基线对齐 16px 标题的首行基线
                 .mt(px(6.))
-                .text_size(px(11.))
-                .line_height(relative_line(11.))
+                .text_size(px(version_size))
+                .line_height(relative_line(version_size))
                 .text_color(version_color)
                 .whitespace_nowrap()
                 .when(has_update, |this| {
@@ -261,35 +295,6 @@ impl ListWindow {
         let syncing = state.syncing;
         let palette = *palette;
 
-        let sync_icon = icon(EpIcon::Refresh, dims::TITLE_ICON, palette.text_secondary)
-            .group_hover("title-sync", move |s| s.text_color(palette.text_primary));
-        let hover_bg = palette.bg_tertiary;
-        let sync_button = div()
-            .id("title-sync")
-            .group("title-sync")
-            .occlude()
-            .size(px(dims::TITLE_BUTTON))
-            .flex()
-            .flex_none()
-            .items_center()
-            .justify_center()
-            .rounded(theme::radius::BASE)
-            .cursor_pointer()
-            .hover(move |s| s.bg(hover_bg))
-            .tooltip(tooltip::native(if syncing {
-                "同步中..."
-            } else {
-                "同步数据"
-            }))
-            .when(!syncing, |this| {
-                this.on_click(|_, window, cx| manual_sync(window, cx))
-            })
-            .child(if syncing {
-                spinning("title-sync-spin", sync_icon).into_any_element()
-            } else {
-                sync_icon.into_any_element()
-            });
-
         div()
             .flex()
             .flex_none()
@@ -336,8 +341,10 @@ impl ListWindow {
             })
             .child(theme_button(block, is_dark, &palette))
             .child(lock_button(block, is_fixed, &palette))
-            .child(sync_button)
-            .child(settings_button(&palette))
+            .when(list_id == DEFAULT_LIST_ID, |this| {
+                this.child(sync_button(&palette, syncing))
+                    .child(settings_button(&palette))
+            })
     }
 
     /// 点版本号且有更新：确认后打开 GitHub Release 页面（旧 `handleVersionClick`）

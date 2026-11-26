@@ -506,6 +506,7 @@ impl AppState {
                 this.window_bg = loaded.window_bg;
                 this.todo_font_family = loaded.todo_font_family;
                 this.todo_font_size = loaded.todo_font_size;
+                crate::theme::apply_user_font(cx, &this.todo_font_family, this.todo_font_size);
                 this.notification_type = loaded.notification_type;
                 this.screen_configs = loaded.screen_configs;
                 this.runtime_prefs = loaded.runtime_prefs;
@@ -1320,7 +1321,7 @@ impl AppState {
         )
     }
 
-    /// 待办字体与字号（字号夹到 12~20）
+    /// 全局字体与字号（字号夹到 12~20，立即同步到全局主题并刷新全部窗口）
     pub fn set_todo_font(
         &mut self,
         family: String,
@@ -1331,6 +1332,7 @@ impl AppState {
         self.todo_font_family = family.clone();
         self.todo_font_size = size;
         self.settings_revision += 1;
+        crate::theme::apply_user_font(cx, &self.todo_font_family, self.todo_font_size);
         cx.notify();
         spawn_db(cx, move |db| {
             settings::set_font_family(db, &family)?;

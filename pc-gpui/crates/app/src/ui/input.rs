@@ -103,10 +103,12 @@ impl RenderOnce for EpInput {
             .read(cx)
             .focus_handle(cx)
             .contains_focused(window, cx);
-        let (height, pad_x, font) = match self.size {
-            InputSize::Default => (32., 11., 14.),
-            InputSize::Small => (24., 7., 12.),
+        let (base_height, pad_x, base_font, extra_h): (f32, f32, f32, f32) = match self.size {
+            InputSize::Default => (32., 11., 14., 8.),
+            InputSize::Small => (24., 7., 12., 6.),
         };
+        let font = theme::scaled_size(cx, base_font);
+        let height = base_height.max((font * 1.5 + extra_h).ceil());
         let border = if self.disabled {
             ep.disabled_border
         } else if focused {

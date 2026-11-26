@@ -14,8 +14,8 @@ use std::time::Duration;
 
 use gpui_kit::component::Theme;
 use gpui_kit::{
-    Anchor, App, BoxShadow, Font, FontFallbacks, FontFeatures, FontStyle, FontWeight, Hsla, Pixels,
-    SharedString, px, rgb, rgba,
+    Anchor, App, BoxShadow, Font, FontFallbacks, FontFeatures, FontStyle, FontWeight, Global, Hsla,
+    Pixels, SharedString, px, rgb, rgba,
 };
 
 /// `0xRRGGBB` → 颜色
@@ -473,7 +473,9 @@ pub mod duration {
     pub const SLOW: Duration = Duration::from_millis(300);
 }
 
-/// 全局字号 14px
+/// 默认全局字号 14px（范围 12~20，设置项 `todo_font_size`）
+pub const DEFAULT_FONT_SIZE: i32 = 14;
+/// 默认全局字号 14px（基准常量）
 pub const FONT_SIZE: Pixels = px(14.);
 /// 全局行高 1.5
 pub const LINE_HEIGHT: f32 = 1.5;
@@ -482,6 +484,24 @@ pub const EP_HEIGHT_DEFAULT: Pixels = px(32.);
 pub const EP_HEIGHT_SMALL: Pixels = px(24.);
 /// tooltip 显示延迟：原生 title 约 500ms；el-tooltip 按调用（300 / 500ms），隐藏 200ms
 pub const TOOLTIP_HIDE_AFTER: Duration = Duration::from_millis(200);
+
+/// 全局用户字体配置（由 [`apply_user_font`] 随 `AppState` 同步更新，所有窗口与控件共享）
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UserTypography {
+    family: String,
+    size: i32,
+}
+
+impl Default for UserTypography {
+    fn default() -> Self {
+        Self {
+            family: String::new(),
+            size: DEFAULT_FONT_SIZE,
+        }
+    }
+}
+
+impl Global for UserTypography {}
 
 /// 界面字体族：Windows `Segoe UI`（拉丁）+ `Microsoft YaHei`（中文回退），与 CSS
 /// `'Segoe UI', 'Microsoft YaHei', sans-serif` 一致。macOS 用系统界面字体（GPUI 的 `.SystemUIFont` 别名 = San Francisco）
@@ -518,8 +538,8 @@ fn font_family_as_fallback() -> String {
     }
 }
 
-/// 界面字体（字重 Regular）；窗口根元素 `.font(theme::ui_font())`
-pub fn ui_font() -> Font {
+/// 默认界面字体（字重 Regular，未配置自定义字体时使用）
+pub fn default_ui_font() -> Font {
     Font {
         family: font_family(),
         features: FontFeatures::default(),
@@ -529,12 +549,55 @@ pub fn ui_font() -> Font {
     }
 }
 
-/// 用户自选的待办字体（设置里 `todo_font_family`，空 = 默认字体栈）：
+/// 当前全局用户字体族（空串 = 跟随系统）
+pub fn user_font_family(cx: &App) -> &str {
+    cx.try_global::<UserTypography>()
+        .map_or("", |t| t.family.as_str())
+}
+
+/// 当前全局用户基准字号（12~20，默认 14）
+pub fn user_font_size(cx: &App) -> i32 {
+    cx.try_global::<UserTypography>()
+        .map_or(DEFAULT_FONT_SIZE, |t| t.size)
+}
+
+/// 相对默认 14px 的全局字号缩放比例
+pub fn font_scale(cx: &App) -> f32 {
+    user_font_size(cx) as f32 / DEFAULT_FONT_SIZE as f32
+}
+
+/// 把默认 14px 基准下的字号 `base` 按全局用户字号等比缩放（默认 14 时精确返回原值）
+pub fn scale_font_size(base: f32, user_size: i32) -> f32 {
+    let size = user_size.clamp(12, 20);
+    if size == DEFAULT_FONT_SIZE {
+        return base;
+    }
+    let scaled = base * (size as f32 / DEFAULT_FONT_SIZE as f32);
+    if base >= 8. { scaled.max(8.) } else { scaled }
+}
+
+/// 当前用户字号下的缩放字号（逻辑像素数值）
+pub fn scaled_size(cx: &App, base: f32) -> f32 {
+    scale_font_size(base, user_font_size(cx))
+}
+
+/// 当前用户字号下的缩放字号（`Pixels`）
+pub fn text_px(cx: &App, base: f32) -> Pixels {
+    px(scaled_size(cx, base))
+}
+
+/// 当前全局界面字体（优先使用用户配置的字体，未配置时回落系统默认界面字体栈）；
+/// 窗口根元素与浮层统一使用 `.font(theme::ui_font(cx))`
+pub fn ui_font(cx: &App) -> Font {
+    todo_font(user_font_family(cx))
+}
+
+/// 用户自选字体（设置里 `todo_font_family`，空 = 默认字体栈）：
 /// `"<family>", -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif`
 pub fn todo_font(family: &str) -> Font {
     let family = family.trim();
     if family.is_empty() {
-        return ui_font();
+        return default_ui_font();
     }
     let mut fallbacks = vec![font_family_as_fallback()];
     fallbacks.extend(font_fallbacks().fallback_list().iter().cloned());
@@ -547,6 +610,40 @@ pub fn todo_font(family: &str) -> Font {
     }
 }
 
+/// 更新全局用户字体与字号，并同步到 `gpui-component` / `gpui-base` 主题、刷新所有已打开的窗口
+pub fn apply_user_font(cx: &mut App, family: &str, size: i32) {
+    let family = family.trim();
+    let size = size.clamp(12, 20);
+    let next = UserTypography {
+        family: family.to_string(),
+        size,
+    };
+    if cx.try_global::<UserTypography>() == Some(&next) {
+        return;
+    }
+    cx.set_global(next);
+    if cx.has_global::<Theme>() {
+        let ui_family: SharedString = if family.is_empty() {
+            font_family()
+        } else {
+            family.to_string().into()
+        };
+        let mono_family: SharedString = if family.is_empty() {
+            editor_theme::default_mono_family()
+        } else {
+            family.to_string().into()
+        };
+        let font_size = px(size as f32);
+        let mono_font_size = px(scale_font_size(13., size));
+        Theme::update(cx, |t| {
+            t.font_family = ui_family;
+            t.mono_font_family = mono_family;
+            t.font_size = font_size;
+            t.mono_font_size = mono_font_size;
+        });
+    }
+}
+
 /// CSS `font-weight: 600`：Segoe UI 有 Semibold，微软雅黑回落 Bold
 pub const WEIGHT_SEMIBOLD: FontWeight = FontWeight::SEMIBOLD;
 /// CSS `font-weight: 500`：Segoe UI / 微软雅黑没有 500，实际渲染为 Regular
@@ -555,10 +652,13 @@ pub const WEIGHT_MEDIUM: FontWeight = FontWeight::NORMAL;
 /// 把 gpui-component 的主题调成 Element Plus 外观（输入框、下拉、复选框、开关、日期选择、弹层等组件用）。
 /// 必须在 `gpui_kit::init` 之后、开窗之前调用。
 pub fn init(cx: &mut App) {
+    cx.set_global(UserTypography::default());
     let ep = ep();
     Theme::update(cx, |t| {
         t.font_family = font_family();
         t.font_size = FONT_SIZE;
+        t.mono_font_family = editor_theme::default_mono_family();
+        t.mono_font_size = px(13.);
         // main.scss：el-button / el-input 圆角覆盖为 6px；EP 弹层 / 下拉 / 消息 4px
         t.radius = radius::BASE;
         t.radius_lg = radius::SM;
@@ -930,8 +1030,10 @@ pub fn fence_tokens() -> &'static FenceTokens {
     &FENCE_TOKENS
 }
 
-/// 收纳箱字号 13px（`.fence-window`）
-pub const FENCE_FONT_SIZE: Pixels = px(13.);
+/// 收纳箱默认字号基准 13px（`.fence-window`，按全局字号等比缩放）
+pub const FENCE_FONT_SIZE_BASE: f32 = 13.;
+/// 收纳箱默认字号 13px（`.fence-window`）
+pub const FENCE_FONT_SIZE: Pixels = px(FENCE_FONT_SIZE_BASE);
 
 /// 「显示隐藏的图标」打开时，隐藏项（用户隐藏 + 以 `.` 开头的自动隐藏）的图标与名字整体不透明度
 /// （同资源管理器里隐藏文件的半透明观感）
@@ -1005,13 +1107,45 @@ mod tests {
         assert_eq!(fallbacks.fallback_list()[0], font_family_as_fallback());
         assert_eq!(todo_font("  ").family, font_family());
     }
+
+    #[test]
+    fn scale_font_size_is_exact_at_default_and_proportional_otherwise() {
+        assert_eq!(scale_font_size(14., 14), 14.);
+        assert_eq!(scale_font_size(12., 14), 12.);
+        assert_eq!(scale_font_size(9., 14), 9.);
+        assert_eq!(scale_font_size(14., 20), 20.);
+        assert_eq!(scale_font_size(14., 12), 12.);
+        assert_eq!(scale_font_size(14., 99), 20.);
+        assert_eq!(scale_font_size(14., 1), 12.);
+        assert_eq!(scale_font_size(9., 12), 8.);
+        assert!((scale_font_size(16., 21) - 16. * 20. / 14.).abs() < 1e-4);
+    }
+
+    #[test]
+    fn mono_and_serif_fonts_prioritize_user_family_when_configured() {
+        let default_mono = editor_theme::mono_font_for("");
+        assert_eq!(default_mono.family, editor_theme::default_mono_family());
+
+        let user_mono = editor_theme::mono_font_for("Maple Mono CN");
+        assert_eq!(user_mono.family.as_ref(), "Maple Mono CN");
+        assert_eq!(
+            user_mono.fallbacks.unwrap().fallback_list()[0],
+            editor_theme::default_mono_family().as_ref()
+        );
+
+        let user_serif = editor_theme::serif_font_for("Maple Mono CN");
+        assert_eq!(user_serif.family.as_ref(), "Maple Mono CN");
+        assert!(!user_serif.fallbacks.unwrap().fallback_list().is_empty());
+    }
 }
 
 // ---- 编辑 / 子任务 / 已完成 / 通知窗口与 Markdown（`ui-editor-windows.md`）----
 
 /// 编辑类窗口与 Markdown 渲染的 token（`0xRRGGBB`，用 [`hex`] 取色；尺寸单位逻辑像素）
 pub mod editor_theme {
-    use gpui_kit::{Font, FontFallbacks, FontFeatures, FontStyle, FontWeight, Hsla};
+    use gpui_kit::{
+        App, Font, FontFallbacks, FontFeatures, FontStyle, FontWeight, Hsla, SharedString,
+    };
 
     // 编辑类窗口里直接写在 scoped CSS 里的 Tailwind slate / blue / red …
     /// slate-700：子任务标题、表单字段标签
@@ -1105,10 +1239,20 @@ pub mod editor_theme {
     /// 分隔线外边距 1em（14px）
     pub const MD_HR_MARGIN: f32 = 14.;
 
-    /// 等宽字体：Windows Consolas（Milkdown 等宽栈在 Windows 上先命中它）；macOS Menlo（系统自带，SF Mono 不对普通应用
-    /// 开放）；Linux 用 Liberation Mono（截图替身）
-    pub fn mono_font() -> Font {
-        let (family, fallbacks): (&str, Vec<String>) = if cfg!(windows) {
+    /// 默认等宽字体族名（未配置自定义字体时使用）
+    pub fn default_mono_family() -> SharedString {
+        if cfg!(windows) {
+            "Consolas".into()
+        } else if cfg!(target_os = "macos") {
+            "Menlo".into()
+        } else {
+            "Liberation Mono".into()
+        }
+    }
+
+    /// 等宽字体（优先用户配置的字体，未配置时回落 Windows Consolas / macOS Menlo / Linux Liberation Mono）
+    pub fn mono_font_for(user_family: &str) -> Font {
+        let (default_family, default_fallbacks): (&str, Vec<String>) = if cfg!(windows) {
             (
                 "Consolas",
                 vec!["Courier New".into(), "Microsoft YaHei".into()],
@@ -1118,8 +1262,16 @@ pub mod editor_theme {
         } else {
             ("Liberation Mono", vec!["Noto Sans CJK SC".into()])
         };
+        let user_family = user_family.trim();
+        let (family, fallbacks) = if user_family.is_empty() {
+            (default_family.to_string(), default_fallbacks)
+        } else {
+            let mut list = vec![default_family.to_string()];
+            list.extend(default_fallbacks);
+            (user_family.to_string(), list)
+        };
         Font {
-            family: family.to_string().into(),
+            family: family.into(),
             features: FontFeatures::default(),
             fallbacks: Some(FontFallbacks::from_fonts(fallbacks)),
             weight: FontWeight::NORMAL,
@@ -1127,9 +1279,14 @@ pub mod editor_theme {
         }
     }
 
-    /// 衬线字体（引用块 `ui-serif, Georgia, Cambria, "Times New Roman", serif`；中文在 Windows 上回落宋体，macOS 上宋体-简）
-    pub fn serif_font() -> Font {
-        let (family, fallbacks): (&str, Vec<String>) = if cfg!(windows) {
+    /// 当前生效的等宽字体（优先使用用户配置的字体）
+    pub fn mono_font(cx: &App) -> Font {
+        mono_font_for(super::user_font_family(cx))
+    }
+
+    /// 衬线字体（优先用户配置的字体，未配置时回落引用块默认字体栈：Georgia / 宋体）
+    pub fn serif_font_for(user_family: &str) -> Font {
+        let (default_family, default_fallbacks): (&str, Vec<String>) = if cfg!(windows) {
             ("Georgia", vec!["Cambria".into(), "SimSun".into()])
         } else if cfg!(target_os = "macos") {
             (
@@ -1139,13 +1296,26 @@ pub mod editor_theme {
         } else {
             ("Liberation Serif", vec!["Noto Serif CJK SC".into()])
         };
+        let user_family = user_family.trim();
+        let (family, fallbacks) = if user_family.is_empty() {
+            (default_family.to_string(), default_fallbacks)
+        } else {
+            let mut list = vec![default_family.to_string()];
+            list.extend(default_fallbacks);
+            (user_family.to_string(), list)
+        };
         Font {
-            family: family.to_string().into(),
+            family: family.into(),
             features: FontFeatures::default(),
             fallbacks: Some(FontFallbacks::from_fonts(fallbacks)),
             weight: FontWeight::NORMAL,
             style: FontStyle::Normal,
         }
+    }
+
+    /// 当前生效的衬线字体（优先使用用户配置的字体）
+    pub fn serif_font(cx: &App) -> Font {
+        serif_font_for(super::user_font_family(cx))
     }
 
     /// `color` 以 `alpha` 不透明度叠在白底上的等效不透明色（GPUI 的外阴影会透过半透明背景显示出来，

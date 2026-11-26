@@ -362,9 +362,11 @@ impl SettingsWindow {
 
     fn render_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = settings_tokens();
+        let menu_size = theme::text_px(cx, 13.);
+        let menu_width = 160.0_f32.max((160. * (1. + (theme::font_scale(cx) - 1.) * 0.4)).round());
         div()
             .flex_none()
-            .w(px(160.))
+            .w(px(menu_width))
             .h_full()
             .p(px(8.))
             .bg(t.surface)
@@ -383,7 +385,7 @@ impl SettingsWindow {
                     .px(px(12.))
                     .py(px(10.))
                     .rounded(theme::radius::MD)
-                    .text_size(px(13.))
+                    .text_size(menu_size)
                     .font_weight(theme::WEIGHT_MEDIUM)
                     .text_color(color)
                     .cursor_pointer()
@@ -417,8 +419,8 @@ impl Render for SettingsWindow {
             .size_full()
             .flex()
             .flex_col()
-            .font(theme::ui_font())
-            .text_size(theme::FONT_SIZE)
+            .font(theme::ui_font(cx))
+            .text_size(theme::text_px(cx, 14.))
             .line_height(relative(theme::LINE_HEIGHT))
             .bg(t.window_bg)
             .text_color(t.label)
@@ -455,14 +457,14 @@ impl Render for SettingsWindow {
 // ----------------------------------------------------------------------
 
 /// `.panel-title`：15px / 600 / `#1E293B`，下边距 16
-fn panel_title(text: impl Into<SharedString>) -> Div {
+fn panel_title(text: impl Into<SharedString>, cx: &App) -> Div {
     let t = settings_tokens();
     div()
         .flex()
         .items_center()
         .gap(px(8.))
         .mb(px(16.))
-        .text_size(px(15.))
+        .text_size(theme::text_px(cx, 15.))
         .font_weight(theme::WEIGHT_SEMIBOLD)
         .text_color(t.title)
         .child(text.into())
@@ -476,6 +478,7 @@ fn settings_row(
     desc: Option<&'static str>,
     control: impl IntoElement,
     last: bool,
+    cx: &App,
 ) -> Div {
     let t = settings_tokens();
     div()
@@ -501,7 +504,7 @@ fn settings_row(
                         .min_w_0()
                         .child(
                             div()
-                                .text_size(px(14.))
+                                .text_size(theme::text_px(cx, 14.))
                                 .font_weight(theme::WEIGHT_MEDIUM)
                                 .text_color(t.label)
                                 .child(label),
@@ -510,7 +513,7 @@ fn settings_row(
                             this.child(
                                 div()
                                     .mt(px(2.))
-                                    .text_size(px(12.))
+                                    .text_size(theme::text_px(cx, 12.))
                                     .text_color(t.tertiary)
                                     .child(desc),
                             )
@@ -521,7 +524,7 @@ fn settings_row(
 }
 
 /// `.card-hint`（`warning` = `.warning-hint`：文字 `#B45309`、图标 `#F59E0B`、上边距 4）
-fn card_hint(icon_source: EpIcon, text: impl Into<SharedString>, warning: bool) -> Div {
+fn card_hint(icon_source: EpIcon, text: impl Into<SharedString>, warning: bool, cx: &App) -> Div {
     let t = settings_tokens();
     let (text_color, icon_color) = if warning {
         (t.warning_text, t.warning_icon)
@@ -533,7 +536,7 @@ fn card_hint(icon_source: EpIcon, text: impl Into<SharedString>, warning: bool) 
         .items_start()
         .gap(px(6.))
         .when(warning, |this| this.mt(px(4.)))
-        .text_size(px(12.))
+        .text_size(theme::text_px(cx, 12.))
         .text_color(text_color)
         .child(
             div()
@@ -550,14 +553,14 @@ fn section_divider() -> Div {
 }
 
 /// `.form-label`：13px / 500 / `#64748B`，下边距 8
-fn form_label() -> Div {
+fn form_label(cx: &App) -> Div {
     let t = settings_tokens();
     div()
         .flex()
         .items_center()
         .justify_between()
         .mb(px(8.))
-        .text_size(px(13.))
+        .text_size(theme::text_px(cx, 13.))
         .font_weight(theme::WEIGHT_MEDIUM)
         .text_color(t.secondary)
 }
@@ -571,6 +574,7 @@ enum DataBtnKind {
 }
 
 /// `.data-btn`：`flex:1`、居中、gap 8、`padding 10px 16px`、1px 边、圆角 8、13px / 500、图标 16；禁用 `opacity .6`
+#[allow(clippy::too_many_arguments)]
 fn data_btn(
     id: &'static str,
     icon_source: EpIcon,
@@ -578,6 +582,7 @@ fn data_btn(
     kind: DataBtnKind,
     disabled: bool,
     busy: bool,
+    cx: &App,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
     let t = settings_tokens();
@@ -620,7 +625,7 @@ fn data_btn(
         .border_color(border)
         .rounded(theme::radius::MD)
         .bg(bg)
-        .text_size(px(13.))
+        .text_size(theme::text_px(cx, 13.))
         .font_weight(theme::WEIGHT_MEDIUM)
         .text_color(text)
         .when(disabled, |this| {

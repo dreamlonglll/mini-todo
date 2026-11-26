@@ -368,7 +368,7 @@ impl SubtaskWindow {
         self.handle_save(window, cx);
     }
 
-    fn render_header(&self) -> impl IntoElement {
+    fn render_header(&self, cx: &App) -> impl IntoElement {
         let palette = light();
         let control = |id: &'static str, source: EpIcon, tip: &'static str, danger: bool| {
             div()
@@ -414,7 +414,7 @@ impl SubtaskWindow {
             .child(drag_region())
             .child(
                 div()
-                    .text_size(px(16.))
+                    .text_size(theme::text_px(cx, 16.))
                     .font_weight(theme::WEIGHT_SEMIBOLD)
                     .line_height(relative(1.2))
                     .text_color(palette.text_primary)
@@ -448,9 +448,10 @@ impl Render for SubtaskWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = light();
         let view_mode = self.is_view_mode();
+        let label_size = theme::text_px(cx, 13.);
         let label = |text: &'static str| {
             div()
-                .text_size(px(13.))
+                .text_size(label_size)
                 .font_weight(theme::WEIGHT_SEMIBOLD)
                 .text_color(hex(editor_theme::SLATE_700))
                 .child(text)
@@ -541,12 +542,12 @@ impl Render for SubtaskWindow {
             .size_full()
             .flex()
             .flex_col()
-            .font(theme::ui_font())
-            .text_size(theme::FONT_SIZE)
+            .font(theme::ui_font(cx))
+            .text_size(theme::text_px(cx, 14.))
             .line_height(relative(theme::LINE_HEIGHT))
             .text_color(palette.text_primary)
             .bg(hex(0xFFFFFF))
-            .child(self.render_header())
+            .child(self.render_header(cx))
             .child(content)
             .child(footer)
             .children(viewer.map(|v| div().absolute().inset_0().child(v)))

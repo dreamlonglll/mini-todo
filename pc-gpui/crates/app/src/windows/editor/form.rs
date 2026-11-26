@@ -5,8 +5,8 @@
 //! 两个之间 8px。
 
 use gpui_kit::{
-    AnyElement, ClickEvent, Context, Div, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    AnyElement, App, ClickEvent, Context, Div, InteractiveElement as _, IntoElement,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
     prelude::FluentBuilder as _, px,
 };
 
@@ -23,7 +23,10 @@ use crate::ui::input::EpInput;
 const PICKER_WIDTH: f32 = 220.;
 
 /// 一个表单项（label 在上）
-fn form_item(label: impl IntoElement, content: impl IntoElement) -> Div {
+fn form_item(label: impl IntoElement, content: impl IntoElement, cx: &App) -> Div {
+    let font = theme::scaled_size(cx, 14.);
+    let label_line = font * (22. / 14.);
+    let content_line = 32.0_f32.max(font * (32. / 14.));
     div()
         .w_full()
         .mb(px(18.))
@@ -32,8 +35,8 @@ fn form_item(label: impl IntoElement, content: impl IntoElement) -> Div {
         .child(
             div()
                 .mb(px(8.))
-                .text_size(px(14.))
-                .line_height(px(22.))
+                .text_size(px(font))
+                .line_height(px(label_line))
                 .text_color(ep().text_regular)
                 .child(label),
         )
@@ -43,8 +46,8 @@ fn form_item(label: impl IntoElement, content: impl IntoElement) -> Div {
                 .flex()
                 .flex_wrap()
                 .items_center()
-                .text_size(px(14.))
-                .line_height(px(32.))
+                .text_size(px(font))
+                .line_height(px(content_line))
                 .child(content),
         )
 }
@@ -70,6 +73,20 @@ impl EditorWindow {
         let description = self.render_description(cx).into_any_element();
         let colors = self.render_colors(cx).into_any_element();
         let quadrants = self.render_quadrants(cx).into_any_element();
+        let repeat_switch = {
+            let weak = cx.entity().downgrade();
+            EpSwitch::new("editor-repeat")
+                .checked(self.repeat_enabled)
+                .on_change(move |checked: &bool, _, cx| {
+                    let checked = *checked;
+                    let _ = weak.update(cx, |this, cx| {
+                        this.repeat_enabled = checked;
+                        cx.notify();
+                    });
+                })
+        };
+        let weekdays = (self.repeat_enabled && self.repeat_type == RepeatType::Weekly)
+            .then(|| self.render_weekdays(cx).into_any_element());
         let content = div()
             .p(px(16.))
             .flex()
@@ -77,13 +94,15 @@ impl EditorWindow {
             .child(form_item(
                 required_label("标题"),
                 EpInput::new(&self.title).w_full(),
+                cx,
             ))
-            .child(form_item(desc_label, description))
-            .child(form_item("颜色", colors))
-            .child(form_item("四象限", quadrants))
+            .child(form_item(desc_label, description, cx))
+            .child(form_item("颜色", colors, cx))
+            .child(form_item("四象限", quadrants, cx))
             .child(form_item(
                 "清单",
                 div().w_full().child(self.list_select.clone()),
+                cx,
             ))
             .child(form_item(
                 "时间范围",
@@ -100,6 +119,7 @@ impl EditorWindow {
                         self.end_date.clone().into_any_element(),
                         self.end_time.clone().into_any_element(),
                     )),
+                cx,
             ))
             .child(form_item(
                 if self.repeat_enabled {
@@ -111,6 +131,7 @@ impl EditorWindow {
                     self.notify_date.clone().into_any_element(),
                     self.notify_time.clone().into_any_element(),
                 ),
+                cx,
             ))
             .when(notify_at.is_some() && !self.repeat_enabled, |this| {
                 this.child(form_item(
@@ -123,24 +144,15 @@ impl EditorWindow {
                         .when(self.is_custom_notify_before, |this| {
                             this.child(div().mt(px(8.)).child(self.custom_notify_before.clone()))
                         }),
+                    cx,
                 ))
             })
-            .child(form_item("重复", {
-                let weak = cx.entity().downgrade();
-                EpSwitch::new("editor-repeat")
-                    .checked(self.repeat_enabled)
-                    .on_change(move |checked: &bool, _, cx| {
-                        let checked = *checked;
-                        let _ = weak.update(cx, |this, cx| {
-                            this.repeat_enabled = checked;
-                            cx.notify();
-                        });
-                    })
-            }))
+            .child(form_item("重复", repeat_switch, cx))
             .when(self.repeat_enabled, |this| {
                 this.child(form_item(
                     "重复方式",
                     div().w_full().child(self.repeat_type_select.clone()),
+                    cx,
                 ))
                 .child(form_item(
                     SharedString::from(format!(
@@ -149,14 +161,16 @@ impl EditorWindow {
                         self.repeat_type.unit()
                     )),
                     div().w_full().child(self.repeat_interval.clone()),
+                    cx,
                 ))
-                .when(self.repeat_type == RepeatType::Weekly, |this| {
-                    this.child(form_item("星期", self.render_weekdays(cx)))
+                .when_some(weekdays, |this, weekdays| {
+                    this.child(form_item("星期", weekdays, cx))
                 })
                 .when(self.repeat_type == RepeatType::Monthly, |this| {
                     this.child(form_item(
                         "每月几号",
                         div().w_full().child(self.repeat_month_day.clone()),
+                        cx,
                     ))
                 })
             });
@@ -303,8 +317,8 @@ impl EditorWindow {
                 .child(div().flex_none().size(px(10.)).rounded_full().bg(color))
                 .child(
                     div()
-                        .text_size(px(12.))
-                        .line_height(px(32.))
+                        .text_size(theme::text_px(cx, 12.))
+                        .line_height(px(32.0_f32.max(theme::scaled_size(cx, 32.))))
                         .text_color(hex(editor_theme::SLATE_700))
                         .child(name),
                 )

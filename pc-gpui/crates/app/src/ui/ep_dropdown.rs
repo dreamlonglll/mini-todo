@@ -124,15 +124,15 @@ impl EpDropdownItem {
         self
     }
 
-    /// 这一项要的宽度（不含面板边框）
-    fn width(&self) -> f32 {
+    /// 这一项要的宽度（不含面板边框），按当前字号缩放
+    fn width_for(&self, font_size: f32, note_size: f32) -> f32 {
         let icon = if self.icon.is_some() { ICON_WIDTH } else { 0. };
         let suffix = match &self.note {
-            Some(note) => SUFFIX_GAP + text_width(note, NOTE_SIZE),
+            Some(note) => SUFFIX_GAP + text_width(note, note_size),
             None if self.has_suffix_icon() => SUFFIX_GAP + SUFFIX_ICON,
             None => 0.,
         };
-        PADDING_X * 2. + icon + text_width(&self.label, FONT_SIZE) + suffix
+        PADDING_X * 2. + icon + text_width(&self.label, font_size) + suffix
     }
 
     fn has_suffix_icon(&self) -> bool {
@@ -214,35 +214,77 @@ impl EpDropdownMenu {
         self
     }
 
-    /// 面板外框高度估算（含上下内边距与 1px 边框）
-    pub fn estimated_height(item_count: usize, divided_count: usize) -> f32 {
-        PADDING * 2. + ITEM_HEIGHT * item_count as f32 + 13. * divided_count as f32 + 2.
+    /// 当前字号下的单行高度（5 + 行高 + 5）
+    fn item_height_for(font_size: f32) -> f32 {
+        let line_h = 22.0_f32.max((font_size * (22. / FONT_SIZE)).ceil());
+        ITEM_HEIGHT.max(line_h + 10.)
     }
 
-    /// 按当前菜单项估算的面板外框高度（有 `max-height` 时不超过它）
+    /// 面板外框高度估算（默认 14px；含上下内边距与 1px 边框）
+    pub fn estimated_height(item_count: usize, divided_count: usize) -> f32 {
+        Self::estimated_height_at(item_count, divided_count, FONT_SIZE)
+    }
+
+    /// 面板外框高度估算（按当前全局字号）
+    pub fn estimated_height_for(cx: &App, item_count: usize, divided_count: usize) -> f32 {
+        Self::estimated_height_at(item_count, divided_count, theme::scaled_size(cx, FONT_SIZE))
+    }
+
+    fn estimated_height_at(item_count: usize, divided_count: usize, font_size: f32) -> f32 {
+        PADDING * 2.
+            + Self::item_height_for(font_size) * item_count as f32
+            + 13. * divided_count as f32
+            + 2.
+    }
+
+    /// 按当前菜单项估算的面板外框高度（默认 14px；有 `max-height` 时不超过它）
     pub fn panel_height(&self) -> f32 {
+        self.panel_height_at(FONT_SIZE)
+    }
+
+    /// 按当前菜单项估算的面板外框高度（按当前全局字号）
+    pub fn panel_height_for(&self, cx: &App) -> f32 {
+        self.panel_height_at(theme::scaled_size(cx, FONT_SIZE))
+    }
+
+    fn panel_height_at(&self, font_size: f32) -> f32 {
         let divided = self.items.iter().filter(|i| i.divided).count();
-        let height = Self::estimated_height(self.items.len(), divided);
+        let height = Self::estimated_height_at(self.items.len(), divided, font_size);
         match self.max_height {
             Some(max) => height.min(f32::from(max) + PADDING * 2. + 2.),
             None => height,
         }
     }
 
-    /// 按最长的菜单项估算的面板宽度（含 1px 边框；文字宽度是估计值，见 [`text_width`]）
+    /// 按最长的菜单项估算的面板宽度（默认 14px；含 1px 边框；文字宽度是估计值，见 [`text_width`]）
     pub fn panel_width(&self) -> f32 {
+        self.panel_width_at(FONT_SIZE, NOTE_SIZE)
+    }
+
+    /// 按最长的菜单项估算的面板宽度（按当前全局字号）
+    pub fn panel_width_for(&self, cx: &App) -> f32 {
+        self.panel_width_at(
+            theme::scaled_size(cx, FONT_SIZE),
+            theme::scaled_size(cx, NOTE_SIZE),
+        )
+    }
+
+    fn panel_width_at(&self, font_size: f32, note_size: f32) -> f32 {
         self.items
             .iter()
-            .map(EpDropdownItem::width)
+            .map(|item| item.width_for(font_size, note_size))
             .fold(0., f32::max)
             + 2.
     }
 }
 
 impl RenderOnce for EpDropdownMenu {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let colors = ep_menu(self.dark);
         let truncate = self.width.is_some();
+        let font_size = theme::scaled_size(cx, FONT_SIZE);
+        let note_size = theme::scaled_size(cx, NOTE_SIZE);
+        let line_h = 22.0_f32.max((font_size * (22. / FONT_SIZE)).ceil());
         let items = self
             .items
             .into_iter()
@@ -284,7 +326,7 @@ impl RenderOnce for EpDropdownMenu {
                         div()
                             .flex_none()
                             .ml(px(SUFFIX_GAP))
-                            .text_size(px(NOTE_SIZE))
+                            .text_size(px(note_size))
                             .text_color(colors.text_secondary)
                             .child(note.clone())
                             .into_any_element(),
@@ -316,8 +358,8 @@ impl RenderOnce for EpDropdownMenu {
                     .items_center()
                     .px(px(PADDING_X))
                     .py(px(5.))
-                    .text_size(px(FONT_SIZE))
-                    .line_height(px(22.))
+                    .text_size(px(font_size))
+                    .line_height(px(line_h))
                     .whitespace_nowrap()
                     .text_color(color)
                     .when(disabled, |this| {
@@ -361,7 +403,7 @@ impl RenderOnce for EpDropdownMenu {
             });
         ep_popper::frame_for(self.dark)
             .id(self.id)
-            .font(theme::ui_font())
+            .font(theme::ui_font(cx))
             .when_some(self.width, |this, width| this.w(px(width)))
             .child(
                 div()
@@ -411,5 +453,18 @@ mod tests {
             .max_height(px(20.));
         assert_eq!(menu.panel_width(), 16. + 56. + 12. + 12. + 16. + 2.);
         assert_eq!(menu.panel_height(), 20. + 10. + 2.);
+    }
+
+    #[test]
+    fn scaled_panel_size_expands_with_larger_font_size() {
+        let menu = EpDropdownMenu::new("m")
+            .item(EpDropdownItem::new("rename", "重命名").icon(EpIcon::EditPen))
+            .item(EpDropdownItem::new("delete", "删除清单").icon(EpIcon::Delete));
+        let default_w = menu.panel_width();
+        let default_h = menu.panel_height();
+        let large_font = theme::scale_font_size(FONT_SIZE, 20);
+        let large_note = theme::scale_font_size(NOTE_SIZE, 20);
+        assert!(menu.panel_width_at(large_font, large_note) > default_w);
+        assert!(menu.panel_height_at(large_font) > default_h);
     }
 }

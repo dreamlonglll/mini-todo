@@ -156,7 +156,7 @@ pub(crate) struct RenderCtx {
 
 impl RenderCtx {
     pub fn sub_size(&self) -> f32 {
-        self.font_size - 2.
+        theme::scale_font_size(12., self.font_size.round() as i32)
     }
 }
 
@@ -835,8 +835,8 @@ impl Render for ListWindow {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .font(theme::ui_font())
-            .text_size(theme::FONT_SIZE)
+            .font(theme::ui_font(cx))
+            .text_size(theme::text_px(cx, 14.))
             .line_height(relative(theme::LINE_HEIGHT))
             .text_color(palette.text_primary)
             .bg(palette.window_bg)

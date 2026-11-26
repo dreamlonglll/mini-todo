@@ -126,6 +126,7 @@ impl EditorWindow {
         let list = list_badge_text(&AppState::global(cx).read(cx).list_name(self.list_id));
         let description = self.description_value(cx);
 
+        let badge_size = theme::text_px(cx, 12.);
         let badge = || {
             div()
                 .flex()
@@ -134,7 +135,7 @@ impl EditorWindow {
                 .px(px(10.))
                 .py(px(3.))
                 .rounded_full()
-                .text_size(px(12.))
+                .text_size(badge_size)
                 .line_height(relative(1.6))
         };
         let meta = div()
@@ -175,7 +176,7 @@ impl EditorWindow {
 
         let body = if description.is_empty() {
             div()
-                .text_size(px(13.))
+                .text_size(theme::text_px(cx, 13.))
                 .text_color(palette.text_tertiary)
                 .child("暂无描述")
                 .into_any_element()
@@ -209,7 +210,7 @@ impl EditorWindow {
                     .child(
                         div()
                             .mb(px(14.))
-                            .text_size(px(22.))
+                            .text_size(theme::text_px(cx, 22.))
                             .font_weight(gpui_kit::FontWeight::BOLD)
                             .line_height(relative(1.35))
                             .text_color(if completed {
@@ -223,7 +224,7 @@ impl EditorWindow {
                     .child(meta)
                     .child(body),
             )
-            .font(theme::ui_font())
+            .font(theme::ui_font(cx))
     }
 }
 

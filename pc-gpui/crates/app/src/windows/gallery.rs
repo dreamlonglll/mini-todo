@@ -34,24 +34,24 @@ impl GalleryWindow {
     }
 }
 
-fn row(label: &'static str) -> gpui_kit::Div {
+fn row(label: &'static str, cx: &App) -> gpui_kit::Div {
     div().flex().flex_wrap().items_center().gap(px(12.)).child(
         div()
             .w(px(90.))
-            .text_size(px(12.))
+            .text_size(theme::text_px(cx, 12.))
             .text_color(theme::light().text_tertiary)
             .child(label),
     )
 }
 
 impl Render for GalleryWindow {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .size_full()
             .flex()
             .flex_col()
-            .font(theme::ui_font())
-            .text_size(theme::FONT_SIZE)
+            .font(theme::ui_font(cx))
+            .text_size(theme::text_px(cx, 14.))
             .line_height(relative(theme::LINE_HEIGHT))
             .bg(theme::hex(0xFFFFFF))
             .text_color(theme::light().text_primary)
@@ -72,7 +72,7 @@ impl Render for GalleryWindow {
                     .gap(px(14.))
                     .p(px(20.))
                     .child(
-                        row("el-button")
+                        row("el-button", cx)
                             .child(EpButton::new("g-default").label("默认"))
                             .child(EpButton::new("g-primary").primary().label("保存"))
                             .child(
@@ -102,7 +102,7 @@ impl Render for GalleryWindow {
                             ),
                     )
                     .child(
-                        row("text / small")
+                        row("text / small", cx)
                             .child(EpButton::new("g-text").text().label("文字按钮"))
                             .child(
                                 EpButton::new("g-close")
@@ -122,7 +122,7 @@ impl Render for GalleryWindow {
                             .child(EpButton::new("g-circle").circle().icon(EpIcon::Search)),
                     )
                     .child(
-                        row("el-input")
+                        row("el-input", cx)
                             .child(EpInput::new(&self.input).w(px(220.)))
                             .child(EpInput::new(&self.input_small).small().w(px(160.)))
                             .child(
@@ -132,7 +132,7 @@ impl Render for GalleryWindow {
                             ),
                     )
                     .child(
-                        row("el-tooltip").child(
+                        row("el-tooltip", cx).child(
                             EpTooltip::new(
                                 "g-tip",
                                 "每周 周一、周三、周五",
@@ -147,7 +147,7 @@ impl Render for GalleryWindow {
                         ),
                     )
                     .child(
-                        row("ElMessage")
+                        row("ElMessage", cx)
                             .child(EpButton::new("g-m-s").small().label("success").on_click(
                                 |_, w, cx| message::show(w, cx, MessageKind::Success, "待办已保存"),
                             ))
@@ -176,7 +176,7 @@ impl Render for GalleryWindow {
                             )),
                     )
                     .child(
-                        row("MessageBox").child(
+                        row("MessageBox", cx).child(
                             EpButton::new("g-confirm")
                                 .small()
                                 .label("删除确认")

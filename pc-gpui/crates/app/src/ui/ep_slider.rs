@@ -225,13 +225,14 @@ impl RenderOnce for EpSlider {
                     let center_x = bounds.left() + bounds.size.width * ratio;
                     // 拇指上沿（放大后 24px）再往上 5px 是箭头尖
                     let top = bounds.top() + bounds.size.height / 2. - px(thumb_size / 2. + 5.);
+                    let tip_font = theme::scaled_size(cx, 12.);
                     let body = div()
-                        .font(theme::ui_font())
+                        .font(theme::ui_font(cx))
                         .whitespace_nowrap()
                         .px(px(11.))
                         .py(px(5.))
-                        .text_size(px(12.))
-                        .line_height(px(20.))
+                        .text_size(px(tip_font))
+                        .line_height(px(tip_font * (20. / 12.)))
                         .text_color(ep.white)
                         .bg(ep.tooltip_bg)
                         .rounded(theme::radius::SM)

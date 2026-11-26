@@ -688,11 +688,12 @@ impl Render for MarkdownEditor {
         let (pad_y, pad_x) = self.padding;
         let editing = self.editing && !self.readonly;
         let body = if editing {
+            let source_size = theme::text_px(cx, 13.);
             let textarea = Textarea::new(&self.source)
                 .appearance(false)
                 .bordered(false)
                 .xsmall()
-                .text_size(px(13.))
+                .text_size(source_size)
                 .line_height(relative(1.6))
                 .w_full()
                 .when(self.rows.is_none(), |this| this.h_full());
@@ -708,8 +709,8 @@ impl Render for MarkdownEditor {
                 .when(self.rows.is_none(), |this| this.flex_1().min_h_0())
                 .px(px(pad_x - TEXTAREA_INSET_X))
                 .py(px(pad_y))
-                .font(editor_theme::mono_font())
-                .text_size(px(13.))
+                .font(editor_theme::mono_font(cx))
+                .text_size(source_size)
                 .line_height(relative(1.6))
                 .text_color(hex(editor_theme::SLATE_700))
                 .child(textarea)

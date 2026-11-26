@@ -23,10 +23,12 @@ NOTIFICATION = "通知"
 SUBTASK_VIEW = "查看子任务"
 SUBTASK_EDIT = "编辑子任务"
 
-# 清单窗口标题栏右区按钮（从右往左，28×28、间距 8、右内边距 16、描边 1）：设置 / 同步 / 锁定 / 日夜 / 视图 / 已完成
+# 清单窗口标题栏右区按钮（从右往左，28×28、间距 8、右内边距 16、描边 1）：
+# 默认清单窗口：设置 / 同步 / 锁定 / 日夜 / 视图 / 已完成；其它清单窗口无设置与同步按钮
 _TITLE_BUTTONS = ["settings", "sync", "lock", "theme", "view", "completed"]
-# 日历窗口标题栏右区：设置 / 锁定 / 日夜 / 清单筛选（漏斗）
-_CAL_BUTTONS = ["settings", "lock", "theme", "filter"]
+_EXTRA_TITLE_BUTTONS = ["lock", "theme", "view", "completed"]
+# 日历窗口标题栏右区（无设置按钮）：锁定 / 日夜 / 清单筛选（漏斗）
+_CAL_BUTTONS = ["lock", "theme", "filter"]
 # 标题栏左侧的清单名（双击改名、右键菜单）
 LIST_NAME = (40, 27)
 # 右键清单名的菜单：「重命名」「删除清单」（默认清单的删除置灰）
@@ -35,8 +37,10 @@ LIST_MENU_DELETE = (75, 105)
 
 
 def title_button(main: Win, name: str) -> tuple[int, int]:
-    """清单窗口标题栏右区按钮中心。`completed` 只在本清单有已完成待办时出现（在 `view` 左边）。"""
-    i = _TITLE_BUTTONS.index(name)
+    """清单窗口标题栏右区按钮中心。`completed` 只在本清单有已完成待办时出现（在 `view` 左边）；
+    只有默认清单窗口（「Mini Todo」）有 `settings` 与 `sync`。"""
+    buttons = _TITLE_BUTTONS if main.title == "Mini Todo" else _EXTRA_TITLE_BUTTONS
+    i = buttons.index(name)
     return main.w - 1 - 16 - 14 - i * 36, 27
 
 

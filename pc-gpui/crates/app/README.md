@@ -55,11 +55,11 @@ src/
 │   ├── drag.rs       自绘拖动公共部分（与收纳箱共用）：阈值、ResizeDir / resize_rect、光标换算、place_client_rect、手柄、render_snap_guides
 │   ├── snap.rs       吸附纯逻辑（SnapKey { Fence, Block }、snap_move / snap_resize、SnapScene::targets_at、group_guides / changed_targets）
 │   ├── list_window.rs + list_window/   清单窗口（原主窗口，每个清单一个）：title_bar（清单名 / 版本红点（只在默认清单窗口）/
-│   │                 同步 / 展开全部 / 已完成 / 视图 / 日夜 / 锁 / 设置）、name（双击改名、右键「重命名 / 删除清单」、删除确认）、
+│   │                 展开全部 / 已完成 / 视图 / 日夜 / 锁 / 同步与设置（只在默认清单窗口））、name（双击改名、右键「重命名 / 删除清单」、删除确认）、
 │   │                 list、todo_item（行 / 子任务 / 拖拽手柄 / 删除确认）、quadrant、row_menu（待办行右键「移动到 ▸」）、
 │   │                 logic（纯逻辑：提醒文案、拖拽排序）；新建到本清单：FAB（锁定时不显示）与操作模式、
 │   │                 Ctrl+N / ⌘N（动作 NewTodo，key context MiniTodoList，根元素 track_focus）、双击空白 / 象限（on_blank_mouse_down）；遮罩
-│   ├── calendar_window.rs + calendar_window/   日历窗口（单例）：title_bar（月份导航 / 今天 / 清单筛选 / 日夜 / 锁 / 设置）、
+│   ├── calendar_window.rs + calendar_window/   日历窗口（单例）：title_bar（月份导航 / 今天 / 清单筛选 / 日夜 / 锁）、
 │   │                 grid（农历 / 节假日 / 跨天条、双击日格新建）、filter（清单筛选下拉）、
 │   │                 logic（网格、跨天条、双击新建的清单与开始时间、first_rect / default_width）
 │   ├── editor/       待办详情 / 编辑：mod（窗口、加载、Esc / Ctrl+Enter、弹层关闭）、view（标题栏与只读排版）、
@@ -101,9 +101,7 @@ src/
 ## 3. 约定（必读）
 
 1. **颜色 / 尺寸只从 `theme.rs` 取**；文案逐字照抄规格。日志一律 `log::*`（落盘），不要 `println!`。
-2. **字体**：每个窗口根元素 `.font(theme::ui_font())`（Windows `Segoe UI` + `Microsoft YaHei` 回退；macOS 系统界面字体
-   `.SystemUIFont` + `PingFang SC`；Linux `Liberation Sans` + `Noto Sans CJK SC`）、`.text_size(theme::FONT_SIZE)`、`.line_height(relative(theme::LINE_HEIGHT))`。待办标题等用户字体用
-   `theme::todo_font(&state.todo_font_family)`。CSS `font-weight: 600` → `theme::WEIGHT_SEMIBOLD`，`500` → Regular。
+2. **字体**：每个窗口根元素 `.font(theme::ui_font(cx))`、`.text_size(theme::text_px(cx, 14.))`、`.line_height(relative(theme::LINE_HEIGHT))`（收纳箱基准字号 `theme::FENCE_FONT_SIZE_BASE` = 13px）。用户配置的字体与字号通过 `theme::apply_user_font(cx, family, size)` 全局生效，优先使用用户字体并以平台默认字体栈作为回退（Windows `Segoe UI` + `Microsoft YaHei`；macOS `.SystemUIFont` + `PingFang SC`；Linux `Liberation Sans` + `Noto Sans CJK SC`）；Markdown 源码 / 代码块（`editor_theme::mono_font(cx)`）与引用块（`editor_theme::serif_font(cx)`）同样优先用户字体；各字号用 `theme::text_px(cx, base)` / `theme::scaled_size(cx, base)` 按 `user_size / 14` 缩放。CSS `font-weight: 600` → `theme::WEIGHT_SEMIBOLD`，`500` → Regular。
 3. **窗口外观**：全部无系统标题栏（`WindowSpec::options()` 已处理）；清单 / 日历窗口 / 通知 / 收纳箱 `spec.transparent = true`
    （Root 背景自动覆盖为透明，界面自己画圆角底色）；其它窗口不透明白底。
 4. **阻塞调用放后台**：`db::spawn_db(cx, |db| core::…)` 返回 `Task<Result<T, String>>`；回前台用 `WeakEntity::update`
@@ -150,7 +148,7 @@ cx.observe(&state, |_, _, cx| cx.notify()).detach();         // 视图跟着刷�
 | `window_bg: theme::WindowBackground { color, alpha }` | 深色主题底色（全局） |
 | `current_screen_config_id`、`screen_configs` | `services::window_mode` 维护（启动 / 重置位置时算组合 ID） |
 | （私有）窗口属性的内存副本 | 每个清单 / 日历窗口的隐藏、日 / 夜、列表 / 四象限、展开全部、日历筛选（core `window_prefs`）；读写见下表。同步键 `view_mode` / `text_theme` / `show_calendar` / `is_fixed` 只作迁移 v31 的初始值，不再读写；`ui-state.json` 的展开全部启动时迁给默认清单窗口（`migrate_legacy_ui_state`） |
-| `todo_font_family`、`todo_font_size`（12~20，默认 14） | 待办字体 |
+| `todo_font_family`、`todo_font_size`（12~20，默认 14） | 全局字体与字号（沿用旧键名，设备本地，不同步） |
 | `notification_type: NotificationType`（`System` / `App`） | |
 | `has_update`、`latest_version`、`release_url` | 版本检查（`services::update_check`） |
 | `runtime_prefs: RuntimePrefs { top_on_wake, auto_hide_enabled }` | 贴边隐藏 / 唤起置顶缓存 |
@@ -268,8 +266,8 @@ editor::open(cx, parent, None, EditorMode::Edit);
 `box_shadow()` / `box_shadow_light()`）；`ep_menu(dark)`（下拉菜单浅色 / EP 暗黑配色）；`snap_guide_color()` / `SNAP_GUIDE_WIDTH`（吸附高亮，
 所有吸附组窗口共用）；`settings_tokens()`、`fence_tokens()`、`editor_theme::*`；`hex` / `hexa` / `rgba_css` / `todo_color` /
 `hex_to_rgb_channels` / `parse_hex_color` / `is_same_color`；`radius::*`、`space::*`、`duration::*`、`FONT_SIZE`、`LINE_HEIGHT`、
-`PRESET_BG_COLORS`、`ui_font()` / `todo_font(family)`、`shadow(x, y, blur, spread, color)`。gpui-component 主题已调成 EP
-（primary `#409EFF`、前景 `#606266`、placeholder `#A8ABB2`、边框 `#DCDFE6`、圆角 6 / 4、无焦点外环、字号 14）。
+`PRESET_BG_COLORS`、`ui_font(cx)` / `todo_font(family)` / `text_px(cx, base)` / `scaled_size(cx, base)` / `apply_user_font(cx, family, size)`、`shadow(x, y, blur, spread, color)`。gpui-component 主题已调成 EP
+（primary `#409EFF`、前景 `#606266`、placeholder `#A8ABB2`、边框 `#DCDFE6`、圆角 6 / 4、无焦点外环、默认字号 14，并随全局字体与字号同步更新）。
 
 `assets`：`EpIcon::*`（旧前端用到的图标 + EP 组件内部图标）、`AppIcon::{QuadGrid, CloseThin, ArrowDownTip, ArrowUpTip}`；
 新增图标：SVG 放进 `assets/icons/{ep,app}/`，在 `assets.rs` 表里加一行。

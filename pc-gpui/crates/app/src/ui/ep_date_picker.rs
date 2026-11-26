@@ -244,13 +244,14 @@ impl EpDatePicker {
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let ep = ep();
+        let header_font = theme::scaled_size(cx, 16.);
         let label =
             |id: &'static str, text: SharedString, mode: PanelMode, cx: &mut Context<Self>| {
                 div()
                     .id(id)
                     .px(px(5.))
-                    .text_size(px(16.))
-                    .line_height(px(22.))
+                    .text_size(px(header_font))
+                    .line_height(px(header_font * (22. / 16.)))
                     .text_color(ep.text_regular)
                     .cursor_pointer()
                     .hover(move |s| s.text_color(ep.primary))
@@ -348,6 +349,8 @@ impl EpDatePicker {
 
     fn render_days(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let ep = ep();
+        let day_font = theme::scaled_size(cx, 12.);
+        let day_circle = 24.0_f32.max((day_font * 1.5).ceil() + 4.);
         let today = Local::now().date_naive();
         let start = month_grid_start(self.view_year, self.view_month);
         let header = div()
@@ -361,7 +364,7 @@ impl EpDatePicker {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_size(px(12.))
+                    .text_size(px(day_font))
                     .text_color(ep.text_regular)
                     .child(*w)
             }));
@@ -398,12 +401,12 @@ impl EpDatePicker {
                     }))
                     .child(
                         div()
-                            .size(px(24.))
+                            .size(px(day_circle))
                             .rounded_full()
                             .flex()
                             .items_center()
                             .justify_center()
-                            .text_size(px(12.))
+                            .text_size(px(day_font))
                             .text_color(color)
                             .when(selected, |this| this.bg(ep.primary))
                             .when(is_today && !selected, |this| {
@@ -462,13 +465,14 @@ impl EpDatePicker {
                     }))
                     .child(
                         div()
-                            .w(px(54.))
+                            .min_w(px(54.))
+                            .px(px(6.))
                             .h(px(36.))
                             .rounded(px(18.))
                             .flex()
                             .items_center()
                             .justify_center()
-                            .text_size(px(12.))
+                            .text_size(theme::text_px(cx, 12.))
                             .text_color(color)
                             .when(selected, |this| this.bg(ep.primary))
                             .when(this_month && !selected, |this| {
@@ -515,13 +519,14 @@ impl EpDatePicker {
                     }))
                     .child(
                         div()
-                            .w(px(60.))
+                            .min_w(px(60.))
+                            .px(px(6.))
                             .h(px(36.))
                             .rounded(px(18.))
                             .flex()
                             .items_center()
                             .justify_center()
-                            .text_size(px(12.))
+                            .text_size(theme::text_px(cx, 12.))
                             .text_color(color)
                             .when(selected, |this| this.bg(ep.primary))
                             .child(year.to_string()),
@@ -538,7 +543,7 @@ impl EpDatePicker {
         ep_popper::frame()
             .w(px(PANEL_WIDTH))
             .text_color(ep().text_regular)
-            .font(theme::ui_font())
+            .font(theme::ui_font(cx))
             .flex()
             .flex_col()
             .child(self.render_header(cx))

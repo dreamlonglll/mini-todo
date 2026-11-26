@@ -213,12 +213,12 @@
   深色主题只作用于清单 / 日历窗口，按窗口各自的日 / 夜（`AppState::palette_for(key)`）；窗口里的下拉菜单（行右键、清单名右键、日历筛选）
   跟着用 EP 暗黑模式的弹层色（`theme::ep_menu(dark)`、`ep_popper::frame_for(dark)`、`EpDropdownMenu::dark(bool)`；不透明，不用窗口的半透明底色）；
   收纳箱「更多」、编辑窗口导入菜单、各种选择器面板仍是浅色。
-- 每个窗口根元素：`.font(theme::ui_font())`、`.text_size(theme::FONT_SIZE)`、`.line_height(relative(theme::LINE_HEIGHT))`。
-  `ui_font()`：Windows `Segoe UI` + `Microsoft YaHei` 回退；macOS `.SystemUIFont` + `PingFang SC`（别名只在主字体族上生效，见 §2.15）；
-  Linux `Liberation Sans` + `Noto Sans CJK SC`（与参考截图一致）。
-  待办标题等用户字体用 `theme::todo_font(&state.todo_font_family)`。CSS `font-weight: 600` → `theme::WEIGHT_SEMIBOLD`，`500` → Regular。
+- 每个窗口根元素：`.font(theme::ui_font(cx))`、`.text_size(theme::text_px(cx, 14.))`、`.line_height(relative(theme::LINE_HEIGHT))`（收纳箱基准字号为 `theme::FENCE_FONT_SIZE_BASE` = 13px）。
+  字体与字号（`todo_font_family`、`todo_font_size`，12~20，默认 14）全局生效：启动前 `block_windows::load_startup_snapshot` 与运行时 `AppState::{reload_app_settings, set_todo_font}` 统一调用 `theme::apply_user_font(cx, family, size)`，同步全局 `UserTypography` 与 gpui-component `Theme`（并刷新所有窗口）。
+  `theme::ui_font(cx)` 优先使用用户配置的字体族，并以平台默认字体栈作为回退（Windows `Segoe UI` + `Microsoft YaHei`；macOS `.SystemUIFont` + `PingFang SC`；Linux `Liberation Sans` + `Noto Sans CJK SC`）；Markdown 源码 / 代码块（`editor_theme::mono_font(cx)`）与引用块（`editor_theme::serif_font(cx)`）同样优先用户字体族。
+  各控件与窗口中的字号统一经 `theme::text_px(cx, base)` / `theme::scaled_size(cx, base)` 按 `user_size / 14` 等比缩放（默认 14px 时精确等于原值），CSS `font-weight: 600` → `theme::WEIGHT_SEMIBOLD`，`500` → Regular。
 - gpui-component 的主题在 `theme::init` 里已调成 Element Plus（primary `#409EFF`、前景 `#606266`、边框 `#DCDFE6`、圆角 6 / 4、
-  无焦点外环、字号 14）；不要用 gpui-component 默认外观去"近似"。
+  无焦点外环、默认字号 14，并随 `apply_user_font` 同步更新）；不要用 gpui-component 默认外观去"近似"。
 - 文案逐字照抄规格（包括标点与空格）。
 
 ### 2.8 控件复用（`ui/`）

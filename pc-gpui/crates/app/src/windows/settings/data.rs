@@ -545,6 +545,9 @@ impl SettingsWindow {
         let busy = self.sync_action.is_some();
         let sync_disabled = busy || url_empty;
 
+        let on_export = cx.listener(|this, _, window, cx| this.export_data(window, cx));
+        let on_import = cx.listener(|this, _, window, cx| this.import_data(window, cx));
+        let on_cleanup = cx.listener(|this, _, window, cx| this.confirm_cleanup_images(window, cx));
         let data_actions = div()
             .flex()
             .gap(px(12.))
@@ -560,7 +563,8 @@ impl SettingsWindow {
                 DataBtnKind::Primary,
                 self.exporting,
                 false,
-                cx.listener(|this, _, window, cx| this.export_data(window, cx)),
+                cx,
+                on_export,
             ))
             .child(data_btn(
                 "import-btn",
@@ -573,7 +577,8 @@ impl SettingsWindow {
                 DataBtnKind::Normal,
                 self.importing,
                 false,
-                cx.listener(|this, _, window, cx| this.import_data(window, cx)),
+                cx,
+                on_import,
             ))
             .child(data_btn(
                 "cleanup-images-btn",
@@ -586,16 +591,19 @@ impl SettingsWindow {
                 DataBtnKind::Normal,
                 self.cleaning_images,
                 self.cleaning_images,
-                cx.listener(|this, _, window, cx| this.confirm_cleanup_images(window, cx)),
+                cx,
+                on_cleanup,
             ));
 
-        let webdav_title = panel_title("云同步 (WebDAV)").when_some(
+        let sync_time_size = theme::text_px(cx, 11.);
+        let clear_size = theme::text_px(cx, 12.);
+        let webdav_title = panel_title("云同步 (WebDAV)", cx).when_some(
             self.last_sync_at.as_deref().filter(|s| !s.is_empty()),
             |this, at| {
                 this.child(
                     div()
                         .ml_auto()
-                        .text_size(px(11.))
+                        .text_size(sync_time_size)
                         .font_weight(gpui_kit::FontWeight::NORMAL)
                         .text_color(t.tertiary)
                         .child(format!("上次同步: {}", format_last_sync(at))),
@@ -603,25 +611,26 @@ impl SettingsWindow {
             },
         );
 
-        let password_label = form_label().child("密码").when(self.has_password, |this| {
-            let clearing = self.clearing_password;
-            this.child(
-                div()
-                    .id("clear-password")
-                    .text_size(px(12.))
-                    .font_weight(gpui_kit::FontWeight::NORMAL)
-                    .text_color(t.primary)
-                    .when(clearing, |this| this.opacity(0.6))
-                    .when(!clearing, |this| {
-                        this.cursor_pointer()
-                            .hover(move |s| s.text_color(t.primary_dark).underline())
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.clear_password(window, cx)),
-                            )
-                    })
-                    .child("清除已保存的密码"),
-            )
-        });
+        let on_clear_password = cx.listener(|this, _, window, cx| this.clear_password(window, cx));
+        let password_label = form_label(cx)
+            .child("密码")
+            .when(self.has_password, |this| {
+                let clearing = self.clearing_password;
+                this.child(
+                    div()
+                        .id("clear-password")
+                        .text_size(clear_size)
+                        .font_weight(gpui_kit::FontWeight::NORMAL)
+                        .text_color(t.primary)
+                        .when(clearing, |this| this.opacity(0.6))
+                        .when(!clearing, |this| {
+                            this.cursor_pointer()
+                                .hover(move |s| s.text_color(t.primary_dark).underline())
+                                .on_click(on_clear_password)
+                        })
+                        .child("清除已保存的密码"),
+                )
+            });
         let toggle_icon = if self.password_visible {
             EpIcon::View
         } else {
@@ -677,6 +686,8 @@ impl SettingsWindow {
                     .when(show_clear, |input| input.suffix(clear_button)),
             );
 
+        let on_test = cx.listener(|this, _, window, cx| this.test_connection(window, cx));
+        let on_save_sync = cx.listener(|this, _, window, cx| this.save_sync_settings(window, cx));
         let form = div()
             .flex()
             .flex_col()
@@ -686,13 +697,14 @@ impl SettingsWindow {
                     .flex()
                     .flex_col()
                     .gap(px(4.))
-                    .child(form_label().child("服务器地址"))
+                    .child(form_label(cx).child("服务器地址"))
                     .child(url_field)
                     .when(is_plain_http(&url), |this| {
                         this.child(card_hint(
                             EpIcon::WarningFilled,
                             "当前地址使用 http://，账号密码与待办数据将以明文传输，建议改用 https://",
                             true,
+                            cx,
                         ))
                     }),
             )
@@ -707,7 +719,7 @@ impl SettingsWindow {
                             .flex_1()
                             .min_w_0()
                             .gap(px(4.))
-                            .child(form_label().child("用户名"))
+                            .child(form_label(cx).child("用户名"))
                             .child(EpInput::new(&self.user_input).small().w_full()),
                     )
                     .child(
@@ -732,6 +744,7 @@ impl SettingsWindow {
                     EpIcon::InfoFilled,
                     "macOS 上 WebDAV 密码以明文保存在本机数据库中",
                     false,
+                    cx,
                 ))
             })
             .child(
@@ -746,7 +759,8 @@ impl SettingsWindow {
                         DataBtnKind::Normal,
                         self.testing,
                         false,
-                        cx.listener(|this, _, window, cx| this.test_connection(window, cx)),
+                        cx,
+                        on_test,
                     ))
                     .child(data_btn(
                         "save-sync",
@@ -755,7 +769,8 @@ impl SettingsWindow {
                         DataBtnKind::Primary,
                         false,
                         false,
-                        cx.listener(|this, _, window, cx| this.save_sync_settings(window, cx)),
+                        cx,
+                        on_save_sync,
                     )),
             );
 
@@ -778,7 +793,7 @@ impl SettingsWindow {
             .flex()
             .items_center()
             .gap(px(4.))
-            .text_size(px(12.))
+            .text_size(clear_size)
             .text_color(t.secondary)
             .cursor_pointer()
             .group("advanced-toggle")
@@ -801,23 +816,23 @@ impl SettingsWindow {
             }
         };
 
-        let passphrase_label = form_label().child("端到端同步加密口令（可选）").when(
+        let on_clear_passphrase =
+            cx.listener(|this, _, window, cx| this.clear_passphrase(window, cx));
+        let passphrase_label = form_label(cx).child("端到端同步加密口令（可选）").when(
             self.has_sync_passphrase,
             |this| {
                 let clearing = self.clearing_passphrase;
                 this.child(
                     div()
                         .id("clear-passphrase")
-                        .text_size(px(12.))
+                        .text_size(clear_size)
                         .font_weight(gpui_kit::FontWeight::NORMAL)
                         .text_color(t.primary)
                         .when(clearing, |this| this.opacity(0.6))
                         .when(!clearing, |this| {
                             this.cursor_pointer()
                                 .hover(move |s| s.text_color(t.primary_dark).underline())
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.clear_passphrase(window, cx)
-                                }))
+                                .on_click(on_clear_passphrase)
                         })
                         .child("清除已保存的口令"),
                 )
@@ -842,15 +857,26 @@ impl SettingsWindow {
                 cx.notify();
             }));
 
+        let on_sync_now =
+            cx.listener(|this, _, window, cx| this.run_sync_command(SyncAction::Sync, window, cx));
+        let on_save_passphrase =
+            cx.listener(|this, _, window, cx| this.save_sync_settings(window, cx));
+        let on_force_pull =
+            cx.listener(|this, _, window, cx| this.confirm_force(SyncAction::Pull, window, cx));
+        let on_force_push =
+            cx.listener(|this, _, window, cx| this.confirm_force(SyncAction::Push, window, cx));
+        let passphrase_btn_w = (108. * theme::font_scale(cx)).round();
+
         div()
             .flex()
             .flex_col()
-            .child(panel_title("数据管理"))
+            .child(panel_title("数据管理", cx))
             .child(data_actions)
             .child(card_hint(
                 EpIcon::InfoFilled,
                 "导出为 ZIP 压缩包，可用于备份或迁移到其他设备；清理图片只删除超过 1 小时未被引用的本地图片",
                 false,
+                cx,
             ))
             .child(section_divider())
             .child(webdav_title)
@@ -862,6 +888,7 @@ impl SettingsWindow {
                 Some("定时自动与云端合并同步"),
                 auto_sync_switch,
                 false,
+                cx,
             ))
             .when(self.auto_sync, |this| {
                 this.child(settings_row(
@@ -870,6 +897,7 @@ impl SettingsWindow {
                     None,
                     div().w(px(120.)).child(self.interval_select.clone()),
                     false,
+                    cx,
                 ))
             })
             .child(
@@ -880,15 +908,15 @@ impl SettingsWindow {
                     DataBtnKind::Primary,
                     sync_disabled,
                     self.sync_action == Some(SyncAction::Sync),
-                    cx.listener(|this, _, window, cx| {
-                        this.run_sync_command(SyncAction::Sync, window, cx)
-                    }),
+                    cx,
+                    on_sync_now,
                 )),
             )
             .child(card_hint(
                 EpIcon::InfoFilled,
                 "通过 WebDAV 协议同步待办数据和图片：本地与云端的新增、修改、删除会自动合并，以较新的修改为准",
                 false,
+                cx,
             ))
             .child(div().flex().child(advanced_toggle))
             .when(self.advanced_open, |this| {
@@ -923,28 +951,29 @@ impl SettingsWindow {
                                                     .w_full(),
                                             ),
                                         )
-                                        .child(div().w(px(108.)).flex_none().child(data_btn(
+                                        .child(div().min_w(px(passphrase_btn_w)).flex_none().child(data_btn(
                                             "save-passphrase",
                                             EpIcon::Check,
                                             "保存口令",
                                             DataBtnKind::Normal,
                                             false,
                                             false,
-                                            cx.listener(|this, _, window, cx| {
-                                                this.save_sync_settings(window, cx)
-                                            }),
+                                            cx,
+                                            on_save_passphrase,
                                         ))),
                                 )
                                 .child(card_hint(
                                     EpIcon::InfoFilled,
                                     "开启后同步文档在本地加密再上传（ChaCha20-Poly1305）；所有 PC 与云端服务必须使用相同口令，遗忘口令将无法解密云端数据",
                                     false,
+                                    cx,
                                 )),
                         )
                         .child(card_hint(
                             EpIcon::WarningFilled,
                             "仅在两端数据出现异常时使用：会以一端为准整体覆盖另一端，被覆盖一端独有的数据将被删除",
                             false,
+                            cx,
                         ))
                         .child(
                             div()
@@ -958,9 +987,8 @@ impl SettingsWindow {
                                     DataBtnKind::Danger,
                                     sync_disabled,
                                     false,
-                                    cx.listener(|this, _, window, cx| {
-                                        this.confirm_force(SyncAction::Pull, window, cx)
-                                    }),
+                                    cx,
+                                    on_force_pull,
                                 ))
                                 .child(data_btn(
                                     "force-push",
@@ -969,9 +997,8 @@ impl SettingsWindow {
                                     DataBtnKind::Danger,
                                     sync_disabled,
                                     false,
-                                    cx.listener(|this, _, window, cx| {
-                                        this.confirm_force(SyncAction::Push, window, cx)
-                                    }),
+                                    cx,
+                                    on_force_push,
                                 )),
                         ),
                 )

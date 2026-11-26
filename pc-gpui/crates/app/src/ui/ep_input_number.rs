@@ -176,16 +176,18 @@ impl Render for EpInputNumber {
             .read(cx)
             .focus_handle(cx)
             .contains_focused(window, cx);
+        let font = theme::scaled_size(cx, 14.);
+        let height = 32.0_f32.max((font * 1.5 + 8.).ceil());
         let input = Input::new(&self.input)
             .appearance(false)
-            .text_size(px(14.))
+            .text_size(px(font))
             .text_center()
             .px(px(0.))
             .py(px(0.));
         div()
             .id(SharedString::from(format!("{}-root", self.id)))
             .w_full()
-            .h(px(32.))
+            .h(px(height))
             .flex()
             .items_center()
             .bg(ep.white)
@@ -210,7 +212,7 @@ impl Render for EpInputNumber {
                         this.child(
                             div()
                                 .flex_none()
-                                .text_size(px(14.))
+                                .text_size(px(font))
                                 .text_color(ep.text_placeholder)
                                 .child(suffix),
                         )

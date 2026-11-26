@@ -186,6 +186,7 @@ impl UiLayer {
     fn render_toast(&self, toast: &Toast, max_width: f32, cx: &mut Context<Self>) -> AnyElement {
         let (bg, border, fg) = kind_colors(toast.kind);
         let id = toast.id;
+        let toast_font = theme::scaled_size(cx, 14.);
         let body = div()
             .id(("ui-message", id))
             .occlude()
@@ -200,8 +201,8 @@ impl UiLayer {
             .border_1()
             .border_color(border)
             .rounded(theme::radius::SM)
-            .text_size(px(14.))
-            .line_height(px(14.))
+            .text_size(px(toast_font))
+            .line_height(px(toast_font))
             .text_color(fg)
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 this.set_toast_hover(id, *hovered);
@@ -239,6 +240,8 @@ impl UiLayer {
             BoxKind::Info => Some(icon(EpIcon::InfoFilled, 24., ep.info)),
             BoxKind::None => None,
         };
+        let title_font = theme::scaled_size(cx, 18.);
+        let body_font = theme::scaled_size(cx, 14.);
         let dialog = div()
             .id(("ui-confirm", pending.id))
             .occlude()
@@ -262,8 +265,8 @@ impl UiLayer {
                 div()
                     .pb(px(12.))
                     .pr(px(28.))
-                    .text_size(px(18.))
-                    .line_height(px(24.))
+                    .text_size(px(title_font))
+                    .line_height(px(title_font * (24. / 18.)))
                     .text_color(ep.text_primary)
                     .child(options.title.clone()),
             )
@@ -290,8 +293,8 @@ impl UiLayer {
                     .flex()
                     .items_center()
                     .gap(px(12.))
-                    .text_size(px(14.))
-                    .line_height(px(24.))
+                    .text_size(px(body_font))
+                    .line_height(px(body_font * (24. / 14.)))
                     .text_color(ep.text_regular)
                     .children(status_icon)
                     // 正文按对话框宽度折行（长文本 / 长单词都不溢出）
@@ -370,7 +373,8 @@ impl Render for UiLayer {
         }
         div()
             .size_full()
-            .font(theme::ui_font())
+            .font(theme::ui_font(cx))
+            .text_size(theme::text_px(cx, 14.))
             .children(confirm)
             .when(!toasts.is_empty(), |this| {
                 this.child(

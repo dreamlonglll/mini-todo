@@ -191,7 +191,7 @@ impl EditorWindow {
             .pb(px(16.))
             .child(
                 div()
-                    .text_size(px(15.))
+                    .text_size(theme::text_px(cx, 15.))
                     .font_weight(theme::WEIGHT_SEMIBOLD)
                     .text_color(palette.text_primary)
                     .child("编辑描述"),
@@ -243,6 +243,8 @@ impl EditorWindow {
         )
         .readonly(true)
         .image_resize(resize);
+        let mono_font = editor_theme::mono_font(cx);
+        let source_size = theme::text_px(cx, 13.);
         let body = div()
             .w_full()
             .when(maximized, |this| this.flex_1().min_h_0())
@@ -262,8 +264,8 @@ impl EditorWindow {
                     .px(px(14.))
                     .py(px(12.))
                     .bg(palette.bg_secondary)
-                    .font(editor_theme::mono_font())
-                    .text_size(px(13.))
+                    .font(mono_font)
+                    .text_size(source_size)
                     .line_height(relative(1.6))
                     .text_color(hex(editor_theme::SLATE_700))
                     .child(
@@ -286,7 +288,7 @@ impl EditorWindow {
                                     .appearance(false)
                                     .bordered(false)
                                     .xsmall()
-                                    .text_size(px(13.))
+                                    .text_size(source_size)
                                     .line_height(relative(1.6))
                                     .h_full()
                                     .w_full(),

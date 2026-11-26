@@ -105,7 +105,7 @@ impl ListWindow {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .text_size(px(12.))
+                    .text_size(theme::text_px(cx, 12.))
                     .line_height(relative(theme::LINE_HEIGHT))
                     .font_weight(theme::WEIGHT_MEDIUM)
                     .text_color(colors.quadrant_title)
@@ -118,7 +118,7 @@ impl ListWindow {
                     .py(px(1.))
                     .rounded(px(10.))
                     .bg(colors.quadrant_count_bg)
-                    .text_size(px(11.))
+                    .text_size(theme::text_px(cx, 11.))
                     .line_height(relative(theme::LINE_HEIGHT))
                     .text_color(colors.quadrant_count_fg)
                     .child(count.to_string()),

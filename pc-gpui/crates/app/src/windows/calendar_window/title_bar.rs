@@ -1,5 +1,5 @@
 //! 日历窗口标题栏（PRD R6）：padding 12 16、高 52；左区月份导航（上一月 / 年月 / 下一月）+「今天」；右区 清单筛选
-//! （[`super::filter`]）/ 日夜 / 锁 / 设置（与清单窗口同一组按钮，`list_window::title_bar`）。
+//! （[`super::filter`]）/ 日夜 / 锁（与清单窗口同一组按钮，`list_window::title_bar`；设置按钮只在主待办窗口展示）。
 //!
 //! 移动是自绘的（`windows::block::BlockDrag::title_bar`），锁定时不挂拖动；按钮都 `.occlude()`，按它们不会开始拖动。
 
@@ -13,9 +13,7 @@ use crate::assets::EpIcon;
 use crate::services::window_mode;
 use crate::theme;
 use crate::ui::icon::icon;
-use crate::windows::list_window::title_bar::{
-    lock_button, relative_line, settings_button, theme_button,
-};
+use crate::windows::list_window::title_bar::{lock_button, relative_line, theme_button};
 
 impl CalendarWindow {
     pub(super) fn render_title_bar(
@@ -50,8 +48,7 @@ impl CalendarWindow {
                     .gap(px(8.))
                     .child(self.filter_button(&palette, cx))
                     .child(theme_button(block, is_dark, &palette))
-                    .child(lock_button(block, is_fixed, &palette))
-                    .child(settings_button(&palette)),
+                    .child(lock_button(block, is_fixed, &palette)),
             )
     }
 
@@ -77,6 +74,8 @@ impl CalendarWindow {
                 .active(move |s| s.bg(hover_bg))
                 .child(icon(source, 12., fg).group_hover(id, move |s| s.text_color(hover_fg)))
         };
+        let month_size = theme::scaled_size(cx, 15.);
+        let today_size = theme::scaled_size(cx, 12.);
         let month = self.calendar.month_text();
         div()
             .flex()
@@ -101,8 +100,8 @@ impl CalendarWindow {
                             .min_w(px(90.))
                             .flex()
                             .justify_center()
-                            .text_size(px(15.))
-                            .line_height(relative_line(15.))
+                            .text_size(px(month_size))
+                            .line_height(relative_line(month_size))
                             .font_weight(theme::WEIGHT_SEMIBOLD)
                             .text_color(palette.text_primary)
                             .whitespace_nowrap()
@@ -122,7 +121,8 @@ impl CalendarWindow {
                     .id("calendar-today")
                     .occlude()
                     .flex_none()
-                    .h(theme::EP_HEIGHT_SMALL)
+                    .min_h(theme::EP_HEIGHT_SMALL)
+                    .py(px(3.))
                     .px(px(11.))
                     .flex()
                     .items_center()
@@ -130,7 +130,7 @@ impl CalendarWindow {
                     .border_1()
                     .border_color(colors.today_border)
                     .bg(colors.today_bg)
-                    .text_size(px(12.))
+                    .text_size(px(today_size))
                     .text_color(colors.today_fg)
                     .whitespace_nowrap()
                     .cursor_pointer()

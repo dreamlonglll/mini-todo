@@ -357,15 +357,17 @@ impl<V: SelectValue> EpSelect<V> {
         let selected = self.selected.as_ref() == Some(&option.value);
         let highlighted = self.highlighted == Some(row);
         let value = option.value.clone();
+        let item_font = theme::scaled_size(cx, 14.);
+        let item_height = ITEM_HEIGHT.max((item_font * 1.5 + 10.).ceil());
         div()
             .id(("opt", index))
             .w_full()
-            .h(px(ITEM_HEIGHT))
+            .h(px(item_height))
             .flex()
             .items_center()
             .pl(px(20.))
             .pr(px(32.))
-            .text_size(px(14.))
+            .text_size(px(item_font))
             .whitespace_nowrap()
             .overflow_hidden()
             .text_ellipsis()
@@ -379,7 +381,9 @@ impl<V: SelectValue> EpSelect<V> {
                 this.font_weight(gpui_kit::FontWeight::BOLD)
             })
             .when(highlighted, |this| this.bg(ep.fill_light))
-            .when_some(option.font.clone(), |this, font| this.font_family(font))
+            .when_some(option.font.clone(), |this, font| {
+                this.font(theme::todo_font(&font))
+            })
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 if *hovered && this.highlighted != Some(row) {
                     this.highlighted = Some(row);
@@ -400,7 +404,9 @@ impl<V: SelectValue> EpSelect<V> {
         let ep = ep();
         let visible = self.visible(cx);
         let width = f32::from(bounds.size.width);
-        let font_size = if self.small { 12. } else { 14. };
+        let font_size = theme::scaled_size(cx, if self.small { 12. } else { 14. });
+        let item_font = theme::scaled_size(cx, 14.);
+        let item_height = ITEM_HEIGHT.max((item_font * 1.5 + 10.).ceil());
         let (body, body_height) = if visible.is_empty() {
             let text = if self.options.is_empty() {
                 "No data"
@@ -417,7 +423,7 @@ impl<V: SelectValue> EpSelect<V> {
                 .into_any_element();
             (body, 20. + font_size * 1.5)
         } else {
-            let height = (visible.len() as f32 * ITEM_HEIGHT).min(MAX_HEIGHT - LIST_PADDING * 2.);
+            let height = (visible.len() as f32 * item_height).min(MAX_HEIGHT - LIST_PADDING * 2.);
             let rows = visible.clone();
             let body = div()
                 .py(px(LIST_PADDING))
@@ -441,7 +447,7 @@ impl<V: SelectValue> EpSelect<V> {
         let panel = ep_popper::frame()
             .id((self.id.clone(), "dropdown"))
             .w(px(width))
-            .font(theme::ui_font())
+            .font(theme::ui_font(cx))
             .child(body);
         let entity = cx.entity().downgrade();
         ep_popper::popper(
@@ -468,11 +474,21 @@ impl<V: SelectValue> Render for EpSelect<V> {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ep = ep();
         // EP 的边框是 `box-shadow: 0 0 0 1px inset`（不占布局），这里用真实 1px 边框，上下内边距各减 1
-        let (min_h, pad_y, pad_x, font, gap, line_h) = if self.small {
+        let (base_min_h, pad_y, pad_x, base_font, gap, base_line_h): (
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+        ) = if self.small {
             (24., 1., 8., 12., 4., 20.)
         } else {
             (32., 3., 12., 14., 6., 24.)
         };
+        let font = theme::scaled_size(cx, base_font);
+        let line_h = base_line_h.max((font * (base_line_h / base_font)).ceil());
+        let min_h = base_min_h.max(line_h + pad_y * 2. + 2.);
         let open = self.open;
         let show_clear =
             self.clearable && self.hovered && self.selected.is_some() && !self.disabled;

@@ -228,12 +228,13 @@ impl CompletedWindow {
         cx.notify();
     }
 
-    fn render_title_bar(&self, count: usize) -> impl IntoElement {
+    fn render_title_bar(&self, count: usize, cx: &App) -> impl IntoElement {
         let palette = light();
         div()
             .relative()
             .flex_none()
-            .h(px(42.))
+            .min_h(px(42.))
+            .py(px(6.))
             .pl(px(16.))
             .pr(px(12.))
             .flex()
@@ -248,21 +249,21 @@ impl CompletedWindow {
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .text_size(px(14.))
+                    .text_size(theme::text_px(cx, 14.))
                     .font_weight(theme::WEIGHT_SEMIBOLD)
                     .text_color(palette.text_primary)
                     .child("已完成")
                     .child(
                         div()
                             .min_w(px(20.))
-                            .h(px(20.))
+                            .min_h(px(20.))
                             .px(px(6.))
                             .flex()
                             .items_center()
                             .justify_center()
                             .rounded(px(10.))
                             .bg(palette.border)
-                            .text_size(px(12.))
+                            .text_size(theme::text_px(cx, 12.))
                             .font_weight(theme::WEIGHT_MEDIUM)
                             .text_color(palette.text_secondary)
                             .child(count.to_string()),
@@ -297,13 +298,16 @@ impl CompletedWindow {
             .focus_handle(cx)
             .contains_focused(window, cx);
         let has_text = !self.search.read(cx).value().is_empty();
+        let input_size = theme::scaled_size(cx, 13.);
+        let input_h = 20.0_f32.max((input_size * 1.5).ceil());
         div().flex_none().px(px(16.)).py(px(12.)).child(
             div()
                 .flex()
                 .items_center()
                 .gap(px(8.))
                 .px(px(12.))
-                .h(px(36.))
+                .py(px(4.))
+                .min_h(px(36.))
                 .rounded(px(8.))
                 .border_1()
                 .when(focused, |this| {
@@ -326,15 +330,15 @@ impl CompletedWindow {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .text_size(px(13.))
+                        .text_size(px(input_size))
                         .text_color(hex(editor_theme::SLATE_700))
                         .child(
                             Input::new(&self.search)
                                 .appearance(false)
-                                .h(px(20.))
+                                .h(px(input_h))
                                 .px(px(0.))
                                 .py(px(0.))
-                                .text_size(px(13.)),
+                                .text_size(px(input_size)),
                         ),
                 )
                 .when(has_text, |this| {
@@ -463,7 +467,7 @@ impl CompletedWindow {
                     .min_w_0()
                     .child(
                         div()
-                            .text_size(px(14.))
+                            .text_size(theme::text_px(cx, 14.))
                             .text_color(palette.text_secondary)
                             .line_through()
                             .truncate()
@@ -476,7 +480,7 @@ impl CompletedWindow {
                                 .flex()
                                 .items_center()
                                 .gap(px(4.))
-                                .text_size(px(12.))
+                                .text_size(theme::text_px(cx, 12.))
                                 .text_color(palette.text_tertiary)
                                 .child(icon(EpIcon::Clock, 12., palette.text_tertiary))
                                 .child(time),
@@ -510,6 +514,7 @@ impl Render for CompletedWindow {
         let filtered = self.filtered_indices(cx);
         let count = filtered.len();
         let searching = !self.search.read(cx).value().trim().is_empty();
+        let empty_size = theme::text_px(cx, 14.);
         let empty_state = |source: EpIcon, text: &'static str| {
             div()
                 .flex()
@@ -523,7 +528,7 @@ impl Render for CompletedWindow {
                     40.,
                     palette.text_tertiary,
                 )))
-                .child(div().text_size(px(14.)).child(text))
+                .child(div().text_size(empty_size).child(text))
         };
         let items: Vec<gpui_kit::AnyElement> = filtered
             .into_iter()
@@ -555,12 +560,12 @@ impl Render for CompletedWindow {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .font(theme::ui_font())
-            .text_size(theme::FONT_SIZE)
+            .font(theme::ui_font(cx))
+            .text_size(theme::text_px(cx, 14.))
             .line_height(gpui_kit::relative(theme::LINE_HEIGHT))
             .text_color(palette.text_primary)
             .bg(hex(0xFFFFFF))
-            .child(self.render_title_bar(count))
+            .child(self.render_title_bar(count, cx))
             .child(search)
             .child(list)
             .children(super::modal_overlay(window, cx, 0.3))
